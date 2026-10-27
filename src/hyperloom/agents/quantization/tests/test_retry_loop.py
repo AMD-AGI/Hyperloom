@@ -482,6 +482,28 @@ async def test_an_attempt_that_writes_no_end_does_not_succeed(tmp_path, quark_ro
     assert result.quantized_model_dir is None
 
 
+@pytest.mark.asyncio
+async def test_an_exported_model_without_an_eval_end_does_not_succeed(tmp_path, quark_root, build_workspace):
+    """SKILL.md owes an eval report or the reason eval was skipped; a model nobody evaluated is not a success."""
+
+    def export_without_eval(workspace: Path, attempt: int) -> str | None:
+        build_workspace(workspace=workspace, include_eval_report=False, last_phase="eval")
+        return None
+
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=tmp_path / "ws",
+        quark_root=quark_root,
+        runner_fn=_StubRunner([export_without_eval]),
+        interactive=False,
+    )
+
+    assert (result.run_dir / "run_manifest.yaml").is_file()
+    assert result.assessment.attempts == (OutcomeId.unclassified_failure,)
+    assert result.status == "failed"
+    assert result.quantized_model_dir is None
+
+
 def _fail_with_hypothesis(build_workspace):
     def fail(workspace: Path, attempt: int) -> str | None:
         build_workspace(workspace=workspace, include_weights=False, include_validation_report=False)
