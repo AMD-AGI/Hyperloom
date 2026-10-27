@@ -10,17 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .assessment import (
-    ASK_RETRYABLE,
-    AUTO_FAIL,
-    AUTO_RECOVER,
-    Assessment,
-    build_assessment,
-    classify_attempt,
-    classify_unfinished_attempt,
-    derive_status,
-)
-from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
+from .assessment import Assessment, build_assessment, classify_attempt, classify_unfinished_attempt, derive_status
+from .outcomes import ASK_RETRYABLE, AUTO_FAIL, AUTO_RECOVER, OutcomeId, SUCCESS_TAGS
 from .result_collector import ATTEMPT_MARKER_FILES, collect_artifacts
 from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_attempt
 
@@ -95,13 +86,7 @@ async def _run_and_classify(
     artifacts = collect_artifacts(workspace)
     if not attempt_ended(artifacts):
         return classify_unfinished_attempt(sdk_error, phase=artifacts.last_phase)
-    return classify_attempt(
-        workspace,
-        sdk_error=sdk_error,
-        last_phase=artifacts.last_phase,
-        acceptable_eval_gap=attempt.acceptable_eval_gap,
-        artifacts=artifacts,
-    )
+    return classify_attempt(artifacts, sdk_error=sdk_error, acceptable_eval_gap=attempt.acceptable_eval_gap)
 
 
 # interactive prompt
@@ -181,8 +166,8 @@ def _decide_next_step(
             )
         return _RetryDecision(retry=False, note="eval_gap_exceeded_rejected")
 
-    # Only ASK_RETRYABLE + UNCLASSIFIED_FAILURE increment the counter.
-    if outcome in ASK_RETRYABLE or outcome == UNCLASSIFIED_FAILURE:
+    # Only ASK_RETRYABLE + unclassified_failure increment the counter.
+    if outcome in ASK_RETRYABLE or outcome == OutcomeId.unclassified_failure:
         if counter >= max_requantize_attempts:
             return _RetryDecision(
                 retry=False,
@@ -280,7 +265,7 @@ async def quantize_via_prompt(
         attempt_n += 1
 
     artifacts = collect_artifacts(run_dir)
-    assessment = build_assessment(attempts_list, workspace=run_dir, artifacts=artifacts, notes=tuple(notes))
+    assessment = build_assessment(attempts_list, artifacts=artifacts, notes=tuple(notes))
 
     status = derive_status(assessment, artifacts)
     quantized_model_dir = (

@@ -9,7 +9,6 @@ import sys
 from typing import Any
 
 from .driver.retry import quantize_via_prompt
-from .driver.runner import DEFAULT_MODEL
 
 
 def _interactive_value(raw: str) -> bool | None:
@@ -70,7 +69,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--model-id",
         default=None,
-        help=f"Override the Claude model id used by the SDK (default {DEFAULT_MODEL}).",
+        help="Override the Claude model id used by the SDK (default: the SDK's own default).",
     )
     p.add_argument(
         "--verbose",

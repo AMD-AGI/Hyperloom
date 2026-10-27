@@ -983,7 +983,7 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     from hyperloom.common.env import EnvValueError
 
     repo_url = "https://github.com/sgl-project/sglang.git"
-    candidate = Candidate(ref="PR:42", repo=repo_url)
+    candidate = Candidate(ref="PR:42")
     assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
     assert isolation.checkout_ref(candidate.ref) == "refs/pull/42/head"
     assert isolation.checkout_ref("main") == "main"
@@ -1006,7 +1006,7 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isolation.prepare_repo_cache(repo_url, tmp_path) == repo_dir
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
 
-    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=repo_url))
+    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main"))
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
     isolation._fetch_candidate_ref(repo_dir, candidate)
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]

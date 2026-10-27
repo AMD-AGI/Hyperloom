@@ -38,7 +38,7 @@ class _StubRunner:
             err = self.side_effects[idx](workspace, attempt)
             if err:
                 sdk_error = err
-        return AttemptResult(workspace=workspace, sdk_error=sdk_error)
+        return AttemptResult(sdk_error=sdk_error)
 
 
 def _materialize_clean_workspace(build_workspace, **overrides):

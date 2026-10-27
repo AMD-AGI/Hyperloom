@@ -182,10 +182,8 @@ function-lines scripts/partition_mode_sweep.py::run_mode 57
 function-lines scripts/platform_audit_bmc.py::main 88
 function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 56
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
-function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
 function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 69
-function-lines src/hyperloom/agents/quantization/driver/runner.py::run_one_attempt 56
 function-lines src/hyperloom/common/codex_session.py::CodexSession.start 70
 function-lines src/hyperloom/common/gain_math.py::conc_pair_comparison 52
 function-lines src/hyperloom/inference_optimizer/agentx/report.py::agentx_measurement 51
@@ -350,7 +348,7 @@ function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBacke
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 92
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 73
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 56
-function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 52
+function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 51
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 67
 function-lines src/hyperloom/orchestrator/enablement/runtime/adapters.py::SglangAdapter.provision 60
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::_SglKernelBuild.install 55
@@ -694,7 +692,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 61
 function-lines src/kernelforge/rewrite_by_flydsl/report.py::build_result 55
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::_Rewrite.finish 61
 function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1761
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1755
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2612
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2719
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1762
@@ -709,14 +707,14 @@ module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1793
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1388
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1342
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1306
-module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2656
+module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2644
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1452
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1268
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1334
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4004
+module-lines src/hyperloom/orchestrator/phases/kernel.py 4003
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1928
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2488
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565

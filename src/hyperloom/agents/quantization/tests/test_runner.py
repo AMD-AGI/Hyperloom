@@ -228,22 +228,6 @@ async def test_run_one_attempt_captures_sdk_exception(tmp_path, fake_sdk, fake_o
 
 
 @pytest.mark.asyncio
-async def test_run_one_attempt_aggregates_chunks(tmp_path, fake_sdk, fake_options_cls):
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("x", encoding="utf-8")
-    qr = tmp_path / "qr"
-    qr.mkdir()
-    fake_sdk.scripted_chunks = ["part one", "part two", "part three"]
-
-    result = await run_one_attempt(
-        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
-        skill_path=skill,
-        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=fake_options_cls),
-    )
-    assert "part one\npart two\npart three" == result.raw_text
-
-
-@pytest.mark.asyncio
 async def test_run_one_attempt_skill_missing_raises(tmp_path, fake_sdk, fake_options_cls):
     qr = tmp_path / "qr"
     qr.mkdir()
@@ -275,31 +259,6 @@ async def test_run_one_attempt_retry_picks_up_hypothesis(tmp_path, fake_sdk, fak
     assert "exec_oom" in prompt
     assert "fix_hypothesis_attempt_2.md" in prompt
     assert str(hyp) in prompt
-
-
-@pytest.mark.asyncio
-async def test_run_one_attempt_falls_back_when_cwd_unsupported(tmp_path, fake_sdk):
-    """Older SDK builds without `cwd` kwarg should retry without it."""
-
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("x", encoding="utf-8")
-    qr = tmp_path / "qr"
-    qr.mkdir()
-
-    class _StrictOptions:
-        def __init__(self, **kwargs):
-            if "cwd" in kwargs:
-                raise TypeError("cwd unsupported")
-            self.kwargs = kwargs
-
-    result = await run_one_attempt(
-        AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=qr),
-        skill_path=skill,
-        sdk=ClaudeAgentSdk(query=fake_sdk, options_cls=_StrictOptions),
-    )
-    assert result.sdk_error == ""
-    # cwd must have been stripped from the retry.
-    assert "cwd" not in fake_sdk.received_options[0].kwargs
 
 
 @pytest.mark.asyncio

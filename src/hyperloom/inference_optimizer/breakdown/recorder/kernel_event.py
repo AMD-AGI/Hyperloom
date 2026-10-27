@@ -53,6 +53,11 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_NO_MATERIAL,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 from hyperloom.common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
@@ -193,13 +198,6 @@ STATUS_FAILED = "failed"
 #: from a second list let the two drift.
 LANE_FAULTED_STATUSES = frozenset({"failed", "error", "failure", "faulted", "timeout", "aborted", "crashed"})
 
-# A rebench either validated the candidate, found its win immaterial, measured it truthfully without beating
-# current_best, or could not conclude because the config it was asked to reproduce did not engage.
-REBENCH_VALIDATED = "validated"
-REBENCH_NO_MATERIAL = "no_material"
-REBENCH_NO_PROMOTE = "no_promote"
-REBENCH_FALLBACK = "fallback"
-
 _ACCEPTANCE_AUTHORED = "authored"
 _ACCEPTANCE_ENV = "env"
 
@@ -216,10 +214,6 @@ __all__ = [
     "OUTCOME_REJECTED",
     "PRODUCER",
     "PRODUCER_GEAK",
-    "REBENCH_FALLBACK",
-    "REBENCH_NO_MATERIAL",
-    "REBENCH_NO_PROMOTE",
-    "REBENCH_VALIDATED",
     "ROUTE_FORGE",
     "ROUTE_GEAK",
     "SECTION_EVENT",

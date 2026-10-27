@@ -373,7 +373,7 @@ class _TargetedRecipe:
             from hyperloom.agents.framework.models import Candidate
 
             prepare_repo_cache(self.repo_url, self.root)
-            candidate = Candidate(ref=self.ref or "HEAD", repo=self.repo_url)
+            candidate = Candidate(ref=self.ref or "HEAD")
             ws = prepare_candidate_workspace(candidate, repo_url=self.repo_url, work_dir=self.root, index=0)
             self.worktree_dir = ws.worktree_dir
             self.venv_dir = ws.venv_dir
