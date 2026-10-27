@@ -16,6 +16,7 @@ from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, agentx_
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
+from ...state.failure_evidence import FAILURE_ATTRIBUTION_CANDIDATE, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
@@ -38,7 +39,7 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
-from ._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS, SCREEN_CYCLE, SCREEN_PARAM
 from ._patch_git import _uncommitted_revert
 from ._patch_sources import _done_field
 
@@ -55,6 +56,17 @@ _AGENTIC_PARITY_NOT_BENCHED = (
 
 
 _PARITY_DEFERRED_TO_CYCLE_BASE = "switch-off parity deferred to the next cycle batch, whose base runs this tree"
+
+
+def _unmeasured_attribution(bench_result: dict[str, Any]) -> str:
+    """Why a bench produced no throughput, when the candidate is not to blame; empty when it measured or broke."""
+    tput = bench_result.get("output_throughput")
+    if isinstance(tput, (int, float)) and tput > 0:
+        return ""
+    attribution = classify_failure_attribution(
+        error_class=bench_result.get("error_class"), error_excerpt=str(bench_result.get("error") or "")[-600:]
+    )
+    return "" if attribution == FAILURE_ATTRIBUTION_CANDIDATE else attribution
 
 
 def _graded_change(graded: Any, delta_pct: float | None) -> float | None:
@@ -91,6 +103,23 @@ class PerfGateMixin:
                 "status": "failed",
                 "error_class": stopped.error_class,
                 "error": stopped.interrupted,
+                "specialist_task_id": specialist_task_id,
+                "patches_applied": [],
+                "patches_reverted": [],
+                "artifacts_reverted": [],
+                "bench_result": bench_result,
+                "workspace": str(attempt.output_root),
+            }
+        attribution = _unmeasured_attribution(bench_result)
+        if attribution:
+            bench_class = str(bench_result.get("error_class") or "")
+            return {
+                "status": "failed",
+                "error_class": BENCH_UNMEASURED_CLASS,
+                "bench_error_class": bench_class,
+                "failure_attribution": attribution,
+                "error": str(bench_result.get("error") or "")[-600:],
+                "reason": f"bench produced no measurement ({attribution}): {bench_class or 'no error class'}",
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],

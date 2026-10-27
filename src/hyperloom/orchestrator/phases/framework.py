@@ -895,11 +895,41 @@ class FrameworkPhase(ProposalBench):
 
     async def on_integrate_patch_settled(self, task: "Task", result: Any, verdict: Verdict) -> None:
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
+        if await self._rebench_unmeasured(task, result.result):
+            return
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
         self._record_measured_patch_set(task, result, verdict)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
+
+    async def _rebench_unmeasured(self, task: "Task", res: Any) -> bool:
+        """Queue the same patch for one more bench when its bench measured nothing through no fault of its own."""
+        params = task.params or {}
+        if (
+            not isinstance(res, dict)
+            or res.get("error_class") != _integrate_vocabulary.BENCH_UNMEASURED_CLASS
+            or not params.get("framework_agent_authoring")
+            or params.get(_integrate_vocabulary.BENCH_RETRY_PARAM)
+        ):
+            return False
+        retry, _existing = await self.tasks.create_or_return_existing(
+            TaskSpec(
+                kind=task.kind,
+                params={**params, _integrate_vocabulary.BENCH_RETRY_PARAM: 1},
+                idempotency_key=f"{task.idempotency_key}:bench-retry",
+                requires_lanes=list(task.requires_lanes or []),
+                lease_ttl_sec=int(task.lease_ttl_sec or 0),
+                dispatch_class="coordinator",
+            )
+        )
+        log.info(
+            "FRAMEWORK: bench of %s measured nothing (%s); benching it once more as %s",
+            task.task_id,
+            res.get("failure_attribution"),
+            retry.task_id,
+        )
+        return True
 
     def _record_measured_patch_set(self, task: "Task", result: Any, verdict: Verdict) -> None:
         """Note the lines this round's patch changed and whether it stayed, so a later proposal can be told it repeats them."""

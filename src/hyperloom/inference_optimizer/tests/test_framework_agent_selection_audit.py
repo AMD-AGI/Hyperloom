@@ -520,6 +520,49 @@ def test_record_authored_outcome_uses_candidate_map_and_batch_fallback(coord: Co
     assert row["status"] == "reverted"
 
 
+@pytest.mark.asyncio
+async def test_an_unmeasured_bench_is_run_once_more_before_its_outcome_is_recorded(coord: Coordinator) -> None:
+    """The retry benches the same patch; a second empty bench is then recorded as failed, not reverted."""
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    coord.shared_state.framework_agent_phase_progress = []
+    params = {
+        "framework_agent_authoring": True,
+        "framework_agent_candidate_id": "cand-1",
+        "framework_batch_id": "batch-1",
+        "specialist_task_id": "spec-1",
+    }
+    first, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="integrate_patch",
+            params=params,
+            idempotency_key="framework:batch-1:cand-1",
+            requires_lanes=["gpu"],
+            lease_ttl_sec=600,
+            dispatch_class="coordinator",
+        )
+    )
+    unmeasured = types.SimpleNamespace(
+        result={"status": "failed", "error_class": "bench_unmeasured", "failure_attribution": "harness"}
+    )
+
+    await coord.phase_framework.on_integrate_patch_settled(first, unmeasured, Verdict.FAILED)
+
+    retries = [t for t in await coord.tasks.queued() if t.task_id != first.task_id]
+    assert [(t.kind, t.params, t.idempotency_key, t.requires_lanes, t.lease_ttl_sec) for t in retries] == [
+        ("integrate_patch", {**params, "bench_retry": 1}, "framework:batch-1:cand-1:bench-retry", ["gpu"], 600)
+    ]
+    assert coord.shared_state.framework_agent_phase_progress == []
+
+    await coord.phase_framework.on_integrate_patch_settled(retries[0], unmeasured, Verdict.FAILED)
+
+    assert [t.task_id for t in await coord.tasks.queued() if t.task_id != first.task_id] == [retries[0].task_id]
+    assert [(r["candidate_id"], r["status"]) for r in coord.shared_state.framework_agent_phase_progress] == [
+        ("cand-1", "failed")
+    ]
+
+
 # _record_framework_agent_authoring_empty_outcome
 def _enter_fpr(coord: Coordinator) -> None:
     coord.shared_state.phase = ps_mod.PHASE_FRAMEWORK_AGENT
