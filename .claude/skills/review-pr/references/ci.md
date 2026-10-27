@@ -1,5 +1,17 @@
 # CI failure classification
 
+## What the gate decides, and the review does not
+
+`scripts/code_metrics_design.py` runs `private_reach_problems`, `flag_argument_problems`,
+`tuple_return_problems`, `raw_vocabulary_problems`, `global_write_problems`, `forwarder_problems`
+and `single_implementation_problems` on every PR, reporting them as A1, A8, A9, A10, A11 and A12.
+Those six are not review rules: a finding on one of them belongs to the `code-metrics` job, and a
+card that re-derives it is re-flagging a gated rule. The same job measures the complexity and
+parameter ceilings; D12 and D14 only ask the question it cannot, which is whether a PR carrying the
+`baseline-raise` label gives its reason.
+
+## Reading `ci.txt`
+
 Consulted from Step 8 of [`../SKILL.md`](../SKILL.md) before `ci.txt` or `meta.txt`'s `mergeable` is
 quoted on the card. Read `ci.txt` before blaming the PR:
 

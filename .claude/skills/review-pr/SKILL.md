@@ -56,16 +56,6 @@ scope: re-flagging a gated rule is a defect in the review, not a finding.
 
 ---
 
-## Step 0 — Scope
-
-Before fetching anything, answer two questions from the title and body and hold them open:
-
-1. What is this change for — what wrong behaviour or missing capability does it address?
-2. By what route — which layer does it change, and is that the layer that owns the concern?
-
-No artifact. A body that answers neither is already a signal: a description naming no mechanism
-usually accompanies a diff nobody traced end to end.
-
 ## Step 1 — Fetch
 
 ```bash
@@ -96,7 +86,7 @@ follow [`references/re-review.md`](references/re-review.md) beside the steps bel
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 80 rules across 11
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 74 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are
 the rules of the earlier findings that still hold.
@@ -111,8 +101,10 @@ an answer; rewrite it before going on.
   of mitigations. What pins it is evidence outside the description — failing output, a session
   artifact, a measurement re-run at `base.txt`; sourced to the body alone it is `[unverified]` and
   E1 decides what that costs. A body listing three improvements is the tell nobody found the cause.
-- **Q2 — Name the route.** Which module, which function, which call path now behaves differently,
-  and why there rather than at the layer above or below.
+- **Q2 — Name the route, and the layer at each end.** Which module, which function, which call path
+  now behaves differently. Then place two things on one vocabulary — `admission boundary`,
+  `producer`, `intermediate`, `final consumer`: where this diff touches, and where the bad value is
+  born. Both go on the card. Different layers, with the upstream one untouched, is E4.
 - **Q3 — What does this make observable to an operator?** A behaviour, an interface, a default, a
   flag, an artifact path, a metric, a log line. If the answer is "nothing", say what makes that
   true — that claim is what the exemption in `AGENTS.md` rests on.
@@ -122,9 +114,12 @@ an answer; rewrite it before going on.
 - **Q5 — What would it take for this change to be wrong?** Name the input, configuration, phase or
   race that would make it produce a wrong answer. "Nothing" is not an answer, and neither is a
   differential run that never built the shapes whose early return the diff moved (E1).
-- **Q6 — If this lands, does the failure it names stop happening?** Reconstruct what that failure
-  takes, trace the branch the head runs under those conditions, say what the outcome becomes. Where
-  it recurs the diff may still be worth landing, but it closes nothing — that is E2.
+- **Q6 — Name the scenario, then say whether it ends.** The scenario is the input, configuration or
+  sequence that produces the failure, in actual values and actual order — "the interpreter already
+  carries ray 2.44.1 with click 8.5.0 and pip cannot write to it", never "when the config is wrong".
+  Then trace the branch the head runs under exactly that, and say what the outcome becomes. It goes
+  on the card. Where the failure recurs the diff may still be worth landing, but it closes nothing —
+  that is E2.
 
 ## Step 3 — Core-file risk
 
@@ -165,6 +160,11 @@ can trigger, so there is no rule here you may pass over because the list looked 
 must cite a file this PR changes; everything else — the header stating the contract, the prompt
 naming the flag, the doc that did not move — is evidence and welcome beside it.
 
+A rule whose `Severity:` is advisory in every shape it names takes no line here: the contract
+cannot publish it, so adjudicate it only when it fires, as a note outside the card. Across 23
+recorded reviews 815 verdict lines carried 12 `FIRE`s — spend the `CLEAR` reasons where a finding
+could come out.
+
 ## Step 5 — AI-code diagnostic
 
 A clean, well-written description is something AI produces easily; these are the structural places
@@ -176,49 +176,44 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
-1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
-   `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
-   an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
-   caller whose helper survives is a reader with no writer. Both are blocking.
-2. `twins` — **Twin divergence.** Mirrored code half-adapted: sibling executors, per-framework patchers
-   (vllm / sglang / atom / xdit), sync and async variants, the duplicated frozensets in
-   `protocol/intent.py` and `agents/critic`. The defect is the asymmetry, not the copy.
-3. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
+1. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
    comment and the prompt assert? Every number, flag name, path and default in the description must
    be greppable in the head tree. A number you cannot trace to an output is `[unverified]` and is
    never repeated as fact.
-4. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
+2. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
    reachable, will it ever fire, does it convert a failed measurement, a failed patch apply or a
    failed artifact write into a plausible-looking value? A fail-closed gate that coalesces a
    missing input to a passing default is the blocking shape.
-5. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
+3. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
    mock of it? Does it assert behaviour or restate the implementation? Would it fail on the merge
    base? A regression test that passes on base pins nothing.
-6. `constants` — **Unjustified constants and unbounded lifetimes.** A new timeout, budget, deadline or threshold
-   literal: finite, positive, single-sourced, and derived from somewhere. A `create_task` whose
-   handle is not stored, an `await`-less blocking call inside `async def`, a subprocess with no
-   timeout and no kill path.
+4. `patch-shape` — **A fix that cannot reach its own cause.** Run only where the diff claims to fix
+   something, read against Q2's two layers, each shape naming the file:line that carries it. Any hit
+   is an E4 candidate, and the first two are blocking on their own:
+   - every production hunk lands in failure classification, naming or reporting — a diff whose whole
+     footprint is what the failure is *called* cannot stop it happening (#2015);
+   - the error class, message or identifier the body quotes appears in neither the changed files nor
+     the code that writes it — then the diff cannot be on that path at all (#1981);
+   - the new guard reads a value its own function did not produce, and no hunk touches it (#1982);
+   - the permissive branch that produced the symptom survives unchanged, with the new branch added
+     above it — narrowing a default is not changing it (#2099);
+   - state is cleared at a reader's entry instead of where it is written or named (#2188);
+   - the body or a new test concedes the rejected input is a reasonable thing to emit, and the diff
+     rejects it anyway — the cause is a missing capability, not a bad caller (#1983).
 
-## Step 6 — Free-form pass, then the build-it-again and blind-spot lines
+## Step 6 — Free-form pass, then the build-it-again line
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any
 correctness risk the rules missed — a phase entered twice, a resume landing on a state shape the
 new code cannot read, a destructive sweep scoped by pattern rather than by what this run owns, a
-number compared against one another measurement system produced?
-
-Then two questions, both answered in full rather than assented to.
+number compared against one another measurement system produced? This step is where most findings
+come from; the rule list is a prompt for it, not a substitute.
 
 Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
 build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
 say which of the diff's parts it does not contain. A part that survives only because it is already
 written is what this question exists to catch; where the diff is a refactor it settles under E3 on
 the net line count, otherwise it carries an `AGENTS.md` bullet and an owner module, or stops here.
-
-Append a `BLIND:` line: **"Is there any correctness risk, resource hazard, or behavioural edge
-case in this diff that none of Steps 1-5 caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
-after this point goes on the card marked `-- late finding` rather than back into a finished
-artifact, so that the order the review ran in stays legible.
 
 ## Step 7 — Refutation
 
@@ -264,6 +259,9 @@ blocks in `refutations.txt` and `independent.txt`. A finding with no key cannot 
 What it does: <one or two sentences: the wrong behaviour or missing capability, and the route
 taken. Written for someone who has not read the diff.>
 
+Scenario: <Q6's values and order, then what the head does under them. Fix PRs only.>
+Layer: <Q2's two: where the diff touches -> where the bad value is born. Fix PRs only.>
+
 Blocking issues: <N | none>
 
 1. [<RULE-ID|free:slug>] <one-line summary> [verified|inferred]
@@ -276,6 +274,11 @@ deferred: <key> -- <reason>
 
 Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Prior: <KEY status, ...> | Base: <merge-base sha> | Head: <head sha>
 ```
+
+`Scenario:` and `Layer:` are written whenever the PR claims to fix something, and only then. They
+are what a reader checks the fix against: a scenario in actual values, and the two layers from Q2.
+"when the config is invalid" is not a scenario — if neither the body nor a surviving artifact pins
+it, write `Scenario: [unverified] -- <what you looked for>`, which is E2's finding, not a blank.
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
 survived both refutation passes is not dropped in silence — it goes on a `deferred:` line, which is
