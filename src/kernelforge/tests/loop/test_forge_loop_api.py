@@ -48,10 +48,27 @@ def test_the_last_published_result_wins():
     "output",
     [
         "no result here",
-        f"{api.RESULT_SENTINEL}not json{api.RESULT_SENTINEL}",
-        f"{api.RESULT_SENTINEL}[1, 2]{api.RESULT_SENTINEL}",
         f'{api.RESULT_SENTINEL}{{"improved": true}}',
     ],
 )
-def test_output_without_a_complete_json_object_has_no_result(output):
-    assert api.parse_forge_loop_result(output) is None
+def test_output_without_a_complete_result_has_none_and_says_nothing(output, caplog):
+    with caplog.at_level("WARNING", logger=api.__name__):
+        assert api.parse_forge_loop_result(output) is None
+
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ("not json", "not valid JSON"),
+        ("[1, 2]", "JSON list, not an object"),
+    ],
+)
+def test_a_malformed_result_has_none_and_is_reported(payload, reason, caplog):
+    output = f"{api.RESULT_SENTINEL}{payload}{api.RESULT_SENTINEL}"
+
+    with caplog.at_level("WARNING", logger=api.__name__):
+        assert api.parse_forge_loop_result(output) is None
+
+    assert reason in caplog.text
