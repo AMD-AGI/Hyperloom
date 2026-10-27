@@ -91,13 +91,6 @@ def test_a_commit_the_repository_does_not_have_ends_the_run_for_good(tmp_path, s
     )
 
 
-def test_a_commit_without_a_lock_file_ends_the_run_for_good(tmp_path, source):
-    sha = _git(source, "rev-parse", "HEAD")
-    _expect_final(
-        *_bootstrap(tmp_path, HYPERLOOM_SOURCE_REPO=str(source), HYPERLOOM_SOURCE_SHA=sha), "no requirements/app.lock"
-    )
-
-
 def test_a_repository_that_cannot_be_reached_is_left_to_a_restart(tmp_path):
     code, exit_file, stderr = _bootstrap(
         tmp_path, HYPERLOOM_SOURCE_REPO=str(tmp_path / "missing"), HYPERLOOM_SOURCE_SHA=_SHA
@@ -129,10 +122,6 @@ def _framework_run(tmp_path, source, **env):
     stub.parent.mkdir(parents=True)
     stub.write_text(_STUB)
     stub.chmod(0o755)
-    (source / "requirements").mkdir()
-    (source / "requirements" / "app.lock").write_text("")
-    _git(source, "add", "requirements/app.lock")
-    _git(source, "commit", "-q", "-m", "lock")
     log = tmp_path / "calls"
     code, exit_file, stderr = _bootstrap(
         tmp_path,
@@ -147,11 +136,14 @@ def _framework_run(tmp_path, source, **env):
 
 
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
-def test_the_lock_and_the_wheel_go_into_the_framework_python_and_it_runs_the_entry(tmp_path, source):
+def test_only_the_wheel_goes_into_the_framework_python_and_it_runs_the_entry(tmp_path, source):
     code, stderr, stub, calls = _framework_run(tmp_path, source)
     assert code == 0, stderr
-    assert any(c.startswith("-m pip --disable-pip-version-check --no-input install -q --require-hashes") for c in calls)
-    assert any("install -q --force-reinstall --no-deps --no-index" in c and c.endswith(".whl") for c in calls)
+    installs = [c for c in calls if " install " in c]
+    assert len(installs) == 1, calls  # the wheel itself: no lock, no dependency
+    assert "install -q --force-reinstall --no-deps --no-index" in installs[0] and installs[0].endswith(".whl")
+    assert not [c for c in calls if "--require-hashes" in c or " -r " in c]
+    assert [c for c in calls if " wheel " in c and "--no-deps" in c]
     assert calls[-1] == "-m hyperloom hosted run"  # exec'd with the framework Python
     assert not (tmp_path / "state" / "venv").exists()  # no environment of its own
     assert (tmp_path / "framework" / ".hyperloom-install").read_text().strip() == _git(source, "rev-parse", "HEAD")
@@ -160,8 +152,7 @@ def test_the_lock_and_the_wheel_go_into_the_framework_python_and_it_runs_the_ent
 @pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
 def test_a_restart_of_the_same_commit_installs_nothing_again(tmp_path, source):
     _framework_run(tmp_path, source)
-    log = tmp_path / "calls"
-    log.unlink()
+    (tmp_path / "calls").unlink()
     code, _, _, calls = _framework_run_again(tmp_path, source)
     assert code == 0 and calls == ["-m hyperloom hosted run"]
 

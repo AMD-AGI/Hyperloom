@@ -7,14 +7,14 @@
 # The host runs this script as the application's command. It
 #   1. reads the version to run from HYPERLOOM_SOURCE_REPO and HYPERLOOM_SOURCE_SHA (a full commit id),
 #   2. builds the wheel for that commit once, into $USER_DATA_PATH/.hyperloom/wheels/<sha>/, and reuses it after,
-#   3. installs the dependencies from the commit's requirements/app.lock with --require-hashes, then the wheel, into
-#      the framework's own Python environment (the one the legacy flow's install.sh installs into, with the image's
-#      torch and ROCm stack), not into a venv of its own: a venv made from it cannot see that stack,
+#   3. installs that wheel, and nothing else, into the framework's own Python environment (the one the legacy flow's
+#      install.sh installs into, with the image's torch and ROCm stack), not into a venv of its own: a venv made from
+#      it cannot see that stack. The runtime dependencies are not installed here: the entry runs the wheel's install.sh
+#      before optimize, which resolves them in that environment as the legacy launchers do,
 #   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with that Python.
 #
-# Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version.
-# The lock holds no torch, triton or ROCm package, but its pins replace same-named packages of the framework environment. An input the
-# script cannot work with (no commit, a bad one, no lock file) ends the run with a final exit.json; a failure that may be
+# Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version. An input the
+# script cannot work with (no commit, a bad one) ends the run with a final exit.json; a failure that may be
 # transient (the network, the disk) exits without one, and the host restarts the run.
 
 set -euo pipefail
@@ -94,11 +94,8 @@ build_wheel() {
   git -C "$src" fetch -q --depth 1 "$url" "$sha" || git -C "$src" fetch -q "$url" || fail "cannot fetch the source commit"
   # The repository answered (the fetch above succeeded) and has no such commit: nothing a restart can fix.
   git -C "$src" checkout -q --detach "$sha" || fail_final "the source repository has no such commit"
-  [[ -f "$src/requirements/app.lock" ]] || fail_final "the source commit has no requirements/app.lock"
-  "${pip[@]}" install -q --require-hashes --no-deps -r "$src/requirements/app.lock"
   mkdir "$work/out"
-  "${pip[@]}" wheel -q --no-deps --no-build-isolation -w "$work/out" "$src"
-  cp "$src/requirements/app.lock" "$work/out/app.lock"
+  "${pip[@]}" wheel -q --no-deps -w "$work/out" "$src"
   : >"$work/out/.complete"
   # The directory appears whole or not at all; a concurrent build of the same commit that won is as good as ours.
   mv -T "$work/out" "$wheel_dir" 2>/dev/null || [[ -f "$wheel_dir/.complete" ]] || fail "cannot store the wheel"
@@ -106,11 +103,7 @@ build_wheel() {
 }
 
 install_into_framework() {
-  if [[ -f "$wheel_dir/.complete" ]]; then
-    "${pip[@]}" install -q --require-hashes --no-deps -r "$wheel_dir/app.lock"
-  else
-    build_wheel # leaves the pinned dependencies installed
-  fi
+  [[ -f "$wheel_dir/.complete" ]] || build_wheel
   local wheels=("$wheel_dir"/*.whl)
   [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $wheel_dir"
   # Reinstall: another commit's wheel has the same version and pip would keep it.
