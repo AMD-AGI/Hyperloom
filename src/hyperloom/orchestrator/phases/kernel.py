@@ -2731,14 +2731,11 @@ class KernelPhase(CoordinatorCollaborator):
             # against this candidate's table.
             missed, hit = all_missed, set()
             requested = all_requested
-        tuned: set[tuple[int, int, int]] = set()
-        for path in csv_paths:
-            tuned |= tuned_csv_shapes(path)
+        tuned = {shape for path in csv_paths for shape in tuned_csv_shapes(path)}
         if not tuned:
             _unreadable("dense")
             return None
         report = tuned_config_coverage(tuned, requested, known_covered=hit)
-        # Without hit lines a served key leaves the log, so an uncovered table proves nothing.
         report["conclusive"] = server_hit_logging(logs[-1]) or bool(report.get("covered"))
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)

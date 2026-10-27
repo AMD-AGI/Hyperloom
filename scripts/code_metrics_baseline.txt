@@ -560,7 +560,6 @@ function-lines src/kernelforge/gemm_tune/tier3/runner.py::attempt_generated_tune
 function-lines src/kernelforge/gemm_tune/tier3/sandbox.py::run_generated_tuner 59
 function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 59
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 64
-function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_ensure_decode_m_coverage 64
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_parse_tuner_stdout 52
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 118
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner._untuned_csv_from_demand 53
