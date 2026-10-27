@@ -77,6 +77,7 @@ def test_an_answer_gives_one_change_to_the_champion_as_a_playbook_on_trial() -> 
     [
         (_answer(none="the audit shows no stop to regret"), f"{NO_CHANGE}: the audit shows no stop to regret"),
         ("no JSON here", "the answer holds no JSON object"),
+        (" \n", "the answer is empty"),
         (_answer(**LATER, measure="gain"), "'gain' is no decision measure"),
         (
             _answer(**{**LATER, "change": {"number": "stall_tests", "value": 12}}, measure="stop_value"),

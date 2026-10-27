@@ -74,6 +74,10 @@ DEFAULT_INTERVAL_SECONDS = 900.0
 #: The shortest judged-test interval a replay keeps: a server takes longer to launch, so a tree whose tests sit closer
 #: was not measured, and its replay would sample without end.
 MIN_INTERVAL_SECONDS = 60.0
+#: The playbook's numbers a replay plays; a change to any other number replays as its parent.
+REPLAYED_NUMBERS = frozenset(
+    {"stall_tests", "probation_share", "probation_tests", "grace_tests", "max_open", "last_open_minutes"}
+)
 #: The archived session's own label in a comparison.
 ARCHIVE = "archive"
 #: The probation shares and branch caps :func:`variants` tries beside H0.
@@ -903,6 +907,7 @@ __all__ = [
     "OPTIMISTIC",
     "PESSIMISTIC",
     "PROBATION_SHARES",
+    "REPLAYED_NUMBERS",
     "REPLAY_RUNS",
     "ROUND_SECONDS",
     "STOP_REPLY",

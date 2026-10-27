@@ -4,16 +4,17 @@
 """The evaluation ladder a new playbook climbs, from what costs nothing to what costs sessions.
 
 * R0, :func:`r0`: the static check (:func:`~hyperloom_multibranch.notebook.rsi.playbook.problems`).
-* R1, :func:`r1`: the scheduling replay of :mod:`rsi.replay`, no LLM and no GPU. A change to a number passes when its
-  paired gain over the champion stays above 0 across the archived sessions both ways beyond the data; a change to a
-  rule cannot be replayed and goes on to R2.
+* R1, :func:`r1`: the scheduling replay of :mod:`rsi.replay`, no LLM and no GPU. A change to a number the replay plays
+  (:data:`~hyperloom_multibranch.notebook.rsi.replay.REPLAYED_NUMBERS`) passes when its paired gain over the champion
+  stays above 0 across the archived sessions both ways beyond the data; a change to a rule cannot be replayed and goes
+  on to R2, and a change to any other number only sessions run under it tell.
 * R2, :func:`r2`: the judge's own decision points (:func:`archived_points`), the prompts the archived sessions' judge
   was asked, asked again with the candidate's playbook and the champion's. A point counts where its outcome is known:
   a stop at most :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a
-  stop at or past the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion. A rule
-  change also replays :data:`JUDGED_SESSIONS` sessions :data:`JUDGED_RUNS` times each under either playbook with the
-  judge asked every round (:func:`r2_sessions`), and passes when its best gain beats the champion's, paired run by
-  run.
+  stop at or past the stall bar, which it should keep. The candidate passes when it gets more of them right than the
+  champion. A rule change also replays :data:`JUDGED_SESSIONS` sessions :data:`JUDGED_RUNS` times each under either
+  playbook with the judge asked every round (:func:`r2_sessions`), and passes when its best gain beats the
+  champion's, paired run by run.
 * R3, :func:`r3`: the challenger sessions, each recorded at CLOSE as a :class:`Trial` with its task
   (:func:`session_task`) and its decision measures (:func:`session_measures`), and paired with the champion's session
   of its task that started nearest it (:func:`pairs`): the run entry runs the two side by side. A playbook is crowned
@@ -51,6 +52,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     OPTIMISTIC,
     PESSIMISTIC,
     REPLAY_RUNS,
+    REPLAYED_NUMBERS,
     Draws,
     PolicyRow,
     SchedulingComparison,
@@ -129,8 +131,12 @@ def r1(
 ) -> Rung:
     """R1: ``candidate`` beside ``champion`` in the scheduling replay of ``trees``, both ways beyond the data."""
 
-    if "rules" in changes(champion, candidate):
+    changed = changes(champion, candidate)
+    if "rules" in changed:
         return Rung("R1", True, "a rule change: the replay cannot play it", skipped=True)
+    unplayed = [name for name in changed if name not in REPLAYED_NUMBERS]
+    if unplayed:
+        return Rung("R1", True, f"{', '.join(unplayed)}: the replay does not play it", skipped=True)
     lows = []
     pair = {champion.label: champion, candidate.label: candidate}
     for beyond in (OPTIMISTIC, PESSIMISTIC):

@@ -61,6 +61,10 @@ _RUNS = "--runs"
 STUDIES = "notebook-studies"
 COMPLETION_TOKENS = 4096
 COMPLETION_SECONDS = 300.0
+#: The stop reason of a reply the model refused, whose text is empty or cut short; the same prompt asked again is
+#: mostly answered, so it is asked up to :data:`REFUSAL_RETRIES` more times.
+REFUSAL = "refusal"
+REFUSAL_RETRIES = 2
 
 
 class StudyError(ValueError):
@@ -116,14 +120,19 @@ def _replay_check(args: argparse.Namespace) -> Any:
 
 
 def _completion(model: str) -> Complete:
-    """One Anthropic completion of ``model`` a prompt, over the transport the environment's credential allows."""
+    """One Anthropic completion of ``model`` a prompt, over the transport the environment's credential allows; a refused
+    reply is asked again."""
 
     async def complete(system: str, prompt: str) -> str:
         messages = [{"role": "user", "content": prompt}]
         request = AnthropicCompletionRequest(
             model=model, messages=messages, max_tokens=COMPLETION_TOKENS, system=system, timeout_s=COMPLETION_SECONDS
         )
-        result = await aanthropic_completion(request=request, component=STUDIES, operation="playbook_generations")
+        for _ in range(REFUSAL_RETRIES + 1):
+            result = await aanthropic_completion(request=request, component=STUDIES, operation="playbook_generations")
+            if result.stop_reason != REFUSAL:
+                return result.text
+        log.warning("%s refused the prompt %d times", model, REFUSAL_RETRIES + 1)
         return result.text
 
     return complete

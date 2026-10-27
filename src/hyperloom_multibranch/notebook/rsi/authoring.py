@@ -35,6 +35,7 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     changes,
     problems,
 )
+from hyperloom_multibranch.notebook.rsi.replay import REPLAYED_NUMBERS
 from hyperloom_multibranch.notebook.rsi.session import FAILED, NO_PROFILE, WRITTEN, CloseStep, archived_history
 from hyperloom_multibranch.notebook.rsi.stops import StopAudit, stop_audit
 
@@ -60,8 +61,9 @@ branches to stop, how many tests (K) each may run at once, and whether to open n
 numbers applied by code, within their bounds, and at most {MAX_RULES} text rules for what numbers cannot say.
 You read how this session's decisions turned out, the playbook it played, and the evidence ledger: every change tried
 before, its hypothesis and what came of it. Propose at most one change to the champion: one number, or one rule added
-or removed. Prefer a number: a number is evaluated by replaying the archived sessions, a rule only by sessions run
-under it. Do not try again a change the ledger shows retired. A rule must hold for sessions you have not seen, so it
+or removed. Prefer a number the replay of the archived sessions plays, {", ".join(sorted(REPLAYED_NUMBERS))}: a
+change to one of them is evaluated before any session runs it, any other change only by sessions run under it. Do not
+try again a change the ledger shows retired. A rule must hold for sessions you have not seen, so it
 names no branch, session or model. The safety envelope stands whatever the playbook says.
 Answer with one JSON object and nothing else, either
 {{"label": "...", "change": {{"number": "<name>", "value": <number or null>}}, "hypothesis": "...", "measure": "..."}},
@@ -168,6 +170,8 @@ def read_change(
     """The playbook ``answer`` proposes, one change to ``champion`` registered ``now`` with ``provenance``, and
     ``""``; or ``None`` and why there is none."""
 
+    if not answer.strip():
+        return None, "the answer is empty"
     start, end = answer.find("{"), answer.rfind("}")
     try:
         document = json.loads(answer[start : end + 1]) if 0 <= start < end else None

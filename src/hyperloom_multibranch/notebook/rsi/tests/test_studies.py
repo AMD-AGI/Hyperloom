@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
 from hyperloom_multibranch.notebook.rsi import studies
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.notebook.rsi.decisions import archive_decisions
@@ -102,6 +103,23 @@ def test_the_command_evolves_the_playbook_asking_the_judge_at_the_decisions_the_
     # Each evolution session's stop of s1, one test past its commit, should go; a judge that stops nothing gets it
     # right under either playbook.
     assert "R2 right on 2 of 2 points, h0 on 2" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("refusals", [1, studies.REFUSAL_RETRIES + 1])
+async def test_a_refused_reply_is_asked_again_a_few_times(monkeypatch: pytest.MonkeyPatch, refusals: int) -> None:
+    replies = [AnthropicMessageResult("", studies.REFUSAL, None)] * refusals
+    replies.append(AnthropicMessageResult('{"none": "nothing"}', "end_turn", None))
+    asked: list[str] = []
+
+    async def answer(*, request: AnthropicCompletionRequest, component: str, operation: str) -> AnthropicMessageResult:
+        asked.append(request.system or "")
+        return replies.pop(0)
+
+    monkeypatch.setattr(studies, "aanthropic_completion", answer)
+    text = await studies._completion("m")("system", "prompt")
+
+    assert len(asked) == min(refusals + 1, studies.REFUSAL_RETRIES + 1)
+    assert text == ('{"none": "nothing"}' if refusals <= studies.REFUSAL_RETRIES else "")
 
 
 def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -85,14 +85,17 @@ def test_r0_is_the_static_check() -> None:
     assert not found.passed and found.reason.startswith("stall_tests 20 is outside")
 
 
-def test_r1_replays_a_number_change_both_ways_and_leaves_a_rule_change_to_r2() -> None:
+def test_r1_replays_a_number_change_both_ways_and_leaves_the_rest_to_the_rungs_that_can_tell() -> None:
     ruled = Playbook("ruled", rules=(ALIKE,), parent=H0.label)
+    wider = Playbook("wider", replaced(H0, producing_k=2).numbers, parent=H0.label)
 
     replayed = r1(PATIENT, H0, (SESSION,), runs=3)
     skipped = r1(ruled, H0, (SESSION,), runs=3)
+    unplayed = r1(wider, H0, (SESSION,), runs=3)
 
     assert replayed.rung == "R1" and "optimistic" in replayed.reason and "pessimistic" in replayed.reason
     assert skipped.skipped and skipped.passed and skipped.reason.startswith("a rule change")
+    assert unplayed.skipped and unplayed.passed and unplayed.reason == "producing_k: the replay does not play it"
 
 
 def _call(minutes: float, *stopped: str) -> dict[str, object]:
