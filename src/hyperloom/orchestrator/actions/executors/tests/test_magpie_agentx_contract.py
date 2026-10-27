@@ -87,7 +87,7 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     assert bench["envs"] == {"TP": "1", "EP_SIZE": "1", "CONC": "8", "RUN_EVAL": "false"}
     launch = bench["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--disable-cuda-graph"]
-    assert launch["env"] == {"SGLANG_TEST": "1"}
+    assert launch["env"] == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
 
 
 def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
@@ -100,9 +100,19 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
-    assert launch["env"] == {"SGLANG_NEXT": "1"}
+    assert launch["env"] == {"AITER_LOG_TUNED_CONFIG": "1", "SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
-    assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
+    base_env = load_benchmark(base)["agentx"]["launch_overrides"]["env"]
+    assert base_env == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
+
+
+def test_a_candidate_that_unsets_hit_logging_runs_without_it(source, tmp_path):
+    """Every round logs aiter's tuned-config hits unless a candidate removes the flag itself."""
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    variant = GridVariant("quiet", "", {}, unset_envs=["AITER_LOG_TUNED_CONFIG"])
+    candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
+    launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert (launch["env"], launch["unset_env"]) == ({}, ["AITER_LOG_TUNED_CONFIG"])
 
 
 @pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])

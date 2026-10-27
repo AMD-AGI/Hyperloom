@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
+_HIT_LOGGING_ENV = "AITER_LOG_TUNED_CONFIG"
 
 
 class ServerArgvInvalidError(ValueError):
@@ -168,6 +169,7 @@ def materialize_agentx(
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
     bench = config["benchmark"]
+    _log_tuned_config_hits(bench)
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
@@ -178,6 +180,16 @@ def materialize_agentx(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     return output
+
+
+def _log_tuned_config_hits(bench: dict[str, Any]) -> None:
+    """Have the server log aiter's tuned-config hits; without them a served key reads as an unserved one."""
+    agentx = bench.get("agentx")
+    if not isinstance(agentx, dict):
+        return
+    launch = agentx.setdefault("launch_overrides", {"version": 1})
+    if _HIT_LOGGING_ENV not in (launch.get("unset_env") or []):
+        launch.setdefault("env", {}).setdefault(_HIT_LOGGING_ENV, "1")
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
