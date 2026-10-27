@@ -505,7 +505,7 @@ def test_render_rater_labels_stable_across_rounds():
             },
         },
     ]
-    text = st.to_proposal_scores_summary(max_rounds=2)
+    text = st.to_proposal_scores_summary()
     for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
         assert slug not in text, f"model slug {slug!r} leaked into prompt"
     # claude-opus-4-8 sorts first -> rater_1, stable across rounds.

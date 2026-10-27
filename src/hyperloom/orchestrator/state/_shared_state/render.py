@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from hyperloom.common.env import env_bool
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
@@ -20,6 +19,11 @@ from .phase_state import GAP_SEVERITY_RANK
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+_WARM_START_MAX_LINES = 12
+_GAPS_MAX_ENTRIES = 10
+_UNTESTED_PROPOSALS_MAX_ENTRIES = 12
+_PROPOSAL_SCORE_ROUNDS = 2
 
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
@@ -330,7 +334,7 @@ class _RenderMixin:
             "power_budget_exceeded / gpu_power_budget_exceeded / power_unmeasured in explore_search and the journal)"
         )
 
-    def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
+    def to_warm_start_summary(self) -> str:
         """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
 
         ``recipe_kb_t0._build_warm_start_context`` already computes the
@@ -356,25 +360,25 @@ class _RenderMixin:
         if priors:
             out.append(priors)
         out.extend(warm_start.pitfall_lines(ctx))
-        if max_lines and len(out) > max_lines:
-            out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines)")
+        if len(out) > _WARM_START_MAX_LINES:
+            out = out[:_WARM_START_MAX_LINES]
+            out.append(f"  · (truncated to {_WARM_START_MAX_LINES} lines)")
         return "\n".join(out)
 
-    def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
-        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows."""
+    def to_gaps_summary(self, *, max_attempts: int = 0) -> str:
+        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at the newest ``_GAPS_MAX_ENTRIES`` rows."""
         if not self.gaps:
             return ""
         ordered = list(self.gaps)
         ordered.sort(key=gap_rows.recency_key, reverse=True)
         rows: list[str] = []
-        for gap in ordered[:max_entries]:
+        for gap in ordered[:_GAPS_MAX_ENTRIES]:
             if not isinstance(gap, dict):
                 continue
             rows.append(gap_rows.summary_row(gap))
             rows.extend(gap_rows.attempt_rows(gap, max_attempts))
-        if len(ordered) > max_entries:
-            rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
+        if len(ordered) > _GAPS_MAX_ENTRIES:
+            rows.append(f"  · (+{len(ordered) - _GAPS_MAX_ENTRIES} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
     def benched_fingerprints(self) -> set[str]:
@@ -428,11 +432,10 @@ class _RenderMixin:
         ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
         return [row for _, _, _, row in ranked]
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12, skip_provenance: str = "") -> str:
+    def to_untested_proposals_summary(self, *, skip_provenance: str = "") -> str:
         """Render the specialist proposals still waiting for a benchmark slot.
 
         Args:
-            max_entries: Rows rendered in full; the rest are counted.
             skip_provenance: Leave out the rows a producer with its own section renders.
         """
         rows = [
@@ -446,12 +449,12 @@ class _RenderMixin:
             "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-        out.extend(untested_proposal_line(row) for row in rows[:max_entries])
-        if len(rows) > max_entries:
-            out.append(f"(+{len(rows) - max_entries} more not shown)")
+        out.extend(untested_proposal_line(row) for row in rows[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
+        if len(rows) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
+            out.append(f"(+{len(rows) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
         return "\n".join(out)
 
-    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+    def to_proposal_scores_summary(self) -> str:
         """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores."""
         rounds = [
             r
@@ -462,7 +465,7 @@ class _RenderMixin:
         ]
         if not rounds:
             return ""
-        shown = rounds[-max_rounds:]
+        shown = rounds[-_PROPOSAL_SCORE_ROUNDS:]
         labels = proposal_scores.rater_labels(shown)
         rows: list[str] = [
             "(Advisory only — one reference among many, NOT a ranking "
@@ -690,20 +693,10 @@ class _RenderMixin:
             parts.append(f"{entry.get('action', '?')}:{entry.get('variant_name', '?')}")
         return parts or "(none)"
 
-    @staticmethod
-    def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``."""
-        if not text:
-            return text or ""
-        from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
-
-        return strip_base64_data_urls(text)
-
     def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``."""
+        """Point the prompt at the ``show_analysis_md`` tool once a TraceLens snapshot exists. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
-        md_text = cached.get("analysis_md_text") or ""
-        if not md_text:
+        if not cached.get("analysis_md_text"):
             return (
                 "(no TraceLens snapshot yet — analysis is auto-enqueued "
                 "by the Coordinator at the end of PRELUDE and on every "
@@ -713,26 +706,16 @@ class _RenderMixin:
                 "`profile` are Coordinator-managed; you may also propose "
                 "them directly if the situation warrants it.)"
             )
-        md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
         gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
         try:
             gain_str = f"{float(gain):.2f}"
         except (TypeError, ValueError):
             gain_str = "?"
-        # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
-        # the verbatim md.
-        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
-            return (
-                f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
-                "full report not inlined; see profiler_digest above or call the "
-                "show_analysis_md context tool for the verbatim analysis.md.)"
-            )
         return (
-            f"\n=== TraceLens Analysis (snapshot #{snap}, "
-            f"gain at snapshot = {gain_str}%) ===\n"
-            f"{md_text}\n"
-            f"=== End TraceLens Analysis ===\n"
+            f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
+            "full report not inlined; see profiler_digest above or call the "
+            "show_analysis_md context tool for the verbatim analysis.md.)"
         )
 
     def _format_profiler_digest(self) -> str:

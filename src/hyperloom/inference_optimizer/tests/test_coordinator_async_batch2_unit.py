@@ -2066,25 +2066,29 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
 
 
 # -- _context_analysis_reader fallback (path read) --------------------------
+def test_context_analysis_reader_strips_base64_from_the_cached_text(coord: Coordinator) -> None:
+    coord.shared_state.last_trace_analyze = {
+        "analysis_md_text": "# Report\n![chart](data:image/png;base64,iVBORw0KGgo)\nbody\n",
+        "analysis_md_path": "/nonexistent/analysis.md",
+    }
+    out = coord.conversation._context_analysis_reader()
+    assert "iVBORw0KGgo" not in out
+    assert "# Report" in out and "body" in out
+
+
 def test_context_analysis_reader_falls_back_to_the_recorded_path(
     coord: Coordinator,
     tmp_path,
-    monkeypatch,
 ) -> None:
     md = tmp_path / "analysis.md"
     md.write_text("# roofline snapshot\n", encoding="utf-8")
     coord.shared_state.last_trace_analyze = {"analysis_md_path": str(md)}
-    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord.conversation._context_analysis_reader()
     assert "roofline snapshot" in out
 
 
-def test_context_analysis_reader_unreadable_path(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
+def test_context_analysis_reader_unreadable_path(coord: Coordinator) -> None:
     coord.shared_state.last_trace_analyze = {"analysis_md_path": "/nonexistent/dir/analysis.md"}
-    monkeypatch.setattr(coord.shared_state, "_format_analysis_md_full", lambda: "")
     out = coord.conversation._context_analysis_reader()
     assert "unreadable" in out or "no analysis.md" in out
 
