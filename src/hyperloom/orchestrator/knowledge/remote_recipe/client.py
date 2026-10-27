@@ -33,7 +33,6 @@ from .values import has_replay_material
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
-_STORE_LOCK_INIT = threading.Lock()
 log = logging.getLogger(__name__)
 
 
@@ -44,12 +43,11 @@ class RemoteRecipeConfigurationError(KBStoreError):
 def _champion(
     rollup: dict[str, Any] | None,
     *,
-    validate_metric: bool = False,
-    expected_metric: str = "optimized_throughput",
-) -> tuple[str, float, dict[str, Any]]:
+    expected_metric: str,
+) -> float:
     """Extract one incumbent, failing closed on an unrecognized rollup."""
     if rollup is None:
-        return "", 0.0, {}
+        return 0.0
     if not isinstance(rollup, dict):
         raise RemoteRecipeValidationError("candidate rollup must be an object")
     if "champion" not in rollup:
@@ -58,18 +56,17 @@ def _champion(
     if raw_champion in (None, {}):
         sessions = rollup.get("sessions")
         if isinstance(sessions, list) and not sessions:
-            return "", 0.0, {}
+            return 0.0
         raise RemoteRecipeValidationError("candidate rollup has sessions but no champion")
     if not isinstance(raw_champion, dict):
         raise RemoteRecipeValidationError("candidate rollup champion must be an object")
     champion = dict(raw_champion)
     metric = str(champion.get("metric") or "").strip()
-    if validate_metric and metric != expected_metric:
+    if metric != expected_metric:
         raise RemoteRecipeValidationError(
             f"cannot compare or replace champion metric {metric!r}; expected {expected_metric!r}"
         )
-    session_id = str(champion.get("session_id") or "").strip()
-    if not session_id:
+    if not str(champion.get("session_id") or "").strip():
         raise RemoteRecipeValidationError("candidate rollup champion is missing session_id")
     if "value" not in champion:
         raise RemoteRecipeValidationError("candidate rollup champion is missing value")
@@ -82,7 +79,7 @@ def _champion(
         raise RemoteRecipeValidationError(f"champion value must be numeric, got {raw_value!r}") from None
     if not math.isfinite(value):
         raise RemoteRecipeValidationError(f"champion value must be finite, got {raw_value!r}")
-    return session_id, value, champion
+    return value
 
 
 def flatten_recipe_document(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -109,7 +106,6 @@ def _validate_session_envelope(
     envelope: Any,
     *,
     canonical_id: str,
-    session_id: str,
 ) -> dict[str, Any]:
     """Validate service-owned identity/version fields before destination cleanup."""
     if not isinstance(envelope, dict):
@@ -119,10 +115,8 @@ def _validate_session_envelope(
         raise RemoteRecipeValidationError(f"session envelope schema_version must be 2, got {schema_version!r}")
     if str(envelope.get("canonical_id") or "") != canonical_id:
         raise RemoteRecipeValidationError("session envelope canonical_id does not match the requested identity")
-    if not session_id:
+    if not str(envelope.get("session_id") or "").strip():
         raise RemoteRecipeValidationError("session envelope session_id is required")
-    if str(envelope.get("session_id") or "") != session_id:
-        raise RemoteRecipeValidationError("session envelope session_id does not match the requested session")
     if not str(envelope.get("record_id") or "").strip():
         raise RemoteRecipeValidationError("session envelope record_id is required")
     if ("revision" not in envelope or envelope.get("revision") is None) and (
@@ -277,20 +271,17 @@ class RemoteRecipeClient:
 
     def __init__(self, store: KBStoreClient) -> None:
         self.store = store
-        with _STORE_LOCK_INIT:
-            lock = getattr(store, "_hyperloom_remote_recipe_lock", None)
-            if lock is None:
-                lock = threading.RLock()
-                setattr(store, "_hyperloom_remote_recipe_lock", lock)
-        self._store_lock = lock
+        self._store_lock = threading.RLock()
 
     @classmethod
-    def from_env_optional(cls) -> "RemoteRecipeClient | None":
-        """Feature-detect both required variables; fail fast on partial config."""
+    def from_env(cls) -> "RemoteRecipeClient":
+        """Build a client, requiring both KB Store variables."""
         base = os.environ.get("KB_STORE_URL", "").strip()
         token = os.environ.get("KB_STORE_TOKEN", "").strip()
         if not base and not token:
-            return None
+            raise RemoteRecipeConfigurationError(
+                "KB_STORE_URL and KB_STORE_TOKEN are required for the remote Recipe KB"
+            )
         if not base or not token:
             missing = "KB_STORE_URL" if not base else "KB_STORE_TOKEN"
             raise RemoteRecipeConfigurationError(f"{missing} is required when Remote Recipe KB V2 is enabled")
@@ -308,12 +299,7 @@ class RemoteRecipeClient:
         )
         if envelope is None:
             return None
-        session_id = str(envelope.get("session_id") or "").strip() if isinstance(envelope, dict) else ""
-        envelope = _validate_session_envelope(
-            envelope,
-            canonical_id=canonical_id,
-            session_id=session_id,
-        )
+        envelope = _validate_session_envelope(envelope, canonical_id=canonical_id)
         envelope = _validate_hyperloom_view(envelope)
         envelope = _validate_recipe_scope(envelope, scope)
         _view_artifact_manifest(envelope)
@@ -339,13 +325,6 @@ class RemoteRecipeClient:
                 _deactivate_destination(root)
                 return None
             session_id = str(selected.get("session_id") or "").strip()
-            selected = _validate_session_envelope(
-                selected,
-                canonical_id=canonical_id,
-                session_id=session_id,
-            )
-            selected = _validate_hyperloom_view(selected)
-            selected = _validate_recipe_scope(selected, scope)
             view_manifest = _view_artifact_manifest(selected)
             document = flatten_recipe_document(selected)
             recipe_json = json.dumps(
@@ -486,7 +465,7 @@ class RemoteRecipeClient:
             return outcome("skipped", "empty_replay_material")
         scope_payload = profile.scope.as_dict()
         rollup = self.store.get_rollup(canonical_id, scope=scope_payload)
-        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=profile.primary_metric)
+        prior = _champion(rollup, expected_metric=profile.primary_metric)
         if score <= prior:
             return outcome("skipped", "not_better_than_champion")
         expected = {artifact.path for artifact in bundle.artifacts}
@@ -521,9 +500,8 @@ class RemoteRecipeClient:
         except KBStoreError as exc:
             if "HTTP 409" not in str(exc):
                 raise
-            _, winner, _ = _champion(
+            winner = _champion(
                 self.store.get_rollup(canonical_id, scope=scope_payload),
-                validate_metric=True,
                 expected_metric=profile.primary_metric,
             )
             if winner < score:
@@ -540,9 +518,6 @@ class RemoteRecipeClient:
 
 
 __all__ = [
-    "KBStoreClient",
-    "KBStoreError",
     "RemoteRecipeClient",
     "RemoteRecipeConfigurationError",
-    "flatten_recipe_document",
 ]

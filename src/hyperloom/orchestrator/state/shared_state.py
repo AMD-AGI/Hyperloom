@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import first_text, to_int, to_str_list, to_unix
+from hyperloom.common.coerce import first_text, to_int, to_str_list
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -428,6 +428,7 @@ def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
             recorder(name, time.monotonic() - started)
 
 
+from ._shared_state.elapsed import elapsed_sec_of
 from ._shared_state.render import _RenderMixin
 
 
@@ -2326,19 +2327,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         Returns:
             float: Minutes consumed; never negative.
         """
-        charged = max(0.0, self.elapsed_charged_sec)
-        anchor = self.leg_anchor_unix
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
-        if anchor > 0.0:
-            return (charged + max(0.0, now_dt.timestamp() - anchor)) / 60.0
-        if charged > 0.0:
-            return charged / 60.0
-        started = to_unix(self.start_ts.strip())
-        if started is None:
-            return 0.0
-        return max(0.0, now_dt.timestamp() - started) / 60.0
+        return self.elapsed_sec_of(vars(self), now_unix=now_dt.timestamp()) / 60.0
+
+    elapsed_sec_of = staticmethod(elapsed_sec_of)
 
     def extend_budget_minutes(self, minutes: float) -> float:
         """Grant more wall-clock budget to this session.

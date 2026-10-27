@@ -18,7 +18,7 @@ from hyperloom.hosted import host_info
 from hyperloom.hosted.host_info import HostGroup, HostInfoError, Var, read_host_info, take_host_info
 
 # Distinct, recognisable values, so a leak anywhere is found by a plain substring search.
-_SECRETS = {name: f"sentinel-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
+_SECRETS = {name: f"sentinel-secret-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _ALL_GROUPS = tuple(HostGroup)
 
 
@@ -31,6 +31,7 @@ def env(tmp_path):
         Var.RUN_ID: "run-1",
         Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
         Var.STATE_DIR: str(tmp_path / "state"),
+        Var.MCP_HOST: "0.0.0.0",
         Var.MCP_PORT: "8765",
         Var.MCP_PUBLIC_URL: "https://app.example.test:8765",
         Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1", "8": "r8"}, "dev": "d"}),
@@ -203,6 +204,7 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
         (Var.MCP_TOKEN, "two words", "whitespace or control"),
+        (Var.MCP_TOKEN, "x" * 15, "at least 16 characters"),
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),
@@ -261,6 +263,7 @@ def test_take_removes_every_host_only_input_and_keeps_the_ones_others_read(env):
     }
     assert info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
     assert info.run_id == "run-1"
+    assert info.mcp_host == "0.0.0.0"
     assert set(host_info.SECRET_VARS) <= set(host_info.HOST_ONLY_VARS)
 
 

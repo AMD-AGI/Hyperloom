@@ -1207,27 +1207,7 @@ class AnalysisAgentService:
         ):
             return context
         evidence_by_path = {reference.path: reference for reference in context.evidence_refs}
-        for artifact in catalog["artifacts"]:
-            if not isinstance(artifact, dict):
-                continue
-            path = str(artifact.get("path") or "")
-            information = artifact.get("available_information")
-            if (
-                not path
-                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
-                or not isinstance(information, list)
-                or not Path(path).resolve().is_relative_to(work_root.resolve())
-            ):
-                continue
-            evidence_by_path[path] = EvidenceRef(
-                kind=str(artifact.get("kind") or "analysis_artifact"),
-                path=path,
-                summary=(
-                    f"{artifact.get('description') or 'Analysis artifact'} "
-                    f"Available information: "
-                    f"{', '.join(str(item) for item in information)}."
-                ),
-            )
+        evidence_by_path.update(self._checkpoint_artifact_refs(catalog["artifacts"], work_root=work_root))
         normalized_cases = tuple(
             self._checkpoint_case_evidence(
                 original,
@@ -1813,6 +1793,33 @@ Update analysis incrementally:
             profile_summary_path=(str(analysis_path) if has_analysis else original.profile_summary_path),
             flags=tuple(dict.fromkeys([*original.flags, reason])),
         )
+
+    @staticmethod
+    def _checkpoint_artifact_refs(artifacts: list, *, work_root: Path) -> dict[str, EvidenceRef]:
+        """The well-formed catalog entries of an unpublished checkpoint that stay inside its work root, by path."""
+        refs: dict[str, EvidenceRef] = {}
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = str(artifact.get("path") or "")
+            information = artifact.get("available_information")
+            if (
+                not path
+                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
+                or not isinstance(information, list)
+                or not Path(path).resolve().is_relative_to(work_root.resolve())
+            ):
+                continue
+            refs[path] = EvidenceRef(
+                kind=str(artifact.get("kind") or "analysis_artifact"),
+                path=path,
+                summary=(
+                    f"{artifact.get('description') or 'Analysis artifact'} "
+                    f"Available information: "
+                    f"{', '.join(str(item) for item in information)}."
+                ),
+            )
+        return refs
 
     @staticmethod
     def _checkpoint_case_evidence(original: CaseEvidence, *, case_root: Path, profiling_enabled: bool) -> CaseEvidence:

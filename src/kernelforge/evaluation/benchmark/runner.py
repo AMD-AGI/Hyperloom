@@ -155,6 +155,11 @@ def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]
     return case_times, unscored, duplicates
 
 
+def _wall_ms_samples(output: str) -> list[float]:
+    """The per-iteration ``wall_ms:`` times a driver printed."""
+    return [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", output)]
+
+
 def _case_milliseconds(case_times: dict) -> dict[str, float]:
     """Each case's time as a float; raises ValueError naming the first case whose time is not finite and positive."""
     times: dict[str, float] = {}
@@ -198,7 +203,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         expected_cases = case_ids
         if not case_ids:
             return _aggregate_refusal(measurements, "MEASUREMENT REPORTED NO CASE TIMINGS")
-        unscored = {str(case_id) for case_id in measurement.get("unscored_cases") or []}
+        unscored = set(measurement.get("unscored_cases") or [])
         if index > 1 and unscored != expected_unscored:
             mismatch = f"expected={sorted(expected_unscored)}, got={sorted(unscored)}"
             return _aggregate_refusal(measurements, f"MEASUREMENT UNSCORED CASE MISMATCH: {mismatch}")
@@ -351,8 +356,7 @@ async def bench_wallclock(
             "output": full_output[-2000:],
         }
 
-    # Parse individual wall_ms values
-    times = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
+    times = _wall_ms_samples(full_output)
 
     # Or parse a single pre-aggregated summary line.
     agg_match = re.search(r"(median_ms|mean_ms):\s*([\d.]+)", full_output)
@@ -590,7 +594,7 @@ async def sweep_case(
 ) -> dict:
     """Time ONE declared case at ONE point in the dispatch-constant space."""
     case = str(case_id).strip()
-    if not case or len(case.split()) != 1:
+    if len(case.split()) != 1:
         return _sweep_failure(f"INVALID CASE ID {case_id!r}")
     try:
         env, exported = _sweep_environment(constants, prefix_constants=prefix_constants)
@@ -634,7 +638,7 @@ async def sweep_case(
     narrowed = set(seen) == {case}
     selected = narrowed and not rejected_before and flag_exit is None
     whole_suite = "" if selected else _whole_suite_note(flag_exit, rejected_before, seen)
-    samples = [float(m) for m in re.findall(r"wall_ms:\s*([\d.]+)", full_output)]
+    samples = _wall_ms_samples(full_output)
     spread = narrowed and bool(samples)
     return {
         "success": True,

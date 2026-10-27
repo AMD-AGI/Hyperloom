@@ -399,6 +399,13 @@ def _lane_prompt(plan: str, *, serialized_driver: Path) -> str:
     )
 
 
+def _append_finding(session_sink: dict, summary: str) -> None:
+    """Add a loop-authored verdict to the session's findings."""
+    session_sink["findings"] = "\n---\n".join(
+        part for part in (str(session_sink.get("findings") or ""), summary) if part
+    )
+
+
 @contextlib.contextmanager
 def _defer_termination_signals(enabled: bool):
     """Delay SIGTERM/SIGINT across best-commit checkpoint publication."""
@@ -722,6 +729,32 @@ class IterationResult:
     agent_model: str = ""
     blockage_epoch: int = 0
 
+    def keep_validation_text(self) -> str:
+        """The validation evidence a KEEP publishes: the summary, then any error tail."""
+        text = self.validation_summary or "canonical validation passed"
+        if self.error_output:
+            text = f"{text}\n\n{self.error_output}".strip()
+        return text
+
+    def error_signature(self) -> str:
+        """The last non-empty line of a failed attempt's error, as its journal signature."""
+        if self.validation_passed:
+            return ""
+        blob = self.error_output or self.validation_summary or ""
+        err_lines = [line.strip() for line in blob.splitlines() if line.strip()]
+        return err_lines[-1][:160] if err_lines else ""
+
+
+def _require_best_is_keep(best: BestRecord, result: IterationResult) -> None:
+    """Refuse a run state whose best is not the KEEP it already applied."""
+    if (
+        best.iteration != result.iteration
+        or best.commit_hash != result.commit_hash
+        or best.wall_ms != result.wall_ms
+        or best.mean_case_speedup != result.mean_case_speedup
+    ):
+        raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
+
 
 @dataclass(frozen=True)
 class WindowGain:
@@ -1027,9 +1060,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         patch = patch.strip()
         if not patch:
             raise ValueError("verified KEEP has no candidate diff")
-        validation_text = result.validation_summary or "canonical validation passed"
-        if result.error_output:
-            validation_text = f"{validation_text}\n\n{result.error_output}".strip()
         benchmark = dict(result.bench_detail or {})
         benchmark.setdefault("median_ms", result.wall_ms)
         publication_base = self.ic.campaign_base_commit or base_head
@@ -1047,7 +1077,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "vgpr": result.vgpr,
             "plan": (plan or "").strip(),
             "rationale": rationale,
-            "validation_text": validation_text,
+            "validation_text": result.keep_validation_text(),
             "benchmark": benchmark,
             "changed_files": changed_files,
             "patch": patch,
@@ -1093,25 +1123,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             raise ValueError("pending KEEP metadata is incomplete")
         if hashlib.sha256(patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP metadata patch checksum mismatch")
-        if pending.get("campaign_id") != state.campaign_id:
-            raise ValueError("pending KEEP campaign mismatch")
-        current_kernel = self._workspace_path(self.ic.kernel_file)
-        if state.kernel_path and state.kernel_path != current_kernel:
-            raise ValueError(f"kernel path mismatch: expected {state.kernel_path}, got {current_kernel}")
-        if state.task_fingerprint and state.task_fingerprint != pending.get("task_fingerprint"):
-            raise ValueError("pending KEEP state task fingerprint mismatch")
-        if pending.get("task_fingerprint") != self._task_fingerprint():
-            raise ValueError("pending KEEP task fingerprint mismatch")
-        if state.git_branch and state.git_branch != pending.get("git_branch"):
-            raise ValueError("pending KEEP state branch mismatch")
-        if pending.get("git_branch") != self.ic.git_branch:
-            raise ValueError("pending KEEP branch mismatch")
-
-        current_branch = self._git("branch", "--show-current").splitlines()[0]
-        if current_branch != self.ic.git_branch:
-            raise ValueError(
-                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {self.ic.git_branch}"
-            )
+        self._require_pending_keep_identity(state, pending)
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
         state_anchor = state.best.commit_hash or state.head_commit
         already_finalized = state.best.iteration == iteration and state.best.commit_hash == current_head
@@ -1139,6 +1151,28 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if subject != pending["commit_subject"]:
             raise ValueError("pending KEEP commit message mismatch")
         return "committed"
+
+    def _require_pending_keep_identity(self, state: RunState, pending: dict) -> None:
+        """Refuse a pending KEEP written for another campaign, kernel, task or branch."""
+        if pending.get("campaign_id") != state.campaign_id:
+            raise ValueError("pending KEEP campaign mismatch")
+        current_kernel = self._workspace_path(self.ic.kernel_file)
+        if state.kernel_path and state.kernel_path != current_kernel:
+            raise ValueError(f"kernel path mismatch: expected {state.kernel_path}, got {current_kernel}")
+        if state.task_fingerprint and state.task_fingerprint != pending.get("task_fingerprint"):
+            raise ValueError("pending KEEP state task fingerprint mismatch")
+        if pending.get("task_fingerprint") != self._task_fingerprint():
+            raise ValueError("pending KEEP task fingerprint mismatch")
+        if state.git_branch and state.git_branch != pending.get("git_branch"):
+            raise ValueError("pending KEEP state branch mismatch")
+        if pending.get("git_branch") != self.ic.git_branch:
+            raise ValueError("pending KEEP branch mismatch")
+
+        current_branch = self._git("branch", "--show-current").splitlines()[0]
+        if current_branch != self.ic.git_branch:
+            raise ValueError(
+                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {self.ic.git_branch}"
+            )
 
     def _validate_resume_scoring_state(self, state: RunState) -> None:
         """Reject checkpoints that cannot restore the original scoring rules."""
@@ -1619,6 +1653,30 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return self._full_diff(commit_hash)
         return git("diff", base, commit_hash, "--", ".", cwd=self.ic.workspace_dir).stdout
 
+    def _keep_score(self, result: IterationResult, pending: dict, best_before: float | None) -> KeepScore | None:
+        """Score a KEEP against its baseline and the search start; None when either side is unmeasured."""
+        baseline = (
+            pending.get("pristine_baseline_wall_ms")
+            or pending.get("baseline_wall_ms")
+            or self.ic.pristine_baseline_wall_ms
+            or self.ic.publication_baseline_wall_ms
+            or self.ic.baseline_wall_ms
+            or self.run_state.baseline_wall_ms
+            or best_before
+        )
+        if baseline is None or result.wall_ms is None or result.mean_case_speedup is None:
+            return None
+        return KeepScore(
+            baseline_wall_ms=baseline,
+            best_wall_ms=result.wall_ms,
+            mean_case_speedup=result.mean_case_speedup,
+            search_start_mean_case_speedup=(
+                self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+            ),
+            snr_db=result.snr_db,
+            search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
+        )
+
     def _publish_best_result(
         self,
         result: IterationResult,
@@ -1630,59 +1688,35 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """Publish one KEEP before another Agent session may start."""
         if not result.kept or not result.commit_hash:
             return False
-        baseline = (
-            (pending or {}).get("pristine_baseline_wall_ms")
-            or (pending or {}).get("baseline_wall_ms")
-            or self.ic.pristine_baseline_wall_ms
-            or self.ic.publication_baseline_wall_ms
-            or self.ic.baseline_wall_ms
-            or self.run_state.baseline_wall_ms
-            or best_before
-        )
-        if baseline is None or result.wall_ms is None or result.mean_case_speedup is None:
+        pending = pending or {}
+        score = self._keep_score(result, pending, best_before)
+        if score is None:
             return False
-        validation_text = (
-            (pending or {}).get("validation_text") or result.validation_summary or "canonical validation passed"
-        )
-        if result.error_output and not pending:
-            validation_text = f"{validation_text}\n\n{result.error_output}".strip()
-        benchmark = dict((pending or {}).get("benchmark") or result.bench_detail or {})
+        benchmark = dict(pending.get("benchmark") or result.bench_detail or {})
         benchmark.setdefault("median_ms", result.wall_ms)
         benchmark.setdefault("mean_case_speedup", result.mean_case_speedup)
         try:
             self.best_publisher.publish(
                 KeepIdentity(
                     campaign_id=self.run_state.campaign_id,
-                    session_index=int((pending or {}).get("session_index", self.run_state.session_index)),
+                    session_index=int(pending.get("session_index", self.run_state.session_index)),
                     experiment_id=(
-                        str((pending or {}).get("experiment_id") or "")
+                        str(pending.get("experiment_id") or "")
                         or (self.experiment.experiment_id if self.experiment else "")
                     ),
                     iteration=result.iteration,
                     commit_hash=result.commit_hash,
                     plan=plan,
                 ),
-                KeepScore(
-                    baseline_wall_ms=baseline,
-                    best_wall_ms=result.wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    search_start_mean_case_speedup=(
-                        self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
-                    ),
-                    snr_db=result.snr_db,
-                    search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
-                ),
+                score,
                 KeepBundle(
-                    validation_text=validation_text,
+                    validation_text=pending.get("validation_text") or result.keep_validation_text(),
                     benchmark=benchmark,
                     changed_files=(
-                        list((pending or {}).get("publication_changed_files") or [])
+                        list(pending.get("publication_changed_files") or [])
                         or self._publication_changed_files(result.commit_hash)
                     ),
-                    patch=(
-                        str((pending or {}).get("publication_patch") or "")
-                        or self._publication_patch(result.commit_hash)
-                    ),
+                    patch=(str(pending.get("publication_patch") or "") or self._publication_patch(result.commit_hash)),
                 ),
                 round_budget=self._round_budget_summary(),
             )
@@ -1716,24 +1750,18 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             checkpoint_metadata=pending,
         )
 
-    def _archive_pending_keep(
-        self,
-        pending: dict,
-        commit_hash: str,
-        *,
-        result: IterationResult | None = None,
-    ) -> None:
+    def _archive_pending_keep(self, pending: dict, result: IterationResult) -> None:
         """Recover the candidate archive when a KEEP was interrupted post-commit."""
         iteration = int(pending["iteration"])
         existing = self.archive.load_meta(iteration)
         if existing:
-            if existing.get("decision") != "KEEP" or existing.get("commit_hash") != commit_hash:
+            if existing.get("decision") != "KEEP" or existing.get("commit_hash") != result.commit_hash:
                 raise ValueError(f"candidate archive conflicts with pending KEEP iteration {iteration}")
             return
         archived = self.archive.record(
             CandidateRecord(
                 iteration=iteration,
-                commit_hash=commit_hash,
+                commit_hash=result.commit_hash,
                 decision="KEEP",
                 kept=True,
                 validation_passed=True,
@@ -1742,8 +1770,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 bench_detail=pending.get("benchmark") or {},
                 snr_db=pending.get("snr_db"),
                 vgpr=pending.get("vgpr"),
-                pmc_diagnosis=result.pmc_diagnosis if result else "",
-                profile_meta=result.profile_meta if result else {},
+                pmc_diagnosis=result.pmc_diagnosis,
+                profile_meta=result.profile_meta,
                 baseline_wall_ms=pending.get("baseline_wall_ms"),
                 best_wall_ms_before=pending.get("best_wall_ms_before"),
                 best_mean_case_speedup_before=pending.get("best_mean_case_speedup_before"),
@@ -1759,7 +1787,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 shape=pending.get("shape") or {},
                 kernel_source=str(pending.get("kernel_source") or ""),
                 change_diff=str(pending.get("patch") or ""),
-                pmc_full=result.pmc_full if result else "",
+                pmc_full=result.pmc_full,
                 validation_text=str(pending.get("validation_text") or ""),
             )
         )
@@ -2001,9 +2029,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "were skipped because the device is still held by processes this "
             f"campaign could not clear. {detail}"
         )
-        session_sink["findings"] = "\n---\n".join(
-            part for part in (str(session_sink.get("findings") or ""), summary) if part
-        )
+        _append_finding(session_sink, summary)
         print("  [REVERT] Device still contended; nothing planned, run or measured this iteration")
         return IterationResult(
             iteration=iteration,
@@ -2346,13 +2372,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             if isinstance(control, dict):
                 planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
             apply_relay_keep(planned.agent_relay)
-        elif (
-            planned.best.iteration != result.iteration
-            or planned.best.commit_hash != result.commit_hash
-            or planned.best.wall_ms != result.wall_ms
-            or planned.best.mean_case_speedup != result.mean_case_speedup
-        ):
-            raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
+        else:
+            _require_best_is_keep(planned.best, result)
         return status, result, keep_event is None
 
     def _plan_resume_recovery(
@@ -2444,11 +2465,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return
         pending, result = recovered
         try:
-            self._archive_pending_keep(
-                pending,
-                result.commit_hash,
-                result=result,
-            )
+            self._archive_pending_keep(pending, result)
         except (OSError, ValueError, RuntimeError) as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
@@ -3186,12 +3203,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 floor_only=(),
             )
 
+        covered = {case_id: iterations[-1] for case_id, iterations in moved_by.items() if iterations}
         groups: dict[tuple[int, ...], list[str]] = {}
-        for case_id, iterations in moved_by.items():
-            if iterations:
-                groups.setdefault(tuple(iterations), []).append(case_id)
+        for case_id in covered:
+            groups.setdefault(tuple(moved_by[case_id]), []).append(case_id)
         return CaseConfigCoverage(
-            covered={case_id: iterations[-1] for case_id, iterations in moved_by.items() if iterations},
+            covered=covered,
             fallback=tuple(case_id for case_id in scored if not moved_by[case_id] and case_id not in unmeasured),
             undifferentiated=tuple(
                 tuple(sorted(members)) for _signature, members in sorted(groups.items()) if len(members) > 1
@@ -3199,13 +3216,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             keeps=tuple(keeps),
             unmeasured=tuple(sorted(unmeasured)),
             unreadable=tuple(unreadable),
-            floor_only=tuple(
-                sorted(
-                    case_id
-                    for case_id, iterations in moved_by.items()
-                    if iterations and case_id not in dispersion_tested
-                )
-            ),
+            floor_only=tuple(sorted(covered.keys() - dispersion_tested)),
         )
 
     def _case_config_coverage_flags(self) -> dict[str, tuple[str, ...]]:
@@ -3705,17 +3716,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             if decision_label is None:
                 decision_label = _decision_label(result)
 
-            error_sig = ""
-            if not result.validation_passed:
-                blob = getattr(result, "error_output", "") or result.validation_summary or ""
-                err_lines = [line.strip() for line in blob.splitlines() if line.strip()]
-                error_sig = err_lines[-1][:160] if err_lines else ""
-
-            existing_events = [
-                event
-                for event in self.state_store.read_events()
-                if event.get("type") == "iteration_result" and int(event.get("iter", 0) or 0) == result.iteration
-            ]
+            existing_events = self._journaled_results_of(result.iteration)
             if len(existing_events) > 1:
                 raise ValueError(f"duplicate iteration_result events for iteration {result.iteration}")
             if existing_events:
@@ -3728,13 +3729,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             newly_applied = self.run_state.next_iteration <= result.iteration
             if newly_applied:
                 self._apply_new_iteration_outcome(result, decision_label, plan)
-            elif result.kept and (
-                self.run_state.best.iteration != result.iteration
-                or self.run_state.best.commit_hash != result.commit_hash
-                or self.run_state.best.wall_ms != result.wall_ms
-                or self.run_state.best.mean_case_speedup != result.mean_case_speedup
-            ):
-                raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
+            elif result.kept:
+                _require_best_is_keep(self.run_state.best, result)
 
             # The monitor remains operational even if durable state I/O fails, but an idempotent recovery must not
             # count the outcome twice.
@@ -3751,7 +3747,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         result,
                         plan=plan,
                         decision_label=decision_label,
-                        error_sig=error_sig,
                         checkpoint_metadata=checkpoint_metadata,
                     )
                 )
@@ -3770,26 +3765,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self.state_store.save(self.run_state)
 
             if require_durable:
-                persisted = self.state_store.load()
-                durable_events = [
-                    event
-                    for event in self.state_store.read_events()
-                    if event.get("type") == "iteration_result" and int(event.get("iter", 0) or 0) == result.iteration
-                ]
-                if (
-                    persisted.next_iteration <= result.iteration
-                    or len(durable_events) != 1
-                    or durable_events[0].get("decision") != decision_label
-                    or (
-                        result.kept
-                        and (
-                            persisted.best.iteration != result.iteration
-                            or persisted.best.commit_hash != result.commit_hash
-                            or persisted.best.wall_ms != result.wall_ms
-                        )
-                    )
-                ):
-                    raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
+                self._require_durable_outcome(result, decision_label)
             return True
         except Exception as error:
             if require_durable:
@@ -3797,13 +3773,39 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
             return False
 
+    def _journaled_results_of(self, iteration: int) -> list[dict]:
+        """Every journaled iteration_result for ``iteration``, duplicates included."""
+        return [
+            event
+            for event in self.state_store.read_events()
+            if event.get("type") == "iteration_result" and int(event.get("iter", 0) or 0) == iteration
+        ]
+
+    def _require_durable_outcome(self, result: IterationResult, decision_label: str) -> None:
+        """Reload the run state and journal and refuse unless both carry this outcome exactly once."""
+        persisted = self.state_store.load()
+        durable_events = self._journaled_results_of(result.iteration)
+        if (
+            persisted.next_iteration <= result.iteration
+            or len(durable_events) != 1
+            or durable_events[0].get("decision") != decision_label
+            or (
+                result.kept
+                and (
+                    persisted.best.iteration != result.iteration
+                    or persisted.best.commit_hash != result.commit_hash
+                    or persisted.best.wall_ms != result.wall_ms
+                )
+            )
+        ):
+            raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
+
     def _iteration_result_event(
         self,
         result: IterationResult,
         *,
         plan: str,
         decision_label: str | None = None,
-        error_sig: str = "",
         checkpoint_metadata: dict | None = None,
     ) -> dict:
         """Build the canonical durable event for one completed iteration."""
@@ -3823,7 +3825,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             agent_provider=result.agent_provider or None,
             agent_model=result.agent_model or None,
             blockage_epoch=result.blockage_epoch,
-            error_sig=error_sig or None,
+            error_sig=result.error_signature() or None,
             session_end_reason=result.session_end_reason or None,
             session_index=int(
                 (checkpoint_metadata or {}).get(
@@ -5009,7 +5011,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 or self._pending_keep_path.exists()
                 or self.archive.max_iteration() > 0
                 or current_ruling_path.exists()
-                or (self.handoff_store is not None and self.handoff_store.latest() is not None)
+                or self.handoff_store.latest() is not None
             ):
                 raise ValueError("workspace already contains a campaign; pass --resume to continue it")
             result = self._git("checkout", "-b", self.ic.git_branch)
@@ -5402,84 +5404,31 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         and the commit the verdict settled on -- a KEEP commits here, so the
         hash the caller came in with is not the one it leaves with.
         """
-        session_sink = frame.session_sink
-        best_before, best_mean_case_speedup_before = frame.best_before, frame.best_mean_case_speedup_before
         commit_hash, attempt_diff = attempt.commit_hash, attempt.attempt_diff
-        attempt_source, rationale = attempt.attempt_source, attempt.rationale
-        # Keep or revert — detailed verdict
-        pending_keep: dict | None = None
-        keep_checkpoint_finalized = False
+        ruling = _Ruling(None, False, commit_hash)
         elapsed = result.duration_sec
         raw_wall_txt = f"{result.wall_ms:.3f} ms" if result.wall_ms is not None else "unavailable"
-        if not result.validation_passed:
+        if not result.validation_passed or not result.kept:
             if commit_hash:
                 self._git_revert_last()
             elif attempt_diff or self._new_paths_need_discard():
                 self._git_discard_worktree()
-            label = "Iteration crashed" if result.crashed else "Validation failed"
-            print(f"  [REVERT] {label} ({elapsed:.0f}s)")
-            print(f"           {result.validation_summary.splitlines()[-1] if result.validation_summary else ''}")
-        elif not result.kept:
-            if commit_hash:
-                self._git_revert_last()
-            elif attempt_diff or self._new_paths_need_discard():
-                self._git_discard_worktree()
-            speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
-            best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-            print(
-                f"  [REVERT] mean case speedup={speedup_txt} not better than "
-                f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
-            )
+            if not result.validation_passed:
+                label = "Iteration crashed" if result.crashed else "Validation failed"
+                print(f"  [REVERT] {label} ({elapsed:.0f}s)")
+                print(f"           {result.validation_summary.splitlines()[-1] if result.validation_summary else ''}")
+            else:
+                speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
+                best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                print(
+                    f"  [REVERT] mean case speedup={speedup_txt} not better than "
+                    f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
+                )
         else:
-            # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
-            # mid-checkpoint cannot leave the pending-keep/run-state half-written.
-            with _defer_termination_signals(bool(attempt_diff)):
-                if attempt_diff:
-                    try:
-                        pending_keep = self._build_pending_keep(
-                            result,
-                            plan=session_sink.get("plan", ""),
-                            best_before=best_before,
-                            rationale=rationale,
-                            kernel_source=attempt_source,
-                        )
-                        self._persist_pending_keep(pending_keep)
-                        commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
-                        result.kept = False
-                        result.validation_passed = False
-                        result.crashed = True
-                        result.validation_summary = f"COMMIT FAILED: {e}"
-                        result.error_output = str(e)
-                        self._git_discard_all_tracked_changes()
-                        self._clear_pending_keep()
-                        print(f"  [REVERT] Commit failed after validation ({elapsed:.0f}s)")
-                        print(f"           {str(e)[-300:]}")
-                    else:
-                        result.commit_hash = commit_hash
-                        self._promote_best(result)
-                        self.best_mean_case_speedup = result.mean_case_speedup
-                        self._finalize_keep_checkpoint(
-                            result,
-                            plan=session_sink.get("plan", ""),
-                            best_before=best_before,
-                            pending=pending_keep,
-                        )
-                        keep_checkpoint_finalized = True
-                        print(f"  [agent] Committed verified best: {commit_hash[:8]}")
-                else:
-                    # No-agent measurement path: there is no candidate diff to commit, but the measurement can
-                    # still establish a best.
-                    self._promote_best(result)
-                    self.best_mean_case_speedup = result.mean_case_speedup
-                # Bridge to the caller's checkpoint sink (main): lets the CLI persist a Hyperloom-recovery
-                # checkpoint JSON alongside our run-state durability.
-                if result.kept and on_best_committed:
-                    on_best_committed(result)
-                if keep_checkpoint_finalized:
-                    self._clear_pending_keep()
+            ruling = self._commit_keep(result, attempt, frame, on_best_committed=on_best_committed)
             if result.kept:
                 improvement = ""
+                best_mean_case_speedup_before = frame.best_mean_case_speedup_before
                 if best_mean_case_speedup_before and result.mean_case_speedup:
                     pct = (result.mean_case_speedup / best_mean_case_speedup_before - 1.0) * 100
                     improvement = f" ({pct:+.1f}% vs previous best)"
@@ -5489,6 +5438,60 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
                     f"{snr_str} ({elapsed:.0f}s)"
                 )
+        return ruling
+
+    def _commit_keep(self, result, attempt: _Attempt, frame: _IterationFrame, *, on_best_committed) -> _Ruling:
+        """Commit a verified KEEP behind a durable pending journal, or demote it when the commit fails."""
+        commit_hash, attempt_diff = attempt.commit_hash, attempt.attempt_diff
+        pending_keep: dict | None = None
+        keep_checkpoint_finalized = False
+        # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
+        # mid-checkpoint cannot leave the pending-keep/run-state half-written.
+        with _defer_termination_signals(bool(attempt_diff)):
+            if attempt_diff:
+                try:
+                    pending_keep = self._build_pending_keep(
+                        result,
+                        plan=frame.session_sink.get("plan", ""),
+                        best_before=frame.best_before,
+                        rationale=attempt.rationale,
+                        kernel_source=attempt.attempt_source,
+                    )
+                    self._persist_pending_keep(pending_keep)
+                    commit_hash = self._git_commit(str(pending_keep["commit_message"]))
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+                    result.kept = False
+                    result.validation_passed = False
+                    result.crashed = True
+                    result.validation_summary = f"COMMIT FAILED: {e}"
+                    result.error_output = str(e)
+                    self._git_discard_all_tracked_changes()
+                    self._clear_pending_keep()
+                    print(f"  [REVERT] Commit failed after validation ({result.duration_sec:.0f}s)")
+                    print(f"           {str(e)[-300:]}")
+                else:
+                    result.commit_hash = commit_hash
+                    self._promote_best(result)
+                    self.best_mean_case_speedup = result.mean_case_speedup
+                    self._finalize_keep_checkpoint(
+                        result,
+                        plan=frame.session_sink.get("plan", ""),
+                        best_before=frame.best_before,
+                        pending=pending_keep,
+                    )
+                    keep_checkpoint_finalized = True
+                    print(f"  [agent] Committed verified best: {commit_hash[:8]}")
+            else:
+                # No-agent measurement path: there is no candidate diff to commit, but the measurement can
+                # still establish a best.
+                self._promote_best(result)
+                self.best_mean_case_speedup = result.mean_case_speedup
+            # Bridge to the caller's checkpoint sink (main): lets the CLI persist a Hyperloom-recovery
+            # checkpoint JSON alongside our run-state durability.
+            if result.kept and on_best_committed:
+                on_best_committed(result)
+            if keep_checkpoint_finalized:
+                self._clear_pending_keep()
         return _Ruling(pending_keep, keep_checkpoint_finalized, commit_hash)
 
     async def _close_iteration(
@@ -5836,14 +5839,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
             if restore_errors:
                 summary += " Restoration errors: " + "; ".join(restore_errors)
-            session_sink["findings"] = "\n---\n".join(
-                part
-                for part in (
-                    str(session_sink.get("findings") or ""),
-                    summary,
-                )
-                if part
-            )
+            _append_finding(session_sink, summary)
             unmeasured_result = IterationResult(
                 iteration=iteration,
                 duration_sec=0.0,
@@ -5878,14 +5874,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 self._git_discard_worktree()
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 summary += f" Candidate restore failed: {type(error).__name__}: {error}"
-            session_sink["findings"] = "\n---\n".join(
-                part
-                for part in (
-                    str(session_sink.get("findings") or ""),
-                    summary,
-                )
-                if part
-            )
+            _append_finding(session_sink, summary)
             unmeasured_result = IterationResult(
                 iteration=iteration,
                 duration_sec=0.0,
@@ -6027,12 +6016,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         frame the implementer reads first, and the plan instruction sits above
         the evidence because lesson records are evidence, not instructions.
         """
-        # Cross-iteration experience assembled from complementary sources (AVO-style lineage view), each
-        # carrying what the others cannot: * the candidate ARCHIVE digest — the trajectory table + full diffs
-        # of the best/near-miss/recent attempts + a pointer to the on-disk archive so the agent can Read any
-        # prior kernel. * the LESSON documents — what each recent session actually explored, in its own words,
-        # including the directions it abandoned (which leave no diff behind). * the experience LEDGER —
-        # objective toolchain observations distilled from machine-verified failure signatures.
         lh_header = _long_horizon_header(
             self.run_state,
             self.state_store,
@@ -6055,30 +6038,28 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ledger_txt = self.ledger.render_for_prompt(
                 include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
             )
+        sources = [lessons_txt, ledger_txt]
         if lh_header:
-            history = "\n\n".join(p for p in (lessons_txt, ledger_txt) if p)
             print(f"  [agent] injected long-horizon header: {len(lh_header)} chars (digest reserved for supervisor)")
         else:
-            history = "\n\n".join(p for p in (digest, lessons_txt, ledger_txt) if p)
+            sources.insert(0, digest)
             if digest:
                 n_cand = len(self.archive.load_index())
                 print(f"  [agent] injected lineage digest: {len(digest)} chars, {n_cand} prior candidates archived")
+        history = "\n\n".join(p for p in sources if p)
         if lessons_txt:
             print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
         if not history:
             history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
-        analysis_evidence = self._render_analysis_evidence_for_implementer()
-        if analysis_evidence:
-            history = f"{analysis_evidence}\n\n{history}"
-            print(f"  [agent] injected Analysis evidence: {len(analysis_evidence)} chars")
-        coverage_block = self._render_case_config_coverage()
-        if coverage_block:
-            history = f"{coverage_block}\n\n{history}"
-            print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
-        ceiling_block = self._render_ceiling_advisory()
-        if ceiling_block:
-            history = f"{ceiling_block}\n\n{history}"
-            print(f"  [agent] injected roofline attainment standing: {len(ceiling_block)} chars")
+        for render, label in (
+            (self._render_analysis_evidence_for_implementer, "Analysis evidence"),
+            (self._render_case_config_coverage, "per-case configuration coverage"),
+            (self._render_ceiling_advisory, "roofline attainment standing"),
+        ):
+            block = render()
+            if block:
+                history = f"{block}\n\n{history}"
+                print(f"  [agent] injected {label}: {len(block)} chars")
         new_file_block = self._render_uncommittable_new_paths()
         if new_file_block:
             history = f"{new_file_block}\n\n{history}"
