@@ -24,7 +24,10 @@ a boot limit does, rather than at its end: measured on a GPU pod, a test that ra
 signed result says ``foreign`` with the process, the card and when, and the runner leaves a note.
 
 Where the probe cannot say who holds the cards (no driver list, ``/proc`` hiding other accounts' processes), the test goes
-on in both modes and the signed result says ``unknown`` and why; it is never written as clean. In a pid namespace of its
+on in both modes and the signed result says ``unknown`` and why; it is never written as clean. Where the runner's view of
+the machine refuses it the list for its cards (a container that is shown no GPU node, not its card's, or no process list),
+the result is ``unobservable`` and why: enforcing, it is refused as ``cards_unobservable`` before the test starts while
+:data:`REFUSE_UNOBSERVABLE` is set, and kept with a note when it is not; observing, it is kept with a note. In a pid namespace of its
 own the probe counts instead of naming (before the test nothing may hold a card, during it one process may hold memory on
 each, and no memory may be held that no process of this container accounts for): the result says so in its ``method``.
 """
@@ -38,8 +41,8 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN
-from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
+from hyperloom.contracts.measurement import CARD_CLEAN, CARD_FOREIGN, CARD_UNKNOWN, CARD_UNOBSERVABLE
+from hyperloom.measure.failures import CARDS_UNOBSERVABLE, FOREIGN_PROCESS_ON_CARD
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import (
@@ -60,6 +63,7 @@ __all__ = [
     "CARD_POLL_SEC",
     "DURING_TEST",
     "ENDED_AT_SIGHTING",
+    "REFUSE_UNOBSERVABLE",
     "CardStatement",
     "CardWatch",
 ]
@@ -72,6 +76,10 @@ DURING_TEST = "during the test"
 AFTER_TEST = "after the test"
 #: What a refusal adds when the enforcing watch ended the test at the look that found the intruder.
 ENDED_AT_SIGHTING = "the test was ended at that look"
+#: Whether an enforcing guard refuses a result whose cards it could not look at because the runner's view of the machine
+#: refused it the kernel's list (``unobservable``). Refused, nothing is signed that the guard could not check; kept, the
+#: result says ``unobservable`` and why, and carries a warning. The one switch for it.
+REFUSE_UNOBSERVABLE = True
 #: How many intruders the failure names, and how much of each one's command line.
 _NAMED = 2
 _COMMAND_CHARS = 80
@@ -100,8 +108,8 @@ class Sighting:
 
 @dataclass(frozen=True)
 class CardStatement:
-    """What the signed result says of the test's cards: ``clean``, ``foreign`` with what was seen, or ``unknown`` with the
-    reason a look could not say. ``checks`` is how many looks read the list, and ``method`` how they told a holder from the
+    """What the signed result says of the test's cards: ``clean``, ``foreign`` with what was seen, ``unobservable`` with
+    what this view of the machine refused, or ``unknown`` with the reason a look could not say. ``checks`` is how many looks read the list, and ``method`` how they told a holder from the
     test's own (the least one a look used; ``None`` when none read the list)."""
 
     state: str
@@ -137,6 +145,7 @@ class CardWatch:
         self._lock = threading.Lock()
         self._sightings: dict[tuple[str | int, ...], Sighting] = {}
         self._unavailable = ""
+        self._unobservable = ""
         self._checks = 0
         self._method: str | None = None
         self._accounted: frozenset[tuple[int, int]] = frozenset()
@@ -153,6 +162,9 @@ class CardWatch:
         if when == BEFORE_TEST:
             reading, found = self._settled(reading, found)
         with self._lock:
+            if reading.unavailable is not None and reading.denied:
+                self._unobservable = self._unobservable or reading.unavailable
+                return
             if reading.unavailable is not None:
                 self._unavailable = self._unavailable or reading.unavailable
                 return
@@ -214,20 +226,36 @@ class CardWatch:
 
     def enforce_guard(self) -> None:
         """Raise the failure that refuses the result when the guard enforces and a process outside the test held a card
-        at any look; observing, do nothing (:meth:`observation` and :meth:`statement` carry what was seen)."""
+        at any look, or (while :data:`REFUSE_UNOBSERVABLE` is set) a look was refused the list; observing, do nothing
+        (:meth:`observation` and :meth:`statement` carry what was seen)."""
+        if self._guard is not CardGuard.ENFORCE:
+            return
         found = self._seen()
-        if self._guard is CardGuard.ENFORCE and found:
+        if found:
             ended = f"; {ENDED_AT_SIGHTING}" if self._ended_early else ""
             raise RunnerFailure(FOREIGN_PROCESS_ON_CARD, _describe(found) + ended)
+        unobservable = self._unobservable_reason()
+        if unobservable and REFUSE_UNOBSERVABLE:
+            raise RunnerFailure(CARDS_UNOBSERVABLE, f"the test's cards cannot be looked at: {unobservable}")
 
     def observation(self) -> str | None:
-        """The note a runner that only observes leaves when a process outside the test held a card, else ``None``."""
+        """The note a runner leaves when it keeps a result the guard did not refuse although a process outside the test
+        held a card (observing) or no look could see the cards (``unobservable``, kept), else ``None``."""
         found = self._seen()
         if self._guard is CardGuard.OBSERVE and found:
             return (
                 f"CARD GUARD OBSERVES ONLY ({CARD_GUARD_ENV}=observe): this result was kept although {_describe(found)}"
             )
+        unobservable = self._unobservable_reason()
+        if unobservable and not found:
+            return (
+                f"CARD GUARD COULD NOT LOOK: this result was kept although its cards are unobservable: {unobservable}"
+            )
         return None
+
+    def _unobservable_reason(self) -> str:
+        with self._lock:
+            return self._unobservable
 
     def _seen(self) -> list[Sighting]:
         with self._lock:
@@ -235,15 +263,19 @@ class CardWatch:
 
     def statement(self) -> CardStatement | None:
         """What the signed result says of its cards: ``foreign`` and who when a process outside the test held one,
-        ``clean`` for a test every look of which read the list and found none, ``unknown`` and why when a look could not
-        read it; ``None`` for a test with no card."""
+        ``clean`` for a test every look of which read the list and found none, ``unobservable`` and why when this view
+        of the machine refused a look the list, ``unknown`` and why when a look could not read it for another reason;
+        ``None`` for a test with no card."""
         if not self._cards:
             return None
         found = self._seen()
         with self._lock:
             checks, unavailable, method = self._checks, self._unavailable, self._method
+            unobservable = self._unobservable
         if found:
             return CardStatement(CARD_FOREIGN, _describe(found), checks, method)
+        if unobservable:
+            return CardStatement(CARD_UNOBSERVABLE, unobservable, checks, method if checks else None)
         if not checks:
             return CardStatement(CARD_UNKNOWN, unavailable or _NEVER_LOOKED, 0)
         if unavailable:

@@ -9,9 +9,12 @@ has ``gpu_id`` 0), and a directory per process id with ``vram_<gpu id>`` files a
 
 from __future__ import annotations
 
+import errno
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+
+import pytest
 
 from hyperloom.common.outside_facts import INITIAL_PID_NAMESPACE
 
@@ -35,6 +38,8 @@ class KernelTree:
         self.kfd = root / "kfd"
         self.procfs = root / "proc"
         self._gpus = gpus
+        self._cpus = cpus
+        self.denied: set[Path] = set()
         for node in range(cpus + gpus):
             directory = self.kfd / "topology" / "nodes" / str(node)
             directory.mkdir(parents=True)
@@ -93,6 +98,33 @@ class KernelTree:
         text = f"pos:\t0\ndrm-driver:\tamdgpu\ndrm-client-id:\t{client or f'{pid}-{descriptor}'}\ndrm-memory-vram:\t{kib} KiB\n"
         (directory / "fdinfo" / str(descriptor)).write_text(text)
 
+    def node(self, card: int) -> Path:
+        """The topology node directory of the ``card``-th GPU of the machine."""
+        return self.kfd / "topology" / "nodes" / str(self._cpus + card)
+
+    def show_only(self, *cards: int) -> None:
+        """A container's view: the kernel refuses the ``gpu_id`` and ``properties`` of every GPU node but ``cards``'
+        (see :meth:`refuse_denied`)."""
+        for card in range(self._gpus):
+            if card not in cards:
+                self.denied |= {self.node(card) / "gpu_id", self.node(card) / "properties"}
+
+    def refuse_denied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make reading a file or listing a directory of :attr:`denied` fail with ``EPERM``, as the kernel answers a
+        container for a GPU it is not given (a mode bit would not refuse root, which the tests may run as)."""
+        denied, read_text, iterdir = self.denied, Path.read_text, Path.iterdir
+
+        def refusing_read(path: Path, *args: object, **kwargs: object) -> str:
+            _refuse(path, denied)
+            return read_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        def refusing_iterdir(path: Path) -> Iterator[Path]:
+            _refuse(path, denied)
+            return iterdir(path)
+
+        monkeypatch.setattr(Path, "read_text", refusing_read)
+        monkeypatch.setattr(Path, "iterdir", refusing_iterdir)
+
     def opened_only(self, pid: int) -> None:
         """``pid`` opened the interface on every GPU (as a monitor does): an entry with no memory and no queue."""
         directory = self.kfd / "proc" / str(pid)
@@ -105,3 +137,8 @@ class KernelTree:
         for path in sorted((self.procfs / str(pid)).iterdir()):
             path.unlink()
         (self.procfs / str(pid)).rmdir()
+
+
+def _refuse(path: Path, denied: set[Path]) -> None:
+    if path in denied:
+        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(path))

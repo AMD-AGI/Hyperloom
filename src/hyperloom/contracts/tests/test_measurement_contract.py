@@ -60,8 +60,15 @@ def test_sandbox_facts_state_whether_the_cards_were_free_of_other_processes_and_
     foreign = _roundtrip(
         _sandbox(card_occupancy="foreign", card_occupancy_reason="1 held the test's cards: pid 9 on card 0")
     )
+    unobservable = _roundtrip(
+        _sandbox(card_occupancy="unobservable", card_occupancy_reason="every GPU node is refused")
+    )
     older = SandboxFacts.from_document({"sandbox_id": "sb-1"})
 
+    assert (unobservable.card_occupancy, unobservable.card_occupancy_reason) == (
+        "unobservable",
+        "every GPU node is refused",
+    )
     assert (clean.card_occupancy, clean.card_occupancy_reason) == ("clean", "")
     assert (unknown.card_occupancy, unknown.card_occupancy_reason) == ("unknown", "no AMD GPU driver is loaded")
     assert (foreign.card_occupancy, foreign.card_occupancy_reason) == (
@@ -81,6 +88,7 @@ def test_sandbox_facts_state_whether_the_cards_were_free_of_other_processes_and_
         ({"card_occupancy": "other"}, "card_occupancy must be"),
         ({"card_occupancy": "unknown"}, "needs its reason"),
         ({"card_occupancy": "foreign"}, "needs its reason"),
+        ({"card_occupancy": "unobservable"}, "needs its reason"),
         ({"card_occupancy": "clean", "card_occupancy_reason": "why?"}, "needs its reason"),
         ({"card_occupancy_reason": "a reason with no state"}, "needs its reason"),
         ({"card_occupancy": "unknown", "card_occupancy_reason": 7}, "must be a string"),

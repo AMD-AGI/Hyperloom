@@ -56,6 +56,12 @@ LOG_LINE_CHARS = 2000
 #: other cards like any infrastructure failure (``hyperloom.measure.runner.card_watch``).
 FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
 
+#: The runner's view of the machine refused it the kernel's list for its cards (a container shown only some GPUs), so the
+#: card guard cannot look, and the guard enforces and refuses such a result (``hyperloom.measure.runner.card_watch``). A
+#: fresh sandbox of the same platform is refused the same way, so it is not retried: it stops the line like any other
+#: program error until the platform shows the runner its cards or the guard is set to record it.
+CARDS_UNOBSERVABLE = "cards_unobservable"
+
 #: A write failed because the disk or the user's quota was full (``ENOSPC``, ``EDQUOT``), in the runner or in the server
 #: (a Triton cache under the sandbox's work directory, say). A candidate's patch cannot fill a shared volume, and the next
 #: sandbox may find room, so nothing about the candidate was learned: retried like any infrastructure failure. The reason
@@ -96,7 +102,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     }
 )
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.
-PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_rejected"})
+PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE})
 
 #: The server could not bind its port. The launcher picks a free port and releases it before the server binds, so
 #: another process can take it in between; the candidate has no say in that, and a fresh sandbox does not repeat it.

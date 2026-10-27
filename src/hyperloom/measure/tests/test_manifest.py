@@ -79,6 +79,10 @@ def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_r
             {"state": "unknown", "reason": "no driver", "checks": 0, "method": None},
             CardOccupancyFacts("unknown", "no driver", 0),
         ),
+        (
+            {"state": "unobservable", "reason": "every GPU node is refused to this view", "checks": 0, "method": None},
+            CardOccupancyFacts("unobservable", "every GPU node is refused to this view", 0),
+        ),
     ],
 )
 def test_a_manifest_states_whether_its_cards_were_free_of_other_processes_and_why_not_when_it_could_not_say(
@@ -196,6 +200,9 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "card occupancy unknown with no reason": lambda d: d["runner"].update(
         card_occupancy={"state": "unknown", "reason": None, "checks": 0}
     ),
+    "card occupancy unobservable with no reason": lambda d: d["runner"].update(
+        card_occupancy={"state": "unobservable", "reason": None, "checks": 0}
+    ),
     "card occupancy clean with a reason": lambda d: d["runner"].update(
         card_occupancy={"state": "clean", "reason": "all is well", "checks": 2}
     ),
@@ -220,6 +227,7 @@ def test_a_manifest_that_breaks_the_contract_is_refused_by_the_reader_and_the_sc
         "file under a file",
         "duplicate file",
         "card occupancy unknown with no reason",
+        "card occupancy unobservable with no reason",
         "card occupancy foreign with no process named",
         "card occupancy clean with a reason",
     }

@@ -26,7 +26,7 @@ from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession
-from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
+from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor, _card_warnings
 from hyperloom_multibranch.toolbox.tests.card_list import INTRUDER, CardList
 from hyperloom_multibranch.toolbox.tests.helpers import Rig as ToolboxRig
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
@@ -226,3 +226,13 @@ def test_the_pool_of_the_local_provider_follows_the_guard_and_enforces_when_none
             assert provider.pool.acquire(1, 0.0) == (0,)
     finally:
         provider.close()
+
+
+def test_a_result_kept_although_its_runner_could_not_look_at_its_cards_carries_a_warning_saying_why() -> None:
+    assert _card_warnings(
+        "unobservable", "every one of the 8 GPU nodes is refused to this view: permission denied"
+    ) == (
+        "card_occupancy_unobservable, the runner's view of the machine refused it a look at its cards: "
+        "every one of the 8 GPU nodes is refused to this view: permission denied",
+    )
+    assert _card_warnings("clean", None) == ()

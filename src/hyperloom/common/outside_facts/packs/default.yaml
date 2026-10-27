@@ -234,7 +234,9 @@ facts:
       runs on. The topology below the same root numbers the GPUs: a node directory per device, whose gpu_id file is 0 for a
       CPU and the kernel's id for a GPU, in the order the ROCm runtime counts devices for ROCR_VISIBLE_DEVICES. The ROCm
       tools (rocm-smi --showpids, amd-smi process) read these same files, so a process that holds a card is found here with
-      no tool whose output format changes between ROCm releases and without root.
+      no tool whose output format changes between ROCm releases and without root. A container is refused (EPERM) the
+      gpu_id and properties of every GPU node its device cgroup does not grant, and the runtime (libhsakmt) leaves such a
+      node out when it numbers the devices.
     names:
       root: /sys/class/kfd/kfd
       processes: proc
@@ -249,6 +251,7 @@ facts:
       - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
       - "hyperloom.sandbox.card_occupancy: the render node of a card is the drm_render_minor line of its node's properties file, which reads 'drm_render_minor 128' for the first GPU of a machine"
       - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
+      - "hyperloom.sandbox.card_occupancy: read_holders skips a GPU node whose gpu_id reads permission denied, as a one-GPU pod read /sys/class/kfd/kfd/topology/nodes/2/gpu_id"
 
   linux_pid_namespace:
     kind: names

@@ -14,6 +14,12 @@ order of the GPU nodes of the kernel's topology; the card pool hands out the sam
 The probe says what it saw or why it cannot say: an answer of "nobody holds it" is only ever given for a list that was
 read. It cannot say where ``/proc`` hides other accounts' processes, nor where the kernel's list is not there.
 
+A container is shown only its own GPUs: the kernel refuses (permission denied) the ``gpu_id`` and ``properties`` of every
+other GPU node, and the ROCm runtime leaves those nodes out when it numbers the cards. The probe does the same, so a card
+is numbered among the GPUs this view can read, and every holder of such a card is still listed (the process list covers
+the whole machine). A view that is refused every GPU node, a card it is asked about or the list itself is not one in
+which nobody holds the cards: its reading is ``denied`` (the card guard calls it *unobservable*).
+
 In a container with a pid namespace of its own the kernel names processes by their id in the host's namespace, and those
 cannot be matched to what the container sees. The probe then does not name whose a holder is: it counts. Before a test
 starts nothing may hold a card, so any holder is foreign; while it runs a test's server is the one process with memory on
@@ -106,6 +112,7 @@ _ZOMBIE = "Z"
 _ROOT_ACCOUNT = 0
 _HIDDEN_OPTION = "hidepid="
 _NOT_HIDING = ("0", "off")
+_PERMISSION_DENIED = "permission denied"
 
 
 class CardGuard(str, Enum):
@@ -139,7 +146,12 @@ def card_guard(environ: Mapping[str, str]) -> CardGuard:
 
 
 class _Unreadable(Exception):
-    """The kernel's list cannot be read as the probe needs it; the message says why."""
+    """The kernel's list cannot be read as the probe needs it; the message says why, and ``denied`` whether it is because
+    this reader's view refuses it (permission denied) rather than because it is missing or malformed."""
+
+    def __init__(self, message: str, *, denied: bool = False) -> None:
+        super().__init__(message)
+        self.denied = denied
 
 
 @dataclass(frozen=True)
@@ -173,10 +185,12 @@ class CardReading:
 
     ``method`` says how a holder's ownership can be told. ``unaccounted`` maps a card to the bytes of memory the kernel lists
     on it that no process the reader sees holds, and is empty when that could not be read (``accounting_gap`` says why).
+    ``denied`` is set with ``unavailable`` when the reason is that this reader's view refuses the list (permission denied).
     """
 
     holders: tuple[Holder, ...] = ()
     unavailable: str | None = None
+    denied: bool = False
     method: str = METHOD_PID_MATCH
     unaccounted: Mapping[int, int] = field(default_factory=dict)
     accounting_gap: str | None = None
@@ -338,7 +352,7 @@ def _read_int(path: Path) -> int | None:
     except _GONE:
         return None
     except PermissionError as exc:
-        raise _Unreadable(f"{path} cannot be read: permission denied") from exc
+        raise _Unreadable(f"{path} cannot be read: {_PERMISSION_DENIED}", denied=True) from exc
     except (OSError, ValueError) as exc:
         raise _Unreadable(f"{path} does not hold a number ({type(exc).__name__})") from exc
 
@@ -391,20 +405,44 @@ class _GpuNode(NamedTuple):
     gpu_id: int
 
 
-def _gpu_nodes(kfd: Path) -> list[_GpuNode]:
-    """The GPUs of the topology, in the order the runtime numbers them: the nodes that are not a CPU, by node number."""
+class _Topology(NamedTuple):
+    """The GPUs of the topology this reader can read, in the order the runtime numbers them, and how many GPU nodes its
+    view refuses."""
+
+    gpus: list[_GpuNode]
+    denied: int
+
+
+def _gpu_nodes(kfd: Path) -> _Topology:
+    """The GPUs of the topology, in the order the runtime numbers them: the nodes that are not a CPU, by node number,
+    leaving out those this reader's view refuses (another container's GPUs), as the runtime does.
+
+    Raises:
+        _Unreadable: When the topology cannot be listed, a node goes away, or every GPU node is refused (``denied``).
+    """
     try:
         nodes = sorted(int(entry.name) for entry in (kfd / KFD_NODES).iterdir() if entry.name.isdigit())
     except OSError as exc:
         raise _Unreadable(f"the GPU topology of {kfd} cannot be listed ({type(exc).__name__})") from exc
     found = []
+    denied = 0
     for node in nodes:
-        gpu_id = _read_int(kfd / KFD_NODES / str(node) / KFD_NODE_GPU_ID)
+        try:
+            gpu_id = _read_int(kfd / KFD_NODES / str(node) / KFD_NODE_GPU_ID)
+        except _Unreadable as exc:
+            if not exc.denied:
+                raise
+            denied += 1
+            continue
         if gpu_id is None:
             raise _Unreadable(f"node {node} of the GPU topology went away while it was read")
         if gpu_id:
             found.append(_GpuNode(node, gpu_id))
-    return found
+    if denied and not found:
+        raise _Unreadable(
+            f"every one of the {denied} GPU nodes of {kfd} is refused to this view: {_PERMISSION_DENIED}", denied=True
+        )
+    return _Topology(found, denied)
 
 
 def _render_minor(kfd: Path, node: int) -> int | None:
@@ -453,6 +491,8 @@ def _listing(directory: Path) -> list[str]:
         return [entry.name for entry in directory.iterdir()]
     except _GONE:
         return []
+    except PermissionError as exc:
+        raise _Unreadable(f"{directory} cannot be listed: {_PERMISSION_DENIED}", denied=True) from exc
 
 
 def _live(procfs: Path, pid: int) -> bool:
@@ -492,7 +532,7 @@ def read_holders(cards: Sequence[int], *, kfd: Path | None = None, procfs: Path 
             holders=_holders(kfd, procfs, {gpu.gpu_id: card for card, gpu in selected.items()}, named=True)
         )
     except _Unreadable as exc:
-        return CardReading(unavailable=str(exc))
+        return CardReading(unavailable=str(exc), denied=exc.denied)
     except OSError as exc:
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
 
@@ -511,7 +551,7 @@ def read_listed(cards: Sequence[int], *, kfd: Path | None = None) -> CardReading
         card_of = {gpu.gpu_id: card for card, gpu in selected.items()}
         return CardReading(holders=_holders(kfd, PROC_PATH, card_of, named=False), method=METHOD_CENSUS)
     except _Unreadable as exc:
-        return CardReading(unavailable=str(exc))
+        return CardReading(unavailable=str(exc), denied=exc.denied)
     except OSError as exc:
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
 
@@ -520,10 +560,17 @@ def _selected(kfd: Path, cards: Sequence[int]) -> dict[int, _GpuNode]:
     """The GPU of the topology each of ``cards`` is.
 
     Raises:
-        _Unreadable: When a card is not among the GPUs the kernel lists: a card that is not there is not a free one.
+        _Unreadable: When a card is not among the GPUs the kernel lists: a card that is not there is not a free one. It is
+            ``denied`` when this view is refused GPU nodes, one of which may be that card.
     """
-    gpus = _gpu_nodes(kfd)
+    gpus, denied = _gpu_nodes(kfd)
     missing = [card for card in cards if not 0 <= card < len(gpus)]
+    if missing and denied:
+        raise _Unreadable(
+            f"card(s) {missing} are not among the {len(gpus)} GPUs this view can read ({denied} more are refused to it: "
+            f"{_PERMISSION_DENIED})",
+            denied=True,
+        )
     if missing:
         raise _Unreadable(f"card(s) {missing} are not among the {len(gpus)} GPUs the kernel lists")
     return {card: gpus[card] for card in cards}
@@ -534,6 +581,8 @@ def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -
     process that is not alive is left out and the live ones are given their command lines."""
     try:
         pids = sorted(int(entry.name) for entry in (kfd / KFD_PROCESSES).iterdir() if entry.name.isdigit())
+    except PermissionError as exc:
+        raise _Unreadable(f"the process list of {kfd} cannot be read: {_PERMISSION_DENIED}", denied=True) from exc
     except OSError as exc:
         raise _Unreadable(f"the process list of {kfd} cannot be read ({type(exc).__name__})") from exc
     found = []

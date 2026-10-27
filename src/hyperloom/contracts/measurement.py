@@ -86,7 +86,10 @@ REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
 CARD_CLEAN = "clean"
 CARD_UNKNOWN = "unknown"
 CARD_FOREIGN = "foreign"
-CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN, CARD_FOREIGN)
+#: The runner's view of the machine (a container shown only some GPUs) refused it the kernel's list for its cards, so
+#: nobody could look; kept only where the runner records such a result instead of refusing it.
+CARD_UNOBSERVABLE = "unobservable"
+CARD_OCCUPANCY_STATES = (CARD_CLEAN, CARD_UNKNOWN, CARD_FOREIGN, CARD_UNOBSERVABLE)
 TABLE_EXERCISED = "exercised"
 TABLE_NOT_EXERCISED = "not_exercised"
 TABLE_NOT_OBSERVABLE = "not_observable"
@@ -345,8 +348,8 @@ class SandboxFacts:
 
     ``card_occupancy`` is what the runner's signed result says of who else used the attempt's cards: ``clean`` when every
     look at them found no process outside the test, ``foreign`` (with ``card_occupancy_reason`` naming the process, the card
-    and when) when one was seen and the card guard only observes, ``unknown`` (with its reason) when it could not look, and
-    empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
+    and when) when one was seen and the card guard only observes, ``unknown`` (with its reason) when it could not look,
+    ``unobservable`` (with its reason) when its view of the machine refused it the look, and empty when the attempt did not say (an attempt that failed before a result, a sandbox with no card, a runner that
     predates it). It is never ``clean`` for a result nobody looked at. ``card_occupancy_method`` says how the runner told a
     process outside the test from the test's own (empty when it did not say).
     """
@@ -389,8 +392,8 @@ class SandboxFacts:
             raise MeasurementError(f"card_occupancy_reason must be a string, got {self.card_occupancy_reason!r}")
         if not isinstance(self.card_occupancy_method, str):
             raise MeasurementError(f"card_occupancy_method must be a string, got {self.card_occupancy_method!r}")
-        if (self.card_occupancy in (CARD_UNKNOWN, CARD_FOREIGN)) != bool(self.card_occupancy_reason):
-            raise MeasurementError("card_occupancy 'unknown' or 'foreign' needs its reason, and 'clean' has none")
+        if (self.card_occupancy not in ("", CARD_CLEAN)) != bool(self.card_occupancy_reason):
+            raise MeasurementError("a card_occupancy that is not 'clean' needs its reason, and 'clean' has none")
 
     @property
     def node(self) -> str | None:
@@ -1058,6 +1061,7 @@ __all__ = [
     "CARD_FOREIGN",
     "CARD_OCCUPANCY_STATES",
     "CARD_UNKNOWN",
+    "CARD_UNOBSERVABLE",
     "NOT_REPRODUCED",
     "PRIORITY_HIGHEST",
     "PRIORITY_LOWEST",
