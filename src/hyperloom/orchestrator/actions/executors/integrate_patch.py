@@ -2474,6 +2474,54 @@ class IntegratePatchExecutor:
             )
         attempt.switch_manifest = switch_manifest
 
+        # The manifest states the arming contract; this checks it against the
+        # diff that is about to be benched. A gate the patch itself adds and
+        # that nothing sets leaves the rewrite inert, so the bench would grade
+        # the unpatched path and the round would report the same failure it was
+        # dispatched on. Refuse here, before the bench, and name the variable:
+        # an inert bench costs the lane a round of its stall budget and says
+        # nothing the next author can act on.
+        if is_enablement and patch_paths:
+            armed_env = {
+                *(str(name).upper() for name in proposal_extra_envs),
+                *(str(name).upper() for name in inherited_envs),
+                # What the launch inherits is armed too, whoever set it.
+                *(name.upper() for name in os.environ),
+            }
+            unarmed_gates = _switch_manifest.unarmed_switch_gates(
+                _read_patch_texts(patch_paths),
+                armed=armed_env,
+            )
+            if unarmed_gates:
+                await self._maybe_write_framework_kb_record(
+                    params=params,
+                    done_payload=done_payload,
+                    outcome="rejected_apply_fail",
+                    tps_delta_pct=0.0,
+                    extra=extra,
+                )
+                return {
+                    "status": "apply_failed",
+                    "error_class": "framework_switch_gates_unarmed",
+                    "error": [f"{name} is read by the patch but armed nowhere" for name in unarmed_gates],
+                    "unarmed_switch_gates": unarmed_gates,
+                    "advisory": (
+                        "the patch turns its own change on with environment variable(s) "
+                        + ", ".join(unarmed_gates)
+                        + f", which neither the {_switch_manifest.MANIFEST_KEY} manifest nor "
+                        "extra_envs arms, so the bench would measure the unpatched path. "
+                        "Declare each one in the manifest or set it in proposal_set's "
+                        "extra_envs, or ship the change ungated."
+                    ),
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [],
+                    "lane": _derive_lane(params),
+                    "retry_feedback": [],
+                    "prior_patches": [str(p) for p in patch_paths],
+                    "enablement": True,
+                }
+
         explicit_artifacts = params.get("artifacts")
         artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
             specialist_workspace=specialist_workspace,

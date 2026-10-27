@@ -64,6 +64,23 @@ index 0000000..1111111 100644
 """
 
 
+# A framework rewrite in the shape the enablement lane authors them: the new
+# path only runs when an environment variable turns it on.
+_SWITCH_GATED_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,5 @@
++import os
+ def f():
+-    return 1
++    if os.environ.get("HL_TEST_FUSE") == "1":
++        return 2
++    return 1
+"""
+
+
 # Targets a file absent from the framework tree — must be caught by the
 # missing-target preflight, not a wasted ``git apply``.
 _MISSING_TARGET_PATCH = """\
@@ -1671,6 +1688,99 @@ async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_any
     assert result["error_class"] == "setup_commands_refused"
     assert result["setup_commands_refused"] == ["ln -sf /a /b"]
     assert result["patches_applied"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_patch_gated_on_an_unarmed_switch_fails_the_round_before_the_bench(tmp_path: Path, monkeypatch):
+    """Benching it would measure the unpatched path and report the gap it was dispatched on.
+
+    The round is failed where the patch is admitted, and the variable is named
+    in the result so the next dispatch declares it instead of resubmitting.
+    """
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-unarmed", patch_contents=[_SWITCH_GATED_PATCH])
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+    monkeypatch.setattr(
+        executor,
+        "_bench_patch",
+        lambda **_kwargs: pytest.fail("an inert patch reached the bench"),
+    )
+
+    params = {
+        "specialist_task_id": "t-spec-unarmed",
+        "framework_source_root": str(repo),
+        "enablement": True,
+    }
+    result = await executor(_make_ctx("t-int-unarmed", params))
+
+    assert result["status"] == "apply_failed"
+    assert result["enablement"] is True
+    assert result["error_class"] == "framework_switch_gates_unarmed"
+    assert result["unarmed_switch_gates"] == ["HL_TEST_FUSE"]
+    assert "HL_TEST_FUSE" in result["advisory"]
+    assert result["patches_applied"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_switch_arms_its_gate_and_the_round_benches(tmp_path: Path, monkeypatch):
+    """The same patch with the switch in its manifest is armed, so nothing is refused."""
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir,
+        "t-spec-armed",
+        patch_contents=[_SWITCH_GATED_PATCH],
+        done_payload_override={
+            "framework_switches": [{"switch": "HL_TEST_FUSE", "category": "fuse_collectives", "target": "src.py:f"}]
+        },
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    benched: dict[str, Any] = {}
+
+    async def _fake_bench(**kwargs):
+        benched.update(kwargs)
+        return {
+            "output_throughput": 150.0,
+            "completed_requests": 12,
+            "error": "",
+            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
+        }, {
+            "accuracy_pass": None,
+            "enablement_accuracy": 0.5,
+            "timed_out": False,
+        }
+
+    async def _noop_kb(**_kwargs):
+        return None
+
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-armed",
+        "framework_source_root": str(repo),
+        "enablement": True,
+    }
+    result = await executor(_make_ctx("t-int-armed", params))
+
+    assert result["status"] == "kept"
+    assert "unarmed_switch_gates" not in result
+    assert benched["extra_envs_applied"]["HL_TEST_FUSE"] == "1"
 
 
 async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, patch_contents=None, ledger=None):

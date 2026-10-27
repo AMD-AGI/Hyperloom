@@ -313,6 +313,69 @@ def test_summary_lists_switches_and_problems():
     assert "! dropped HL_B" in text
 
 
+# unarmed switch gates
+
+
+def _diff(*added: str, context: tuple[str, ...] = (), removed: tuple[str, ...] = ()) -> str:
+    """Build a one-file diff with the given added, context and removed lines."""
+    body = [f" {line}" for line in context] + [f"-{line}" for line in removed] + [f"+{line}" for line in added]
+    header = "diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1,1 +1,2 @@\n"
+    return header + "\n".join(body) + "\n"
+
+
+def test_a_gate_the_patch_adds_and_nothing_arms_is_reported():
+    """Nothing sets it, so the bench would measure the unpatched path."""
+    patch = _diff('    if os.environ.get("HL_FUSE_RMSNORM") == "1":')
+    assert manifest.unarmed_switch_gates([patch], armed=set()) == ["HL_FUSE_RMSNORM"]
+
+
+def test_every_read_form_counts_as_a_gate():
+    """A kernel-side rewrite reads its switch from C just as the Python side does."""
+    patch = _diff(
+        '    a = os.getenv("HL_A")',
+        '    b = os.environ["HL_B"]',
+        '    const char* c = std::getenv("HL_C");',
+    )
+    assert manifest.unarmed_switch_gates([patch]) == ["HL_A", "HL_B", "HL_C"]
+
+
+def test_an_armed_gate_is_not_reported():
+    """The manifest switches and the proposal's extra_envs both arm."""
+    patch = _diff('    if os.environ.get("HL_FUSE") == "1":')
+    assert manifest.unarmed_switch_gates([patch], armed={"HL_FUSE"}) == []
+
+
+def test_a_gate_the_file_already_reads_is_not_this_rounds_contract():
+    """The patch moved an existing read; whoever armed it before arms it still."""
+    patch = _diff(
+        '    flag = os.environ.get("HL_OLD")',
+        context=('    if os.environ.get("HL_OLD") == "1":',),
+    )
+    assert manifest.unarmed_switch_gates([patch]) == []
+
+
+def test_a_read_the_patch_rewrites_in_place_is_not_a_new_gate():
+    """Replacing the line that reads a switch does not make the round own the switch."""
+    patch = _diff(
+        '    flag = os.environ.get("HL_OLD", "0")',
+        removed=('    flag = os.environ.get("HL_OLD")',),
+    )
+    assert manifest.unarmed_switch_gates([patch]) == []
+
+
+def test_a_secret_shaped_name_is_not_a_switch():
+    """A credential the patch reads is never something a round may arm."""
+    patch = _diff('    key = os.environ.get("HF_TOKEN")')
+    assert manifest.unarmed_switch_gates([patch]) == []
+
+
+def test_the_patch_set_is_read_as_one_change():
+    """One patch adding a read of what another patch's file already reads adds no gate."""
+    adds = _diff('    flag = os.environ.get("HL_SHARED")')
+    reads_already = _diff("    pass", context=('    if os.environ.get("HL_SHARED") == "1":',))
+    assert manifest.unarmed_switch_gates([adds, reads_already]) == []
+
+
 # SharedState lever ledger
 
 

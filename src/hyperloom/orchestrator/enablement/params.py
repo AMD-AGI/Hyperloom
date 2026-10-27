@@ -110,6 +110,7 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
     """
     grounding_drops = [str(d) for d in (enablement.last_grounding_drop_reason or [])]
     setup_refusals = [str(c) for c in (enablement.last_setup_refusals or [])]
+    unarmed_gates = [str(g) for g in (enablement.last_unarmed_switch_gates or [])]
     blocks = [_build_failure_note(enablement)]
     if enablement.patches_span_multiple_roots:
         blocks.append(
@@ -125,6 +126,17 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
             + "; ".join(setup_refusals[:4])
             + ". Re-author these as installer invocations, or carry the work "
             "in a patch instead."
+        )
+    if unarmed_gates:
+        blocks.append(
+            "UNARMED SWITCH GATE: the prior round's patch turned its own "
+            "change on with environment variable(s) "
+            + ", ".join(unarmed_gates[:4])
+            + ", which nothing arms for the bench, so the round was failed "
+            "WITHOUT benching it: the measurement would have run the "
+            "unpatched path. Declare each switch in the framework_switches "
+            "manifest of your specialist_done, or set it in proposal_set as "
+            "an extra_envs entry, or ship the change ungated."
         )
     if grounding_drops:
         blocks.append(

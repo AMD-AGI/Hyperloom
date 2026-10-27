@@ -749,6 +749,24 @@ async def test_rearm_records_the_refused_setup_commands_of_the_round_that_failed
 
 
 @pytest.mark.asyncio
+async def test_rearm_records_the_switch_gates_the_refused_round_left_unarmed(tmp_path):
+    """The round never benched, so the gate name is the only thing the next author gets."""
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "apply_failed",
+            "enablement": True,
+            "specialist_task_id": "spec-1",
+            "error_class": "framework_switch_gates_unarmed",
+            "unarmed_switch_gates": ["HL_FUSE_RMSNORM"],
+        }
+    )
+    assert fake.shared_state.enablement.last_unarmed_switch_gates == ["HL_FUSE_RMSNORM"]
+    assert fake.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_path):
     """A KEEP that observed nothing must not inherit the previous KEEP's map.
 
@@ -1087,6 +1105,18 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
     assert params is not None
     assert "SETUP COMMAND REFUSED" in params["notes"]
     assert "ln -sf /a /b" in params["notes"]
+
+
+def test_build_params_tells_the_next_round_which_switch_gate_was_unarmed(monkeypatch, tmp_path):
+    """Without the name the next round resubmits the same patch and stays inert."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_unarmed_switch_gates = ["HL_FUSE_RMSNORM"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "UNARMED SWITCH GATE" in params["notes"]
+    assert "HL_FUSE_RMSNORM" in params["notes"]
+    assert "framework_switches" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):

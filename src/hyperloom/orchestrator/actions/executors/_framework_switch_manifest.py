@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from hyperloom.common.env_safety import (
@@ -188,6 +189,61 @@ def switch_env(switches: list[dict[str, Any]], *, only: "set[str] | None" = None
     return {entry["switch"]: entry["value"] for entry in switches if wanted is None or entry["switch"] in wanted}
 
 
+# How a patch reads an environment variable to gate itself: ``os.environ.get``
+# and ``os.environ[...]``, plus any ``getenv`` call, which covers ``os.getenv``
+# and the C/C++ ``getenv``/``std::getenv`` a kernel-side rewrite uses.
+_ENV_READ_RE = re.compile(r"""(?:environ\s*(?:\.\s*get\s*\(|\[)|\bgetenv\s*\()\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""")
+
+
+def _patch_env_gates(patch_text: str) -> tuple[set[str], set[str]]:
+    """Split the env names a diff reads into the ones it adds and the ones already in the file.
+
+    A read on a context or a removed line belongs to the file as it stands, so
+    the patch is not the one that introduced the gate and arming it is not this
+    round's contract.
+    """
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for line in patch_text.splitlines():
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        names = {m.group(1).upper() for m in _ENV_READ_RE.finditer(line[1:])}
+        if not names:
+            continue
+        if line.startswith("+"):
+            added |= names
+        else:
+            preexisting |= names
+    return added, preexisting
+
+
+def unarmed_switch_gates(patch_texts: list[str], *, armed: "set[str] | frozenset[str] | None" = None) -> list[str]:
+    """Return the env gates the patches ADD that nothing in ``armed`` turns on.
+
+    A rewrite behind a variable that neither the manifest nor an ``extra_envs``
+    override sets is never on for the measurement: the patch applies, the bench
+    runs the unpatched path, and the round reports the failure it was
+    dispatched on.
+
+    Args:
+        patch_texts: The diff text of every patch the round submitted.
+        armed: Every env name the launch will set, manifest switches included.
+
+    Returns:
+        The unarmed gate names, sorted. Secret-shaped names are left out: they
+        are credentials the patch reads, never a switch a round may arm.
+    """
+    armed_names = {str(name).strip().upper() for name in (armed or ())}
+    added: set[str] = set()
+    preexisting: set[str] = set()
+    for text in patch_texts:
+        text_added, text_preexisting = _patch_env_gates(text)
+        added |= text_added
+        preexisting |= text_preexisting
+    unarmed = added - preexisting - armed_names
+    return sorted(name for name in unarmed if not is_secret_shaped_env_name(name))
+
+
 def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
     """Return every switch ``name`` transitively depends on, plus ``name``."""
     by_name = {entry["switch"]: entry for entry in switches}
@@ -342,4 +398,5 @@ __all__ = [
     "parse_manifest",
     "summarize",
     "switch_env",
+    "unarmed_switch_gates",
 ]
