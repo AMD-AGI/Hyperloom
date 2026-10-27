@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from ._kernel_decisions import _honest_flag
+from .kernel_decisions import _honest_flag
 
 
 _RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.

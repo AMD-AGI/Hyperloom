@@ -71,11 +71,6 @@ def _is_forge_compatible_shapes_json(path: Path) -> bool:
         return False
 
 
-def _profile_shapes_are_fresh(state: Any) -> bool:
-    """Return whether the latest profile matches the active workload/config."""
-    return bool(state.profile_trace_matches_workload())
-
-
 def _resolve_forge_shapes(
     state,
     session_dir: Path,
@@ -100,7 +95,7 @@ def _resolve_forge_shapes(
     correctly-scoped shapes. Artifacts stay the fallback for the unscoped case
     and for when the trace yields nothing for this precision.
     """
-    if require_fresh_profile and not _profile_shapes_are_fresh(state):
+    if require_fresh_profile and not state.profile_trace_matches_workload():
         log.info(
             "Forge GEMM shapes: latest TraceLens profile does not match the "
             "active workload/config; ignoring its shape artifacts"

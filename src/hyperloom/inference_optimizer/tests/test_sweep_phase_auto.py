@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -137,7 +138,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -154,8 +155,7 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
     seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
     seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
@@ -176,8 +176,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -774,7 +773,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 

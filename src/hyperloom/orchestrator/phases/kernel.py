@@ -75,6 +75,7 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel import kernel_decisions
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
@@ -3005,7 +3006,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Never started, so no attempt to record; a recorded ``skipped`` would latch GEMM off for later entries.
             return
         self._sync_profile_state_after_gemm_roofline(result)
-        self.shared_state.record_gemm_tuning(result)
+        kernel_decisions.record_gemm_tuning(self.shared_state, result)
         try:
             await self._validate_gemm_tuning_e2e(result)
         except Exception as exc:  # isolation boundary: one GEMM campaign's e2e validation, recorded as a REVERT fault
@@ -3806,7 +3807,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
-        from ..kernel._kernel_decisions import enqueue_nominated_patch
         from ..kernel.nomination_result import parse_outcome, summarize_dropped_patches
 
         outcome = parse_outcome(result)
@@ -3829,7 +3829,7 @@ class KernelPhase(CoordinatorCollaborator):
         keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
         queued = 0
         for patch in outcome.patches:
-            record = enqueue_nominated_patch(
+            record = kernel_decisions.enqueue_nominated_patch(
                 self.shared_state,
                 patch=patch,
                 keep_threshold_pct=keep_pct,

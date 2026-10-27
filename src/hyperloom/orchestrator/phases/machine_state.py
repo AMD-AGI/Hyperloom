@@ -19,6 +19,7 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from ..kernel import kernel_decisions
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -505,12 +506,13 @@ def phase_status_summary(
             f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
             f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
         )
+    entered = time.strftime("%FT%TZ", time.gmtime(t0)) if (t0 := _phase_started_unix(state)) > 0 else "(unset)"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
         f"cycle     : {state.macro_cycle}",
-        f"entered   : {state.phase_started_ts or '(unset)'}",
+        f"entered   : {entered}",
         budget_line,
         allowed_line,
     ]
@@ -652,13 +654,12 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if state.has_keep_pending_integrate:
+    if kernel_decisions.has_keep_pending_integrate(state):
         return True
-
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
-    return bool(state.untried_hot_reusable_kernels())
+    return bool(kernel_decisions.untried_hot_reusable_kernels(state))
 
 
 def measured_seconds(state: Any, field: str) -> float | None:
@@ -1774,7 +1775,6 @@ def record_phase_transition(
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
     state.phase = row["to_phase"]
-    state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
     _publish_phase_boundary(
         _PhaseBoundary(

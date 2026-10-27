@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 )
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...kernel import kernel_decisions
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
 
@@ -38,14 +39,6 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     if session_dir is None:
         return 0
     return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
-
-
-def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
-    fn = getattr(state, method, None)
-    if not callable(fn):
-        return default
-    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
@@ -495,10 +488,10 @@ def _build_summary_dict(
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len": len(state.optimization_stack or []),
-        # Honesty annotations: surface unfinished/unvalidated work; read defensively for partial-state stubs.
-        "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
-        "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
-        "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
+        # Honesty annotations: surface unfinished/unvalidated work.
+        "has_unvalidated_keeps": state.optimization_stack_has_unvalidated_keeps(),
+        "untried_hot_reusable_kernels": kernel_decisions.untried_hot_reusable_kernels(state),
+        "pending_keep_kernels": kernel_decisions.pending_keep_kernel_ids(state),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,

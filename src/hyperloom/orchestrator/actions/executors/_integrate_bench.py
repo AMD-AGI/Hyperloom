@@ -300,14 +300,13 @@ class BenchStageMixin:
                 variant reports no slot of its own.
 
         Returns:
-            str: The observation artifact's path, empty when there was no server
-            log to classify or no session to write under.
+            str: The observation artifact's path, empty when there was no server log to classify.
         """
         from ...bringup import observe_bringup
         from .baseline import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 
         server_log = str(bench.get("server_log_path") or "").strip()
-        if not server_log or self.session_dir is None:
+        if not server_log:
             return ""
         slot = Path(bench["workspace"]) if bench.get("workspace") else output_root
         read = read_bringup_log(Path(server_log))
@@ -315,11 +314,11 @@ class BenchStageMixin:
             server_log=read.text,
             server_elapsed_sec=server_child_elapsed_sec(read.text),
             wrapper_stderr=str(bench.get("error") or ""),
-            session_dir=Path(self.session_dir),
+            session_dir=self.session_dir,
         )
         return write_boot_observation(
             verdict.observation,
-            session_dir=Path(self.session_dir),
+            session_dir=self.session_dir,
             output_dir=slot,
             attempt=open_bringup_attempt(slot),
         )
