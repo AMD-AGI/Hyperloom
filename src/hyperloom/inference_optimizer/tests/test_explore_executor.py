@@ -593,6 +593,7 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
+        "fingerprint": "cc" * 8,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,

@@ -812,10 +812,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
-    # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
+    # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # Current run of contiguous config KEEPs; resets when a code_patch KEEP lands.
-    consecutive_config_only_rounds: int = 0
     # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
@@ -823,13 +821,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     target_advisory_enabled: bool = True
     # Master switch for sedimenting KEEP/REVERT provenance into the persistent recipe; off => recipe stays ephemeral.
     recipe_sediment_enabled: bool = True
-    research_scout_runs: int = 0
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
     static_recon_enabled: bool = True
-    static_recon_runs: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.

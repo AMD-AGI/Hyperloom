@@ -198,7 +198,13 @@ class _RenderMixin:
             )
         )
         n_config_attempt = sum(1 for m in mix if (m or {}).get("change_type") == "config_attempt")
-        consec = int(self.consecutive_config_only_rounds or 0)
+        consec = 0
+        for m in reversed(mix):
+            change_type = (m or {}).get("change_type")
+            if change_type == "code_patch":
+                break
+            if change_type == "config":
+                consec += 1
         return (
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
             f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
