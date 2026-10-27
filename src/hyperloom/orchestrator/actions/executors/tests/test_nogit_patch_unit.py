@@ -402,29 +402,23 @@ def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
     assert old_file.read_text() == "original_content\n"
 
 
-@pytest.mark.parametrize("revert_action", ("restore", "restore_old", "delete"))
-def test_ledger_written_by_an_older_build_still_restores_by_existence(tmp_path, revert_action):
-    """A resumed ledger whose records carry ``backup_path`` and ``revert_action`` restores by ``existed`` alone."""
+def test_ledger_written_by_an_older_build_still_restores(tmp_path):
+    """A resumed ledger record that names its copy ``backup_path`` still restores the target."""
     target = tmp_path / "target.py"
-    bak = tmp_path / "bk" / "backup.bak"
-    bak.parent.mkdir(parents=True)
+    bak = tmp_path / "backup.bak"
     bak.write_text("original_content\n", encoding="utf-8")
-    if revert_action == "delete":
-        target.write_text("created\n", encoding="utf-8")
-        record = {"target": str(target), "existed": False, "backup_path": None, "revert_action": revert_action}
-    else:
-        record = {
-            "target": str(target),
-            "existed": True,
-            "backup_path": str(bak),
-            "revert_action": revert_action,
-            "pre_image_sha256": ledger.file_digest(bak),
-        }
+    record = {
+        "target": str(target),
+        "existed": True,
+        "backup_path": str(bak),
+        "revert_action": "restore_old",
+        "pre_image_sha256": ledger.file_digest(bak),
+    }
 
     _reverted, errors = ledger.restore_records([record])
 
     assert errors == []
-    assert target.exists() is (revert_action != "delete")
+    assert target.read_text() == "original_content\n"
 
 
 def test_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):

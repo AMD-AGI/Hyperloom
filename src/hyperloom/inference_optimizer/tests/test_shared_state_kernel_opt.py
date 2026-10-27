@@ -20,8 +20,8 @@ def state() -> SharedState:
 
 
 # Invariant 1: empty kernel_id is a no-op Invariant 2: KEEP wins; non-KEEP never overwrites a pending KEEP
-# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy. the pending-KEEP queue
-# semantics
+# Vendor-playbook KEEPs (e.g. mori dispatch/combine) must never auto-deploy.
+# Pending-KEEP queue semantics
 def test_pending_keep_drains_in_micro_speedup_order(state: SharedState):
     """KEEPs on different source_files drain highest-micro-first as the stack fills."""
     _seed_keep(state, "k001", decision="KEEP", micro=2.5, source_file="/p/file_a.py", artifact="/t/a1.py")
