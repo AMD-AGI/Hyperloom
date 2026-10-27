@@ -17,16 +17,17 @@ So it also needs:
 - ``HYPERLOOM_BUILD_PYTHON`` (``python3`` when unset): the image's interpreter, which runs the compile;
 - ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in.
 
-A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable. The
-compile runs in :class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`, out of this process; a host that cannot
-isolate it fails each build as the machine's, never compiles in-process.
+A store and trust given without any of the four required ones refuse the build of the toolbox, naming the variable, and
+so does a host that is not ready for them (:func:`~hyperloom_multibranch.toolbox.build_preflight.build_preflight`;
+``python -m hyperloom_multibranch.toolbox.build_setup`` sets one up). The compile runs in
+:class:`~hyperloom.measure.runner.native.isolated.IsolatedBuilds`, out of this process; a host that cannot isolate it
+fails each build as the machine's, never compiles in-process.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -49,6 +50,7 @@ from hyperloom.measure.runner.native.isolated import (
 )
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.recipes import RECIPE_FACTORIES, native_recipes
+from hyperloom_multibranch.toolbox.build_preflight import PreflightSite, build_preflight, signing_key_problem
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -72,8 +74,6 @@ BUILD_GFX_ENV = "HYPERLOOM_BUILD_GFX"
 BUILD_PYTHON_ENV = "HYPERLOOM_BUILD_PYTHON"
 BUILDER_IMAGE_ENV = "HYPERLOOM_BUILDER_IMAGE"
 _DEFAULT_PYTHON = "python3"
-#: Any access by the group or others.
-_OTHERS_ACCESS = 0o077
 
 logger = logging.getLogger(__name__)
 
@@ -107,15 +107,9 @@ def _signer(path: Path) -> Signer:
     Raises:
         BuildStoreConfigError: The file is a link, is not this user's, can be read by anyone else, or is not a key.
     """
-    try:
-        found = os.lstat(path)
-    except OSError as exc:
-        raise BuildStoreConfigError(f"{BUILD_SIGNING_KEY_ENV} cannot be used: {type(exc).__name__}") from None
-    if not stat.S_ISREG(found.st_mode) or found.st_uid != os.geteuid() or found.st_mode & _OTHERS_ACCESS:
-        raise BuildStoreConfigError(
-            f"{BUILD_SIGNING_KEY_ENV} must name a regular file of this user that no one else can read (mode 0600): "
-            "the compile runs as another user on this host and must not be able to read the key"
-        )
+    problem = signing_key_problem(path, os.geteuid())
+    if problem is not None:
+        raise BuildStoreConfigError(f"{BUILD_SIGNING_KEY_ENV} {problem}")
     try:
         return Signer.from_file(path)
     except (OSError, ValueError) as exc:
@@ -138,7 +132,8 @@ def native_builds(
     store = store_from_environment(environ)
     if store is None:
         return None
-    signer = _signer(Path(_required(environ, BUILD_SIGNING_KEY_ENV)))
+    key = Path(_required(environ, BUILD_SIGNING_KEY_ENV))
+    signer = _signer(key)
     image = image_digest.rsplit("@", 1)[-1]
     machine = BuildMachine(
         image,
@@ -146,16 +141,17 @@ def native_builds(
         _required(environ, BUILD_GFX_ENV),
         environ.get(BUILD_PYTHON_ENV, "").strip() or _DEFAULT_PYTHON,
     )
+    sources, image_root = Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))
+    runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
+    shared = (Path(runner_envs[BUILD_STORE_ENV]), Path(runner_envs[BUILD_TRUST_ENV]))
+    build_preflight(PreflightSite(*shared, key, sources, image_root, machine.python))
     recipes = native_recipes()
-    site = NativeSite(
-        machine, recipes, Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))
-    )
+    site = NativeSite(machine, recipes, sources, image_root)
     planner, isolated = NativePlanner(site, blobs), isolation()
     runner = IsolatedBuilds(planner, blobs, isolated, RECIPE_FACTORIES)
     _log_isolation(isolated)
     build_site = BuildSite(machine.image_digest, machine.builder_image_digest, machine.gfx_arch, recipes)
     driver = StoreBuildDriver(store, signer, build_site, compiled_needs, runner)
-    runner_envs = {BUILD_STORE_ENV: environ[BUILD_STORE_ENV].strip(), BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV].strip()}
     return NativeBuilds(driver, planner, runner_envs)
 
 

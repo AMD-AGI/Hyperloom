@@ -37,6 +37,8 @@ from hyperloom.measure.runner.native.isolated import staged_record
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.spec import Environment
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch
+from hyperloom_multibranch.toolbox import native_builds as native_builds_module
+from hyperloom_multibranch.toolbox.build_preflight import PreflightSite
 from hyperloom_multibranch.toolbox.native_builds import (
     BUILD_GFX_ENV,
     BUILD_IMAGE_ROOT_ENV,
@@ -321,6 +323,14 @@ def test_what_the_child_staged_is_read_as_untrusted_data(tmp_path: Path) -> None
 # --- configuration --------------------------------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def ready_host(monkeypatch: pytest.MonkeyPatch) -> list[PreflightSite]:
+    """The host checks pass here (test_build_preflight has them); what they were asked about is recorded."""
+    asked: list[PreflightSite] = []
+    monkeypatch.setattr(native_builds_module, "build_preflight", asked.append)
+    return asked
+
+
 def _configured(tmp_path: Path, **overrides: str) -> dict[str, str]:
     key = signing.generate_private_key()
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -358,6 +368,31 @@ def test_a_configured_store_gives_the_driver_the_plan_and_the_runners_the_store(
     }
     assert native.plan.site.machine.image_digest == IMAGE and native.plan.site.machine.builder_image_digest == IMAGE
     assert set(native.plan.site.recipes) == {"sgl_kernel", "vllm"}, "every recipe, vLLM's included"
+
+
+def test_a_configured_store_checks_the_host_with_what_it_was_given_and_refuses_with_its_answer(
+    tmp_path: Path, ready_host: list[PreflightSite], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environ = {**_configured(tmp_path), "HYPERLOOM_BUILD_PYTHON": "/image/bin/python3"}
+
+    native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE)
+    assert ready_host == [
+        PreflightSite(
+            tmp_path / "store",
+            tmp_path / "trust.json",
+            tmp_path / "service.key",
+            tmp_path / "sources",
+            tmp_path / "image",
+            "/image/bin/python3",
+        )
+    ]
+
+    def not_ready(site: PreflightSite) -> None:
+        raise BuildStoreConfigError("setpriv is not on PATH")
+
+    monkeypatch.setattr(native_builds_module, "build_preflight", not_ready)
+    with pytest.raises(BuildStoreConfigError, match="setpriv is not on PATH"):
+        native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE)
 
 
 @pytest.mark.parametrize(

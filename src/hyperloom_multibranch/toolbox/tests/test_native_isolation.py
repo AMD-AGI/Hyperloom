@@ -41,6 +41,13 @@ from hyperloom_multibranch.toolbox.native_builds import native_builds
 from hyperloom_multibranch.toolbox.tests import native_support as fake
 from hyperloom_multibranch.toolbox.tests.test_native_builds import EDITED_CU, Hooks, Rig, _configured
 
+
+@pytest.fixture(autouse=True)
+def ready_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host checks pass here (test_build_preflight has them)."""
+    monkeypatch.setattr(native_builds_module, "build_preflight", lambda site: None)
+
+
 SETPRIV = "/usr/bin/setpriv"
 UNSHARE = "/usr/bin/unshare"
 #: A child, in a tree of its own, that stages a record saying which tree it came from.
