@@ -179,6 +179,21 @@ def test_a_build_the_service_made_under_the_servers_variables_is_used(image, tmp
     assert manifest.jit_cache.builds_seen == 0 and manifest.outcome.failure_class is None
 
 
+def test_a_build_by_another_interpreter_than_the_servers_is_not_used(image, tmp_path, monkeypatch) -> None:
+    """Another interpreter can be another Python, torch or HIP: the module it would build is not the build's."""
+    built = Built(image, tmp_path, monkeypatch)
+    other = tmp_path / "python-other"
+    other.write_text(f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+    other.chmod(0o755)
+
+    manifest, status, _ = image.run(
+        "other-python", _sheet(image, built, envs={"HYPERLOOM_FRAMEWORK_PYTHON": str(other)}), extra_env=built.environ()
+    )
+
+    assert manifest.jit_cache.builds_seen == 1
+    assert "the server's HYPERLOOM_FRAMEWORK_PYTHON differ from its build's" in status["message"]
+
+
 def test_a_build_for_another_gpu_is_not_used(image, tmp_path, monkeypatch) -> None:
     built = Built(image, tmp_path, monkeypatch, gfx="gfx942")
 

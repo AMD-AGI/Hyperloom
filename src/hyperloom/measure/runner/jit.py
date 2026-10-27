@@ -14,6 +14,7 @@ for a test to fail: a fact that cannot be read switches the kind that needs it o
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -67,12 +68,21 @@ from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
 
-__all__ = ["JIT_CACHE_ENV", "ColdStart", "Surroundings", "build_session", "cold_start"]
+__all__ = [
+    "FRAMEWORK_PYTHON_ENV",
+    "JIT_CACHE_ENV",
+    "ColdStart",
+    "Surroundings",
+    "build_session",
+    "cold_start",
+    "interpreter_identity",
+]
 
 JIT_CACHE_ENV = "HYPERLOOM_JIT_CACHE"
 STAGING_DIR = "jit-cache"
 _TABLE_PREFIX = "AITER_CONFIG_"
-_PYTHONPATH, _FRAMEWORK_PYTHON = "PYTHONPATH", "HYPERLOOM_FRAMEWORK_PYTHON"
+FRAMEWORK_PYTHON_ENV = "HYPERLOOM_FRAMEWORK_PYTHON"
+_PYTHONPATH, _FRAMEWORK_PYTHON = "PYTHONPATH", FRAMEWORK_PYTHON_ENV
 _DIRECTORY = "dir"
 _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
@@ -278,7 +288,7 @@ def _given(inputs: _Inputs, surface: BuildSurface, effective: Path, touched: fro
     if built is None:
         return None
     names = frozenset(PurePosixPath(o.path).name.removesuffix(_MODULE_SUFFIX) for o in built.record.outputs) & touched
-    problem = _build_differs(built.record, inputs.machine.gfx_arch, surface)
+    problem = _build_differs(built.record, inputs.machine.gfx_arch, surface, inputs.python)
     if problem is not None:
         inputs.around.notes.append(f"jit cache: the CPU build of aiter's modules is not used: {problem}")
         return None
@@ -294,8 +304,15 @@ def _given(inputs: _Inputs, surface: BuildSurface, effective: Path, touched: fro
     return GivenModules(names, built.lay) if names else None
 
 
-def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface) -> str | None:
-    """How the CPU build's target and variables differ from what this server's build would have, ``None`` when not."""
+def interpreter_identity(python: str) -> str:
+    """The interpreter ``python`` names, as the file it runs: the same Python, torch and HIP build on both sides of a
+    CPU build of aiter's modules is the same file in the same image."""
+    return os.path.realpath(shutil.which(python) or python)
+
+
+def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface, python: str) -> str | None:
+    """How the CPU build's target, interpreter and variables differ from what this server's build would have, ``None``
+    when not."""
     if record.inputs.gfx_arch != gfx_arch:
         return f"it was built for {record.inputs.gfx_arch} and this GPU is {gfx_arch}"
     built = {
@@ -303,8 +320,9 @@ def _build_differs(record: BuildRecord, gfx_arch: str, surface: BuildSurface) ->
         for name, value in record.toolchain.items()
         if name.startswith(COMPILE_ENV_PREFIX)
     }
-    # The interpreter and the import path are the image's on both sides; what they could change is in the farm.
-    server = {k: v for k, v in surface.environment.items() if k not in (_PYTHONPATH, _FRAMEWORK_PYTHON)}
+    # The import path is the image's on both sides; what a patch could change on it is in the farm.
+    server = {k: v for k, v in surface.environment.items() if k != _PYTHONPATH}
+    server[_FRAMEWORK_PYTHON] = interpreter_identity(python)
     if server.get(_GPU_ARCHS) in (_NATIVE, gfx_arch):
         del server[_GPU_ARCHS]
     differing = sorted(name for name in set(built) | set(server) if built.get(name) != server.get(name))

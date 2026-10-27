@@ -52,6 +52,7 @@ from hyperloom.measure.jit.native.record import READY, BuildRecord
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native.builder import BuildMachine, LaidTree, tree_dir
 from hyperloom.measure.runner.native.planning import NativePlanner
+from hyperloom.measure.runner.jit import FRAMEWORK_PYTHON_ENV, interpreter_identity
 from hyperloom.measure.runner.native.recipes import PYTHON_PLACEHOLDER, NativeRecipe, runner_preflight
 from hyperloom.measure.spec import EnvRoot as SheetRoot
 from hyperloom.orchestrator.enablement.runtime.targeted_build import AiterBuild, default_budget_sec
@@ -87,6 +88,7 @@ os.makedirs(jit, exist_ok=True)
 os.environ["AITER_JIT_DIR"] = jit
 os.environ["AITER_META_DIR"] = os.path.join(tree, plan["meta"])
 os.environ.pop("AITER_REBUILD", None)
+sys.path.insert(0, os.path.dirname(os.path.join(tree, plan["package"])))
 sys.path.insert(0, os.path.join(tree, plan["package"]))
 from jit import core
 for name in plan["modules"]:
@@ -199,7 +201,8 @@ class AiterModules:
 
     def _build_variables(self, python: str) -> dict[str, str]:
         """The variables of the service's environment that aiter's build path reads, less locations, the tuned tables
-        and what the build sets itself: what the compile gets and its record states."""
+        and what the build sets itself, and the interpreter the compile runs: what the compile gets and its record
+        states."""
         if self._variables is None:
             try:
                 package = locate_package(AITER_PACKAGE, python, Path.cwd())
@@ -208,6 +211,7 @@ class AiterModules:
             names = scan_env_names([package], [image_aiter_meta(package)])
             surface = build_surface(names, self._environ, {})
             self._variables = {k: v for k, v in surface.environment.items() if k not in _SET_BY_BUILD}
+            self._variables[FRAMEWORK_PYTHON_ENV] = interpreter_identity(python)
         return dict(self._variables)
 
 

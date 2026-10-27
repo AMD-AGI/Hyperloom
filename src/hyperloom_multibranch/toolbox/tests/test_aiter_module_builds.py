@@ -8,6 +8,7 @@ taken. A host that configures no build store compiles as before (2a): the server
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from functools import partial
 from pathlib import Path
@@ -77,7 +78,7 @@ class AiterRig:
         builds = PendingBuilds(self.driver, hooks.hooks(), max_infra_retries=0, retry_seconds=0.0)
         needs = builds.plan(REQUEST, AcceptedMeasurement(compiled, ()))
         assert builds.wait("r1", needs), "the build is not stored yet: the test waits as pending_build"
-        await hooks.done.wait()
+        await asyncio.wait_for(hooks.done.wait(), 300)
         return builds
 
 
