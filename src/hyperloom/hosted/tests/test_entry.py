@@ -57,6 +57,7 @@ def run(tmp_path, monkeypatch):
         for name, value in values.items():
             monkeypatch.setenv(name, value)
 
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the entry edits it
     installer = tmp_path / "install.sh"
     installer.write_text("#!/bin/bash\necho stub installer ran\n")
     monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
@@ -662,3 +663,41 @@ def test_the_installer_installs_into_the_running_venv_and_optimize_finds_its_scr
     ]
     assert fake.environments[0]["PATH"].split(os.pathsep)[0] == str(venv / "bin")
     assert fake.environments[0]["PATH"].split(os.pathsep).count(str(venv / "bin")) == 1
+
+
+def test_a_package_the_working_directory_shadows_as_a_namespace_still_resolves_for_optimize(run, monkeypatch, tmp_path):
+    """The shape of the framework image: a directory without ``__init__.py`` in the working directory, the real package
+    reached by an editable install's finder, which the import system consults after ``sys.path``."""
+    import importlib.abc
+    import importlib.util
+
+    cwd, real = tmp_path / "cwd", tmp_path / "real" / "shadowed_pkg"
+    (cwd / "shadowed_pkg").mkdir(parents=True)
+    real.mkdir(parents=True)
+    (real / "__init__.py").write_text("")
+
+    class EditableFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "shadowed_pkg":
+                return importlib.util.spec_from_file_location(
+                    name, real / "__init__.py", submodule_search_locations=[str(real)]
+                )
+            return None
+
+    finder = EditableFinder()
+    monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, finder])
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(sys, "path", ["", str(cwd), *sys.path])  # what ``python -m`` leaves
+    monkeypatch.delitem(sys.modules, "shadowed_pkg", raising=False)
+    assert importlib.util.find_spec("shadowed_pkg").origin is None  # the defect, without the entry's guard
+    seen = []
+
+    def optimize(argv):
+        sys.modules.pop("shadowed_pkg", None)
+        importlib.invalidate_caches()
+        seen.append(importlib.util.find_spec("shadowed_pkg").origin)
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    entry.main(["run"])
+    assert seen == [str(real / "__init__.py")]

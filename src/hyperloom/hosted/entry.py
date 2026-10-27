@@ -87,7 +87,18 @@ def main(argv: list[str] | None = None) -> int:
         return RETURNCODE_REFUSED
 
 
+def _drop_cwd_from_sys_path() -> None:
+    """Keep the working directory off ``sys.path``: the host chooses it, and a ``python -m`` start puts it first.
+
+    A directory there named like an installed package (``sglang``) but without ``__init__.py`` is found as a namespace
+    package, which wins over an editable install's finder, so the package has no ``__file__`` for ``optimize``.
+    """
+    cwd = os.path.realpath(os.getcwd())
+    sys.path[:] = [item for item in sys.path if item and os.path.realpath(item) != cwd]
+
+
 def _run() -> int:
+    _drop_cwd_from_sys_path()
     info = _read_inputs()
     spec = _read_spec(info)
     if not Path(os.environ.get(ENV_USER_DATA_PATH, "")).is_absolute():
