@@ -2043,7 +2043,6 @@ class TestN38ActionVerdictClass:
             session_dir=sd,
             codex_client_factory=_fake_client_factory,
             runtime_caller_factory=_fake_runtime_caller_factory,
-            static_context={"model": "m", "framework": "sglang"},
             action_verdict_policy={"baseline": "exploration", "integrate": "promotion"},
         )
         assert backend.action_verdict_policy == {
@@ -2127,7 +2126,6 @@ class TestN38ActionVerdictClass:
             session_dir=sd,
             codex_client_factory=_FakeAsyncOpenAI,
             runtime_caller_factory=_fake_runtime_caller_factory,
-            static_context={"model": "m", "framework": "sglang"},
             action_verdict_policy={
                 "params": "exploration",
                 "integrate": "promotion",

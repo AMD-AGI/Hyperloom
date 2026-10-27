@@ -61,13 +61,13 @@ def test_classify_phase_artifact_gap_pyyaml(tmp_path) -> None:
 
 def test_build_assessment_empty_and_bad_gap(tmp_path) -> None:
     with pytest.raises(ValueError, match="attempts must be non-empty"):
-        build_assessment([], workspace=tmp_path)
+        build_assessment([], artifacts=_base_artifacts(tmp_path))
 
     art = dataclasses.replace(
         _base_artifacts(tmp_path),
         eval_report_data={"relative_gap": "not-a-float"},
     )
-    a2 = build_assessment([OutcomeId.eval_gap_accepted], workspace=tmp_path, artifacts=art)
+    a2 = build_assessment([OutcomeId.eval_gap_accepted], artifacts=art)
     # Bad relative_gap swallowed.
     assert a2.eval_gap is None
 

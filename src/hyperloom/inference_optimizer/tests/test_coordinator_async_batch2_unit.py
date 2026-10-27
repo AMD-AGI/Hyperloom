@@ -284,8 +284,10 @@ async def test_context_reader_failure_carries_traceback_to_the_log(
     provider = ContextProvider(
         shared_state=coord.shared_state,
         inbox_reader=coord.conversation._context_inbox_reader,
+        analysis_reader=coord.conversation._context_analysis_reader,
         recent_outcomes_reader=coord.conversation._context_recent_outcomes_reader,
         running_tasks_reader=coord.conversation._context_running_tasks_reader,
+        reference_reader=coord.conversation._context_reference_reader,
     )
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):

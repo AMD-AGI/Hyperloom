@@ -485,8 +485,7 @@ class SpecialistSubprocessDispatcher:
         # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
-        # Bound the spawned CLI's request transport so a stalled gateway stream
-        # raises client-side instead of hanging forever.
+        # Keep the spawned CLI off its non-essential traffic and auto-updater.
         from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)

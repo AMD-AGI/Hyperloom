@@ -79,7 +79,7 @@ from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler
 from ._profile_setup import fit_capture_to_speculative
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
-    _load_model_config_dict,
+    load_model_config_dict,
     _sparse_kv_block_size,
 )
 
@@ -787,7 +787,7 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
     model = str(model_path or "").strip()
     if not model:
         return False
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     basename = Path(model).name.lower()
     if data is None:
         # Fallback for mounted model dirs whose config is unreadable.
@@ -829,7 +829,7 @@ def _client_tokenizer_mode(model_path: str | None) -> str:
     model = str(model_path or "").strip()
     if not model:
         return ""
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     if data is None:
         return ""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -938,7 +938,7 @@ def default_baseline_config() -> Path:
 
 
 def _finalize_framework_server_args(
-    bench: dict[str, Any], window: _RequestWindow, *, gpu_type: str | None, drop_moe_runner_backend: bool = False
+    bench: dict[str, Any], window: _RequestWindow, *, drop_moe_runner_backend: bool = False
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
@@ -977,7 +977,6 @@ def _finalize_framework_server_args(
         resolved_server_args,
         bench.get("framework"),
         bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
     )
     # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
     #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
@@ -995,11 +994,8 @@ def _finalize_framework_server_args(
     # 6. JSON-valued flags (--speculative-config / --compilation-config /
     #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
-    #    word. No-op for sglang and for arg strings with no JSON.
-    resolved_server_args = compact_json_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
+    #    word. No-op for arg strings with no JSON.
+    resolved_server_args = compact_json_server_args(resolved_server_args)
     resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
@@ -1702,9 +1698,7 @@ def materialize_config_with_envs(
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
-    _finalize_framework_server_args(
-        bench, window, gpu_type=target.gpu_type, drop_moe_runner_backend=options.drop_moe_runner_backend
-    )
+    _finalize_framework_server_args(bench, window, drop_moe_runner_backend=options.drop_moe_runner_backend)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)

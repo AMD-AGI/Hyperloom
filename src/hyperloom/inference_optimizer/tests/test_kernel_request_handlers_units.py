@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import asyncio
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -203,6 +204,14 @@ class TestForgeGemmHelperCoverage:
         # Unreadable / missing config -> auto.
         assert untuned_gemm_csv._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
         assert untuned_gemm_csv._resolve_fp8_quant_type("") == "auto"
+
+    def test_resolve_fp8_quant_type_logs_malformed_config(self, tmp_path, caplog):
+        model_dir = tmp_path / "broken"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert untuned_gemm_csv._resolve_fp8_quant_type(str(model_dir)) == "auto"
+        assert "model_config_invalid_json" in caplog.text
 
     def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
         model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
@@ -1385,7 +1394,7 @@ class TestForgeGemmHelperCoverage:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.common import model_paths
 
         snapshot = tmp_path / "models--amd--DeepSeek-V4-Pro-MXFP4" / "snapshots" / "abc123"
         snapshot.mkdir(parents=True)
@@ -1404,7 +1413,7 @@ class TestForgeGemmHelperCoverage:
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            model_config_utils,
+            model_paths,
             "resolve_local_model_dir",
             lambda _model_path: snapshot,
         )
@@ -1532,7 +1541,7 @@ class TestForgeGemmHelperCoverage:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.common import model_paths
 
         SharedState(
             precision="mxfp4",
@@ -1542,7 +1551,7 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            model_config_utils,
+            model_paths,
             "resolve_local_model_dir",
             lambda _model_path: None,
         )

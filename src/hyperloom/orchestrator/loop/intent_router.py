@@ -20,7 +20,7 @@ from hyperloom.orchestrator.lever import (
 )
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.common.timeutil import parse_iso_unix_or_zero, format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 from .verdicts import (
     CriticRuling,
     collapse_verdict_map,
@@ -29,7 +29,7 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from hyperloom.common.coerce import to_int
+from hyperloom.common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,
@@ -1346,7 +1346,7 @@ class IntentRouter(CoordinatorCollaborator):
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
         try:
-            started = parse_iso_unix_or_zero((await self.tasks.get(task_id)).updated_at)
+            started = to_unix((await self.tasks.get(task_id)).updated_at, 0.0)
         except TaskNotFound:
             started = 0.0
         if started > 0:

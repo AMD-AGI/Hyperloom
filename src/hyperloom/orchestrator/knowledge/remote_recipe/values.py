@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
 from hyperloom.common.coerce import to_float
 
-from hyperloom.common.coerce import first_text
+from hyperloom.common.coerce import first_text, optional_positive_int
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedupe_extra_server_args,
@@ -121,14 +121,6 @@ def _kernel_host_origin(apply_root: str) -> dict[str, Any]:
     return {HOST_ORIGIN_KEY: {"apply_root": root}} if root.startswith("/") else {}
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError):
-        return None
-    return resolved if resolved > 0 else None
-
-
 #: Every dimension either supported identity scheme may place in its scope.
 _SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 
@@ -151,9 +143,9 @@ def workload_shape(state: Any, *, scope: RecipeScope) -> dict[str, int]:
     shape = {
         key: value for key, value in scope.as_dict().items() if key != "kernel_optimizer" and isinstance(value, int)
     }
-    ep = _positive_int(getattr(state, "ep", None))
+    ep = optional_positive_int(getattr(state, "ep", None))
     if ep is None:
-        ep = _positive_int(extra.get("ep"))
+        ep = optional_positive_int(extra.get("ep"))
     if ep is not None and ep > 1:
         shape["ep"] = ep
     partitions = _partition_count(state)
@@ -171,7 +163,7 @@ def _partition_count(state: Any) -> int | None:
     was running on exactly that.
     """
     partition = _mapping(getattr(state, "compute_partition", {}))
-    count = _positive_int(partition.get("partitions"))
+    count = optional_positive_int(partition.get("partitions"))
     if count is None:
         from hyperloom.common.gpu_partition import MODE_PARTITION_COUNTS
 
@@ -829,7 +821,7 @@ def _adopt_prior_kernel(
     if (
         replay.get("status") != "reproduced"
         or kernel_replay.get("status") != "kept"
-        or _positive_int(kernel_replay.get("kept")) is None
+        or optional_positive_int(kernel_replay.get("kept")) is None
     ):
         return
     selected_kernel: dict[str, dict[str, list[dict[str, Any]]]] = {}
@@ -1124,7 +1116,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
         if key in SHAPE_KEYS:
-            resolved = _positive_int(value)
+            resolved = optional_positive_int(value)
             if resolved is not None:
                 row[key] = resolved
     return row

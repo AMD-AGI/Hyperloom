@@ -13,7 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .parse_usage import _claude_result_output_tokens, _claude_stream_model, _iter_json_events, normalize_usage
+from .parse_usage import _claude_result_output_tokens, _claude_stream_model, iter_json_events, normalize_usage
 from .tool_events import TIMING_NONE
 from .trajectory_trace import EVENT_LLM_REQUEST, STATUS_COMPLETED, record_event
 
@@ -23,7 +23,7 @@ def stream_json_requests(log_path: str | Path) -> list[dict[str, Any]]:
     requests: dict[str, dict[str, Any]] = {}
     session_output: int | None = None
     init_model: str | None = None
-    for obj in _iter_json_events(log_path, "stream-json"):
+    for obj in iter_json_events(log_path, "stream-json"):
         if obj.get("type") == "system":
             init_model = _claude_stream_model(obj) or init_model
             continue
@@ -60,20 +60,17 @@ def stream_json_requests(log_path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def record_stream_json_requests(log_path: str | Path) -> int:
-    """Put every model request of a finished stream-json log on the trajectory; returns how many rows were written.
+def record_stream_json_requests(log_path: str | Path) -> None:
+    """Put every model request of a finished stream-json log on the trajectory.
 
     The log has no per-line timestamps, so these rows are untimed (``timing_source="none"``).
     """
-    written = 0
     for request in stream_json_requests(log_path):
-        span_id = record_event(
+        record_event(
             EVENT_LLM_REQUEST,
             status=STATUS_COMPLETED,
             attributes={**request, "name": request["model"] or "llm", "timing_source": TIMING_NONE, "complete": True},
         )
-        written += span_id is not None
-    return written
 
 
 __all__ = ["record_stream_json_requests", "stream_json_requests"]

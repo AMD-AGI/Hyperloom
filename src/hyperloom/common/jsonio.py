@@ -102,12 +102,13 @@ def read_json(
 def read_jsonl(
     path: Path,
     *,
-    require_dict: bool = False,
-    skip_malformed: bool = False,
-    skip_non_dict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
-) -> list[Any]:
-    """Parse a JSONL file; an unreadable file is reported to ``on_error`` and yields ``[]``."""
+) -> list[dict[str, Any]]:
+    """Parse the JSON-object rows of a JSONL file.
+
+    An unreadable file is reported to ``on_error`` and yields ``[]``. A malformed line or a non-object row is reported
+    to ``on_error`` and skipped.
+    """
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
@@ -115,20 +116,16 @@ def read_jsonl(
             on_error(exc)
         return []
 
-    rows: list[Any] = []
+    rows: list[dict[str, Any]] = []
     for line_no, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
             data = json.loads(stripped)
-            if require_dict and not isinstance(data, dict):
-                if skip_non_dict:
-                    continue
+            if not isinstance(data, dict):
                 raise ValueError(f"expected JSON object at {path}:{line_no}, got {type(data).__name__}")
-        except (json.JSONDecodeError, ValueError) as exc:
-            if not skip_malformed:
-                raise
+        except ValueError as exc:
             if on_error is not None:
                 on_error(exc)
             continue
@@ -136,11 +133,11 @@ def read_jsonl(
     return rows
 
 
-def _qualifying(chunks: Iterable[str], required_key: str | None) -> Iterator[dict[str, Any]]:
+def _qualifying(chunks: Iterable[str], required_key: str) -> Iterator[dict[str, Any]]:
     """Every JSON object in ``chunks``, in order, that carries ``required_key``."""
     for chunk in chunks:
         for data in _iter_json_objects(chunk):
-            if required_key is None or required_key in data:
+            if required_key in data:
                 yield data
 
 
@@ -149,26 +146,16 @@ def _last(objects: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
     return tail[0] if tail else None
 
 
-def extract_first_json_with_key(
-    text: str,
-    required_key: str | None = None,
-    bare_re: re.Pattern[str] | None = None,
-    *,
-    last: bool = False,
-) -> dict[str, Any] | None:
-    """Pull a JSON object out of a model reply."""
+def extract_last_json_matching(text: str, required_key: str, bare_re: re.Pattern[str]) -> dict[str, Any] | None:
+    """Return the last JSON object carrying ``required_key`` among *text*'s fenced blocks, then its ``bare_re`` matches."""
     if not text:
         return None
     fenced = (m.group(1) for m in _FENCED_BLOCK_RE.finditer(text))
-    bare = (m.group(1) for m in bare_re.finditer(text)) if bare_re is not None else ()
-    candidates = _qualifying(chain(fenced, bare), required_key)
-    return _last(candidates) if last else next(candidates, None)
+    bare = (m.group(1) for m in bare_re.finditer(text))
+    return _last(_qualifying(chain(fenced, bare), required_key))
 
 
-def extract_last_json_with_key(
-    text: str,
-    required_key: str | None = None,
-) -> dict[str, Any] | None:
+def extract_last_json_with_key(text: str, required_key: str) -> dict[str, Any] | None:
     """Return the last JSON object in *text* (by start offset) that qualifies."""
     if not text:
         return None
@@ -177,7 +164,7 @@ def extract_last_json_with_key(
 
 
 __all__ = [
-    "extract_first_json_with_key",
+    "extract_last_json_matching",
     "extract_last_json_with_key",
     "read_json",
     "read_json_strict",

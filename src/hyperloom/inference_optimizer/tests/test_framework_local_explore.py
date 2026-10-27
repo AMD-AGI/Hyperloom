@@ -307,6 +307,16 @@ def test_dispatched_verdict_reaches_the_integrate_task():
     assert gap.kind == "missing_model_arch"
 
 
+def test_a_resource_constraint_verdict_acquires_no_code():
+    """An OOM is the host being too small, so the integrate task has no gap to acquire code for."""
+    from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, classify_failure
+    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+
+    signature = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
+    assert signature.kind == RESOURCE_CONSTRAINT
+    assert _enablement_gap({"enablement": True, "enablement_failure_signature": signature.to_dict()}) is None
+
+
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
 # registered and has a real canonical id --------------------------------------------------------------------------- #
 def test_local_explore_gap_canonical_id_is_not_literal_local_explore(tmp_path: Path):

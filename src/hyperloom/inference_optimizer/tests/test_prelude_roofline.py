@@ -121,11 +121,11 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     coord.shared_state.current_best = {
         "extra_server_args": "--enable-torch-compile --quantization fp8",
     }
-    import hyperloom.inference_optimizer.roofline_ceiling as rc
+    import hyperloom.orchestrator.phases.prelude as prelude
 
     monkeypatch.setattr(
-        rc,
-        "_read_baseline_yaml_server_args",
+        prelude,
+        "read_baseline_server_args",
         lambda _state: "--attention-backend AITER",
     )
 

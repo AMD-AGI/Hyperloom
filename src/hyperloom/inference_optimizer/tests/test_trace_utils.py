@@ -178,7 +178,7 @@ def test_mean_proposal_score_edge_cases():
     assert lm._mean_proposal_score([{"score": "8"}, {"nope": 1}]) == 8.0
 
 
-# --- _row_utils: coercion + closed-schema validation -----------------------
+# --- _row_utils: closed-schema validation ----------------------------------
 
 _FIELDS = frozenset({"session_id", "component"})
 _COMPONENTS = frozenset({"orchestration"})
@@ -188,13 +188,6 @@ def _row(**over):
     base = {"session_id": "sess-1", "component": "orchestration"}
     base.update(over)
     return base
-
-
-def test_coerce_optional_int_variants():
-    assert ru.coerce_optional_int(None) is None
-    assert ru.coerce_optional_int("7") == 7
-    assert ru.coerce_optional_int("nan") is None  # bad type -> None, distinct from 0
-    assert ru.coerce_optional_int(object()) is None
 
 
 def test_validate_closed_row_extra_or_missing_field_raises():

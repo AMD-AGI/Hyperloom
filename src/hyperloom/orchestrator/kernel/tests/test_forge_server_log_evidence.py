@@ -258,12 +258,11 @@ class TestTheDenseLaneTokens:
             raise _StopHere
 
         from hyperloom.common import model_paths, visible_devices
-        from hyperloom.inference_optimizer import model_config_utils
 
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
         monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
-        monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
+        monkeypatch.setattr(model_paths, "resolve_local_model_dir", lambda _p: model_dir)
         monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")

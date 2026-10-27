@@ -18,6 +18,7 @@ from hyperloom.common.launch_log_evidence import (
     engine_adjusted_settings_from_log,
     observed_server_config_from_log,
     observed_server_identity_from_log,
+    operand_digest,
 )
 
 
@@ -61,7 +62,6 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
         "e2e_norm_intvty_p50": (latency.get("e2e_norm_intvty") or {}).get("p50"),
         "e2e_norm_intvty_p90": (latency.get("e2e_norm_intvty") or {}).get("p90"),
         "agentx_metrics": metrics,
-        "agentx_server_launch": metrics.get("server_launch"),
         "tp": recipe.get("tp"),
         "ep": recipe.get("ep"),
         "conc": recipe.get("conc"),
@@ -87,7 +87,7 @@ def native_launch_evidence(
     flags = shlex.join(argv[first_option:])
     env = {name: value for name, value in launch["effective_env"].items() if value is not None}
     model = str(bench.get("envs", {}).get("MODEL_PATH") or bench["model"])
-    digest = "sha256:" + hashlib.sha256(model.encode()).hexdigest()
+    digest = operand_digest(model)
     recipe = measurement["agentx_metrics"]["recipe"]
     framework = bench["framework"]
     return {
@@ -97,10 +97,8 @@ def native_launch_evidence(
         "framework": framework,
         "model_path": model,
         "requested_server_args": flags,
-        "requested_server_flags": flags,
         "requested_server_env": env,
         "observed_server_launch_flags": flags,
-        "observed_server_env": env,
         "observed_server_config": observed_server_config_from_log(actual_server_log, framework)
         if actual_server_log
         else {},

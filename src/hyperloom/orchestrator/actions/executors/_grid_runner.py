@@ -92,7 +92,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    shell_safe_dedupe as shell_safe_dedupe,
+    dedupe_extra_server_args,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
@@ -590,7 +590,7 @@ def _resolve_mn_effective_server_args(
         _base_envs = _base_bench.get("envs") or {}
         _base_framework_env = server_args_env_name(_base_bench.get("framework"))
         _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-        return shell_safe_dedupe(
+        return dedupe_extra_server_args(
             compose_server_args(
                 inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
                 base_extra_args=base_extra_args,
@@ -2002,7 +2002,7 @@ def _build_variant_yaml(
         combined, args_env=extra_args_env, model_path=target.model_path, variant=variant
     )
     if combined:
-        envs[extra_args_env] = shell_safe_dedupe(combined)
+        envs[extra_args_env] = dedupe_extra_server_args(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)

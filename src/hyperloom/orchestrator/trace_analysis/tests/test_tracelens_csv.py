@@ -1519,7 +1519,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
         return CodexSessionResult(
             text="wrote analysis.md",
             usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
-            thread_id="thread-123",
         )
 
     def _no_claude_query(**_kwargs):
