@@ -92,8 +92,7 @@ def assemble_parts(
         return {}
 
     items: dict[str, list[dict[str, Any]]] = {}
-    singletons: dict[str, dict[str, Any]] = {}
-    discarded: dict[str, list[str]] = {}
+    singletons: dict[str, list[dict[str, Any]]] = {}
 
     for path in _fragment_paths(d, only_sections, only_event):
         rec = _load(path, warns)
@@ -104,30 +103,25 @@ def assemble_parts(
             warns.append(f"recorder: {path.name} missing 'section'")
             continue
         if rec.get("kind") == "singleton":
-            prev = singletons.get(section)
-            if prev is None or str(rec.get("ts") or "") >= str(prev.get("ts") or ""):
-                if prev is not None:
-                    discarded.setdefault(section, []).append(str(prev.get("producer") or "?"))
-                singletons[section] = rec
-            else:
-                discarded.setdefault(section, []).append(str(rec.get("producer") or "?"))
+            singletons.setdefault(section, []).append(rec)
         else:
             items.setdefault(section, []).append(rec)
-
-    # A singleton fragment is named for its producer, so a section with more than one is one two producers claimed.
-    for section, producers in discarded.items():
-        warns.append(
-            f"recorder: {section} was written as a singleton by more than one "
-            f"producer; only the newest was kept and "
-            f"{sorted(set(producers))} were dropped whole"
-        )
 
     out: dict[str, Any] = {}
     for section, recs in items.items():
         recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
         out[section] = [r.get("payload") for r in recs]
-    for section, rec in singletons.items():
-        out[section] = rec.get("payload")
+    for section, recs in singletons.items():
+        recs.sort(key=lambda r: str(r.get("ts") or ""))
+        # A singleton fragment is named for its producer, so a section with more than one is one two producers claimed.
+        if len(recs) > 1:
+            dropped = sorted({str(r.get("producer") or "?") for r in recs[:-1]})
+            warns.append(
+                f"recorder: {section} was written as a singleton by more than one "
+                f"producer; only the newest was kept and "
+                f"{dropped} were dropped whole"
+            )
+        out[section] = recs[-1].get("payload")
 
     _compose_versions(out)
     _compose_critic(out)

@@ -173,7 +173,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("submission_invalid_reasons", measurement.get("submission_invalid_reasons") or None),
                 ("ttft_mean_ms", ttft),
                 ("e2el_mean_ms", e2el),
-                ("ttft_e2el_source", ttft_source or None),
+                ("ttft_e2el_source", ttft_source),
                 ("config_path", to_mapping(anchor.get("request")).get("config_path") or None),
                 ("benchmark_report_path", measurement.get("benchmark_report_path") or None),
                 ("failure_streak", fail_streak or None),
@@ -205,10 +205,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
 
-    inv_md = render_invocation_block(anchor.get("invocation"), session.get("image"))
-    if inv_md:
-        md_parts.append("")
-        md_parts.append(inv_md)
+    # Kept last: an empty invocation block then leaves only trailing newlines, which the strip below drops.
+    md_parts.append("")
+    md_parts.append(render_invocation_block(anchor.get("invocation"), session.get("image")))
 
     return RenderedSection(
         section_id="baseline",

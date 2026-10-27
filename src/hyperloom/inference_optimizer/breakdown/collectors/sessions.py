@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
+from hyperloom.common.coerce import first_str, to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import _to_int
@@ -104,7 +104,7 @@ def collect_session(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Collect the session-identification + lifecycle section."""
-    start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
+    start_ts = first_str(state.get("start_ts"), manifest.get("created_at_utc"))
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
@@ -118,7 +118,7 @@ def collect_session(
     if image is None:
         warnings.append("image: manifest.json records no image")
     section = {
-        "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
+        "session_id": first_str(state.get("session_id"), manifest.get("session_id")),
         "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id": manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc": manifest.get("created_at_utc") or start_ts,
@@ -133,8 +133,8 @@ def collect_session(
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root (the operator-chosen workspace base).
-        "user_data_path": str(
-            manifest.get("user_data_path") or state.get("user_data_path") or os.environ.get("USER_DATA_PATH") or ""
+        "user_data_path": first_str(
+            manifest.get("user_data_path"), state.get("user_data_path"), os.environ.get("USER_DATA_PATH")
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history.
