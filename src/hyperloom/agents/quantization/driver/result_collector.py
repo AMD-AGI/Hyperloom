@@ -26,8 +26,8 @@ _BLOCKED = "blocked.md"
 _LAST_PHASE = "last_phase.txt"
 _EVAL_REPORT = "eval_report.json"
 _EVAL_SKIPPED = "eval_skipped.txt"
-#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt and
-#: every run of one model share the workspace, so the retry loop archives these before each attempt.
+#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt of
+#: one run shares the run directory, so the retry loop archives these before each attempt.
 ATTEMPT_MARKER_FILES = (_BLOCKED, _LAST_PHASE, _EVAL_REPORT, _EVAL_SKIPPED)
 
 
