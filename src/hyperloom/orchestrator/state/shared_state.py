@@ -1167,12 +1167,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
-        out.setdefault("schema_version", 1)
         out.setdefault("tested", {})
         out.setdefault("accepted", [])
         out.setdefault("rejected", [])
-        out.setdefault("domains_round_summary", [])
-        out.setdefault("name_index", {})
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})
 

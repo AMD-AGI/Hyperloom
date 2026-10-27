@@ -68,7 +68,6 @@ from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdic
 from ._grid_variant_filter import ServingStack
 from ._grid_base import (
     TS_FAILED,
-    TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
 from .benchmark_result import double_run_requested
@@ -702,16 +701,7 @@ def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[s
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-# ``estimated_output_throughput`` is the rough decode tput salvaged from a killed-overtime variant's partial
-# server.log, and the wall-clock pair says "ran too slow -> early kill" instead of an opaque FAILED row.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = (
-    "tput",
-    "gain_pct",
-    "base_tput",
-    "estimated_output_throughput",
-    "runtime_sec",
-    "wall_clock_ratio_vs_baseline",
-)
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
@@ -773,7 +763,6 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
             error_class=te.get("error_class"),
             error_excerpt=te.get("error_excerpt"),
             reason=reason,
-            explicit=te.get("failure_attribution"),
         )
         if outcome in UNMEASURED_OUTCOMES
         else "",
@@ -863,7 +852,6 @@ class _ExploreRound:
         self.rejected: list[dict[str, Any]] = []
         self.winners_history: list[dict[str, Any]] = []
         self.tested: dict[str, dict[str, Any]] = {}
-        self.name_index: dict[str, Any] = {}
         # Servers this round launched, and the variants that reached the measured check and were answered by the
         # stack or the ledger instead (a restatement of the stack, or a verdict the session already holds).
         self.launched: dict[str, str] = {}
@@ -1379,7 +1367,6 @@ class _ExploreRound:
             **self._graded_verdict(gv, r, variant_meas),
             "status": r.status,
             "tput": r.output_throughput,
-            "decision_tput": r.output_throughput,
             **graded_axes_of(variant_meas),
             "base_tput": self.running_tput,
             "round_id": self.round_id,
@@ -1521,8 +1508,6 @@ class _ExploreRound:
 
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
-        if gv.name:
-            self.name_index[gv.name] = row["fingerprint"]
         if row["outcome"] != "KEEP":
             self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
             self.losers.append(_ledger_view(row, _LOSER_FIELDS))
@@ -1574,8 +1559,8 @@ class _ExploreRound:
         self.remove_args = list(run_remove_args)
         self.unset_envs = list(run_gv.unset_envs)
         self.args_mode = "replace" if persist else "append"
-        if row["decision_tput"] and row["decision_tput"] > 0:
-            self.running_tput = row["decision_tput"]
+        if row["tput"] and row["tput"] > 0:
+            self.running_tput = row["tput"]
         if self.grade_on_intvty:
             # Only a comparable intvty KEEP advances the round anchor. Degraded measurements never reach here.
             self.running_perf = perf_snapshot_from_mapping(meas)
@@ -1603,7 +1588,6 @@ class _ExploreRound:
             # baseline) rather than that it scored nothing.
             "accuracy": next((g["observed"] for g in row["gates"] if g["gate"] == "accuracy"), None),
             "tput": row["tput"],
-            "decision_tput": row["decision_tput"],
             # The axes this KEEP was graded on travel with it: current_best becomes the next round's anchor, and
             # an anchor without them degrades the session.
             **graded_axes_of(meas),
@@ -1622,7 +1606,7 @@ class _ExploreRound:
         outcomes = [
             _outcome_row(te, fingerprint, reasons.get(fingerprint, ""), task_id)
             for fingerprint, te in self.tested.items()
-            if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED, TS_KILLED_OVERTIME)
+            if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED)
         ]
         outcomes.extend(
             {
@@ -1652,7 +1636,7 @@ class _ExploreRound:
         # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
         # measured again.
         answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
-        measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.tested.values())
+        measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
             "status": status,
@@ -1660,10 +1644,8 @@ class _ExploreRound:
             # failed. As a bare ``failed`` with no error_class nothing downstream could tell the two apart, and
             # the KB would learn that these variants are bad.
             **self._budget_error(status),
-            "session_budget_untested": self.untested,
             "base_tput": self.base_tput,
-            "running_base_tput": self.running_tput,
-            # Each KEEP advances ``running_base_tput``, so this is the final stack.
+            # Each KEEP advances the running anchor, so this is the final stack.
             "output_throughput": float(self.running_tput) if self.winners else None,
             "best_variant": best,
             "best_gain_pct": best_gain_pct,
@@ -1673,12 +1655,9 @@ class _ExploreRound:
             "per_variant_outcomes": outcomes,
             "framework_lever_attributions": levers,
             "explore_search_update": {
-                "schema_version": 1,
                 "tested": self.tested,
                 "rejected": list(rejected.values()),
-                "name_index": self.name_index,
                 "winners_history": self.winners_history,
-                "domains_round_summary": [],
                 "last_round": self._last_round_summary(),
             },
             "round_id": self.round_id,
@@ -1707,7 +1686,6 @@ class _ExploreRound:
             "base_extra_args": self.base_args,
             "tested": [w["fingerprint"] for w in self.winners] + [lr["fingerprint"] for lr in self.losers],
             "round_winners": [w["fingerprint"] for w in self.winners],
-            "killed_overtime": [fp for fp, te in self.tested.items() if te.get("outcome") == TS_KILLED_OVERTIME],
             "skipped_dup": self.skipped,
             "ts": _now_iso(),
         }

@@ -645,11 +645,6 @@ class _RenderMixin:
             f"  rejected={len(search.get('rejected') or [])}"
             f"  tested={len(tested)}"
         )
-        # Surfaced on the head line because a whole round reaped by the overtime gate is otherwise invisible.
-        last_round = search.get("last_round")
-        n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
-        if n_killed:
-            head += f"  killed_overtime(last_round)={n_killed}"
         out: list[str] = ["", head]
         rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
         if not rows:

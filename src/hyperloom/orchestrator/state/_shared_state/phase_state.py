@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 from hyperloom.common.timeutil import now_iso
@@ -29,40 +30,11 @@ def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     return {k: tested[k] for k in keys}
 
 
-def _stamp_cycle_on_tested(
-    tested: dict[str, Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> dict[str, Any]:
-    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(tested, dict):
-        return {}
-    bn = (bottleneck or "").strip()
-    for v in tested.values():
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return tested
-
-
-def _stamp_cycle_on_rejected(
-    rejected: list[Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> list[Any]:
-    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(rejected, list):
-        return []
-    bn = (bottleneck or "").strip()
-    for v in rejected:
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return rejected
+def _stamp_cycle(rows: Iterable[Any], cycle: int) -> None:
+    """Attribute each ledger row that carries no cycle to the macro-cycle it landed in."""
+    for row in rows:
+        if isinstance(row, dict):
+            row.setdefault("cycle", int(cycle))
 
 
 def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
@@ -181,22 +153,6 @@ def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int
         "provenance": str(variant.get("provenance") or "llm_direct"),
         # Attribute the win to the macro-cycle it landed in.
         "cycle": cycle,
-    }
-
-
-def _winners_history_row(entry: dict[str, Any], config: _AcceptedConfig) -> dict[str, Any]:
-    """Mirror an accepted row into winners_history, so plateau judges needn't crawl optimization_stack."""
-    return {
-        "round_id": entry["accepted_at_round"],
-        "variant_name": entry["name"],
-        "fingerprint": config.fingerprint,
-        "gain_pct": entry["gain_pct"],
-        "extra_args": config.args,
-        "extra_envs": config.envs,
-        **config.control_fields,
-        "provenance": entry["provenance"],
-        "ts": entry["ts"],
-        "cycle": entry["cycle"],
     }
 
 
@@ -479,25 +435,16 @@ class _PhaseStateMixin:
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
         merged = dict(prior)
-        merged["schema_version"] = int(update.get("schema_version") or 1)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
-        cur_bottleneck = self.current_top_bottleneck()
         # The executor reports the round it just benched; accumulating it over the
         # durable ledger is this layer's job, and a re-measured fingerprint replaces
         # its earlier row because that is what a fresh measurement means.
-        merged["tested"] = _cap_tested_ledger(
-            _stamp_cycle_on_tested(
-                {**(prior.get("tested") or {}), **(update.get("tested") or {})},
-                cur_cycle,
-                cur_bottleneck,
-            )
-        )
-        merged["rejected"] = _stamp_cycle_on_rejected(
-            _merge_rejected(prior.get("rejected"), update.get("rejected")),
-            cur_cycle,
-            cur_bottleneck,
-        )
-        merged["name_index"] = {**(prior.get("name_index") or {}), **(update.get("name_index") or {})}
+        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
+        _stamp_cycle(tested.values(), cur_cycle)
+        merged["tested"] = _cap_tested_ledger(tested)
+        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
+        _stamp_cycle(rejected, cur_cycle)
+        merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
         # round ids on it, so it has to advance once per benched round.
         merged["cursor"] = int(prior.get("cursor") or 0) + 1
@@ -507,9 +454,6 @@ class _PhaseStateMixin:
             prior.get("winners_history"),
             update.get("winners_history"),
             cur_cycle,
-        )
-        merged["domains_round_summary"] = list(
-            update.get("domains_round_summary") or prior.get("domains_round_summary") or []
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
@@ -523,7 +467,6 @@ class _PhaseStateMixin:
         fp = config.fingerprint
         entry = _accepted_entry(variant, config, int(getattr(self, "macro_cycle", 0) or 0))
         search = dict(self.explore_search or {})
-        search.setdefault("schema_version", 1)
         accepted = [
             v for v in (search.get("accepted") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
@@ -532,13 +475,6 @@ class _PhaseStateMixin:
         search["rejected"] = [
             v for v in (search.get("rejected") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
-        name_index = dict(search.get("name_index") or {})
-        if entry["name"]:
-            name_index[entry["name"]] = fp
-        search["name_index"] = name_index
-        wh = list(search.get("winners_history") or [])
-        wh.append(_winners_history_row(entry, config))
-        search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
     def record_authored_framework_levers(
