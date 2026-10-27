@@ -28,6 +28,7 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
+from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
 from kernelforge.loop.round_budget import (
     ADMISSION_SESSION_SEC,
@@ -2419,8 +2420,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._baseline_case_times = {"small": 1.0, "large": 1.0}
     loop._best_case_times = {"small": 1.0, "large": 1.0}
     loop._case_times = {}
-    loop._last_pmc_diagnosis = ""
-    loop._last_pmc_full = ""
     loop.config = SimpleNamespace(gpu_target="gfx942")
     # No round is open around these iterations, so the measurement they run is
     # charged to nothing -- which is also what a drain iteration does.
@@ -6566,7 +6565,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
-    experiment_count = len(first.tracker.list_experiments())
+    experiment_count = len(persisted_experiments(first.tracker.dir))
     bad_config = replace(first.ic, **{field_name: field_value})
 
     mismatched = IterationLoop(
@@ -6581,7 +6580,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
         )
 
     assert state_path.read_bytes() == before
-    assert len(first.tracker.list_experiments()) == experiment_count
+    assert len(persisted_experiments(first.tracker.dir)) == experiment_count
 
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):

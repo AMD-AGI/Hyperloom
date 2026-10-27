@@ -604,7 +604,7 @@ function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin.
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 61
 function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 52
 function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._run_analysis_refresh 57
-function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 60
+function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 58
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 66
 function-lines src/kernelforge/loop/campaign_config.py::CampaignConfig.from_dict 53
 function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 71
@@ -626,11 +626,11 @@ function-lines src/kernelforge/loop/run_state.py::RunState.from_dict 58
 function-lines src/kernelforge/loop/run_state.py::apply_iteration 51
 function-lines src/kernelforge/loop/runner.py::IterationLoop.__init__ 53
 function-lines src/kernelforge/loop/runner.py::IterationLoop._adopt_validated_warm_start 80
-function-lines src/kernelforge/loop/runner.py::IterationLoop._archive_attempt 54
+function-lines src/kernelforge/loop/runner.py::IterationLoop._archive_attempt 51
 function-lines src/kernelforge/loop/runner.py::IterationLoop._begin_locked_run 60
 function-lines src/kernelforge/loop/runner.py::IterationLoop._build_pending_keep 55
 function-lines src/kernelforge/loop/runner.py::IterationLoop._case_config_coverage 58
-function-lines src/kernelforge/loop/runner.py::IterationLoop._close_iteration 82
+function-lines src/kernelforge/loop/runner.py::IterationLoop._close_iteration 81
 function-lines src/kernelforge/loop/runner.py::IterationLoop._collect_session_candidate 140
 function-lines src/kernelforge/loop/runner.py::IterationLoop._decide_iteration_keep 58
 function-lines src/kernelforge/loop/runner.py::IterationLoop._implementer_history 81
@@ -726,11 +726,11 @@ module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py
 module-lines src/kernelforge/fusion/author.py 1260
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1431
-module-lines src/kernelforge/fusion/validate.py 1514
+module-lines src/kernelforge/fusion/validate.py 1476
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1235
 module-lines src/kernelforge/loop/insession_gate.py 1263
 module-lines src/kernelforge/loop/knowledge_integration.py 1464
-module-lines src/kernelforge/loop/runner.py 6494
+module-lines src/kernelforge/loop/runner.py 6479
 module-lines src/kernelforge/loop/task_preparer.py 1511
 module-lines src/kernelforge/orchestrator/analysis.py 1959
 module-lines src/kernelforge/orchestrator/orchestration.py 1831

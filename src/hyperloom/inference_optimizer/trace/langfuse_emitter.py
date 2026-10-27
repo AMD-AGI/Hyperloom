@@ -273,7 +273,6 @@ def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "wall_ms": row.get("wall_ms"),
         "snr_db": row.get("snr_db"),
         "validation_passed": row.get("validation_passed"),
-        "pmc_diagnosis": row.get("pmc_diagnosis"),
     }
 
 

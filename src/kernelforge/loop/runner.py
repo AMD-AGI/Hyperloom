@@ -696,7 +696,6 @@ class IterationResult:
     wall_ms: float | None = None
     mean_case_speedup: float | None = None
     snr_db: float | None = None
-    pmc_diagnosis: str = ""
     vgpr: int | None = None
     kept: bool = False  # True if change was kept, False if reverted
     commit_hash: str = ""
@@ -709,11 +708,6 @@ class IterationResult:
     crashed: bool = False
     # Full measurement detail for the candidate archive (not just the scalars above).
     bench_detail: dict = field(default_factory=dict)
-    pmc_full: str = ""
-    # Structured profile metadata (backend, bottleneck, target kernels, roofline dtype/AI/HBM+compute pct, SoL
-    # metrics) for the candidate archive's meta.json, so the supervisor / next agent can consume it without parsing
-    # prose.
-    profile_meta: dict = field(default_factory=dict)
     # Why the agent session ended this iteration (from the in-session gate / SDK): converged / block_budget_exhausted
     # / block_cap / turn_cap / gate_error / agent_stopped / sdk_*. "" when no agent ran.
     session_end_reason: str = ""
@@ -1770,8 +1764,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 bench_detail=pending.get("benchmark") or {},
                 snr_db=pending.get("snr_db"),
                 vgpr=pending.get("vgpr"),
-                pmc_diagnosis=result.pmc_diagnosis,
-                profile_meta=result.profile_meta,
                 baseline_wall_ms=pending.get("baseline_wall_ms"),
                 best_wall_ms_before=pending.get("best_wall_ms_before"),
                 best_mean_case_speedup_before=pending.get("best_mean_case_speedup_before"),
@@ -1787,7 +1779,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 shape=pending.get("shape") or {},
                 kernel_source=str(pending.get("kernel_source") or ""),
                 change_diff=str(pending.get("patch") or ""),
-                pmc_full=result.pmc_full,
                 validation_text=str(pending.get("validation_text") or ""),
             )
         )
@@ -4916,7 +4907,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         bench_detail=result.bench_detail,
                         snr_db=result.snr_db,
                         vgpr=result.vgpr,
-                        pmc_diagnosis=result.pmc_diagnosis,
                         baseline_wall_ms=self.ic.baseline_wall_ms,
                         best_wall_ms_before=best_before,
                         best_mean_case_speedup_before=best_mean_case_speedup_before,
@@ -4930,8 +4920,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         shape={},
                         kernel_source=attempt_source,
                         change_diff=self._full_diff(commit_hash) if commit_hash else attempt_diff,
-                        pmc_full=result.pmc_full,
-                        profile_meta=result.profile_meta,
                         validation_text=validation_text,
                         session_end_reason=result.session_end_reason,
                         turns=result.turns,
@@ -5533,7 +5521,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 snr_db=result.snr_db,
                 wall_ms=result.wall_ms,
                 mean_case_speedup=result.mean_case_speedup,
-                pmc_diagnosis=result.pmc_diagnosis,
                 vgpr=result.vgpr,
                 decision="KEEP" if result.kept else "REVERT",
                 notes=session_sink.get("plan", ""),
@@ -6487,8 +6474,6 @@ def _compact_history_entry(r: IterationResult) -> str:
         parts.append(f"snr={r.snr_db:.1f}dB")
     if r.vgpr:
         parts.append(f"vgpr={r.vgpr}")
-    if r.pmc_diagnosis:
-        parts.append(f"pmc='{r.pmc_diagnosis[:40]}'")
     if rat:
         parts.append(f"rat='{rat}'")
     return " ".join(parts)
