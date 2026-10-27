@@ -291,6 +291,12 @@ def _prepare_claude_environment() -> None:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = format_custom_headers(gateway.headers)
 
 
+# Applied to every session unless the operator's environment names the variable itself. Claude Code's non-essential
+# traffic includes a session-title request that resends the first prompt, uncached, at the session model's price; no
+# Forge session reads that title.
+_SESSION_ENV_DEFAULTS = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+
+
 def _builtin_tools(names: list[str]) -> list[str]:
     """Narrow a permission list to the built-in tools it names.
 
@@ -490,18 +496,19 @@ class ClaudeBackend:
 
     def _tool_policy_options(self, policy, spec: AgentRunSpec) -> dict[str, Any]:
         """The SDK options one generic tool policy asks for."""
-        allowed_tools: list[str] = []
-        if policy.read:
-            allowed_tools.append("Read")
-        if policy.search:
-            allowed_tools.extend(["Grep", "Glob"])
-        if policy.write:
-            allowed_tools.extend(["Edit", "Write"])
-        if policy.shell:
-            allowed_tools.append("Bash")
-        allowed_tools.extend(policy.extra_tools)
+        allowed_tools = self._role_tools(policy)
+        declared_tools = self._role_tools(spec.declared_tool_policy) if spec.declared_tool_policy else allowed_tools
+        permission_mode = policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")
+        described_only = sorted(set(_builtin_tools(declared_tools)) - set(allowed_tools))
+        if described_only and permission_mode != "dontAsk":
+            # Every other mode can approve a described tool that is missing from ``allowed_tools``: acceptEdits passes
+            # Edit and Write, bypassPermissions passes everything.
+            raise ClaudeBackendError(
+                f"a session that describes tools it may not use ({', '.join(described_only)}) must run with "
+                f"permission_mode='dontAsk', not {permission_mode!r}"
+            )
         options: dict[str, Any] = {
-            "allowed_tools": list(dict.fromkeys(allowed_tools)),
+            "allowed_tools": allowed_tools,
             # ``allowed_tools`` is only a permission list: the CLI still loads
             # and describes every built-in tool, and those schemas sit in the
             # cached prefix that is re-read on every turn of the session, so
@@ -517,8 +524,8 @@ class ClaudeBackend:
             # they dominate the prefix and this line saves only 5,317 tokens.
             # MCP tools are not part of the built-in set and are carried by
             # ``allowed_tools`` alone.
-            "tools": _builtin_tools(allowed_tools),
-            "permission_mode": (policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
+            "tools": _builtin_tools(declared_tools),
+            "permission_mode": permission_mode,
         }
         if policy.max_turns is not None:
             options["max_turns"] = policy.max_turns
@@ -600,6 +607,9 @@ class ClaudeBackend:
         if spec.env:
             # The SDK spawns the CLI with the inherited process environment and applies this over it.
             options["env"] = {**options.get("env", {}), **spec.env}
+        defaults = {key: value for key, value in _SESSION_ENV_DEFAULTS.items() if key not in os.environ}
+        if defaults:
+            options["env"] = {**defaults, **options.get("env", {})}
         return options
 
     @staticmethod

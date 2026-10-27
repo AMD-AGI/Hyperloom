@@ -262,6 +262,11 @@ class AgentRunSpec:
     # ``protected_globs`` add to them per session. A session that can write is refused without them, so a caller that
     # forgets them cannot run with nothing protected. Appended for the same reason as the fields above.
     protected_path_rules: ProtectedPathRules | None = None
+    # The tools a provider describes to the model, when they must differ from the ones ``tool_policy`` lets this
+    # session use. A resumed follow-up keeps the definitions of the conversation it continues, because they open the
+    # cached prefix every earlier turn was billed against; ``tool_policy`` alone still decides what it may run.
+    # Appended for the same reason as the fields above.
+    declared_tool_policy: AgentToolPolicy | None = None
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.

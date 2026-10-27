@@ -17,6 +17,7 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
+from kernelforge.loop.lessons import SUMMARIZER_ROLE
 from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
 from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
@@ -374,7 +375,7 @@ def test_summarizer_resumes_read_only_and_without_hooks():
 
     spec, session_id, feedback, usage = backend.calls[0]
     assert session_id == "sess-1"
-    assert feedback == "record your lesson"
+    assert feedback == f"{SUMMARIZER_ROLE}\n\nrecord your lesson"
     assert usage == "usage-obj"
     # The in-session gate's Stop hook would otherwise block the summarizing turn and push the agent back into editing
     # the kernel.
@@ -395,6 +396,79 @@ def test_summarizer_resumes_read_only_and_without_hooks():
     assert implementer_spec.hooks is not None
     assert implementer_spec.writable is True
     assert implementer_spec.read_only_resume is False
+
+
+def test_summarizer_keeps_the_prefix_the_implementer_session_cached():
+    """Same system prompt, same described tools: the summary turn reads the session's prefix instead of rewriting it."""
+    backend = _RecordingBackend()
+    implementer_spec = _spec(
+        tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100, thinking_budget_tokens=3000)
+    )
+
+    summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage=None)
+    asyncio.run(summarize("record your lesson"))
+
+    spec = backend.calls[0][0]
+    assert spec.system_prompt == implementer_spec.system_prompt
+    assert spec.declared_tool_policy == implementer_spec.tool_policy
+    # Thinking settings are part of what a cached prefix is matched against.
+    assert spec.tool_policy.thinking_budget_tokens == 3000
+    assert spec.tool_policy.permission_mode == "dontAsk"
+    assert spec.tool_policy.max_turns == 4
+
+
+def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="sess-1")], captured)
+    implementer_spec = _spec(tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100))
+    summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage=None)
+
+    asyncio.run(summarize("record your lesson"))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["resume"] == "sess-1"
+    assert kwargs["system_prompt"] == "implementer system prompt"
+    assert kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+    assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert kwargs["permission_mode"] == "dontAsk"
+
+
+@pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
+def test_describing_unpermitted_tools_requires_a_mode_that_refuses_them(mode):
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(
+        writable=False,
+        read_only_resume=True,
+        allow_dirty_targets=True,
+        allow_untracked=True,
+        protected_globs=["*"],
+        declared_tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
+        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, permission_mode=mode),
+    )
+
+    with pytest.raises(ClaudeBackendError, match="dontAsk"):
+        asyncio.run(backend.run(spec))
+
+
+def test_sessions_turn_off_claude_code_title_generation(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", raising=False)
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert captured["options"].kwargs["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+def test_an_operator_setting_for_nonessential_traffic_wins(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "0")
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in captured["options"].kwargs.get("env", {})
 
 
 def test_summarizer_is_none_without_a_session_id():

@@ -17,7 +17,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
     AgentToolPolicy,
 )
-from kernelforge.agent_backends.claude import ClaudeBackend
+from kernelforge.agent_backends.claude import _SESSION_ENV_DEFAULTS, ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
@@ -225,8 +225,10 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
         factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
 
 
-async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
-    """Pin the single-lane path: an ordinary session carries no overlay at all."""
+async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, monkeypatch):
+    """Pin the single-lane path: an ordinary session carries no overlay beyond the backend's own defaults."""
+    for key in _SESSION_ENV_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
@@ -251,11 +253,13 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
         )
     )
 
-    assert "env" not in captured["options"].kwargs
+    assert captured["options"].kwargs["env"] == _SESSION_ENV_DEFAULTS
 
 
-async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
+async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
     """The overlay reaches the provider option the SDK spawns the CLI with."""
+    for key in _SESSION_ENV_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
     workspace = _lane_dir(tmp_path, "claude-env")
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
@@ -279,7 +283,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
         )
     )
 
-    assert captured["options"].kwargs["env"] == {"AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {**_SESSION_ENV_DEFAULTS, "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):
