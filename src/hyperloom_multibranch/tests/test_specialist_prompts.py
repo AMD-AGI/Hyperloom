@@ -85,7 +85,7 @@ def test_the_role_reads_the_briefs_direction_menu_before_claiming_and_chooses_as
     prompt = " ".join(role_prompt(WORKLOAD).split())
 
     assert f'When the brief lists "{MENU_TITLE.split(" (")[0]}", read it before you claim' in prompt
-    assert "A brief without that list belongs to a branch the menu leaves out to compare against" in prompt
+    assert "A brief without that list: choose as you would without it." in prompt
 
 
 def test_the_role_profiles_through_a_profile_test_and_tracelens():
