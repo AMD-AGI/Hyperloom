@@ -285,6 +285,15 @@ def test_the_window_holds_four_of_the_longest_root_tests_when_that_is_longer(sna
     assert paced(POLICY, 300.0) == POLICY and paced(POLICY, None) == POLICY
 
 
+def test_a_baseline_read_from_the_prelude_childs_run_paces_the_window_by_that_run(snapshot: NotebookSnapshot) -> None:
+    assert snapshot.baseline is not None
+    child_run = dataclasses.replace(snapshot.baseline, request_ids=(), source="prelude-child:r1", wall_seconds=5288.0)
+
+    longest = longest_root_test_seconds(dataclasses.replace(snapshot, baselines=(child_run,)))
+
+    assert longest == 5288.0 and paced(POLICY, longest).window_seconds == 4 * 5288.0
+
+
 def test_the_prior_counts_only_branches_that_spent_as_many_tests() -> None:
     assert remaining_prior((PAYS_LATE, PAYS_SOON), TASK, 4) == remaining_prior((PAYS_LATE,), TASK, 4)
     assert remaining_prior((PAYS_SOON,), TASK, 4) is None

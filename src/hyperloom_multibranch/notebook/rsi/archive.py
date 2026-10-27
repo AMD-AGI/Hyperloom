@@ -258,9 +258,12 @@ def session_start(snapshot: NotebookSnapshot) -> float:
 
 def longest_root_test_seconds(snapshot: NotebookSnapshot) -> float | None:
     """The longest start-to-finish time of the root tests the baseline anchored on, the one PRELUDE logs; ``None``
-    before a baseline or when none of them recorded both times."""
+    before a baseline or when none of them recorded both times. A baseline read from the PRELUDE child's run anchors on
+    no root test: that run's wall time stands in."""
 
     baseline = snapshot.baseline
+    if baseline is not None and not baseline.request_ids:
+        return baseline.wall_seconds
     anchored = set(baseline.request_ids) if baseline is not None else set()
     walls = [
         record.result.finished_at - record.result.started_at
@@ -455,7 +458,7 @@ def tree_from_snapshot(
         branches=tuple(reading.branch(node) for node in snapshot.lineage.branches),
         noise=MeasurementNoise(
             dispersion_pct=baseline.dispersion_pct.get(metric),
-            samples=len(baseline.request_ids),
+            samples=len(baseline.request_ids) or (1 if baseline.source else 0),
             environment=_environment(snapshot),
         ),
         policy_versions=dict(snapshot.fingerprints[-1].policy_versions) if snapshot.fingerprints else {},

@@ -213,6 +213,17 @@ def test_each_branch_keeps_who_drove_it_and_a_tree_written_before_reads_as_all_s
     assert all(branch.driver is BranchDriver.SPECIALIST for branch in tree_from_document(document).branches)
 
 
+def test_a_baseline_read_from_the_prelude_childs_run_counts_as_one_sample_and_paces_by_it(
+    snapshot: NotebookSnapshot,
+) -> None:
+    assert snapshot.baseline is not None
+    child_run = dataclasses.replace(snapshot.baseline, request_ids=(), source="prelude-child:r1", wall_seconds=5288.0)
+
+    searched = tree_from_snapshot(dataclasses.replace(snapshot, baselines=(child_run,)), METRIC)
+
+    assert (searched.noise.samples, searched.longest_root_test_seconds) == (1, 5288.0)
+
+
 @pytest.mark.parametrize(("merge_node", "environment"), [("node-1", SINGLE_HOST), ("node-2", "hosted")])
 def test_hosted_measurement_on_one_node_is_a_single_host(
     snapshot: NotebookSnapshot, merge_node: str, environment: str
