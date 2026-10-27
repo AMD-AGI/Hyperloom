@@ -36,6 +36,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     validate_envelope,
 )
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir, manifest_path
+from hyperloom.common.coerce import optional_positive_int, to_int
 from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
@@ -397,11 +398,8 @@ class CriticAgentBackend:
         raw = os.environ.get("CRITIC_AGENT_MAX_COMPLETION_TOKENS")
         if raw is None or not raw.strip():
             return CRITIC_AGENT_MAX_COMPLETION_TOKENS
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value <= 0:
+        value = optional_positive_int(raw)
+        if value is None:
             log.warning(
                 "CRITIC_AGENT_MAX_COMPLETION_TOKENS=%r is not a positive integer; using default %d",
                 raw,
@@ -957,15 +955,9 @@ class CriticAgentBackend:
         macro_cycle: int | None = None,
     ) -> None:
         """Stamp the timeline keys for the next reactor turn and request."""
-        try:
-            self._trace_tick = int(tick) if tick is not None else None
-        except (TypeError, ValueError):
-            self._trace_tick = None
+        self._trace_tick = to_int(tick)
         self._trace_phase = (str(phase) or None) if phase else None
-        try:
-            self._trace_macro_cycle = int(macro_cycle) if macro_cycle is not None else None
-        except (TypeError, ValueError):
-            self._trace_macro_cycle = None
+        self._trace_macro_cycle = to_int(macro_cycle)
 
     def _trace_critic_llm_call(
         self,

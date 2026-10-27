@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
 from hyperloom.common.llm_headers import parse_unexpanded_headers
@@ -450,14 +451,7 @@ def _private_codex_home(
 
 def _usage_int(payload: dict[str, Any], key: str) -> int:
     """Read one non-negative token count, treating unusable values as 0."""
-    value = payload.get(key)
-    if isinstance(value, bool):
-        return 0
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed >= 0 else 0
+    return max(0, to_int(payload.get(key), 0))
 
 
 def normalize_codex_usage(usage: Any) -> dict[str, int]:

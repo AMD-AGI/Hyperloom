@@ -8,12 +8,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
@@ -109,15 +109,8 @@ def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
 
 def _coerce_score(raw: Any) -> float | None:
     """Coerce a model-emitted score into a clamped [0, 10] float."""
-    if isinstance(raw, bool):
-        return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(val):
-        return None
-    return max(0.0, min(10.0, val))
+    val = to_float(raw)
+    return None if val is None else max(0.0, min(10.0, val))
 
 
 def _normalise_model_scores(
