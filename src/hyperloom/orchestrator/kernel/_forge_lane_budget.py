@@ -166,7 +166,8 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     explicit = _positive_int(payload.get("attn_tp"))
     if explicit:
         return explicit
-    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+    from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+    from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
     server_args = str(payload.get("extra_server_args") or "").strip()
     if not server_args:
@@ -177,8 +178,8 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     # launch_infera_node injects --dp-size = tp when a dp-attention flag arrives
     # without one, and these args are read before that injection.
     dp = (
-        _positive_int(_parse_server_arg(server_args, "--dp-size"))
-        or _positive_int(_parse_server_arg(server_args, "--data-parallel-size"))
+        _positive_int(server_arg_value(server_args, "--dp-size"))
+        or _positive_int(server_arg_value(server_args, "--data-parallel-size"))
         or tp
     )
     return max(1, tp // dp)
