@@ -101,10 +101,11 @@ an answer; rewrite it before going on.
   of mitigations. What pins it is evidence outside the description — failing output, a session
   artifact, a measurement re-run at `base.txt`; sourced to the body alone it is `[unverified]` and
   E1 decides what that costs. A body listing three improvements is the tell nobody found the cause.
-- **Q2 — Name the route, and the layer at each end.** Which module, which function, which call path
-  now behaves differently. Then place two things on one vocabulary — `admission boundary`,
-  `producer`, `intermediate`, `final consumer`: where this diff touches, and where the bad value is
-  born. Both go on the card. Different layers, with the upstream one untouched, is E4.
+- **Q2 — Name the route, and the layer at each end.** Place two frames on this upstream-first
+  vocabulary — `admission` (could refuse the input), `producer` (computes the value), `intermediate`
+  (passes it on), `consumer` (acts on it): the frame this diff changes, and the earliest frame that
+  could have refused the bad value. Both go on the card; strictly downstream with no hunk upstream
+  is E4.
 - **Q3 — What does this make observable to an operator?** A behaviour, an interface, a default, a
   flag, an artifact path, a metric, a log line. If the answer is "nothing", say what makes that
   true — that claim is what the exemption in `AGENTS.md` rests on.
@@ -171,7 +172,7 @@ A clean, well-written description is something AI produces easily; these are the
 a diff that reads well hides its defects. One line per check into `$WORK/ai_diagnostic.txt`:
 
 ```
-<check>: CLEAN|HIT -- <what you looked at and what you found>
+<check>: CLEAN|HIT|N/A -- <what you looked at and what you found>
 ```
 
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
@@ -187,9 +188,9 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 3. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
    mock of it? Does it assert behaviour or restate the implementation? Would it fail on the merge
    base? A regression test that passes on base pins nothing.
-4. `patch-shape` — **A fix that cannot reach its own cause.** Run only where the diff claims to fix
-   something, read against Q2's two layers, each shape naming the file:line that carries it. Any hit
-   is an E4 candidate, and the first two are blocking on their own:
+4. `patch-shape` — **A fix that cannot reach its own cause.** Run on a fix PR as the card contract
+   defines one, against Q2's two frames, each shape naming its file:line; elsewhere write `N/A`.
+   Any hit is an E4 candidate, and the first two are blocking on their own:
    - every production hunk lands in failure classification, naming or reporting — a diff whose whole
      footprint is what the failure is *called* cannot stop it happening (#2015);
    - the error class, message or identifier the body quotes appears in neither the changed files nor
@@ -237,7 +238,8 @@ trigger reachable in a real configuration; is the point already made in `comment
 other than an earlier review-pr card. A finding on an earlier card is not "already made": it is
 settled in `prior_verdicts.txt`, kept if it still holds and dropped if it was fixed.
 
-Then hand `card.md`, the diff and `base.txt` to a reader who has not seen your reasoning — a second
+Then hand the surviving findings as they will appear, the diff and `base.txt` to a reader who has
+not seen your reasoning — a second
 agent or a person — with every finding false until defended. `$WORK/independent.txt` takes the same
 `FINDING` / `ATTEMPT` / `OUTCOME` blocks, one per finding that survived above. With no such reader,
 write `FINDING: none -- no independent reader available` and say so on the card.
@@ -260,11 +262,11 @@ What it does: <one or two sentences: the wrong behaviour or missing capability, 
 taken. Written for someone who has not read the diff.>
 
 Scenario: <Q6's values and order, then what the head does under them. Fix PRs only.>
-Layer: <Q2's two: where the diff touches -> where the bad value is born. Fix PRs only.>
+Layer: <Q2's two frames: the one this diff changes -> the earliest that could have refused.>
 
 Blocking issues: <N | none>
 
-1. [<RULE-ID|free:slug>] <one-line summary> [verified|inferred]
+1. [<RULE-ID|free:slug>] <one-line summary> [verified]
    Problem: <what is wrong> path/to/file.py:123
    Impact: <what it costs at runtime>
    Action: <verb> <what to change>
@@ -275,10 +277,10 @@ deferred: <key> -- <reason>
 Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Prior: <KEY status, ...> | Base: <merge-base sha> | Head: <head sha>
 ```
 
-`Scenario:` and `Layer:` are written whenever the PR claims to fix something, and only then. They
-are what a reader checks the fix against: a scenario in actual values, and the two layers from Q2.
-"when the config is invalid" is not a scenario — if neither the body nor a surviving artifact pins
-it, write `Scenario: [unverified] -- <what you looked for>`, which is E2's finding, not a blank.
+`Scenario:` and `Layer:` are written when `title.txt` carries a `fix` prefix or the body names a
+concrete failure — an error string, a session id, an RSI problem, `Fixes #N` — and only then; that
+is E2's trigger. "when the config is invalid" is not a scenario: if neither the body nor a
+surviving artifact pins it, write `Scenario: [unverified] -- <where you looked>`, E2's finding.
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
 survived both refutation passes is not dropped in silence — it goes on a `deferred:` line, which is
@@ -298,9 +300,10 @@ refutation.
 ### Evidence threshold
 
 - `[verified]` — you opened the code, followed the chain, and can name the input, configuration or
-  phase that triggers it.
+  phase that triggers it; for an E1 or E2 evidence gap, naming where you looked — body, artifacts,
+  commits — and what was not there is what verifies it.
 - `[inferred]` — plausible, not confirmed. An inferred finding is not blocking: verify it or delete
-  it, do not ship it as a question at the bottom of the card.
+  it. `pr-review-publish.sh` refuses a card whose blocking findings are not all `[verified]`.
 
 A finding with no `path:line` does not go on the card, and one that stops at "likely the root
 cause" with no chain is not shippable.
@@ -344,18 +347,6 @@ A finding produced by a sub-agent is a hypothesis. Before publishing it, do all 
 
 A finding that fails any of these is deleted, not downgraded. Report one verified finding rather
 than five unconfirmed ones. Nothing in the output says "a sub-agent found" — you own every line.
-
-## Adding a new rule
-
-When a human reviewer catches something this skill missed:
-
-1. Add the rule body to `rules.md` under its family, with the real PR it was learned from quoted as
-   evidence. A rule with no PR behind it is a hypothetical and does not go in.
-2. Put its id on an index row whose trigger a reviewer can match against `files.txt` and the diff,
-   or add a row. A rule on no row is never read.
-3. Write the false-positive self-check into the body: the condition under which the shape is
-   correct and the rule must stay silent.
-4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
 
 **Nothing new goes in this file.** SKILL.md is budgeted at 365 lines and holds only what every
 review needs. Past that length a skill stops being read in full, and an unread instruction is worth

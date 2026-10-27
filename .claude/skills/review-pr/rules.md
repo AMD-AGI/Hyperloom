@@ -21,6 +21,18 @@ statement of the same review posture.
 
 ---
 
+## Adding a rule
+
+When a human reviewer catches something the skill missed:
+
+1. Add the rule body under its family, with the real PR it was learned from quoted as evidence. A
+   rule with no PR behind it is a hypothetical and does not go in.
+2. Put its id on an index row whose trigger a reviewer can match against `files.txt` and the diff,
+   or add a row. A rule on no row is never read.
+3. Write the false-positive self-check into the body: the condition under which the shape is
+   correct and the rule must stay silent.
+4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
+
 ## Index
 
 Pick every row whose left column matches the changed files and a skim of the diff, then read only
@@ -133,9 +145,9 @@ opened for stays live.
 
 **Severity:** blocking
 **Fires when:** `body.txt` or `title.txt` gives a measurement or a causal claim as the reason for the change: a function over a complexity, length or parameter ceiling; a run truncated by a cap, budget or timeout; a named session's duration or termination reason; a percentage, count or baseline entry.
-**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged. Complexity and size go through `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` or the `ruff --select C901|PLR0913 --isolated` invocations D12 and D14 name, read against the thresholds in `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against `scripts/code_metrics_baseline.txt`; an author's figure from another tool is not the repo's gate. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
-**Seen in:** PR #2009 -- `_validate_restore_record` was refactored to "bring it under the ceiling" while ruff C901 at the merge base measured 8 against a threshold of 20, with no entry in `code_metrics_baseline.txt`; the card said outright "I did not independently recompute the CC numbers" and reported no finding. PR #2046 -- five functions were split for the same reason; `load_controller_publication` measured 18 at base, and the PR landed at net 0 production lines once the premise was checked. PR #1981 -- the cap was raised because a round was said to hit it, while the three profile attempts in the named session ran about 128 s each and ended `orchestrator_cancelled` against a 7200 s cap; the PR was closed.
-**Not a finding when:** the premise reproduces, or it rests on state no artifact retained and the body says so -- then the figure is `[unverified]` and E2 decides on the mechanism instead.
+**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged, and *the repo's own tool* is the binding half. Cyclomatic complexity is `radon cc` at the version `scripts/code_metrics.py` pins, never Ruff's `C901`: the two disagree by a factor on the same function, because radon counts every `and`, `or`, ternary, comprehension and `assert` and mccabe does not. Parameter count is `ruff --select PLR0913`. Read either against `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against `scripts/code_metrics_baseline.txt`, or let `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` do both. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
+**Seen in:** PR #1981 -- the cap was raised because a round was said to hit it, while the three profile attempts in the named session ran about 128 s each and ended `orchestrator_cancelled` against a 7200 s cap; the PR was closed. The inverse, and the reason this rule names its tool: reviewing PR #2009 and PR #2046 with `ruff --select C901` put `_validate_restore_record` at 8 and `load_controller_publication` at 18, both far under the ceiling, and made two correctly-motivated refactors look unmotivated -- `radon cc`, which the gate pins, puts the same two functions at 23 and 30, and #2046's body had said 30 all along. A premise checked with the wrong tool is worse than one not checked at all, because it arrives with a number attached.
+**Not a finding when:** the premise reproduces, or it rests on state no artifact retained and the body says so -- then the figure is `[unverified]` and E2 decides on the mechanism instead. Never when your own measurement came from a tool the gate does not run.
 **Evidence:** the tool invocation and its output at `base.txt`, quoted with the threshold it is read against; `$WORK/body.txt` for the claim.
 **Report as:** `E1 -- the body gives <claim> as the reason; at <base sha> <tool> measures <actual> against <threshold> -- the premise does not hold`
 
@@ -947,7 +959,7 @@ this diff did not grow it); the file is a test, or sits in `extend-exclude`, whi
 the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
-**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+**Evidence:** both radon invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
 for the branches that moved the number.
 **Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
 the ceiling of 20; split it or keep <added branch> out of it`
