@@ -73,7 +73,7 @@ follow [`references/re-review.md`](references/re-review.md) beside the steps bel
 | `title.txt`, `body.txt` | the title, one line, and the description — rule X2 checks both against the diff |
 | `diff.txt` | the full diff against the merge base |
 | `files.txt` | changed paths, one per line — the input to rule selection |
-| `numstat.txt` | added, deleted, path — size and shape of the change |
+| `numstat.txt`, `netlines.txt` | added, deleted, path; and E3's production total, `src/` outside `tests/`, binary rows excluded |
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
@@ -85,7 +85,7 @@ follow [`references/re-review.md`](references/re-review.md) beside the steps bel
 ## Step 1b — Select the rules
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
-`files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
+`files.txt`, a skim of `diff.txt`, or a `label:` line in `meta.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
 per line, then read only those bodies. **Never read `rules.md` whole** — it holds 74 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are

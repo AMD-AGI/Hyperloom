@@ -40,7 +40,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/` | X1 X3 D12 X8 |
+| changes any non-test file under `src/` | X1 X3 X8 |
 | gives a measurement or a causal claim as the reason for the change: a function over a ceiling, a run truncated by a cap or timeout, a named session's duration or termination reason, a percentage or baseline entry | E1 |
 | names a concrete failure it addresses: an error string, a session id, an RSI problem, `Fixes #N` | E2 E4 |
 | is typed `refactor`, or gives simplification, complexity or structure as the reason | E1 E3 |
@@ -67,7 +67,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds a new module, or adds methods, fields or imports to a module or class already over a size trigger | A5 |
 | extracts a function from a long one, or cites the complexity or size trigger as the reason for a split | A6 |
 | branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 |
-| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | D14 |
+| carries a `baseline-raise` label in `meta.txt`, waiving the `code-metrics` gate, and adds or widens a `def`/`async def` under `src/` outside `tests/` | D12 D14 |
 | adds an `isinstance`/`is None`/`or {}` guard on an internal value, a renaming local, or an `except ...: raise` | A13 |
 | adds or renames a function, parameter, module binding or import alias | A14 |
 | reaches through two or more collaborators (`a.b.c.method()`), or adds a module function that mostly reads one parameter's fields | A4 |
@@ -168,7 +168,7 @@ opened for stays live.
 **The rule:** count `src/` paths outside a `tests/` directory from `numstat.txt`; added minus deleted is the number, and it goes on the card beside the mechanism the change removed. A refactor that grows production code has to name what it took away -- a branch, a state, a copy, a layer -- and a new helper, a new module or a named unit around existing code is not that. `AGENTS.md` *Simplify by removing a mechanism* is the bullet. The comparison that settles it is the delete-first alternative: what the same goal costs when the duplicated or dead code goes first, which is frequently negative where the PR is positive.
 **Seen in:** no single PR -- a window of thirteen. The seven refactors a card cleared with no finding landed at net +395 (#2010), +260 (#2014), +116 (#2016), +109 (#2018), +27 (#2012), +24 (#2007) and +13 (#2009) production lines; the six a human sent back over the same weeks landed at net -184 (#2019), -134 (#2020), -94 (#1961), -73 (#1992), -43 (#1998) and -26 (#1964). Same authors, same kind of change; the variable was whether anyone counted. #2046 went from +40 lines and 7 new functions to +0 once the count was asked for.
 **Not a finding when:** the body states the net figure and the mechanism removed, and the growth is a stated one-off -- a split that deletes a duplicated copy at a second site in the same diff, or a staged first half whose follow-up the body names.
-**Evidence:** `$WORK/numstat.txt`, summed over `src/` paths outside `tests/`; `$WORK/body.txt` for the mechanism the PR claims to remove.
+**Evidence:** `$WORK/netlines.txt` -- `net:` is the number, already summed over `src/` paths outside `tests/`; `$WORK/body.txt` for the mechanism the PR claims to remove.
 **Report as:** `E3 -- refactor adds <N> net production lines and removes no mechanism; <alternative> reaches the same state at <M>`
 
 ### E4 -- Fix where the input is admitted, not where it finally breaks
