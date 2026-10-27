@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -40,7 +40,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.contracts.sources import SourceRoot, source_roots
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.repo.stack import ScratchBlobs, stack_files
@@ -90,7 +90,8 @@ class GitExperimentRepo:
 
     No working tree or index is involved, so writers on different branches never contend, and two writers racing on one
     branch leave exactly one commit on it. ``aiter_configs`` is the aiter install a merge that unites two kernel tables
-    reads their shape key from, the image's when ``None``.
+    reads their shape key from, the image's when ``None``. ``native`` is each component's native tree, where the
+    host builds native code: a patch to it applies there.
     """
 
     def __init__(
@@ -99,11 +100,13 @@ class GitExperimentRepo:
         blobs: BlobStore,
         locator: PackageLocator = locate_installed_package,
         aiter_configs: Path | None = None,
+        native: Mapping[str, NativeTree] | None = None,
     ) -> None:
         self._path = path.resolve()
         self._blobs = blobs
         self._locator = locator
         self._aiter_configs = aiter_configs
+        self._native = dict(native or {})
         # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
         # repository, so none reaches git and GIT_DIR names this one.
         inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
@@ -260,10 +263,10 @@ class GitExperimentRepo:
         return stack_files(component, self._roots(component), self._blobs, paths)
 
     def _roots(self, component: ComponentPatches) -> tuple[SourceRoot, ...]:
-        """The trees ``component``'s patches apply to: its installed package, and the meta trees the specialist's
-        source base lays out beside it."""
+        """The trees ``component``'s patches apply to: its installed package, the meta trees the specialist's source
+        base lays out beside it, and its native tree."""
         layout = self._layout(component)
-        return source_roots(layout, self._locator(layout).path)
+        return source_roots(layout, self._locator(layout).path, self._native.get(component.component))
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:
