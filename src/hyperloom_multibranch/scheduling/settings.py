@@ -86,6 +86,14 @@ class Workload:
         return GRADED_INTVTY_P50 if self.inferencex is None else GRADED_OUTPUT
 
     @property
+    def profiles_moved_head_on_merge(self) -> bool:
+        """Whether the integration head a large merge moved is profiled at once, or only once a branch opens on it.
+        An AgentX profile replays the trace window, as long as a test, on one of the integration branch's slots, where
+        it would hold up the merge tests offered on the moved head."""
+
+        return self.inferencex is not None
+
+    @property
     def final_concs(self) -> tuple[int, ...]:
         """The concs FINAL measures a candidate at: the sweep around ``conc`` for InferenceX, and ``conc`` alone for
         AgentX, which defines no other operating point."""

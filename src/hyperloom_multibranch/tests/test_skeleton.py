@@ -2149,3 +2149,29 @@ async def test_a_backend_without_tool_jobs_is_asked_for_one_profile_and_noted_as
     assert profile.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
     [noted] = [row for row in _decisions(stage) if row["kind"] == "profile"]
     assert (noted["reason"], noted["detail"]["code"]) == (PROFILE_UNAVAILABLE, "no_tool_executor")
+
+
+async def test_an_agentx_large_merge_leaves_the_head_unprofiled_until_the_judge_opens_a_branch_on_it(
+    tmp_path: Path,
+) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
+    stage = _stage(tmp_path, child=child)
+    stage.settings = replace(SETTINGS, workload=AGENTX)
+    opening = _reply({"open": 1, "branches": [], "stop": []})
+    stage.judge = ScriptedCompletion([opening, opening])
+    stage.scripts = {"b01": (tagged("c1"),)}
+    stage.measured = {**CURVES, frozenset({"c1"}): {MAIN_POINT: 1500.0, CONC: 1500.0}}
+    stage.toolbox_type = AnalysingToolbox
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert stage.sessions.started["b02"] == head
+    [(_, profile)] = _profiles(stage.toolbox)
+    assert (profile.branch_id, profile.parent_commit) == (INTEGRATION_BRANCH, head)
+    [moved] = [row for row in _decisions(stage) if row["kind"] == "event"]
+    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
+    running = [(call["at"], '"profile_running": true' in call["prompt"]) for call in calls]
+    assert running[:3] == [(START, False), (moved["at"], False), (moved["at"] + SETTINGS.judge_interval_seconds, True)]

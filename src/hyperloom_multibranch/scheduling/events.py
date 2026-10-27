@@ -20,7 +20,10 @@ branch builds on. Nothing here scores the frontier, which logs a round every tim
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
 Both wait for the measurement to end, so the tick only starts the task and looks whether it is done. The PROFILE takes
-one of the integration branch's K slots. A backend that cannot profile, by refusing the PROFILE, failing it or running
+one of the integration branch's K slots; when the workload's profile would hold that slot as long as a test, the moved
+head is profiled only once a branch opens on it (:attr:`~.settings.Workload.profiles_moved_head_on_merge`). A head whose
+recipe a profile already measured, maybe a branch's of its own commit, is not profiled again: it reads that profile's
+shares. A backend that cannot profile, by refusing the PROFILE, failing it or running
 no analysis, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
 a cold start and holds the integration branch's slot. The toolbox's own names are imported where the profile uses
 them: the toolbox loads the main flow's runtime, which importing the session must not.
@@ -50,6 +53,8 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.widening import refill_focus
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -205,7 +210,8 @@ class IntegrationProfiler:
     The profile is a PROFILE test of the head through ``tests``, at the default priority of its purpose, then a
     TraceLens analysis of that test, whose op shares the ``records`` hold once the analysis has ended. Its bottleneck is
     compared with the shares of the previous profile, or else with those of the head the move started from. Once a
-    profile shows the backend cannot profile, no profile starts again.
+    profile shows the backend cannot profile, no profile starts again. A head the toolbox refuses to profile, because a
+    profile of its recipe exists, takes that profile's shares once its analysis left them.
     """
 
     def __init__(self, toolbox: RealToolbox, tests: SessionTests, records: RecordSearch, clock: Clock) -> None:
@@ -217,6 +223,7 @@ class IntegrationProfiler:
         self._waiting: tuple[str, str] | None = None
         self._shares: OpShares | None = None
         self._available = True
+        self._same_recipe: dict[str, str] = {}
 
     @property
     def running(self) -> bool:
@@ -251,6 +258,15 @@ class IntegrationProfiler:
             self.start(*waiting)
         return outcome
 
+    async def shares_of(self, commit: str) -> OpShares | None:
+        """The op shares of ``commit``: its own, else those of the profile of its recipe the toolbox named when it
+        refused to profile ``commit`` again."""
+
+        own = await self._records.op_shares(commit)
+        if own is not None or commit not in self._same_recipe:
+            return own
+        return await self._profile_shares(self._same_recipe[commit])
+
     async def stop(self) -> None:
         """Cancel the running profile, which takes its PROFILE test back; its analysis goes with the integration
         branch's withdrawal."""
@@ -278,12 +294,34 @@ class IntegrationProfiler:
             detail = {"commit": head, "code": rejected.code, "rejection": rejected.reason}
             if rejected.code == CODE_PROFILE_UNVERIFIED:
                 return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, detail)
-            if rejected.code == PROFILE_EXISTS_CODE:  # the head was profiled already, maybe by a specialist's branch
-                return ProfileOutcome(PROFILE_EXISTS, {**detail, "request_id": rejected.existing_request_id})
+            if rejected.code == PROFILE_EXISTS_CODE:
+                return await self._reused(head, str(rejected.existing_request_id), before, detail)
             unable = (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE)
             if rejected.code in unable:
                 return ProfileOutcome(PROFILE_UNAVAILABLE, detail, available=False)
             raise
+
+    async def _reused(
+        self, head: str, request_id: str, before: OpShares | None, detail: Mapping[str, object]
+    ) -> ProfileOutcome:
+        """The outcome of ``head`` reusing the profile ``request_id`` of its recipe, maybe a specialist branch's."""
+
+        self._same_recipe[head] = request_id
+        reused = {**detail, "request_id": request_id}
+        shares = await self._profile_shares(request_id)
+        if shares is None:
+            return ProfileOutcome(PROFILE_EXISTS, reused)
+        self._shares = shares
+        return ProfileOutcome(
+            PROFILE_EXISTS, {**reused, "largest_op": dict(shares.largest(1))}, bottleneck_moved(before, shares)
+        )
+
+    async def _profile_shares(self, request_id: str) -> OpShares | None:
+        """The shares the analysis of the PROFILE ``request_id`` left; an analysis keys them by the commit it profiled."""
+
+        profiled = (await self._records.record(request_id)).request.parent_commit
+        shares = await self._records.op_shares(profiled)
+        return shares if shares is not None and shares.profile_request_id == request_id else None
 
     async def _analysed(self, head: str, request_id: str, before: OpShares | None) -> ProfileOutcome:
         """Analyse the trace of the PROFILE ``request_id`` once it ended; the toolbox reads the trace off that test's
@@ -322,10 +360,11 @@ class SessionEvents:
 
     The integrator's task hands over each round's merge reports with :meth:`note_merges`; :meth:`detect` turns them,
     the quarantines put in force and the environment changes the ``notebook`` shows since the last tick and the
-    profile ``profiler`` finished, into events, and has the head a large merge moved to profiled. A quarantine lifted
-    and put in force again is a new event; an environment change is one event, however many ticks see it.
-    :meth:`record_card_shortage` reads the cards ``toolbox`` can still measure on against the ``cards_per_test`` one
-    test needs.
+    profile ``profiler`` finished, into events. The head a large merge moved to is profiled at once when the
+    ``workload`` profiles a moved head on its merge, else by :meth:`branches_opened_on` it. A quarantine lifted and put
+    in force again is a new event; an environment change is one event, however many ticks see it.
+    :meth:`record_card_shortage` reads the cards ``toolbox`` can still measure on against the cards one test of the
+    ``workload`` needs.
     """
 
     def __init__(
@@ -334,13 +373,15 @@ class SessionEvents:
         decisions: DecisionLog,
         profiler: IntegrationProfiler,
         toolbox: Toolbox,
-        cards_per_test: int,
+        workload: Workload,
     ) -> None:
         self._notebook = notebook
         self._decisions = decisions
         self._profiler = profiler
         self._toolbox = toolbox
-        self._cards_per_test = cards_per_test
+        self._cards_per_test = workload.tp
+        self._profile_on_merge = workload.profiles_moved_head_on_merge
+        self._unprofiled_move: str | None = None
         self._merges: list[MergeReport] = []
         self._quarantined: frozenset[tuple[str, tuple[int, ...]]] = frozenset()
         self._changes_seen: set[tuple[str, str]] = set()
@@ -358,13 +399,16 @@ class SessionEvents:
     async def detect(self) -> bool:
         """Record the events since the last tick as decisions and hold them for the judge; true when there was one.
 
-        A large merge has the head the last merge of the tick moved to profiled, when no profile runs."""
+        A large merge leaves the head unprofiled since the head the first merge of the tick moved from; on a workload
+        that profiles a moved head on its merge, the head the last merge moved to is profiled now."""
 
         found = self._profiled()
         moved = [event for event in map(integration_moved, self._merges) if event is not None]
         merged = [report for report in self._merges if report.merged_commit]
         if moved:
-            self._profiler.start(str(merged[-1].merged_commit), merged[0].onto)
+            self._unprofiled_move = self._unprofiled_move or merged[0].onto
+            if self._profile_on_merge:
+                self._profile_move(str(merged[-1].merged_commit))
         self._merges.clear()
         found = [*moved, *await self._environment(), *found]
         for event in found:
@@ -395,6 +439,22 @@ class SessionEvents:
         """Have ``head`` profiled, as a merge that moved it off ``moved_from`` would."""
 
         self._profiler.start(head, moved_from)
+
+    def branches_opened_on(self, commit: str) -> None:
+        """Have ``commit``, which branches just opened on, profiled when a large merge left the head unprofiled."""
+
+        self._profile_move(commit)
+
+    async def focus_on(self, commit: str, asked: tuple[str, ...], count: int) -> tuple[str, ...]:
+        """The focus of each of ``count`` branches opening on ``commit`` (:func:`refill_focus`), the ops the judge
+        ``asked`` for taken over the op shares of ``commit`` or of the profile of its recipe."""
+
+        return refill_focus(asked, count, await self._profiler.shares_of(commit))
+
+    def _profile_move(self, head: str) -> None:
+        if self._unprofiled_move is not None:
+            self._profiler.start(head, self._unprofiled_move)
+            self._unprofiled_move = None
 
     async def stop_profiling(self) -> None:
         await self._profiler.stop()

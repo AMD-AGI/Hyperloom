@@ -88,7 +88,7 @@ from hyperloom_multibranch.scheduling.roster import (
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
+from hyperloom_multibranch.scheduling.widening import Widening
 
 logger = logging.getLogger(__name__)
 
@@ -519,19 +519,21 @@ class Explorer:
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:
-        shares = await self._notebook.op_shares(start.start_commit)
-        return refill_focus(decision.focus, decision.open_count, shares)
+        return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
 
     async def _open_batch(
         self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
     ) -> tuple[BranchEntry, ...]:
         """Open up to ``count`` branches at K ``k`` as ``start`` says, briefed on ``focus``; none once its deadline has
         passed. The only place a batch is cut to the free slots: a fork or repair admitted while the batch starts can
-        take the last ones, and the branches that found no slot are recorded as ``open_cut``."""
+        take the last ones, and the branches that found no slot are recorded as ``open_cut``. A start commit a large
+        merge moved the head to is profiled once branches opened on it, unless its merge had it profiled."""
 
         if self._clock.now() >= start.deadline:
             return ()
         opened = await self._branches.open_branches(count, k, start, focus)
+        if opened:
+            self._events.branches_opened_on(start.start_commit)
         if len(opened) < count:
             detail = {"requested": count, "opened": len(opened), "open_cut": count - len(opened)}
             self._decisions.record(Decision(DecisionKind.OPEN, OPEN_CUT_REASON, detail=detail))

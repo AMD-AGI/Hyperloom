@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -23,6 +23,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     EnvironmentChange,
     OpShares,
     QuarantineEvent,
+    TestRecord,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome, QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected
@@ -46,6 +47,7 @@ from hyperloom_multibranch.scheduling.events import (
 )
 from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
@@ -53,6 +55,8 @@ from hyperloom_multibranch.toolbox.tools.base import JobStatus
 
 METRIC = "output_throughput"
 BAR = 2.0
+INFERENCEX = Workload("org/model", "vllm", 1, 16, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024))
+AGENTX = replace(INFERENCEX, inferencex=None)
 
 
 def _merged(gain_pct: float, outcome: MergeOutcome = MergeOutcome.MERGED) -> MergeReport:
@@ -154,15 +158,20 @@ CLOCK = Clock(now=lambda: 7.0, sleep=_no_wait)
 
 
 class _Shares:
-    """The notebook's op shares by commit, as the TraceLens results put them there."""
+    """The notebook's op shares by commit, as the TraceLens results put them there, and the records of the tests the
+    toolbox ``requests`` holds."""
 
     def __init__(self, shares: Mapping[str, OpShares] | None = None) -> None:
         self.shares = dict(shares or {})
         self.reads: list[str] = []
+        self.requests: Mapping[str, TestRequest] = {}
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
         self.reads.append(commit_id)
         return self.shares.get(commit_id)
+
+    async def record(self, request_id: str) -> TestRecord:
+        return TestRecord(self.requests[request_id])
 
 
 def _events(
@@ -170,12 +179,13 @@ def _events(
     log: Path,
     toolbox: FakeToolbox | None = None,
     shares: _Shares | None = None,
-    cards_per_test: int = 1,
+    workload: Workload = INFERENCEX,
 ) -> SessionEvents:
     toolbox = toolbox or FakeToolbox()
     records = shares or _Shares()
+    records.requests = toolbox.requests
     profiler = IntegrationProfiler(toolbox, SessionTests(toolbox, CLOCK), records, CLOCK)  # type: ignore[arg-type]
-    return SessionEvents(health, DecisionLog(log, CLOCK), profiler, toolbox, cards_per_test)
+    return SessionEvents(health, DecisionLog(log, CLOCK), profiler, toolbox, workload)
 
 
 @pytest.mark.parametrize(
@@ -203,8 +213,8 @@ def test_a_toolbox_runs_out_of_cards_below_what_one_test_needs_and_never_when_it
 
 async def test_a_card_shortage_is_recorded_and_never_shown_to_the_judge(log: Path) -> None:
     toolbox = FakeToolbox()
-    enough = _events(_Health(), log, toolbox, cards_per_test=8)
-    short = _events(_Health(), log, toolbox, cards_per_test=9)
+    enough = _events(_Health(), log, toolbox, workload=replace(INFERENCEX, tp=8))
+    short = _events(_Health(), log, toolbox, workload=replace(INFERENCEX, tp=9))
 
     assert not await enough.record_card_shortage() and _logged(log) == []
     assert await short.record_card_shortage()
@@ -314,18 +324,23 @@ def test_a_bottleneck_without_shares_to_compare_has_not_moved() -> None:
 
 class _HeadRecipes:
     """An experiment repository in which every commit holds a recipe of its own, as heads a large merge moved between
-    do; the toolbox keys a profile by its recipe, so heads sharing one would share a profile."""
+    do, except that each commit ``merged`` maps to holds the recipe of the commit it merged; the toolbox keys a
+    profile by its recipe, so heads sharing one share a profile."""
+
+    def __init__(self, merged: Mapping[str, str] | None = None) -> None:
+        self._merged = dict(merged or {})
 
     async def read_recipe(self, commit: str) -> Recipe:
-        return Recipe(FakeToolboxConfig().image_digest, LaunchConfig(envs={"HL_TEST_HEAD": commit}))
+        recipe_of = self._merged.get(commit, commit)
+        return Recipe(FakeToolboxConfig().image_digest, LaunchConfig(envs={"HL_TEST_HEAD": recipe_of}))
 
 
 class _AnalysingToolbox(FakeToolbox):
     """The toolbox module's fake with an analysis route: a TraceLens job that runs until ``finish`` puts its op shares
     in the notebook; not a placeholder, the fake has no tool jobs of its own."""
 
-    def __init__(self, shares: _Shares, **options: Any) -> None:
-        super().__init__(wiring=FakeWiring(repo=_HeadRecipes()), **options)  # type: ignore[arg-type]
+    def __init__(self, shares: _Shares, repo: _HeadRecipes | None = None, **options: Any) -> None:
+        super().__init__(wiring=FakeWiring(repo=repo or _HeadRecipes()), **options)  # type: ignore[arg-type]
         self._shares = shares
         self.analyses: list[tuple[str, str, dict[str, Any], str]] = []
         self.status = JobStatus.RUNNING
@@ -538,3 +553,96 @@ async def test_a_merge_during_the_profile_is_recorded_and_the_next_move_profiles
     await _until(lambda: len(toolbox.requests) == 2)
     [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
     assert (profile["reason"], profile["detail"]["code"]) == (HEAD_MOVED_DURING_PROFILE, CODE_PROFILE_UNVERIFIED)
+
+
+async def test_an_inferencex_merge_profiles_the_head_it_moved_at_once_and_a_branch_opened_on_it_profiles_nothing_more(
+    log: Path,
+) -> None:
+    toolbox = FakeToolbox(autorun=False)
+    events = _events(_Health(), log, toolbox, workload=INFERENCEX)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    await _until(lambda: toolbox.requests)
+
+    events.branches_opened_on("c-merged")
+    await events.detect()
+
+    assert [request.parent_commit for request in toolbox.requests.values()] == ["c-merged"]
+    await events.stop_profiling()
+
+
+async def test_an_agentx_merge_leaves_the_head_unprofiled_until_branches_open_on_it_and_then_profiles_it_once(
+    log: Path,
+) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
+    events.note_merges((_moved_onto("c-merged"),))
+
+    assert await events.detect()
+    [moved] = events.hand_over()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert moved.kind is EventKind.INTEGRATION_MOVED
+    assert not events.profiling and toolbox.requests == {}
+
+    events.branches_opened_on("c-merged")
+    await _until(lambda: toolbox.analyses)
+    events.branches_opened_on("c-merged")
+    toolbox.finish("c-merged", {"gemm": 55.0, "attn": 30.0})
+    await _until(lambda: not events.profiling)
+
+    assert await events.detect() and not events.profiling
+    [shifted] = events.hand_over()
+    assert (shifted.kind, shifted.detail["previous_commit"]) == (EventKind.BOTTLENECK_MOVED, "c-root")
+    assert [request.parent_commit for request in toolbox.requests.values()] == ["c-merged"]
+    assert await events.focus_on("c-merged", (), 2) == ("gemm", "attn")
+
+
+async def _branch_profiled(toolbox: _AnalysingToolbox, commit: str) -> str:
+    return await toolbox.submit_test(
+        replace(integration_test_request(TestKind.PROFILE, Purpose.PROFILE, commit), branch_id="b01")
+    )
+
+
+async def test_an_agentx_head_whose_recipe_a_branch_profiled_reads_that_profiles_shares_without_profiling_again(
+    log: Path,
+) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
+    branch_profile = await _branch_profiled(toolbox, "c-b01")
+    shares.shares["c-b01"] = OpShares("c-b01", "job-b01", branch_profile, {"gemm": 55.0, "attn": 30.0})
+    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.hand_over()
+
+    events.branches_opened_on("c-merged")
+    await _until(lambda: not events.profiling)
+
+    assert await events.detect()
+    [shifted] = events.hand_over()
+    assert (shifted.kind, shifted.detail["commit"]) == (EventKind.BOTTLENECK_MOVED, "c-b01")
+    assert list(toolbox.requests) == [branch_profile] and toolbox.analyses == []
+    assert await events.focus_on("c-merged", ("moe",), 2) == ("moe", "gemm")
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert (profile["reason"], profile["detail"]["request_id"]) == (PROFILE_EXISTS, branch_profile)
+
+
+async def test_a_head_reads_the_shares_of_its_recipes_profile_once_the_branch_that_made_it_analysed_it(
+    log: Path,
+) -> None:
+    shares = _Shares()
+    toolbox = _AnalysingToolbox(shares, _HeadRecipes({"c-merged": "c-b01"}), autorun=False)
+    branch_profile = await _branch_profiled(toolbox, "c-b01")
+    events = _events(_Health(), log, toolbox, shares, workload=AGENTX)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.branches_opened_on("c-merged")
+    await _until(lambda: not events.profiling)
+    await events.detect()
+
+    assert await events.focus_on("c-merged", (), 1) == ("",)
+    shares.shares["c-b01"] = OpShares("c-b01", "job-b01", branch_profile, {"gemm": 55.0})
+    assert await events.focus_on("c-merged", (), 1) == ("gemm",)
+    assert list(toolbox.requests) == [branch_profile]

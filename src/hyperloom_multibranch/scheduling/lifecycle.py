@@ -228,7 +228,7 @@ class Session:
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, self._clock)
-        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
+        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload)
         self._selector = FinalSelector(checks, settings.workload)
         self._signals = StopSignals()
         self._in_final = False
