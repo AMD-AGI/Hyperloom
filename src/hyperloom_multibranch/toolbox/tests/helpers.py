@@ -190,6 +190,7 @@ def build(
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     builds: BuildDriver | None = None,
     short_prompt_pool: ShortPromptPool | None = None,
+    aiter_builds_missing: str | None = None,
 ) -> Rig:
     """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for."""
@@ -213,7 +214,7 @@ def build(
     toolbox = RealToolbox(
         stores,
         executor,
-        AcceptanceSetup(repo, planner, active_image, workload_kind),
+        AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
         tools=tools(notebook) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(policy=policy, clock=clock),
     )

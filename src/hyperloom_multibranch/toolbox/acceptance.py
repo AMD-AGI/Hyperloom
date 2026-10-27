@@ -19,8 +19,10 @@ from typing import Protocol
 from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply, diff
-from hyperloom.measure.compile import BaseImageMismatchError, BlobStore
+from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
+from hyperloom.measure.compile import BaseImageMismatchError, BlobStore, CompiledEnvironment
 from hyperloom.measure.eval_context import EvalContextError
+from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
@@ -49,6 +51,10 @@ from hyperloom_multibranch.toolbox.short_prompts import (
 ONLINE_TUNING_CODE = "online_tuning_unsupported"
 CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
 NO_EFFECTIVE_CHANGE_CODE = "no_effective_change"
+DELTA_NOT_APPLICABLE_CODE = "delta_not_applicable"
+#: The refusal of a candidate that patches aiter's ``csrc`` or ``hsa`` on a toolbox whose tests cannot build the modules
+#: the patch touches; the reason the toolbox gives (``AcceptanceSetup.aiter_builds_missing``) follows it.
+AITER_SOURCES_REASON = "aiter csrc/hsa patches need native builds; this toolbox has none configured"
 ONLINE_TUNING_REASON = (
     f"{TUNABLEOP_ENABLED_ENV}=1 without {TUNABLEOP_TUNING_ENV}=0 tunes every GEMM shape the first time the server runs it: at "
     "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
@@ -123,6 +129,20 @@ def _check_online_tuning(candidate: Recipe) -> None:
         raise RequestRejected(ONLINE_TUNING_REASON, ONLINE_TUNING_CODE)
 
 
+def _check_aiter_sources(accepted: object, missing: str | None) -> None:
+    """Refuse a candidate that patches aiter's ``csrc`` or ``hsa`` when this toolbox cannot build the modules it touches
+    (``missing`` says why), unless its launch rebuilds every module itself (``AITER_REBUILD``): each attempt of its
+    test would be refused by its runner, and the image's prebuilt modules are not the patch."""
+    environment = getattr(accepted, "environment", None)
+    if missing is None or not isinstance(environment, CompiledEnvironment):
+        return
+    paths = [
+        entry.path for root in environment.roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries
+    ]
+    if paths and not build_surface((), environment.recipe.launch.envs, {}).rebuild:
+        raise RequestRejected(f"{paths[0]}: {AITER_SOURCES_REASON}: {missing}", DELTA_NOT_APPLICABLE_CODE)
+
+
 def _check_upstream_label(parent: Recipe, request: TestRequest) -> None:
     """Refuse a delta that moves the upstream label of a component the parent already has.
 
@@ -189,6 +209,10 @@ class AcceptanceSetup:
     that forces the consistency check (a lead being adopted), still run it. It is on by default because the rule gate
     still reads an eval score from every explore (``rulegate.readings.eval_score``); once the gate judges an explore
     without one, the default turns off and this field goes.
+
+    ``aiter_builds_missing`` says why this toolbox's tests cannot build the aiter modules a patch to aiter's ``csrc`` or
+    ``hsa`` touches (its runners would refuse every attempt of such a test); with it such a candidate is refused at
+    acceptance, naming the patched path. ``None`` (the default) accepts it.
     """
 
     repo: ExperimentRepo
@@ -199,6 +223,7 @@ class AcceptanceSetup:
     short_prompts: ShortPromptSetup | None = None
     long_context: LongContextSetup | None = None
     explore_accuracy: bool = True
+    aiter_builds_missing: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +260,7 @@ class Acceptance:
         self._patch_files = no_patch_files if blobs is None else blob_patch_files(blobs)
         self._long_context = setup.long_context
         self._explore_accuracy = setup.explore_accuracy
+        self._aiter_builds_missing = setup.aiter_builds_missing
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
         """The request an InferenceX campaign runs: ``baseline``, ``explore``, ``confirm``, ``integration`` and
@@ -271,7 +297,10 @@ class Acceptance:
         if not replay:
             _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
-        accepted = self._with_short_prompts(self._plan(recipe, request), recipe, candidate, request)
+        planned = self._plan(recipe, request)
+        if not replay:
+            _check_aiter_sources(planned, self._aiter_builds_missing)
+        accepted = self._with_short_prompts(planned, recipe, candidate, request)
         return Prepared(self._with_long_context(accepted, request), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
@@ -342,7 +371,7 @@ class Acceptance:
             return apply(recipe, request.delta)
         except RecipeError as error:
             raise RequestRejected(
-                f"the delta does not fit the parent recipe: {error}", "delta_not_applicable"
+                f"the delta does not fit the parent recipe: {error}", DELTA_NOT_APPLICABLE_CODE
             ) from error
 
     def _check_fake_gain(self, parent: Recipe, candidate: Recipe) -> None:
@@ -370,4 +399,4 @@ class Acceptance:
         except EvalContextError as error:
             raise RequestRejected(str(error), CONTEXT_BELOW_EVAL_CODE) from error
         except RecipeError as error:
-            raise RequestRejected(f"the environment does not compile: {error}", "delta_not_applicable") from error
+            raise RequestRejected(f"the environment does not compile: {error}", DELTA_NOT_APPLICABLE_CODE) from error

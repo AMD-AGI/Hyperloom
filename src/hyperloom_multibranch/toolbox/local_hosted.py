@@ -39,6 +39,7 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
@@ -300,6 +301,16 @@ def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = No
     return None if named is None else Path(named).expanduser().resolve()
 
 
+def aiter_builds_missing(runner_envs: Mapping[str, str]) -> str | None:
+    """Why the tests of runners with ``runner_envs`` cannot build the aiter modules a ``csrc``/``hsa`` patch touches,
+    ``None`` when they can: a runner builds them in the test's own aiter JIT directory, which only the shared
+    compiled-code cache gives (the CPU build of #125 stage 2b seeds that directory too), unless every module is rebuilt
+    (``AITER_REBUILD``)."""
+    if runner_envs.get(JIT_CACHE_ENV, "").strip() or build_surface((), runner_envs, {}).rebuild:
+        return None
+    return f"no JIT store ({JIT_STORE_ENV}) gives its tests an aiter JIT directory to build the touched modules in"
+
+
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
     """The runner template: the image's variables, ``runner_envs`` over them, and the variable that names the session's
     rule pack. ``runner_envs`` add to the image's variables, never replace them: without ``ROCM_PATH`` and
@@ -424,6 +435,7 @@ def build_local_toolbox(
     template = _runner_template(session, options)
     eval_sets = acceptance.short_prompts is not None or acceptance.long_context is not None
     shared_dirs = {**_shared_dirs(jit_root, eval_sets, os.environ), **(native.runner_envs if native else {})}
+    acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
     provider = _provider(session, cards, template, options, shared_dirs)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))

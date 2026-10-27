@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.measurement import FailureClass, Purpose, TestRequest
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure import signing
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore
@@ -33,9 +33,13 @@ from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
 from hyperloom.measure.spec import Environment
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.toolbox.acceptance import AITER_SOURCES_REASON
+from hyperloom_multibranch.toolbox.local_hosted import aiter_builds_missing
 from hyperloom_multibranch.toolbox.native_builds import compiled_needs, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.pending_builds import PendingBuilds
 from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests.test_native_builds import REQUEST, Hooks
 
 BUILDER = "sha256:" + "c" * 64
@@ -47,6 +51,7 @@ class AiterRig:
 
     def __init__(self, tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.tmp, self.blobs = tmp, LocalBlobStore(tmp / "blobs")
+        self.patches = 0
         self.package = standin.aiter_image(tmp / "image")
         locate = lambda name, python, cwd: self.package.parent / name  # noqa: E731
         monkeypatch.setattr(aiter_modules, "locate_package", locate)
@@ -64,9 +69,16 @@ class AiterRig:
             self.blobs, IMAGE, lambda layout: standin.package_base(self.package), modules=self.modules
         )
 
+    def recipe(self, text: str = PATCHED, **launch: str) -> Recipe:
+        self.patches += 1
+        work = self.tmp / f"up-{self.patches}"
+        patch = git_patch(work, {standin.KERNEL: standin.IMAGE_KERNEL}, {standin.KERNEL: text})
+        return recipe_with(
+            (put_patch(self.blobs, "k.patch", patch),), component="aiter", launch=LaunchConfig(envs=launch)
+        )
+
     def compile(self, text: str, *, modules: bool = True):
-        patch = git_patch(self.tmp / "up", {standin.KERNEL: standin.IMAGE_KERNEL}, {standin.KERNEL: text})
-        recipe = recipe_with((put_patch(self.blobs, "k.patch", patch),), component="aiter")
+        recipe = self.recipe(text)
         compiler = (
             self.compiler
             if modules
@@ -131,3 +143,62 @@ def test_a_host_with_no_build_store_keeps_its_acceptance_as_it_was(tmp_path: Pat
     acceptance = SimpleNamespace(planner=object())
 
     assert native is None and with_native_plan(acceptance, native) is acceptance  # type: ignore[arg-type]
+
+
+class OnCardPlanner:
+    """Acceptance's planner over the rig's compiler without the module plan (no build store, 2a): no points."""
+
+    def __init__(self, rig: AiterRig) -> None:
+        self.blobs = rig.blobs
+        self._compiler = EnvironmentCompiler(rig.blobs, IMAGE, lambda layout: standin.package_base(rig.package))
+
+    def plan(self, request: TestRequest, parent: Recipe) -> AcceptedMeasurement:
+        return AcceptedMeasurement(self._compiler.compile(parent, request.delta), ())
+
+
+NO_JIT_DIR = aiter_builds_missing({})
+
+
+async def test_a_csrc_patch_on_a_toolbox_whose_tests_cannot_build_its_modules_is_refused_at_submission(
+    rig: AiterRig,
+) -> None:
+    box = build(
+        rig.tmp / "box", repo=FakeRepo(rig.recipe()), planner=OnCardPlanner(rig), aiter_builds_missing=NO_JIT_DIR
+    )
+
+    with pytest.raises(RequestRejected) as refused:
+        await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+
+    assert refused.value.code == "delta_not_applicable", "the candidate's refusal, not the machine's"
+    assert refused.value.reason == f"{standin.KERNEL}: {AITER_SOURCES_REASON}: {NO_JIT_DIR}"
+    state = await box.toolbox.queue_state()
+    assert box.executor.jobs == [] and not state.queued_by_branch and not state.pending_build_by_branch, (
+        "nothing queued"
+    )
+
+
+async def test_a_csrc_patch_is_accepted_where_its_tests_can_build_the_modules(rig: AiterRig) -> None:
+    for missing, launch in ((None, {}), (NO_JIT_DIR, {"AITER_REBUILD": "1"})):
+        box = build(
+            rig.tmp / f"box-{len(launch)}",
+            repo=FakeRepo(rig.recipe(**launch)),
+            planner=OnCardPlanner(rig),
+            aiter_builds_missing=missing,
+        )
+        assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH)), (missing, launch)
+
+
+async def test_a_toolbox_with_no_jit_directory_still_takes_a_candidate_that_leaves_aiters_sources(
+    rig: AiterRig,
+) -> None:
+    box = build(rig.tmp / "box", repo=FakeRepo(), planner=OnCardPlanner(rig), aiter_builds_missing=NO_JIT_DIR)
+
+    assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+
+
+def test_a_runner_with_the_jit_cache_or_a_full_rebuild_can_build_aiters_modules() -> None:
+    assert NO_JIT_DIR is not None and "HYPERLOOM_JIT_STORE" in NO_JIT_DIR
+    assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": " "}) == NO_JIT_DIR, "an empty value names no directory"
+    assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": "/jit"}) is None
+    assert aiter_builds_missing({"AITER_REBUILD": "1"}) is None
+    assert aiter_builds_missing({"AITER_REBUILD": "0"}) == NO_JIT_DIR
