@@ -8,7 +8,8 @@ attempts into the request's single result:
 
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
   ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
-  repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported.
+  repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
+  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`) is retried once, and its node is not reported either.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -26,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import NamedTuple, Protocol
 
+from hyperloom.measure.failures import JIT_BUILD_TIMEOUT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -42,6 +44,10 @@ DEFAULT_MAX_INFRA_RETRIES = 3
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH})
+#: Infrastructure failures a fresh sandbox likely repeats but may not, retried once only and not held against the node:
+#: an aiter module rebuilt past the server's watchdog builds again in the next sandbox, unless the shared compiled-code
+#: cache took the first build.
+ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT})
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
 UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 
@@ -96,9 +102,18 @@ NodeFailure = Callable[[str, str, bool], Awaitable[None]]
 and True for an infrastructure failure the executor classified."""
 
 
-def _repeats_in_every_sandbox(reason: str | None) -> bool:
-    """Whether an infrastructure failure's ``reason`` names one that a retry in a fresh sandbox repeats."""
-    return bool(reason) and reason.partition(":")[0].strip() in UNRETRIED_INFRA_REASONS
+def _reason_name(reason: str | None) -> str:
+    """The name a failure's ``reason`` starts with, before its ``: <detail>``."""
+    return (reason or "").partition(":")[0].strip()
+
+
+def _retry_refused(reason: str | None, attempts: list[Attempt]) -> bool:
+    """Whether an infrastructure failure's ``reason`` names one that a retry in a fresh sandbox repeats, or one retried
+    once only that ``attempts`` (this one included) already met before."""
+    name = _reason_name(reason)
+    if name in UNRETRIED_INFRA_REASONS:
+        return True
+    return name in ONCE_RETRIED_INFRA_REASONS and sum(_reason_name(a.failure_reason) == name for a in attempts) > 1
 
 
 def _attempt_of(result: TestResult) -> Attempt:
@@ -176,14 +191,15 @@ class AttemptRunner:
                     )
                 reran = True
                 continue
-            if _repeats_in_every_sandbox(result.failure_reason):
+            if _retry_refused(result.failure_reason, attempts):
                 return self._final(
                     job,
                     result,
                     attempts,
                     _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, result.failure_reason),
                 )
-            await self._report(attempts[-1], result.failure_reason, reproduced=True)
+            if _reason_name(result.failure_reason) not in ONCE_RETRIED_INFRA_REASONS:
+                await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
                 reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
                 return self._final(

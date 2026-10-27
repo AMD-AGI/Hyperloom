@@ -72,6 +72,10 @@ _MISSING_KERNEL = re.compile(
 #: A write the file system refused for want of room: ``ENOSPC`` (errno 28) or ``EDQUOT`` (errno 122), as Python and the C
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
+_WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
+#: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
+#: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
+_JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
 _HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
@@ -140,3 +144,11 @@ def hip_error(text: str) -> str | None:
     return _last_matching(text, lambda line: bool(_HIP_EXCEPTION.search(line))) or _last_matching(
         text, lambda line: bool(_HIP_ERROR_TOKEN.search(line))
     )
+
+
+def jit_build_timeout(text: str) -> str | None:
+    """The watchdog's line when a server's scheduler watchdog fired while a stack it dumped was still in aiter's JIT build
+    (a module rebuilt at the first prefill, past the watchdog); ``None`` when either is missing."""
+    if not _JIT_BUILD_FRAME.search(text):
+        return None
+    return _last_matching(text, lambda line: bool(_WATCHDOG_TIMEOUT.search(line)))

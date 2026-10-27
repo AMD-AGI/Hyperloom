@@ -67,6 +67,13 @@ _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
 RUNNER_EXITED = "runner_exited"
 
+#: The server's scheduler watchdog fired while a rank was still building an aiter JIT module (a tuned table named
+#: kernel instances the image's prebuilt module lacks, so aiter rebuilt it at the first prefill). Nothing about the
+#: candidate's speed was learned, so it is an infrastructure failure, but a fresh sandbox rebuilds the same module: the
+#: attempts retry it once only (``hyperloom_multibranch.toolbox.attempts``). The reason is ``jit_build_timeout: <the
+#: watchdog's line>``.
+JIT_BUILD_TIMEOUT = "jit_build_timeout"
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -245,6 +252,9 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if full:
         # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
         return _infra(f"{DISK_FULL}: {full}")
+    hang = log_causes.jit_build_timeout(text)
+    if hang:
+        return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")
     signature = classify_failure(text)
     if signature.kind == EVAL_RUNTIME_FAILURE:
         refusal = log_causes.bad_request(text)

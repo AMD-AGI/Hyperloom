@@ -18,6 +18,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
+from hyperloom.measure.failures import JIT_BUILD_TIMEOUT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom_multibranch.toolbox.attempts import AttemptRunner, TestJob
 
@@ -91,3 +92,14 @@ async def test_another_infrastructure_failure_is_still_retried_on_other_nodes(re
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
     assert reported == ["n1", "n2", "n3", "n4"]
+
+
+JIT_REASON = f"{JIT_BUILD_TIMEOUT}: [TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
+
+
+async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node() -> None:
+    result, executor, reported = await _run(JIT_REASON)
+    assert len(executor.jobs) == 2 and len(result.attempts) == 2
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == JIT_REASON
+    assert reported == [], "the tables, not the node, made the server build past its watchdog"
