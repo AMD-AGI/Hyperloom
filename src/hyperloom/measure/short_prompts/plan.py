@@ -3,8 +3,8 @@
 
 """What the instruction sheet asks the runner to do for the short-prompt consistency check.
 
-The sheet names the staged prompt set by its key and by the hash of its prompts file, how many fresh server processes to
-try, how many tokens each prompt may generate, how long the whole check may take, and the lines of the recipe change that
+The sheet names the staged prompt set by its key and by the hash of its prompts file, how many server processes answer (the
+test's own server, then fresh ones up to that count), how many tokens each prompt may generate, how long the whole check may take, and the lines of the recipe change that
 made the toolbox ask for it (so a signed sheet says why the check ran).
 """
 
@@ -32,7 +32,9 @@ __all__ = [
 #: The directory, below a test's output directory, that holds the check's raw outputs; the signed bundle lists them.
 SHORT_PROMPTS_DIR = "short_prompts"
 OUTPUTS_FILE = "outputs.json"
-DEFAULT_PROCESSES = 6
+#: The test's own server only: the toolbox pools the processes of one recipe across its tests and plans fresh ones on top
+#: only where the pool is short.
+DEFAULT_PROCESSES = 1
 DEFAULT_MAX_NEW_TOKENS = 32
 #: The check's own time limit: a boot that hangs ends the check as incomplete, not the test.
 DEFAULT_PHASE_CAP_SEC = 1200.0
@@ -61,9 +63,9 @@ def _trigger_line(value: Any, path: str) -> str:
 @dataclass(frozen=True)
 class ShortPromptPlan:
     """One test's short-prompt check: ``prompt_set`` is the key of the staged entry and ``prompts_sha256`` the hash of its
-    prompts file; ``processes`` fresh servers each answer every prompt with at most ``max_new_tokens`` greedy tokens, and
-    the whole check ends, incomplete, after ``phase_cap_sec`` (the runner sizes it from the boots it measures once it has
-    measured one). ``trigger`` says why the check was asked for."""
+    prompts file; ``processes`` servers (the test's own, after its measured rounds, then fresh ones) each answer every prompt
+    with at most ``max_new_tokens`` greedy tokens, and the whole check ends, incomplete, after ``phase_cap_sec`` (the runner
+    sizes it from the boots it measures once it has measured one). ``trigger`` says why the check was asked for."""
 
     prompt_set: str
     prompts_sha256: str

@@ -57,11 +57,29 @@ class _Http(ThreadingHTTPServer):
         return
 
 
+#: The endpoint sglang drops its prefix cache at (its HTTP server's ``/flush_cache``), as the server defines it.
+SGLANG_FLUSH = "/flush_cache"
+
+
 class LocalServer:
-    """A threaded HTTP server on a free local port with ``handler`` as its request handler, started by ``with``."""
+    """A threaded HTTP server on a free local port with ``handler`` as its request handler, started by ``with``. It also
+    answers sglang's ``POST /flush_cache`` with 200 and counts the calls in ``flushes``."""
 
     def __init__(self, handler: type[BaseHTTPRequestHandler], port: int = 0) -> None:
-        self._http = _Http(("127.0.0.1", port), handler)
+        self.flushes = 0
+        outer = self
+
+        class Flushing(handler):  # type: ignore[valid-type, misc]
+            def do_POST(self) -> None:
+                if self.path != SGLANG_FLUSH:
+                    super().do_POST()  # type: ignore[misc]
+                    return
+                outer.flushes += 1
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self._http = _Http(("127.0.0.1", port), Flushing)
         self._thread = threading.Thread(target=self._http.serve_forever, daemon=True)
 
     @property

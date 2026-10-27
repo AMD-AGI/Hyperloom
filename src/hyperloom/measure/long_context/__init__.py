@@ -11,5 +11,5 @@ substring match; the toolbox states the scores and never says pass or fail.
 Modules: ``plan`` (what the sheet asks for), ``tasks`` (the generators), ``staging`` and ``resolve`` (the frozen set and
 its offline entry, on ``measure.short_prompts.staging``), ``build`` (the command that makes an entry), ``client`` (greedy
 completions of text prompts), ``rounds`` (the pass and the file it leaves), ``outputs`` (that file), ``grade`` (the
-match).
+match), ``held`` (both accuracy checks on the test's own server, before its teardown).
 """

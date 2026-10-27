@@ -8,8 +8,12 @@ compares the answers across those processes (self-consistency only: a comparison
 every change that moves greedy tokens early, fp8 KV and quantized GEMMs among them, and a defect that is wrong in every
 process is the accuracy evaluation's to see). The types here state counts and positions, never a verdict: what refuses a
 candidate is the gate's rule, not this record. The gate holds a candidate's :attr:`ShortPromptConsistency.inconsistency`
-to the one the session's baseline check measured. Like the rest of the
-measurement contract they are frozen dataclasses that validate on construction and round-trip through ``to_document()``
+to the one the session's baseline check measured.
+
+The processes are pooled per recipe: every test of a recipe that runs the check adds its own server's answers (and those of
+any fresh process it booted) to the toolbox's pool for that recipe's digest, and :class:`PooledConsistency` compares every
+process pooled so far. A test's own ``processes`` and ``self_consistency`` are what its bundle holds; ``pooled`` is what the
+gate reads. Like the rest of the measurement contract they are frozen dataclasses that validate on construction and round-trip through ``to_document()``
 and ``from_document()``.
 """
 
@@ -36,6 +40,7 @@ __all__ = [
     "SHORT_PROMPTS_STATUSES",
     "OutputCounts",
     "OutputDifference",
+    "PooledConsistency",
     "ShortPromptConsistency",
 ]
 
@@ -147,6 +152,63 @@ class OutputCounts:
 
 
 @dataclass(frozen=True)
+class PooledConsistency:
+    """The short-prompt answers of every server process pooled for one recipe, compared with each other.
+
+    ``recipe_digest`` names the recipe; ``processes`` names each pooled process (``<test output dir>#<process index>``) in
+    the order ``counts`` lists them; ``counts`` is ``None`` below two processes. ``compared_by`` is how the outputs were
+    compared (``""`` when they were not).
+    """
+
+    recipe_digest: str
+    processes: tuple[str, ...]
+    compared_by: str
+    counts: OutputCounts | None
+
+    def __post_init__(self) -> None:
+        _text(self.recipe_digest, "the pooled recipe's digest")
+        _strings(self.processes, "pooled processes")
+        if len(set(self.processes)) != len(self.processes):
+            raise MeasurementError("the pooled processes are distinct")
+        if self.compared_by not in COMPARED_BY:
+            raise MeasurementError(f"compared_by must be one of {list(COMPARED_BY)}, got {self.compared_by!r}")
+        if (self.counts is None) != (len(self.processes) < 2):
+            raise MeasurementError("pooled counts are given exactly when two or more processes are pooled")
+        if self.counts is not None and len(self.counts.mismatches) != len(self.processes):
+            raise MeasurementError("pooled counts count every pooled process")
+
+    @property
+    def count(self) -> int:
+        """How many server processes the pooled comparison rests on."""
+        return len(self.processes)
+
+    @property
+    def inconsistency(self) -> int | None:
+        """The most prompts one pooled process answers differently from the consensus of all of them; ``None`` below two
+        processes (never read as 0)."""
+        return None if self.counts is None else max(self.counts.mismatches)
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "recipe_digest": self.recipe_digest,
+            "processes": list(self.processes),
+            "compared_by": self.compared_by,
+            "counts": None if self.counts is None else self.counts.to_document(),
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> PooledConsistency:
+        f = _mapping(document, "pooled short-prompt consistency")
+        counts = f.get("counts")
+        return cls(
+            recipe_digest=f.get("recipe_digest"),
+            processes=tuple(_items(f.get("processes"), "pooled processes")),
+            compared_by=f.get("compared_by", ""),
+            counts=None if counts is None else OutputCounts.from_document(counts),
+        )
+
+
+@dataclass(frozen=True)
 class ShortPromptConsistency:
     """The short-prompt consistency check of one test: a frozen set of short prompts, answered greedily by fresh server
     processes of the candidate's launch, compared across those processes.
@@ -156,7 +218,8 @@ class ShortPromptConsistency:
     are the indices of those that did. ``miss_probability_one_third`` is the chance that that many launches all miss a
     defect that shows in one launch in three. ``self_consistency`` compares the candidate's processes with each other
     (``None`` below two processes). ``trigger`` says why the check ran, ``outputs`` where the raw outputs are in the
-    test's output directory.
+    test's output directory. ``pooled`` compares every process the toolbox pooled for the test's recipe, these included;
+    ``None`` on a record made without a pool.
     """
 
     status: str
@@ -171,6 +234,7 @@ class ShortPromptConsistency:
     compared_by: str
     self_consistency: OutputCounts | None
     outputs: str = ""
+    pooled: PooledConsistency | None = None
 
     def __post_init__(self) -> None:
         if self.status not in SHORT_PROMPTS_STATUSES:
@@ -193,6 +257,8 @@ class ShortPromptConsistency:
             raise MeasurementError(f"compared_by must be one of {list(COMPARED_BY)}, got {self.compared_by!r}")
         self._check_counts()
         _relative_dir(self.outputs, "outputs")
+        if self.pooled is not None and not isinstance(self.pooled, PooledConsistency):
+            raise MeasurementError(f"pooled must be PooledConsistency, got {self.pooled!r}")
 
     def _check_counts(self) -> None:
         own = self.self_consistency
@@ -207,12 +273,15 @@ class ShortPromptConsistency:
 
     @property
     def inconsistency(self) -> int | None:
-        """The most prompts one completed process answers differently from the consensus of the check's processes;
-        ``None`` when fewer than two processes completed, so nothing was compared (never read as 0).
+        """The most prompts one process answers differently from the consensus: of every process pooled for the recipe when
+        the record has a pool (:attr:`PooledConsistency.inconsistency`), else of the test's own completed processes;
+        ``None`` when fewer than two were compared (never read as 0).
 
         The rule gate holds a candidate's to the one the session's baseline check measured (its floor). It is counted
         over the processes that completed, so an incomplete check has one too; its ``status`` says it is incomplete.
         """
+        if self.pooled is not None:
+            return self.pooled.inconsistency
         own = self.self_consistency
         return None if own is None else max(own.mismatches)
 
@@ -230,6 +299,7 @@ class ShortPromptConsistency:
             "compared_by": self.compared_by,
             "self_consistency": None if self.self_consistency is None else self.self_consistency.to_document(),
             "outputs": self.outputs,
+            "pooled": None if self.pooled is None else self.pooled.to_document(),
         }
 
     @classmethod
@@ -237,7 +307,7 @@ class ShortPromptConsistency:
         """Also reads a record written while the check compared with the parent's outputs: its ``reference`` is left
         out."""
         f = _mapping(document, "a short-prompt consistency check")
-        own = f.get("self_consistency")
+        own, pooled = f.get("self_consistency"), f.get("pooled")
         return cls(
             status=f.get("status"),
             reason=f.get("reason", ""),
@@ -251,4 +321,5 @@ class ShortPromptConsistency:
             compared_by=f.get("compared_by", ""),
             self_consistency=None if own is None else OutputCounts.from_document(own),
             outputs=f.get("outputs", ""),
+            pooled=None if pooled is None else PooledConsistency.from_document(pooled),
         )

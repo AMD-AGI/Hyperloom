@@ -48,7 +48,6 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
-from hyperloom.measure.eval_context import eval_context, served_context
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
 from hyperloom.measure.farm import (
     FarmError,
@@ -62,13 +61,20 @@ from hyperloom.measure.farm import (
 )
 from hyperloom.measure.framework.copies import PrivateFramework, private_framework
 from hyperloom.measure.framework.rows import RowsOnlyRefused
+from hyperloom.measure.long_context.held import (
+    HeldAnswers,
+    HeldChecks,
+    HeldServer,
+    long_context_unheld,
+    not_held,
+    run_held_checks,
+    served_by,
+)
 from hyperloom.measure.long_context import staging as long_context_staging
-from hyperloom.measure.long_context.rounds import run_long_context
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import (
     JIT_CACHE,
     KERNEL_TABLES,
-    LONG_CONTEXT,
     OTHER,
     REPRO_CASE,
     ROUND_COLLECT,
@@ -76,8 +82,8 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     PhaseRecorder,
 )
-from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.points import launch_carriers
+from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
@@ -170,6 +176,7 @@ _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 #: What a test that failed records in place of the short-prompt check it would have run.
 _CHECK_SKIPPED = "short_prompt_check skipped: test failed"
 _LONG_CONTEXT_SKIPPED = "long_context_check skipped: test failed"
+_NOT_HELD = "the test's server was not held up for the check (its framework's lifecycle cannot hold one)"
 _WARMUP_TPUT = "warmup_round_tput"
 
 
@@ -198,6 +205,8 @@ class _Run:
     boot: BootGuard | None = None
     #: Where the test's phases are stamped: the caller's recorder when the call carries one, else the backend's own.
     phases: PhaseRecorder = field(default_factory=PhaseRecorder)
+    #: What the accuracy checks left on the test's own server before its teardown; ``None`` until they ran there.
+    held: HeldAnswers | None = None
 
     def add(self, point: int, result: VariantResult) -> bool:
         """Record one result; say whether the test must go on."""
@@ -299,8 +308,7 @@ def _validate(call: TestCall) -> None:
         _validate_profile(call)
     if call.kind == _REPRO:
         _validate_repro(call)
-    _validate_short_prompts(call)
-    _validate_long_context(call)
+    _validate_checks(call)
     _, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
     if dropped:
         raise TestCallRefused(f"env_overrides may not set {sorted(dropped)}")
@@ -330,32 +338,22 @@ def _validate_profile(call: TestCall) -> None:
         )
 
 
-def _validate_short_prompts(call: TestCall) -> None:
-    """A short-prompt check needs a test that measures and a staged prompt set that is the one the call names; a test that
+def _validate_checks(call: TestCall) -> None:
+    """An accuracy check needs a test that measures and a staged prompt set that is the one the call names; a test that
     would only find out after its rounds is refused before any server starts."""
-    plan = call.short_prompts
-    if plan is None:
-        return
-    if call.kind in (_PROFILE, _REPRO):
-        raise TestCallRefused(f"a {call.kind} test does not run the short-prompt consistency check")
-    try:
-        load_prompt_set(plan, os.environ)
-    except PromptSetError as exc:
-        raise TestCallRefused(f"the short-prompt set {plan.prompt_set} cannot be used: {exc}") from exc
-
-
-def _validate_long_context(call: TestCall) -> None:
-    """A long-context check needs a test that measures and a staged prompt set that is the one the call names, refused
-    before any server starts like a short-prompt check."""
-    plan = call.long_context
-    if plan is None:
-        return
-    if call.kind in (_PROFILE, _REPRO):
-        raise TestCallRefused(f"a {call.kind} test does not run the long-context check")
-    try:
-        long_context_staging.load_prompt_set(plan, os.environ)
-    except PromptSetError as exc:
-        raise TestCallRefused(f"the long-context set {plan.prompt_set} cannot be used: {exc}") from exc
+    checks = (
+        (call.short_prompts, "short-prompt consistency check", "short-prompt set", load_prompt_set),
+        (call.long_context, "long-context check", "long-context set", long_context_staging.load_prompt_set),
+    )
+    for plan, check, prompt_set, load in checks:
+        if plan is None:
+            continue
+        if call.kind in (_PROFILE, _REPRO):
+            raise TestCallRefused(f"a {call.kind} test does not run the {check}")
+        try:
+            load(plan, os.environ)  # type: ignore[arg-type]
+        except PromptSetError as exc:
+            raise TestCallRefused(f"the {prompt_set} {plan.prompt_set} cannot be used: {exc}") from exc
 
 
 def _validate_repro(call: TestCall) -> None:
@@ -636,58 +634,85 @@ def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, 
 async def _single(run: _Run) -> None:
     # A profiled round is not a statistic: it runs once, with no warmup before it.
     warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
-    lifecycle = _one_eval_lifecycle(run, warmup)
+    lifecycle = _held_lifecycle(run, warmup)
     if lifecycle is None:
         run.add(0, await _grid(run, 0, _TEST, warmup_before_measure=None if warmup is None else bool(warmup)))
     else:
-        await _eval_then_measure(run, lifecycle)
+        await _eval_then_measure(run, lifecycle, warmup)
 
 
-def _one_eval_lifecycle(run: _Run, warmup: int | None) -> _Lifecycle | None:
-    """The server a graded test shares between its warmup and measured rounds; ``None`` when it runs the old way.
+def _warms(warmup: int | None) -> bool:
+    return run_grid_warmup_enabled() if warmup is None else bool(warmup)
+
+
+def _checks_held(call: TestCall) -> bool:
+    """Whether the test runs an accuracy check, which asks the test's own server before its teardown."""
+    return call.short_prompts is not None or call.long_context is not None
+
+
+def _held_lifecycle(run: _Run, warmup: int | None) -> _Lifecycle | None:
+    """The server a test holds up across its rounds; ``None`` when it runs the old way.
 
     ``run_grid`` gives its warmup and measured rounds one configuration, so a graded test evaluated in both. Evaluating
-    once needs the rounds apart, which needs a server the lifecycle can hold up: a framework that cannot hold one, a
-    test with no warmup (its one round evaluates) and an AgentX test (it has no evaluation) run as before. ``None``
-    as the plan is ``run_grid``'s own default.
+    once needs the rounds apart, which needs a server the lifecycle can hold up; so does a test whose accuracy checks ask
+    its server after the measured round. Any other test (an AgentX test has no evaluation) runs as before.
     """
     call = run.call
-    if not call.accuracy or not (run_grid_warmup_enabled() if warmup is None else bool(warmup)):
-        return None
-    if is_magpie_agentx(_point_config(call.points[0]).get("benchmark") or {}):
+    agentx = is_magpie_agentx(_point_config(call.points[0]).get("benchmark") or {})
+    if not (call.accuracy and _warms(warmup) and not agentx) and not _checks_held(call):
         return None
     lifecycle = _Lifecycle(run)
     return lifecycle if lifecycle.eligible else None
 
 
-async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle) -> None:
-    """Warmup bench, the evaluation, then the measured bench on one server, with no evaluation after it.
+async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle, warmup: int | None) -> None:
+    """Warmup bench, the evaluation, then the measured bench on one server, with no evaluation after it; then the accuracy
+    checks on that server, before its teardown.
 
     InferenceX's own order; the evaluation between the benches keeps the measured one from reusing the prefix cache the
     warmup left. The warmup round keeps the point's ``RUN_EVAL`` (on, as validated) and leaves the server up; when
     the warmup failed or was stopped, nothing is measured, and neither when the logs of the warmup or of its evaluation
     name a cause that settles the test (a crashed server, a refused request): the measured round would boot a server
-    that cannot serve, and the test ends with the failure those logs state.
+    that cannot serve, and the test ends with the failure those logs state. A test with no warmup boots in its measured
+    round, which then evaluates as the point says.
     """
+    warm = _warms(warmup)
     try:
-        warmup = await _grid(
-            run, 0, _WARMUP, server_lifecycle=lifecycle.settings(cleanup=False), warmup_before_measure=False
-        )
-        run.warmup = warmup
-        if not run.add(0, warmup) or _is_failure(warmup) or decides_test(_ended(run).verdict):
+        if warm and not await _warmup_round(run, lifecycle):
             return
         measured = await _grid(
             run,
             0,
             _TEST,
-            server_lifecycle=lifecycle.settings(cleanup=True),
-            server_already_ready=True,
-            base_extra_envs=_MEASURED_ENVS,
+            server_lifecycle=lifecycle.settings(cleanup=not _checks_held(run.call)),
+            server_already_ready=warm,
+            base_extra_envs=_MEASURED_ENVS if warm and run.call.accuracy else None,
             warmup_before_measure=False,
         )
-        run.add(0, measured)
+        if run.add(0, measured):
+            await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
+
+
+async def _warmup_round(run: _Run, lifecycle: _Lifecycle) -> bool:
+    """The warmup bench on the server it leaves up; whether the measured round follows."""
+    warmup = await _grid(
+        run, 0, _WARMUP, server_lifecycle=lifecycle.settings(cleanup=False), warmup_before_measure=False
+    )
+    run.warmup = warmup
+    return run.add(0, warmup) and not _is_failure(warmup) and not decides_test(_ended(run).verdict)
+
+
+async def _held_checks(run: _Run, lifecycle: _Lifecycle) -> None:
+    """The checks the test plans, on its own server after its last round; none for a test that failed or is stopping."""
+    call = run.call
+    if not _checks_held(call) or run.stopped_rc is not None or _test_failed(run):
+        return
+    serving = Serving(f"http://127.0.0.1:{lifecycle.port}", _model_of(call))
+    server = HeldServer(serving, lifecycle.framework, lambda: run.stopped_rc is not None)
+    run.held = await run_held_checks(_held_checks_of(call), server, run.phases)
+    run.notes.append(run.held.flush)
 
 
 def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
@@ -697,7 +722,7 @@ def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
     if call.short_prompts is not None:
         rounds = _then_check(rounds, _short_prompts, _CHECK_SKIPPED)
     if call.long_context is not None:
-        rounds = _then_check(rounds, _long_context, _LONG_CONTEXT_SKIPPED)
+        rounds = _then_check(rounds, _long_context_unheld, _LONG_CONTEXT_SKIPPED)
     return rounds
 
 
@@ -774,6 +799,7 @@ async def _sweep(run: _Run) -> None:
             await _sweep_by_restart(run, order)
             return
         await _reuse(run, lifecycle, order[booted:])
+        await _held_checks(run, lifecycle)
     finally:
         lifecycle.teardown()
 
@@ -824,7 +850,7 @@ async def _reuse(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> None:
             run,
             point,
             f"c{_levels(run.call.points)[point]}",
-            server_lifecycle=lifecycle.settings(cleanup=position == len(order) - 1),
+            server_lifecycle=lifecycle.settings(cleanup=position == len(order) - 1 and not _checks_held(run.call)),
             server_already_ready=True,
             warmup_before_measure=False,
         )
@@ -875,7 +901,7 @@ def _run_case(run: _Run, port: int) -> None:
         run_case(
             script,
             base_url=f"http://127.0.0.1:{port}",
-            model=str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or ""),
+            model=_model_of(call),
             timeout_sec=timeout,
             output_dir=Path(call.output_dir),
         )
@@ -883,16 +909,14 @@ def _run_case(run: _Run, port: int) -> None:
         _fail_case(run, str(exc))
 
 
-class _PassServers:
-    """The servers of a check: each is a boot-only round of the point's own launch, as a repro test's is, run in a
-    scratch directory of its own so that its logs and reports are not part of the test's output. ``name`` names the
-    rounds (``<name><index>``) and ``phase`` is the phase the check's questions are stamped as."""
+class _FreshServers:
+    """The fresh processes of the short-prompt check: boot-only rounds ``short<index>`` of the point's own launch, as a
+    repro test's is, each in a scratch directory of its own so that its logs and reports are not the test's."""
 
-    def __init__(self, run: _Run, name: str, phase: str) -> None:
+    def __init__(self, run: _Run) -> None:
         self._run = run
-        self._name, self._phase = name, phase
         self._lifecycle: _Lifecycle | None = None
-        self._model = str((_point_config(run.call.points[0]).get("benchmark") or {}).get("model") or "")
+        self._model = _model_of(run.call)
 
     def should_stop(self) -> bool:
         return self._run.stopped_rc is not None
@@ -904,11 +928,11 @@ class _PassServers:
         if not lifecycle.eligible:
             raise PassFailed(f"the server cannot be held up for the check ({lifecycle.reason})")
         self._lifecycle = lifecycle
-        boot = await _boot_server(run, lifecycle, 0, f"{self._name}{index}")
+        boot = await _boot_server(run, lifecycle, 0, f"short{index}")
         if _is_failure(boot):
             run.add(0, boot)
             raise PassFailed(f"the server did not come up ({boot.error_class or boot.status})")
-        run.phases.begin(self._phase)
+        run.phases.begin(SHORT_PROMPTS)
         return Serving(f"http://127.0.0.1:{lifecycle.port}", self._model)
 
     async def stop(self) -> None:
@@ -918,52 +942,40 @@ class _PassServers:
 
 
 @contextlib.contextmanager
-def _check_servers(run: _Run, name: str, phase: str) -> Iterator[_PassServers]:
-    """The servers of a check run apart from the test: on a copy of the call whose output is a scratch directory, so the
-    check's rounds, logs and reports are not the test's."""
-    scratch = Path(tempfile.mkdtemp(prefix=f"hl-{name}-"))
+def _fresh_servers(run: _Run) -> Iterator[_FreshServers]:
+    """The fresh processes run apart from the test: on a copy of the call whose output is a scratch directory, so their
+    rounds, logs and reports are not the test's."""
+    scratch = Path(tempfile.mkdtemp(prefix="hl-short-"))
     try:
         apart = dataclasses.replace(run.call, output_dir=scratch, result_dir=None)
-        yield _PassServers(_Run(apart, run.unset_envs, phases=run.phases), name, phase)
+        yield _FreshServers(_Run(apart, run.unset_envs, phases=run.phases))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
         run.phases.begin(OTHER)
 
 
+def _model_of(call: TestCall) -> str:
+    return str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or "")
+
+
 async def _short_prompts(run: _Run) -> None:
-    """Ask fresh servers of the test's own launch the short prompts, after its rounds and apart from them; a failure of
-    the check is the check's (``outputs.json`` says), never the test's."""
-    plan = run.call.short_prompts
-    if plan is None:
-        return
-    with _check_servers(run, "short", SHORT_PROMPTS) as servers:
-        await run_passes(plan, load_prompt_set(plan, os.environ), servers, Path(run.call.output_dir))
+    """Write the short-prompt check: process 0 (the test's own server), then the fresh ones the plan asks for, apart from
+    the test; a failure of the check is the check's (``outputs.json`` says), never the test's."""
+    first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _NOT_HELD)
+    if first is not None:
+        with _fresh_servers(run) as servers:
+            await run_passes(first, servers, Path(run.call.output_dir))
 
 
-def _point_served_context(config: dict[str, Any]) -> int | None:
-    """The tokens of context the launch of the rendered point ``config`` serves: its context flag, else its
-    ``MAX_MODEL_LEN`` (as ``eval_context`` reads them); ``None`` when it states neither, which leaves the server's own
-    default, and the requests then find out."""
-    envs, carried = launch_carriers(config)
-    flag = served_context(carried or "")
-    return flag.tokens if flag is not None else eval_context(envs)
+async def _long_context_unheld(run: _Run) -> None:
+    """The long-context check of a test whose server was not held up for it (one that was ran it there)."""
+    if run.held is None:
+        await long_context_unheld(_held_checks_of(run.call), _NOT_HELD)
 
 
-async def _long_context(run: _Run) -> None:
-    """Ask a fresh server of the test's own launch the long prompts, after its rounds and apart from them; a launch that
-    serves too little context starts no server, and a failure of the check is the check's, never the test's."""
-    plan, call = run.call.long_context, run.call
-    if plan is None:
-        return
-    served = _point_served_context(_point_config(call.points[0]))
-    with _check_servers(run, "long", LONG_CONTEXT) as servers:
-        await run_long_context(
-            plan,
-            long_context_staging.load_prompt_set(plan, os.environ),
-            servers,
-            Path(call.output_dir),
-            served_context=served,
-        )
+def _held_checks_of(call: TestCall) -> HeldChecks:
+    served = served_by(*launch_carriers(_point_config(call.points[0])))
+    return HeldChecks(call.short_prompts, call.long_context, Path(call.output_dir), served)
 
 
 def _gather_traces(run: _Run) -> None:
@@ -1027,7 +1039,8 @@ def _warmup_rounds(point: int, result: VariantResult, workspace: Path) -> list[R
 def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
     workspace = Path(result.workspace) if result.workspace else Path(run.call.output_dir)
     if result is run.warmup:
-        return _warmup_rounds(point, result, workspace)
+        warmed = _warmup_rounds(point, result, workspace)
+        return warmed if run.call.accuracy else [r for r in warmed if r.phase != _ACCURACY]
     rounds = []
     if any(w == _WARMUP_DISCARDED for w in result.nonfatal_warnings):
         rounds.append(RoundOutcome(point, _WARMUP, workspace.parent / "warmup_round", 0))

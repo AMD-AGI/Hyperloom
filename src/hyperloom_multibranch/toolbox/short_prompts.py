@@ -11,17 +11,20 @@ its purpose is one of the pack's ``always_purposes`` (a baseline, whose inconsis
 candidate to, and a final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
 
-*Switched on.* The check is on by default: the triggers above bound its cost (six fresh processes, about 9 to 11
-minutes, on a test that runs it). A builder gives the toolbox the setup: from its options, or from the host environment's
+*Switched on.* The check is on by default: a test that runs it answers the prompts on its own server after its rounds, in
+seconds; only a merge test or a final candidate whose recipe's pool is short boots fresh processes. A builder gives the toolbox the setup: from its options, or from the host environment's
 ``HYPERLOOM_SHORT_PROMPTS`` (the key of the staged entry; ``off`` turns the check off) when it names none, and without
 either the set ``measure.short_prompts.build`` stages for the session model's tokenizer with its default seed, when it is
 staged (:func:`default_short_prompts`; the set depends on the tokenizer, so a host that cannot find it runs no check and
 logs why). A builder whose runners read this host's runner cache reads what it is given there first
 (:func:`staged_short_prompts`); a set that is asked for, or found and not readable, is refused, never run without.
 
-*What against.* The outputs of the test's own fresh server processes are compared with each other only. Nothing is kept
-for later tests: a comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8 KV,
-quantized GEMMs), and a defect that is wrong in every process is the accuracy evaluation's to see.
+*What against.* The outputs of server processes of one recipe are compared with each other only: the test's own, and
+every process the toolbox pooled for the same recipe (``short_prompt_pool``). Every test that runs the check adds its own
+server (process 0); a merge test (``integration``) or a final candidate whose recipe has fewer pooled processes than the
+pack's ``processes`` also boots fresh ones up to that count (:func:`with_extra_processes`), and an explore is judged over
+the processes it has. A comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8
+KV, quantized GEMMs), and a defect that is wrong in every process is the accuracy evaluation's to see.
 
 *What is recorded.* :func:`consistency_of` reads the landed ``outputs.json`` and states counts and positions
 (``ShortPromptConsistency``); it never says pass or fail, and an ``incomplete`` check holds nothing back.
@@ -44,7 +47,7 @@ from hyperloom.contracts.consistency import (
     OutputDifference,
     ShortPromptConsistency,
 )
-from hyperloom.contracts.measurement import TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
 from hyperloom.measure.compile import BlobStore, CompileError, patch_targets
 from hyperloom.measure.short_prompts.compare import Comparison, Difference, Side, compare_outputs
@@ -77,6 +80,7 @@ __all__ = [
     "ShortPromptsNotStaged",
     "consistency_of",
     "decide",
+    "output_counts",
     "blob_patch_files",
     "default_short_prompts",
     "environment_short_prompts",
@@ -85,6 +89,7 @@ __all__ = [
     "short_prompt_rules",
     "staged_short_prompts",
     "touch_lines",
+    "with_extra_processes",
 ]
 
 #: The host environment variable that names the staged prompt set (its key) when a builder is given no setup.
@@ -103,6 +108,9 @@ _MAX_REASONS = 32
 _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
 _UTF8 = "utf-8"
 _MAX_FAILED_SHOWN = 3
+#: The tests whose recipe the gate reads over the pack's full count of processes: what reaches integration, and what
+#: ships. A defect in one launch in three escapes two processes about 44% of the time and six about 9%.
+_FULL_COUNT_PURPOSES = (Purpose.INTEGRATION, Purpose.FINAL)
 
 
 @dataclass(frozen=True)
@@ -343,7 +351,8 @@ def decide(
 ) -> ShortPromptPlan | None:
     """The check ``request`` runs, or ``None``: its purpose is one the pack always checks, the caller forces it, or the
     change from ``parent`` to ``candidate`` touches what the pack says affects attention, the KV cache or prefill
-    (``files`` reads the files a patch changes)."""
+    (``files`` reads the files a patch changes). The plan asks the test's own server only; :func:`with_extra_processes`
+    adds the fresh ones a short pool needs."""
     if setup is None or request.kind not in _CHECKED_KINDS:
         return None
     rules = short_prompt_rules()
@@ -358,11 +367,20 @@ def decide(
     return ShortPromptPlan(
         prompt_set=setup.prompt_set,
         prompts_sha256=setup.prompts_sha256,
-        processes=rules.processes,
+        processes=1,
         max_new_tokens=rules.max_new_tokens,
         phase_cap_sec=rules.phase_cap_sec,
         trigger=_bounded(reasons),
     )
+
+
+def with_extra_processes(plan: ShortPromptPlan, request: TestRequest, pooled: int) -> ShortPromptPlan:
+    """``plan`` with the fresh processes ``request`` boots after its own server's answers: for a merge test or a final
+    candidate, as many as the recipe's pool (``pooled`` processes so far) lacks of the pack's ``processes``; for any other
+    test, none."""
+    if request.purpose not in _FULL_COUNT_PURPOSES:
+        return plan
+    return replace(plan, processes=max(1, short_prompt_rules().processes - pooled))
 
 
 # --- what is recorded ----------------------------------------------------------------------------------------------
@@ -372,7 +390,8 @@ def _difference(found: Difference | None) -> OutputDifference | None:
     return None if found is None else OutputDifference(**vars(found))
 
 
-def _counts(side: Side | None) -> OutputCounts | None:
+def output_counts(side: Side | None) -> OutputCounts | None:
+    """A comparison's counts as the result records them; ``None`` for none."""
     return None if side is None else OutputCounts(side.mismatches, _difference(side.first))
 
 
@@ -450,6 +469,6 @@ def _consistency(plan: ShortPromptPlan, found: OutputsFile, comparison: Comparis
         processes=tuple(sorted(completed)),
         miss_probability_one_third=miss_probability(len(completed)),
         compared_by=comparison.compared_by,
-        self_consistency=_counts(comparison.self_consistency),
+        self_consistency=output_counts(comparison.self_consistency),
         outputs=f"{SHORT_PROMPTS_DIR}/{OUTPUTS_FILE}",
     )

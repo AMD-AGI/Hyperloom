@@ -25,6 +25,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
+from hyperloom_multibranch.toolbox.short_prompt_pool import POOL_FILE, ShortPromptPool
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs
@@ -161,10 +162,12 @@ def session_archive(archive: ResultArchive | None, directory: Path) -> ResultArc
 def session_stores(
     notebook: LocalNotebook, directory: Path, run_id: str, builds: BuildDriver | None = None
 ) -> ToolboxStores:
-    """The submit log below the session directory and the notebook as every port the toolbox writes to; ``builds`` drives
-    the native build store when the host configured one (without it no test waits for a build)."""
+    """The submit log and the short-prompt pool below the session directory and the notebook as every port the toolbox
+    writes to; ``builds`` drives the native build store when the host configured one (without it no test waits for a
+    build)."""
     return ToolboxStores(
         log=SubmissionLog(directory / _SUBMISSIONS, run_id),
+        short_prompt_pool=ShortPromptPool(directory / POOL_FILE),
         sink=notebook,  # type: ignore[arg-type]
         health=notebook,  # type: ignore[arg-type]
         claims=notebook,  # type: ignore[arg-type]

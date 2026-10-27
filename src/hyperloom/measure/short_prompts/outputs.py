@@ -34,6 +34,8 @@ __all__ = [
     "OutputsError",
     "OutputsFile",
     "ProcessEntry",
+    "output_document",
+    "parse_output",
     "parse_outputs",
     "read_outputs",
     "read_outputs_document",
@@ -93,14 +95,16 @@ def _entry_document(entry: ProcessEntry) -> dict[str, Any]:
         "reason": clean_reason(entry.reason),
         "boot_seconds": round(entry.boot_seconds, 3),
         "query_seconds": round(entry.query_seconds, 3),
-        "outputs": {
-            prompt_id: {
-                "text": out.text,
-                "tokens": None if out.tokens is None else list(out.tokens),
-                "finish_reason": out.finish_reason,
-            }
-            for prompt_id, out in entry.outputs.items()
-        },
+        "outputs": {prompt_id: output_document(out) for prompt_id, out in entry.outputs.items()},
+    }
+
+
+def output_document(output: Output) -> dict[str, Any]:
+    """One prompt's output as the file holds it."""
+    return {
+        "text": output.text,
+        "tokens": None if output.tokens is None else list(output.tokens),
+        "finish_reason": output.finish_reason,
     }
 
 
@@ -133,7 +137,12 @@ def write_outputs(
     return path
 
 
-def _output(value: Any, path: str) -> Output:
+def parse_output(value: Any, path: str) -> Output:
+    """One prompt's output read strictly from what :func:`output_document` made; ``path`` names it in a refusal.
+
+    Raises:
+        OutputsError: It is not such an output.
+    """
     if not isinstance(value, dict) or set(value) != {"text", "tokens", "finish_reason"}:
         raise OutputsError(f"{path}: expected the keys text, tokens and finish_reason")
     tokens = value["tokens"]
@@ -170,7 +179,7 @@ def _entry(value: Any, path: str) -> ProcessEntry:
         raise OutputsError(f"{path}: boot_seconds and query_seconds are non-negative numbers")
     if not isinstance(value["outputs"], dict) or not isinstance(value["reason"], str):
         raise OutputsError(f"{path}: outputs is an object and reason a string")
-    outputs = {pid: _output(out, f"{path}.outputs.{pid}") for pid, out in value["outputs"].items()}
+    outputs = {pid: parse_output(out, f"{path}.outputs.{pid}") for pid, out in value["outputs"].items()}
     if (status == OK) == (not outputs):
         raise OutputsError(f"{path}: a process is ok exactly when it holds outputs")
     return ProcessEntry(index, status, value["reason"], float(seconds[0]), float(seconds[1]), outputs)

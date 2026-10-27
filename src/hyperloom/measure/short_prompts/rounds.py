@@ -1,19 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The passes of the check: start a fresh server process, ask it every prompt, stop it, once per planned process.
+"""The processes of the check: the test's own server answers first, then fresh server processes, once per planned extra.
 
-How a server is started and stopped is the backend's (``PassHost``): the local backend boots the point's own launch the way
-a ``repro`` test does. This module owns the order, the time budget and what is recorded. A process that fails to start, or
-fails to answer a prompt, is recorded as failed with its reason and the next one is tried; the check stops early, and says
-why, when the phase cap leaves no room for another process. A failed or skipped process is never a clean one.
+Process 0 is the test's own server, asked after its measured rounds and before its teardown (:func:`answer_held`); it costs
+the seconds the prompts take. Processes 1 to ``processes - 1`` are fresh servers of the same launch, started and stopped one
+after another (:func:`run_passes`); the toolbox plans them only where the recipe's pooled processes fall short of the pack's
+count for a merge test or a final candidate. How a server is started and stopped is the backend's (``PassHost``): the local
+backend boots the point's own launch the way a ``repro`` test does. This module owns the order, the time budget and what is
+recorded. A process that fails to start, or fails to answer a prompt, is recorded as failed with its reason and the next one
+is tried; the check stops early, and says why, when the phase cap leaves no room for another process. A failed or skipped
+process is never a clean one.
 
-The check runs after the test's own rounds, so the test's server has booted and its ready stamp below the test's output
-directory says how long that took. The cap is sized from it: ``processes * (boot + answers) * (1 + CAP_MARGIN_FRACTION) +
-CAP_MARGIN_SEC``, ``answers`` being the longest a process of this check took to answer the prompts (nothing before the
-first has), and ``boot`` the longest boot measured (the test's, then each process's). It is sized again after every
-process. The plan's ``phase_cap_sec`` is the cap only while no boot is measured. A model whose server boots slowly would
-fit one or two processes in a fixed cap, and on a fast one a hung process would hold the cards long after the others.
+The fresh processes run after the test's own rounds, so the test's server has booted and its ready stamp below the test's
+output directory says how long that took. The cap is sized from it: ``processes * (boot + answers) * (1 +
+CAP_MARGIN_FRACTION) + CAP_MARGIN_SEC``, ``answers`` being the longest a process of this check took to answer the prompts,
+and ``boot`` the longest boot measured (the test's, then each process's). It is sized again after every process. The plan's
+``phase_cap_sec`` is the cap only while no boot is measured, and the cap of the test's own server's answers.
 """
 
 from __future__ import annotations
@@ -33,7 +36,17 @@ from hyperloom.measure.short_prompts.outputs import FAILED, OK, ProcessEntry, co
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.short_prompts.prompts import Prompt
 
-__all__ = ["CAP_MARGIN_FRACTION", "CAP_MARGIN_SEC", "PassFailed", "PassHost", "Serving", "model_of", "run_passes"]
+__all__ = [
+    "Answered",
+    "CAP_MARGIN_FRACTION",
+    "CAP_MARGIN_SEC",
+    "PassFailed",
+    "PassHost",
+    "Serving",
+    "answer_held",
+    "model_of",
+    "run_passes",
+]
 
 _PHASE_CAP_STOP = "the phase cap leaves no room for another process"
 _RUN_STOPPED = "the run was stopped"
@@ -152,34 +165,52 @@ async def _one_process(
     return ProcessEntry(index, OK, "", booted - started, clock() - booted, completions_to_outputs(answers))
 
 
+@dataclass(frozen=True)
+class Answered:
+    """Process 0 of a check: the plan, the prompts it was asked, and its entry (the test's own server's, or a failed one
+    that says why that server could not answer)."""
+
+    plan: ShortPromptPlan
+    prompts: Sequence[Prompt]
+    entry: ProcessEntry
+
+
+async def answer_held(
+    plan: ShortPromptPlan, prompts: Sequence[Prompt], host: PassHost, *, clock: Callable[[], float] = time.monotonic
+) -> Answered:
+    """Process 0: ``host`` is the test's own server, still up after its measured rounds; it answers every prompt within the
+    plan's ``phase_cap_sec``. A host that cannot give the server makes the process failed with its reason."""
+    entry = await _one_process(plan, prompts, host, 0, _Budget(clock() + plan.phase_cap_sec, clock))
+    return Answered(plan, prompts, entry)
+
+
 async def run_passes(
-    plan: ShortPromptPlan,
-    prompts: Sequence[Prompt],
-    host: PassHost,
-    output_dir: Path,
-    *,
-    clock: Callable[[], float] = time.monotonic,
+    answered: Answered, host: PassHost, output_dir: Path, *, clock: Callable[[], float] = time.monotonic
 ) -> tuple[ProcessEntry, ...]:
-    """Run the planned processes one after another, write ``outputs.json`` below ``output_dir`` and return the entries.
+    """Run the planned fresh processes (1 to ``plan.processes - 1``) one after another after process 0 (``answered``,
+    :func:`answer_held`), write ``outputs.json`` below ``output_dir`` and return the entries.
 
     ``output_dir`` is the test's own output directory, whose ready stamps say how long the test's server took to boot.
     ``clock`` is the ``time.monotonic()`` that the deadline handed to the host is on.
     """
+    plan, prompts, first = answered.plan, answered.prompts, answered.entry
     started = clock()
     measured = _Measured(_positive(boot_seconds(Path(output_dir))))
+    if first.status == OK:  # its server was already up: it measured an answering time, not a boot
+        measured.answers = _positive(first.query_seconds) or 0.0
     budget = _Budget(started + measured.cap(plan), clock)
     _LOG.info(
         "short-prompt check capped at %.0f s (the plan's cap is %.0f s)", budget.deadline - started, plan.phase_cap_sec
     )
     infos = [prompt.info() for prompt in prompts]
-    entries: list[ProcessEntry] = []
+    entries: list[ProcessEntry] = [first]
     longest = 0.0
     stopped = ""
-    for index in range(plan.processes):
+    for index in range(1, plan.processes):
         left = budget.deadline - clock()
         if host.should_stop():
             stopped = _RUN_STOPPED
-        elif left <= 0 or (entries and left < longest):
+        elif left <= 0 or (len(entries) > 1 and left < longest):
             stopped = _PHASE_CAP_STOP
         if stopped:
             break

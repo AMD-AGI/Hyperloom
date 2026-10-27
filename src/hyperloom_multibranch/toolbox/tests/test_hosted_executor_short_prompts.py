@@ -27,10 +27,13 @@ from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
+from hyperloom_multibranch.toolbox.short_prompt_pool import POOL_FILE, ShortPromptPool
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
-PLAN = ShortPromptPlan("short-prompts-test", "a" * 64, trigger=("purpose final",))
+PLAN = ShortPromptPlan("short-prompts-test", "a" * 64, processes=6, trigger=("purpose final",))
+#: The plan of a test that asks its own server only, as every test whose pool needs no fresh process does.
+OWN = ShortPromptPlan("short-prompts-test", "a" * 64, trigger=("purpose explore",))
 GOOD = ["good"] * 6
 
 
@@ -60,11 +63,20 @@ class _Session:
         self.point = tmp_path / "planned.yaml"
         self.planner = _Planner(self.point, check)
         self.executor = HostedExecutor(rig.backend, tmp_path / "session")
-        self.tb = build(tmp_path, executor=self.executor, planner=self.planner, policy=POLICY)
+        pool = ShortPromptPool(tmp_path / "toolbox" / POOL_FILE)
+        self.tb = build(tmp_path, executor=self.executor, planner=self.planner, policy=POLICY, short_prompt_pool=pool)
+        self.tb.toolbox.trace_root = tmp_path / "session"
         self.tmp_path, self.rig, self.count = tmp_path, rig, 0
         self.started = False
 
-    async def run(self, behaviours: list[str] | None, *, check: ShortPromptPlan | None = None, **fake: object):
+    async def run(
+        self,
+        behaviours: list[str] | None,
+        *,
+        check: ShortPromptPlan | None = None,
+        server_args: str | None = None,
+        **fake: object,
+    ):
         fake = {"fake_accuracy": "0.64", **fake, **({} if behaviours is None else {"fake_short_prompts": behaviours})}
         point_yaml(self.tmp_path, self.point.name, **fake)
         self.planner.check = check or self.planner.check
@@ -72,7 +84,8 @@ class _Session:
             await self.tb.toolbox.start()
             self.started = True
         self.count += 1
-        request_id = await self.tb.toolbox.submit_test(req(server_args=f"--max-num-seqs {256 + self.count}"))
+        args = server_args or f"--max-num-seqs {256 + self.count}"
+        request_id = await self.tb.toolbox.submit_test(req(server_args=args))
         await asyncio.wait_for(self.tb.toolbox.drain(), 60)
         entry = self.tb.toolbox._log.get(request_id)
         assert entry is not None and entry.outcome is not None
@@ -193,3 +206,29 @@ async def test_test_result_shows_the_check_with_its_counts_and_no_reference(tmp_
         shown["self_consistency"]["mismatches"][1] > 0 and shown["self_consistency"]["first_difference"]["process"] == 1
     )
     assert ShortPromptPlan.parse(PLAN.to_document(), "x") == PLAN
+
+
+async def test_the_tests_of_one_recipe_pool_their_own_servers_and_the_pool_survives_a_toolbox_restart(
+    tmp_path: Path, rig
+) -> None:
+    session = _Session(tmp_path, rig, OWN)
+    recipe = "--max-num-seqs 300"
+
+    first = await session.run(["good"], server_args=recipe)
+    second = await session.run(["bad"], server_args=recipe)
+    await session.tb.toolbox.close()
+    restarted = _Session(tmp_path, rig, OWN)
+    restarted.count = session.count
+    third = await restarted.run(["good"], server_args=recipe)
+    other = await restarted.run(["bad"], server_args="--max-num-seqs 301")
+
+    own = [r.short_prompt_consistency for r in (first, second, third)]
+    assert [c.processes for c in own] == [(0,), (0,), (0,)] and all(c.self_consistency is None for c in own)
+    pooled = [c.pooled for c in own]
+    assert [p.count for p in pooled] == [1, 2, 3], "every test of the recipe adds its server, across the restart"
+    assert pooled[2].processes == (f"{first.output_dir}#0", f"{second.output_dir}#0", f"{third.output_dir}#0")
+    assert pooled[0].inconsistency is None, "one process compares nothing; it is not read as 0"
+    assert pooled[1].inconsistency > 0 and [n > 0 for n in pooled[2].counts.mismatches] == [False, True, False]
+    assert own[2].inconsistency == pooled[2].inconsistency, "the gate's number is the pooled one"
+    assert other.short_prompt_consistency.pooled.count == 1, "another recipe has its own pool"
+    assert restarted.executor.difference(third) is None, "the pooled part is not claimed by one bundle"

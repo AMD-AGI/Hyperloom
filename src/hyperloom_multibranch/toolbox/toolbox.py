@@ -66,6 +66,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
     median_test_seconds,
 )
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
+from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey, ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL, JobStatus, ToolJobs, ToolRequest
@@ -92,7 +93,9 @@ class ToolboxStores:
 
     ``sink`` takes the requests, results and withdrawals, ``health`` holds the quarantine list, ``claims`` hands the
     claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
-    ``builds`` drives the native build store; without one no test waits for a build.
+    ``builds`` drives the native build store; without one no test waits for a build. ``short_prompt_pool`` keeps the
+    short-prompt answers of every test per recipe (``short_prompt_pool``); without one no test's check is pooled and every
+    merge test and final candidate boots the pack's full count of fresh processes.
     """
 
     log: SubmissionLog
@@ -101,6 +104,7 @@ class ToolboxStores:
     claims: ClaimService | None = None
     records: RecordSearch | None = None
     builds: BuildDriver | None = None
+    short_prompt_pool: ShortPromptPool | None = None
 
 
 @dataclass(frozen=True)
@@ -139,7 +143,13 @@ class RealToolbox:
         self._executor = executor
         self._queue = WorkQueue(tuning.policy or QueuePolicy())
         self._quarantine = Quarantine(stores.health)
-        self._acceptance = Acceptance(acceptance, is_accepted=self._is_accepted, live_profile=self._live_profile)
+        self._pool = stores.short_prompt_pool
+        self._acceptance = Acceptance(
+            acceptance,
+            is_accepted=self._is_accepted,
+            live_profile=self._live_profile,
+            pooled=self._pool_count,
+        )
         self._runner = AttemptRunner(
             executor,
             avoid=lambda: self._quarantine.nodes,
@@ -648,7 +658,19 @@ class RealToolbox:
                 builds=self._builds.charges(item.request_id),
             )
         builds = self._builds.charges(item.request_id)
+        result = await asyncio.to_thread(self._pooled, item.request_id, result)
         return replace(result, request_id=item.request_id, queued_at=item.queued_at, builds=builds)
+
+    def _pool_count(self, key: PoolKey) -> int:
+        return 0 if self._pool is None else self._pool.count(key)
+
+    def _pooled(self, request_id: str, result: TestResult) -> TestResult:
+        """``result`` with its short-prompt check compared over every process pooled for its recipe; as it is when the
+        toolbox keeps no pool or does not know where the test's output landed."""
+        entry = self._log.get(request_id)
+        if self._pool is None or self.trace_root is None or entry is None:
+            return result
+        return pooled_result(self._pool, entry.recipe_digest, result, self.trace_root)
 
     # --- native builds -------------------------------------------------------------------------------------------
 

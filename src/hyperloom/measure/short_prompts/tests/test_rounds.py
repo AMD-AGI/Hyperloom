@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The passes of the check against servers that answer over HTTP, one of them defective as the aiter prefill was."""
+"""The processes of the check against servers that answer over HTTP, one of them defective as the aiter prefill was.
+
+Process 0 is the test's own server (``answer_held``), already up: in these tests its start takes no time on the clock.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +19,14 @@ from hyperloom.measure.short_prompts.client import CompletionError, complete, di
 from hyperloom.measure.short_prompts.compare import compare_outputs
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, OutputsError, read_outputs
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
-from hyperloom.measure.short_prompts.rounds import CAP_MARGIN_FRACTION, CAP_MARGIN_SEC, PassFailed, Serving, run_passes
+from hyperloom.measure.short_prompts.rounds import (
+    CAP_MARGIN_FRACTION,
+    CAP_MARGIN_SEC,
+    PassFailed,
+    Serving,
+    answer_held,
+    run_passes,
+)
 from hyperloom.measure.short_prompts.tests.support import (
     MODEL,
     FakeServer,
@@ -37,7 +47,7 @@ class _Host:
         *,
         failing: frozenset[int] = frozenset(),
         clock=None,
-        boots: Callable[[int], float] = lambda index: 400.0,
+        boots: Callable[[int], float] = lambda index: 0.0 if index == 0 else 400.0,
     ) -> None:
         self._answers, self._failing, self._clock, self._boots = answers, failing, clock, boots
         self._server: FakeServer | None = None
@@ -67,7 +77,13 @@ class _Host:
 
 
 def _run(host: _Host, tmp_path, plan: ShortPromptPlan = PLAN, **kwargs):
-    return asyncio.run(run_passes(plan, prompt_set(), host, tmp_path, **kwargs))
+    """Process 0 on ``host`` as the test's own server, then the fresh processes on ``host``."""
+
+    async def check():
+        first = await answer_held(plan, prompt_set(), host, **kwargs)
+        return await run_passes(first, host, tmp_path, **kwargs)
+
+    return asyncio.run(check())
 
 
 def test_a_server_that_is_wrong_for_short_prompts_in_one_launch_in_three_is_caught_by_the_other_launches(tmp_path):
@@ -160,7 +176,8 @@ def test_the_first_check_is_capped_from_the_tests_own_boot_not_the_plans_fixed_c
 
     entries = _run(host, tmp_path, PLAN, clock=clock)
 
-    assert PLAN.phase_cap_sec == 1200.0 and host.deadlines[0] == _sized(400.0) == 3120.0
+    assert host.deadlines[0] == PLAN.phase_cap_sec == 1200.0, "the test's own server answers within the plan's cap"
+    assert host.deadlines[1] == _sized(400.0) == 3120.0
     assert [e.status for e in entries] == [OK] * 6, "six 400 s boots do not fit the plan's 1200 s, and fit 3120 s"
     assert read_outputs(tmp_path).stopped == ""
 
@@ -172,8 +189,8 @@ def test_with_no_boot_measured_the_plans_cap_holds_until_the_first_process_has_m
 
     entries = _run(host, tmp_path, plan, clock=clock)
 
-    assert host.deadlines[:2] == [1000.0, _sized(400.0)], "the plan's cap, then the cap the first boot sizes"
-    assert len(entries) == 6 and all(entry.boot_seconds == 400.0 for entry in entries)
+    assert host.deadlines[:3] == [1000.0, 1000.0, _sized(400.0)], "the plan's cap, then the cap the first boot sizes"
+    assert len(entries) == 6 and [entry.boot_seconds for entry in entries] == [0.0] + [400.0] * 5
 
 
 def test_the_cap_ends_a_check_whose_process_hangs_with_the_reason_and_the_processes_it_got_to(tmp_path):
@@ -183,13 +200,13 @@ def test_the_cap_ends_a_check_whose_process_hangs_with_the_reason_and_the_proces
         lambda index: good_answer,
         clock=clock,
         failing=frozenset({hangs}),
-        boots=lambda i: 900.0 if i == hangs else 100.0,
+        boots=lambda i: 900.0 if i == hangs else 0.0 if i == 0 else 100.0,
     )
     _booted(tmp_path, 100.0)
 
     entries = _run(host, tmp_path, PLAN, clock=clock)
 
-    assert host.deadlines == [_sized(100.0)] * 3, "a failed process measures nothing, so the cap stays 870 s"
+    assert host.deadlines == [PLAN.phase_cap_sec] + [_sized(100.0)] * 2, "a failed process measures nothing"
     assert [e.status for e in entries] == [OK, OK, FAILED], "1100 s have passed: nothing fits in what is left"
     assert "phase cap" in read_outputs(tmp_path).stopped
 
@@ -208,8 +225,9 @@ def test_the_phase_cap_also_ends_a_process_whose_server_answers_slowly_between_i
     entries = _run(_Host(slow), tmp_path, plan)
 
     assert time.monotonic() - began < 10, "32 sequential prompts at 0.4 s would take 13 s"
-    assert entries[0].status == FAILED and entries[0].reason == "the phase cap ended this process's questions"
-    assert len(entries) == 1, "no further process is started once the cap has passed"
+    reasons = [(e.status, e.reason) for e in entries]
+    assert reasons == [(FAILED, "the phase cap ended this process's questions")] * 2, "the own server, then one fresh"
+    assert len(entries) == 2, "no further process is started once the cap has passed"
     assert "phase cap" in read_outputs(tmp_path).stopped
 
 
@@ -246,7 +264,7 @@ def test_a_stopped_run_starts_no_further_process(tmp_path):
     host = _Host(lambda index: good_answer)
     host.stop_now = True
 
-    assert _run(host, tmp_path) == ()
+    assert [entry.index for entry in _run(host, tmp_path)] == [0], "only the test's own server, already up"
     assert read_outputs(tmp_path).stopped == "the run was stopped"
 
 
@@ -315,3 +333,13 @@ def test_an_outputs_file_that_repeats_a_process_index_or_cuts_its_counts_is_refu
 
     with pytest.raises(OutputsError, match="repeats a process index"):
         read_outputs(tmp_path)
+
+
+def test_the_tests_own_server_answering_is_not_a_boot_the_cap_is_sized_from(tmp_path):
+    clock = _Clock()
+    host = _Host(lambda index: good_answer, clock=clock, boots=lambda index: 0.5 if index == 0 else 400.0)
+    plan = ShortPromptPlan("short-prompts-test", "a" * 64, processes=2, phase_cap_sec=1000.0)
+
+    _run(host, tmp_path, plan, clock=clock)
+
+    assert host.deadlines[1] == pytest.approx(0.5 + 1000.0), "with no boot measured, the plan's cap holds"

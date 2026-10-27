@@ -36,7 +36,9 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     short_prompt_rules,
     no_patch_files,
     touch_lines,
+    with_extra_processes,
 )
+from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 
 SETUP = ShortPromptSetup("short-prompts-test", "a" * 64)
@@ -224,11 +226,13 @@ def _purposed(purpose: Purpose, **fields: object):
     ],
     ids=["baseline", "final", "lead-adoption", "diff-list-explore", "diff-list-integration"],
 )
-def test_each_decided_trigger_runs_the_check_six_times_and_names_itself(purpose, fields, candidate, trigger):
+def test_each_decided_trigger_runs_the_check_on_the_tests_own_server_and_names_itself(
+    purpose, fields, candidate, trigger
+):
     plan = _plan(_purposed(purpose, **fields), candidate)
 
     assert plan is not None and plan.trigger == (trigger,)
-    assert plan.processes == 6
+    assert plan.processes == 1, "fresh processes are added for a short pool only (with_extra_processes)"
 
 
 @pytest.mark.parametrize("consistency_check", [None, False])
@@ -249,7 +253,7 @@ def test_the_rules_come_from_the_rule_pack():
     assert (rules.processes, rules.max_new_tokens, rules.phase_cap_sec) == (6, 32, 1200.0)
     assert rules.always_purposes == {"baseline", "final"}
     plan = _plan(req(purpose=Purpose.FINAL), PARENT)
-    assert plan is not None and (plan.processes, plan.max_new_tokens, plan.phase_cap_sec) == (6, 32, 1200.0)
+    assert plan is not None and (plan.processes, plan.max_new_tokens, plan.phase_cap_sec) == (1, 32, 1200.0)
 
 
 def test_touch_lines_render_each_kind_of_change_one_line_each():
@@ -289,11 +293,20 @@ class _Planner:
         return self.accepted
 
 
-def _prepare(request, candidate_args: str, *, setup: ShortPromptSetup | None, accepted: object, replay: bool = False):
+def _prepare(
+    request,
+    candidate_args: str,
+    *,
+    setup: ShortPromptSetup | None,
+    accepted: object,
+    replay: bool = False,
+    pooled=lambda key: 0,
+):
     repo = FakeRepo(PARENT)
     acceptance = Acceptance(
         AcceptanceSetup(repo, _Planner(accepted), IMAGE, short_prompts=setup),  # type: ignore[arg-type]
         is_accepted=lambda _id: True,
+        pooled=pooled,
     )
     return asyncio.run(acceptance.prepare(request, replay=replay))
 
@@ -340,6 +353,7 @@ def test_a_planner_whose_accepted_measurement_cannot_carry_a_plan_is_left_as_it_
 PROMPT_PLAN = ShortPromptPlan(
     SETUP.prompt_set,
     SETUP.prompts_sha256,
+    processes=6,
     trigger=("purpose final",),
 )
 
@@ -392,10 +406,19 @@ def test_a_run_that_stopped_at_the_cap_is_incomplete_with_the_cap_as_the_reason(
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "phase cap" in check.reason and check.processes == (0, 1)
 
 
-def test_one_process_alone_has_no_self_consistency_and_is_incomplete(tmp_path):
+def test_one_process_alone_has_no_self_consistency_and_is_incomplete_when_more_were_planned(tmp_path):
     check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"]))
 
     assert check.self_consistency is None and check.status == SHORT_PROMPTS_INCOMPLETE
+
+
+def test_the_tests_own_server_alone_is_a_complete_check_that_compares_nothing_by_itself(tmp_path):
+    own = replace(PROMPT_PLAN, processes=1)
+
+    check = consistency_of(own, _landed(tmp_path, ["good"], own))
+
+    assert check.status == SHORT_PROMPTS_COMPLETE and check.processes == (0,)
+    assert check.self_consistency is None and check.inconsistency is None, "the pool is what compares it"
 
 
 @pytest.mark.parametrize("behaviours", [["fail"] * 6, []])
@@ -431,3 +454,41 @@ def test_a_late_drift_in_one_process_is_located_at_its_token_and_the_prompt_is_l
     difference = check.self_consistency.first_difference
     assert difference is not None and (difference.process, difference.position) == (1, 31)
     assert difference.prompt_tokens > 16 and check.inconsistency == 1
+
+
+@pytest.mark.parametrize(
+    ("purpose", "pooled", "processes"),
+    [
+        (Purpose.INTEGRATION, 0, 6),
+        (Purpose.INTEGRATION, 2, 4),
+        (Purpose.FINAL, 5, 1),
+        (Purpose.FINAL, 9, 1),
+        (Purpose.EXPLORE, 0, 1),
+        (Purpose.CONFIRM, 1, 1),
+        (Purpose.BASELINE, 0, 1),
+    ],
+    ids=["merge-empty", "merge-short", "final-one-short", "final-full", "explore", "confirm", "baseline"],
+)
+def test_only_a_merge_test_or_a_final_candidate_boots_fresh_processes_up_to_the_packs_count(purpose, pooled, processes):
+    plan = _plan(_purposed(purpose, consistency_check=True), PARENT)
+    assert plan is not None
+
+    assert with_extra_processes(plan, _purposed(purpose, consistency_check=True), pooled).processes == processes
+
+
+def test_acceptance_asks_the_pool_of_the_candidates_recipe_and_plans_what_it_lacks(tmp_path):
+    asked: list[PoolKey] = []
+
+    def pooled(key: PoolKey) -> int:
+        asked.append(key)
+        return 2
+
+    final = _prepare(req(purpose=Purpose.FINAL), "", setup=SETUP, accepted=_accepted(tmp_path), pooled=pooled)
+    explore = _prepare(
+        req(server_args="--attention-backend aiter"), "", setup=SETUP, accepted=_accepted(tmp_path), pooled=pooled
+    )
+
+    assert final.environment.short_prompts.processes == 4, "its own server and three fresh ones make six"
+    assert explore.environment.short_prompts.processes == 1, "an explore uses what it has"
+    assert asked[0] == PoolKey(final.recipe_digest, SETUP.prompts_sha256, 32)
+    assert asked[1].recipe_digest == explore.recipe_digest != final.recipe_digest

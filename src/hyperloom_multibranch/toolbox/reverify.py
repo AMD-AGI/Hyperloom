@@ -29,7 +29,8 @@ __all__ = [
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
 #: What a short-prompt check's record states that the bundle alone does not: the plan's reasons.
-_CONSISTENCY_NOT_IN_BUNDLE = frozenset({"trigger"})
+#: ``pooled`` compares the processes of other tests' bundles too, each of which is verified with its own record.
+_CONSISTENCY_NOT_IN_BUNDLE = frozenset({"trigger", "pooled"})
 
 
 def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str | None:

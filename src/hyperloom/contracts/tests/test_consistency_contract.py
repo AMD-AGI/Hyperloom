@@ -15,6 +15,7 @@ from hyperloom.contracts.consistency import (
     SHORT_PROMPTS_INCOMPLETE,
     OutputCounts,
     OutputDifference,
+    PooledConsistency,
     ShortPromptConsistency,
 )
 from hyperloom.contracts.measurement import MeasurementError, Purpose, TestKind, TestRequest, TestResult, Validity
@@ -205,3 +206,32 @@ def test_the_flag_is_a_boolean_or_nothing(bad):
 def test_the_check_is_replaceable_but_revalidated():
     with pytest.raises(MeasurementError):
         replace(_result(short_prompt_consistency=_check()), short_prompt_consistency=3)
+
+
+POOLED = PooledConsistency(
+    "sha256:" + "1" * 64, ("tests/a/attempt-1#0", "tests/b/attempt-1#0", "tests/c/attempt-1#0"), "tokens", FOUND
+)
+
+
+def test_a_pooled_comparison_round_trips_and_is_the_inconsistency_the_gate_reads():
+    check = _roundtrip(_check(processes_planned=1, processes=(0,), self_consistency=None, pooled=POOLED))
+
+    assert check.pooled == POOLED and (POOLED.count, POOLED.inconsistency) == (3, 2)
+    assert check.inconsistency == 2, "the pooled count, not the test's own (which compared nothing)"
+    assert _check(pooled=replace(POOLED, processes=POOLED.processes[:1], counts=None)).inconsistency is None
+    assert _check().inconsistency == 2 and _check().pooled is None, "a record made without a pool reads its own"
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"processes": ("a#0", "a#0", "b#0")}, "the pooled processes are distinct"),
+        ({"counts": None}, "pooled counts are given exactly when two or more processes are pooled"),
+        ({"counts": OutputCounts((0, 0))}, "pooled counts count every pooled process"),
+        ({"compared_by": "bytes"}, "compared_by must be one of"),
+        ({"recipe_digest": ""}, "the pooled recipe's digest"),
+    ],
+)
+def test_a_pooled_comparison_that_breaks_the_contract_is_refused_naming_what(change, message):
+    with pytest.raises(MeasurementError, match=message):
+        replace(POOLED, **change)

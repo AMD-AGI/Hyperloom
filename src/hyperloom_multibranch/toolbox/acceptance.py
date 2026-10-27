@@ -33,7 +33,14 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
-from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, blob_patch_files, decide, no_patch_files
+from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey
+from hyperloom_multibranch.toolbox.short_prompts import (
+    ShortPromptSetup,
+    blob_patch_files,
+    decide,
+    no_patch_files,
+    with_extra_processes,
+)
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -136,6 +143,10 @@ def _check_upstream_label(parent: Recipe, request: TestRequest) -> None:
             )
 
 
+def _nothing_pooled(key: PoolKey) -> int:
+    return 0
+
+
 def _no_live_profile(request: TestRequest, recipe_digest: str) -> str | None:
     return None
 
@@ -206,14 +217,18 @@ class Acceptance:
         *,
         is_accepted: Callable[[str], bool],
         live_profile: Callable[[TestRequest, str], str | None] = _no_live_profile,
+        pooled: Callable[[PoolKey], int] = _nothing_pooled,
     ) -> None:
         """``live_profile`` answers, for a PROFILE request and the digest of the recipe it measures, the id of a profile
-        of the same recipe that is queued, running or measured, or ``None``; the toolbox reads it from its submit log."""
+        of the same recipe that is queued, running or measured, or ``None``; the toolbox reads it from its submit log.
+        ``pooled`` answers how many server processes have answered the short prompts for a recipe so far (the toolbox's
+        ``short_prompt_pool``)."""
         self._repo = setup.repo
         self._planner = setup.planner
         self._image = setup.active_image_digest
         self._is_accepted = is_accepted
         self._live_profile = live_profile
+        self._pooled = pooled
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
         blobs = setup.planner.blobs
@@ -260,8 +275,12 @@ class Acceptance:
         return Prepared(self._with_long_context(accepted, request), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
-        """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it."""
+        """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it: on the
+        test's own server, and on as many fresh ones as the recipe's pool lacks for a merge test or a final candidate."""
         plan = decide(request, parent, candidate, self._short_prompts, self._patch_files)
+        if plan is not None:
+            pooled = self._pooled(PoolKey(candidate.digest(), plan.prompts_sha256, plan.max_new_tokens))
+            plan = with_extra_processes(plan, request, pooled)
         return (
             replace(accepted, short_prompts=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)
