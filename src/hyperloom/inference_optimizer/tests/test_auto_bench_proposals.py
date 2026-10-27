@@ -13,6 +13,13 @@ class _Tasks:
     def __init__(self, queued=(), running=()) -> None:
         self._queued, self._running = list(queued), list(running)
         self.created: list[dict[str, Any]] = []
+        self.ended: dict[str, str] = {}
+
+    async def find_by_idempotency_key(self, key):
+        if key in self.ended:
+            return SimpleNamespace(state=self.ended[key])
+        created = any(c["idempotency_key"] == key for c in self.created)
+        return SimpleNamespace(state="queued") if created else None
 
     async def queued(self):
         return self._queued
@@ -228,6 +235,19 @@ async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases
 
     (batch,) = _explores(fp)
     assert (batch["params"][CYCLE_ARMS_PARAM], batch["idempotency_key"]) == ([], "cycle-reference-c0-s1")
+
+
+async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(monkeypatch):
+    """GLM-5.3: recover cancelled a preempted pod's reference batch, and its spent key kept the screen shut all cycle."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _agentx_phase()
+    fp._coord.tasks.ended = {"cycle-reference-c0-s0": "cancelled", "cycle-reference-c0-s0-a1": "failed"}
+
+    assert await fp.enqueue_cycle_batch() is True
+    fp._coord.tasks.ended["cycle-reference-c0-s0-a2"] = "cancelled"
+    assert await fp.enqueue_cycle_batch() is False
+
+    assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s0-a2"]
 
 
 async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch):
