@@ -14,7 +14,8 @@ server starts, and what an accepted test compiled is published to it by this hos
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
-staged for the session model's tokenizer when there is one (``short_prompts.default_short_prompts``). The set is read in the runner cache of
+for the session model's tokenizer, staged here at the build when it is missing (``short_prompts.default_short_prompts``;
+a failure leaves the check off with a warning that says why). The set is read in the runner cache of
 this host (``HYPERLOOM_RUNNER_CACHE``, where ``python -m hyperloom.measure.short_prompts.build`` staged it) before the
 toolbox is built, and the runners are told that directory; one that is not staged there refuses the build.
 
@@ -255,8 +256,8 @@ class LocalOptions:
     unless a test says otherwise). ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check (``acceptance.short_prompts`` of a builder that names it there says the same and must
     not differ); ``None`` takes the key in ``HYPERLOOM_SHORT_PROMPTS`` of the host environment (``off`` for no check),
-    and without either the set staged for the session model's tokenizer, when it is staged. It is read in this host's
-    runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and the build refuses one that is not staged
+    and without either the set for the session model's tokenizer, staged at the build when missing. It is read in this
+    host's runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and the build refuses one that is not staged
     there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named and read the same way (``None`` takes the
@@ -371,7 +372,7 @@ def _acceptance_with_prompts(
     long_named = with_long_context(acceptance, options.long_context).long_context
     return replace(
         acceptance,
-        short_prompts=staged_short_prompts(named, environ, model_dir),
+        short_prompts=staged_short_prompts(named, environ, model_dir, stage=True),
         long_context=staged_long_context(long_named, environ),
     )
 

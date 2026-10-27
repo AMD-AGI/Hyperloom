@@ -61,7 +61,7 @@ from hyperloom.measure.short_prompts.plan import (
     ShortPromptPlan,
     miss_probability,
 )
-from hyperloom.measure.short_prompts.build import DEFAULT_SEED, tokenizer_hashes
+from hyperloom.measure.short_prompts.build import DEFAULT_SEED, build_entry, tokenizer_hashes
 from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.short_prompts.resolve import staged_entry, verified_entry
 from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, StagedEntry, cache_root, entry_key
@@ -95,6 +95,7 @@ SHORT_PROMPTS_OFF = "off"
 MODEL_PATH_ENV = "MODEL_PATH"
 
 _LOG = logging.getLogger(__name__)
+_NOT_STAGED = "short-prompt consistency check off: the model's prompt set %s is not staged in the runner cache: %s"
 
 _UNSET = "(unset)"
 _MAX_LINE_CHARS = 200
@@ -136,11 +137,16 @@ def _setup_of(asked: str, read: Callable[[], StagedEntry]) -> ShortPromptSetup:
     return ShortPromptSetup(entry.key, entry.prompts_sha256)
 
 
-def default_short_prompts(model_dir: Path | None, environ: Mapping[str, str]) -> ShortPromptSetup | None:
+def default_short_prompts(
+    model_dir: Path | None, environ: Mapping[str, str], *, stage: bool = False
+) -> ShortPromptSetup | None:
     """The set ``measure.short_prompts.build`` stages for the tokenizer in ``model_dir`` (else the directory
     ``MODEL_PATH`` in ``environ`` names) with its default seed, read in the runner cache ``environ`` names; ``None``, and
     a log line that says why, when there is no model directory (information: a toolbox of no model has nothing to find), it
     holds no tokenizer or that set is not staged (a warning: the model's own check is off).
+
+    With ``stage`` (a toolbox whose runners read the same cache) a set that is not staged is staged first, on the CPU: the
+    model's tokenizer and the seeded generator; when that fails the check is off and the warning says why.
 
     Raises:
         ShortPromptsNotStaged: The set is there and unfinished, or is not what its manifest recorded: a set that was found
@@ -156,14 +162,29 @@ def default_short_prompts(model_dir: Path | None, environ: Mapping[str, str]) ->
         _LOG.warning("short-prompt consistency check off: the model's tokenizer cannot be read: %s", exc)
         return None
     if not (cache_root(environ) / EVALSETS_DIR / key).exists():
-        _LOG.warning(
-            "short-prompt consistency check off: the model's prompt set %s is not staged in the runner cache", key
-        )
-        return None
+        if not stage:
+            _LOG.warning(_NOT_STAGED, key, "the toolbox does not stage it")
+            return None
+        if not _staged_now(directory, environ, key):
+            return None
     return _setup_of(f"the model's prompt set {key}", lambda: staged_entry(key, environ))
 
 
-def environment_short_prompts(environ: Mapping[str, str], model_dir: Path | None = None) -> ShortPromptSetup | None:
+def _staged_now(model_dir: Path, environ: Mapping[str, str], key: str) -> bool:
+    """Stage the model's default prompt set (``key``) in the runner cache ``environ`` names; whether it was, the reason
+    logged when it was not."""
+    try:
+        build_entry(model_dir, cache_root(environ))
+    except Exception as exc:  # noqa: BLE001 - the tokenizer library raises anything; the check is off and says why
+        _LOG.warning(_NOT_STAGED, key, f"staging it failed: {type(exc).__name__}: {exc}")
+        return False
+    _LOG.info("short-prompt consistency check: staged the model's prompt set %s in the runner cache", key)
+    return True
+
+
+def environment_short_prompts(
+    environ: Mapping[str, str], model_dir: Path | None = None, *, stage: bool = False
+) -> ShortPromptSetup | None:
     """The setup ``HYPERLOOM_SHORT_PROMPTS`` names in ``environ``: none for ``off``, the model's own set
     (:func:`default_short_prompts`) when it names none (a blank value names none).
 
@@ -178,12 +199,12 @@ def environment_short_prompts(environ: Mapping[str, str], model_dir: Path | None
     if key == SHORT_PROMPTS_OFF:
         return None
     if not key:
-        return default_short_prompts(model_dir, environ)
+        return default_short_prompts(model_dir, environ, stage=stage)
     return _setup_of(f"{SHORT_PROMPTS_ENV}={key}", lambda: staged_entry(key, environ))
 
 
 def staged_short_prompts(
-    named: ShortPromptSetup | None, environ: Mapping[str, str], model_dir: Path | None = None
+    named: ShortPromptSetup | None, environ: Mapping[str, str], model_dir: Path | None = None, *, stage: bool = False
 ) -> ShortPromptSetup | None:
     """The setup a toolbox whose runners read the runner cache ``environ`` names runs the check with, or ``None`` for none.
 
@@ -195,7 +216,7 @@ def staged_short_prompts(
         ShortPromptsNotStaged: The set is asked for and is not staged there, is unfinished or is not the one named.
     """
     if named is None:
-        return environment_short_prompts(environ, model_dir)
+        return environment_short_prompts(environ, model_dir, stage=stage)
     return _setup_of(
         f"prompt set {named.prompt_set}", lambda: verified_entry(named.prompt_set, named.prompts_sha256, environ)
     )
