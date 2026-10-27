@@ -1,18 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Compare the outputs of several server processes with each other and with a reference.
+"""Compare the outputs of several server processes with each other.
 
 An output of a prompt is its generated tokens as the server printed them (its text when any output lacks tokens). For
-each prompt the *consensus* of a set of processes is the output most of them gave (a tie goes to the lowest process
-index). Two comparisons are made, and neither says pass or fail, only how many prompts differ and where:
-
-* self-consistency: for each candidate process, the prompts whose output is not the consensus of the candidate's own
-  processes. A server that gives different answers to the same greedy prompt in different launches has a defect whatever
-  its parent does; the check needs at least two processes.
-* against the reference (the parent's processes): for each candidate process, the prompts whose output is not the
-  reference's consensus. A prompt the reference's own processes disagree on is *unstable* there: counted apart and left
-  out, because the reference cannot say what the answer is.
+each prompt the *consensus* of the processes is the output most of them gave (a tie goes to the lowest process index).
+Self-consistency counts, for each process, the prompts whose output is not the consensus; it says no pass or fail, only
+how many prompts differ and where. A server that gives different answers to the same greedy prompt in different launches
+has a defect whatever its parent does; the comparison needs at least two processes.
 
 Where two outputs differ, the position of the first difference (a token index, or a character index when the comparison is
 by text) and the start of both texts say whether the output is corrupted from its first tokens or drifts late, as two
@@ -81,25 +76,22 @@ class Difference:
 
 @dataclass(frozen=True)
 class Side:
-    """One comparison: per process (in the order of its index) how many prompts differ, the first difference found, and
-    for a reference the number of prompts it is unstable on."""
+    """The comparison: per process (in the order of its index) how many prompts differ, and the first difference found."""
 
     mismatches: tuple[int, ...]
     first: Difference | None
-    unstable: int = 0
 
 
 @dataclass(frozen=True)
 class Comparison:
-    """``self_consistency`` is ``None`` below two candidate processes, ``reference`` when there is no usable reference."""
+    """``self_consistency`` is ``None`` below two processes."""
 
     compared_by: str
     self_consistency: Side | None
-    reference: Side | None
 
 
-def _compared_by(groups: Sequence[Mapping[int, Outputs]]) -> str:
-    every = (out for group in groups for outputs in group.values() for out in outputs.values())
+def _compared_by(processes: Mapping[int, Outputs]) -> str:
+    every = (out for outputs in processes.values() for out in outputs.values())
     return BY_TOKENS if all(out.tokens is not None for out in every) else BY_TEXT
 
 
@@ -134,20 +126,14 @@ def _difference(process: int, prompt: PromptInfo, expected: Output, actual: Outp
     )
 
 
-def _side(
-    candidate: Mapping[int, Outputs], reference: Mapping[int, Outputs], prompts: Sequence[PromptInfo], by: str
-) -> Side:
-    """The candidate processes against the consensus of ``reference`` (which may be the candidate itself)."""
-    unstable = 0
+def _side(candidate: Mapping[int, Outputs], prompts: Sequence[PromptInfo], by: str) -> Side:
+    """The processes against their own consensus."""
     consensus: dict[str, Output] = {}
     for prompt in prompts:
-        given = [outputs[prompt.id] for _, outputs in sorted(reference.items()) if prompt.id in outputs]
+        given = [outputs[prompt.id] for _, outputs in sorted(candidate.items()) if prompt.id in outputs]
         if not given:
             continue
         sigs = [_signature(out, by) for out in given]
-        if len(set(sigs)) > 1 and reference is not candidate:
-            unstable += 1
-            continue
         wanted = _consensus(sigs)
         consensus[prompt.id] = next(out for out, sig in zip(given, sigs) if sig == wanted)
     counts, first = [], None
@@ -160,18 +146,13 @@ def _side(
         counts.append(len(differing))
         if first is None and differing:
             first = _difference(index, *differing[0], by)
-    return Side(tuple(counts), first, unstable)
+    return Side(tuple(counts), first)
 
 
-def compare_outputs(
-    candidate: Mapping[int, Outputs], reference: Mapping[int, Outputs] | None, prompts: Sequence[PromptInfo]
-) -> Comparison:
-    """The comparisons of the candidate's processes (by index) with each other and with ``reference``'s, if it has any.
+def compare_outputs(candidate: Mapping[int, Outputs], prompts: Sequence[PromptInfo]) -> Comparison:
+    """The comparison of the candidate's processes (by index) with each other.
 
     A candidate process must hold an output for every prompt in ``prompts``; the rounds only record such processes.
     """
-    groups = [candidate] if not reference else [candidate, reference]
-    by = _compared_by(groups)
-    own = _side(candidate, candidate, prompts, by) if len(candidate) >= 2 else None
-    against = _side(candidate, reference, prompts, by) if reference else None
-    return Comparison(by, own, against)
+    by = _compared_by(candidate)
+    return Comparison(by, _side(candidate, prompts, by) if len(candidate) >= 2 else None)

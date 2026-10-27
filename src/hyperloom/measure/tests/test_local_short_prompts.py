@@ -158,7 +158,7 @@ def test_a_server_that_is_wrong_for_short_prompts_in_some_launches_shows_in_the_
     _run(tmp_path, cache)
 
     found = read_outputs(tmp_path / "out")
-    own = compare_outputs(found.completed, None, prompt_set()).self_consistency
+    own = compare_outputs(found.completed, prompt_set()).self_consistency
     assert own is not None and [n > 0 for n in own.mismatches] == [False, True, False, False, True, False]
 
 

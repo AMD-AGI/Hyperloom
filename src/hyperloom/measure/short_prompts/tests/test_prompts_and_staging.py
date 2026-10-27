@@ -201,17 +201,22 @@ def test_a_model_directory_with_no_tokenizer_files_is_refused(tmp_path):
 
 
 def test_the_plan_round_trips_and_a_wrong_field_is_refused_naming_it(tmp_path):
-    plan = ShortPromptPlan("short-prompts-abc", "a" * 64, trigger=("purpose final",), recipe="sha256:" + "b" * 64)
+    plan = ShortPromptPlan("short-prompts-abc", "a" * 64, trigger=("purpose final",))
 
     assert ShortPromptPlan.parse(plan.to_document(), "sheet") == plan
     with pytest.raises(DocumentError, match="prompt set key"):
         ShortPromptPlan("Not A Key", "a" * 64)
     with pytest.raises(DocumentError, match="processes must be 1 to"):
         ShortPromptPlan("k", "a" * 64, processes=0)
-    with pytest.raises(DocumentError, match="not a recipe digest"):
-        ShortPromptPlan("k", "a" * 64, recipe="b" * 64)
     with pytest.raises(DocumentError, match="unknown key"):
         ShortPromptPlan.parse({**plan.to_document(), "extra": 1}, "sheet")
+
+
+def test_a_sheet_written_while_checks_were_stored_by_recipe_still_parses_and_its_digests_are_left_out():
+    plan = ShortPromptPlan("short-prompts-abc", "a" * 64, trigger=("purpose final",))
+    old = {**plan.to_document(), "recipe": "sha256:" + "b" * 64, "parent_recipe": "sha256:" + "c" * 64}
+
+    assert ShortPromptPlan.parse(old, "sheet") == plan and "recipe" not in plan.to_document()
 
 
 def test_six_launches_miss_a_defect_in_one_launch_in_three_with_probability_8_8_percent():

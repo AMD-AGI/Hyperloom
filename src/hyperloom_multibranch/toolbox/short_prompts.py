@@ -7,8 +7,8 @@
 ``short_prompt_touch`` pattern says which of them touch attention, the KV cache or prefill. A patch is rendered with the
 files it changes, read from the patch itself in the blob store (its path in the recipe is only its hash), and a patch whose
 files cannot be read counts as touching. A test also runs the check when
-its purpose is one of the pack's ``always_purposes`` (a baseline, which gives its descendants their reference outputs, and a
-final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
+its purpose is one of the pack's ``always_purposes`` (a baseline, whose inconsistency is the floor the rule gate holds every
+candidate to, and a final candidate) or when the request sets ``consistency_check`` (scheduling does on a reverse merge). A caller can add the
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
 
 *Switched on.* The check is on by default: the triggers above bound its cost (six fresh processes, about 9 to 11
@@ -19,37 +19,30 @@ staged (:func:`default_short_prompts`; the set depends on the tokenizer, so a ho
 logs why). A builder whose runners read this host's runner cache reads what it is given there first
 (:func:`staged_short_prompts`); a set that is asked for, or found and not readable, is refused, never run without.
 
-*What against.* The outputs of the test's own fresh server processes are compared with each other and with the parent's
-outputs from the parent's own run, which :class:`ReferenceStore` keeps by recipe digest. A parent with no stored outputs is
-a reference that is ``absent`` and counts nothing, never a clean one.
+*What against.* The outputs of the test's own fresh server processes are compared with each other only. Nothing is kept
+for later tests: a comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8 KV,
+quantized GEMMs), and a defect that is wrong in every process is the accuracy evaluation's to see.
 
 *What is recorded.* :func:`consistency_of` reads the landed ``outputs.json`` and states counts and positions
-(``ShortPromptConsistency``); it never says pass or fail.
+(``ShortPromptConsistency``); it never says pass or fail, and an ``incomplete`` check holds nothing back.
 """
 
 from __future__ import annotations
 
 import functools
-import json
 import logging
-import os
 import re
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
 
 from hyperloom.common.outside_facts import SHORT_PROMPT_CHECK, SHORT_PROMPT_TOUCH
 from hyperloom.contracts.consistency import (
-    REFERENCE_ABSENT,
-    REFERENCE_COMPARED,
     SHORT_PROMPTS_COMPLETE,
     SHORT_PROMPTS_INCOMPLETE,
     OutputCounts,
     OutputDifference,
     ShortPromptConsistency,
-    ShortPromptReference,
 )
 from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
@@ -79,8 +72,6 @@ __all__ = [
     "PatchFilesUnreadable",
     "SHORT_PROMPTS_ENV",
     "SHORT_PROMPTS_OFF",
-    "ReferenceAbsent",
-    "ReferenceStore",
     "ShortPromptRules",
     "ShortPromptSetup",
     "ShortPromptsNotStaged",
@@ -90,7 +81,6 @@ __all__ = [
     "default_short_prompts",
     "environment_short_prompts",
     "no_patch_files",
-    "record_reference",
     "rederive",
     "short_prompt_rules",
     "staged_short_prompts",
@@ -110,10 +100,8 @@ _UNSET = "(unset)"
 _MAX_LINE_CHARS = 200
 _MAX_REASONS = 32
 _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
-_SCHEMA = 1
 _UTF8 = "utf-8"
 _MAX_FAILED_SHOWN = 3
-_SHA_DIGITS = 16
 
 
 @dataclass(frozen=True)
@@ -353,69 +341,7 @@ def decide(
         max_new_tokens=rules.max_new_tokens,
         phase_cap_sec=rules.phase_cap_sec,
         trigger=_bounded(reasons),
-        recipe=candidate.digest(),
-        parent_recipe=parent.digest(),
     )
-
-
-# --- what against --------------------------------------------------------------------------------------------------
-
-
-class ReferenceAbsent(Exception):
-    """The parent has no usable outputs; the message is the reason the result records."""
-
-
-@dataclass(frozen=True)
-class StoredReference:
-    request_id: str
-    outputs: OutputsFile
-
-
-class ReferenceStore:
-    """The outputs of finished checks, by the digest of the recipe they were measured on and the prompt set.
-
-    A test's outputs are stored under its own recipe's digest, so a test whose parent is that recipe finds them. The first
-    complete check of a recipe is the one kept: a reference does not change under the tests that were compared with it.
-    """
-
-    def __init__(self, directory: Path) -> None:
-        self._directory = Path(directory)
-
-    def _path(self, recipe: str, prompts_sha256: str) -> Path:
-        return self._directory / f"{recipe.removeprefix('sha256:')}-{prompts_sha256[:_SHA_DIGITS]}.json"
-
-    def get(self, recipe: str, prompts_sha256: str) -> StoredReference:
-        """The outputs stored for ``recipe``.
-
-        Raises:
-            ReferenceAbsent: Nothing is stored, or what is stored cannot be read.
-        """
-        path = self._path(recipe, prompts_sha256)
-        try:
-            document = json.loads(path.read_text(encoding=_UTF8))
-            if document["schema"] != _SCHEMA or document["recipe"] != recipe:
-                raise ValueError("another recipe")
-            return StoredReference(str(document["request_id"]), parse_outputs(document["outputs"]))
-        except FileNotFoundError:
-            raise ReferenceAbsent("the parent recipe has no recorded outputs for this prompt set") from None
-        except (OSError, ValueError, KeyError, TypeError, OutputsError):
-            raise ReferenceAbsent("the parent recipe's recorded outputs cannot be read") from None
-
-    def put(self, recipe: str, prompts_sha256: str, request_id: str, outputs: Mapping[str, Any]) -> bool:
-        """Store ``outputs`` (the document of a complete check) unless the recipe already has some; whether it did."""
-        path = self._path(recipe, prompts_sha256)
-        self._directory.mkdir(parents=True, exist_ok=True)
-        document = {"schema": _SCHEMA, "recipe": recipe, "request_id": request_id, "outputs": outputs}
-        fd, scratch = tempfile.mkstemp(dir=self._directory, prefix=".ref-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding=_UTF8) as handle:
-                json.dump(document, handle, sort_keys=True)
-            os.link(scratch, path)
-        except FileExistsError:
-            return False
-        finally:
-            Path(scratch).unlink(missing_ok=True)
-        return True
 
 
 # --- what is recorded ----------------------------------------------------------------------------------------------
@@ -426,9 +352,7 @@ def _difference(found: Difference | None) -> OutputDifference | None:
 
 
 def _counts(side: Side | None) -> OutputCounts | None:
-    if side is None:
-        return None
-    return OutputCounts(side.mismatches, _difference(side.first), side.unstable)
+    return None if side is None else OutputCounts(side.mismatches, _difference(side.first))
 
 
 def _why_incomplete(plan: ShortPromptPlan, found: OutputsFile, completed: int) -> str:
@@ -452,24 +376,14 @@ def _incomplete(plan: ShortPromptPlan, reason: str) -> ShortPromptConsistency:
         miss_probability_one_third=miss_probability(0),
         compared_by="",
         self_consistency=None,
-        reference=ShortPromptReference(REFERENCE_ABSENT, "no process answered every prompt, so nothing was compared"),
     )
 
 
-def _reference_outputs(plan: ShortPromptPlan, store: ReferenceStore | None) -> tuple[StoredReference | None, str]:
-    if store is None or not plan.parent_recipe:
-        return None, "no reference store, or no parent recipe, is known to this toolbox"
-    try:
-        return store.get(plan.parent_recipe, plan.prompts_sha256), ""
-    except ReferenceAbsent as exc:
-        return None, str(exc)
-
-
-def consistency_of(plan: ShortPromptPlan, directory: Path, store: ReferenceStore | None) -> ShortPromptConsistency:
+def consistency_of(plan: ShortPromptPlan, directory: Path) -> ShortPromptConsistency:
     """The check of a test whose output landed in ``directory``, as the result records it.
 
     Whatever the bundle lacks makes the check ``incomplete`` with the reason, never a clean one: no outputs file, outputs of
-    another prompt set, a process that did not answer, a parent with no outputs to compare with.
+    another prompt set, a process that did not answer.
     """
     try:
         found = parse_outputs(read_outputs_document(directory))
@@ -477,17 +391,13 @@ def consistency_of(plan: ShortPromptPlan, directory: Path, store: ReferenceStore
         return _incomplete(plan, str(exc))
     if (found.prompt_set, found.prompts_sha256) != (plan.prompt_set, plan.prompts_sha256):
         return _incomplete(plan, "the bundle's outputs are for another prompt set than the one the test asked for")
-    completed = found.completed
-    if not completed:
+    if not found.completed:
         return _incomplete(plan, _why_incomplete(plan, found, 0))
-    stored, absent = _reference_outputs(plan, store)
-    comparison = compare_outputs(completed, None if stored is None else stored.outputs.completed, found.prompts)
-    return _consistency(plan, found, comparison, stored, absent)
+    return _consistency(plan, found, compare_outputs(found.completed, found.prompts))
 
 
 def rederive(recorded: ShortPromptConsistency, directory: Path) -> ShortPromptConsistency:
-    """The check ``recorded`` claims, derived again from the outputs file of the verified bundle at ``directory`` alone: all
-    of it except the reference, which is the parent's outputs as they were stored then and not part of this bundle."""
+    """The check ``recorded`` claims, derived again from the outputs file of the verified bundle at ``directory`` alone."""
     plan = ShortPromptPlan(
         "rederived",
         recorded.prompt_set_sha256,
@@ -500,38 +410,14 @@ def rederive(recorded: ShortPromptConsistency, directory: Path) -> ShortPromptCo
     except OutputsError as exc:
         return _incomplete(plan, str(exc))
     plan = replace(plan, prompt_set=found.prompt_set, prompts_sha256=found.prompts_sha256)
-    comparison = compare_outputs(found.completed, None, found.prompts) if found.completed else None
-    if comparison is None:
+    if not found.completed:
         return _incomplete(plan, _why_incomplete(plan, found, 0))
-    return _consistency(plan, found, comparison, None, "not part of the bundle")
+    return _consistency(plan, found, compare_outputs(found.completed, found.prompts))
 
 
-def record_reference(
-    plan: ShortPromptPlan, check: ShortPromptConsistency, directory: Path, store: ReferenceStore, request_id: str
-) -> bool:
-    """Keep the outputs of a complete check as the reference for tests whose parent is the recipe it measured; whether it
-    kept them. An incomplete check, or a test that knows no recipe digest, leaves nothing."""
-    if check.status != SHORT_PROMPTS_COMPLETE or not plan.recipe:
-        return False
-    try:
-        return store.put(plan.recipe, plan.prompts_sha256, request_id, read_outputs_document(directory))
-    except (OutputsError, OSError):
-        return False
-
-
-def _consistency(
-    plan: ShortPromptPlan, found: OutputsFile, comparison: Comparison, stored: StoredReference | None, absent: str
-) -> ShortPromptConsistency:
+def _consistency(plan: ShortPromptPlan, found: OutputsFile, comparison: Comparison) -> ShortPromptConsistency:
     completed = found.completed
     reason = _why_incomplete(plan, found, len(completed))
-    reference_counts = _counts(comparison.reference)
-    if stored is not None and reference_counts is None:
-        absent = "the parent's recorded outputs hold no process that answered every prompt"
-    reference = (
-        ShortPromptReference(REFERENCE_COMPARED, request_id=stored.request_id, counts=reference_counts)
-        if stored is not None and reference_counts is not None
-        else ShortPromptReference(REFERENCE_ABSENT, reason=absent)
-    )
     return ShortPromptConsistency(
         status=SHORT_PROMPTS_INCOMPLETE if reason else SHORT_PROMPTS_COMPLETE,
         reason=reason,
@@ -544,6 +430,5 @@ def _consistency(
         miss_probability_one_third=miss_probability(len(completed)),
         compared_by=comparison.compared_by,
         self_consistency=_counts(comparison.self_consistency),
-        reference=reference,
         outputs=f"{SHORT_PROMPTS_DIR}/{OUTPUTS_FILE}",
     )

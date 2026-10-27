@@ -28,8 +28,8 @@ __all__ = [
 
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
-#: What a short-prompt check's record states that the bundle alone does not: the parent's outputs, the plan's reasons.
-_CONSISTENCY_NOT_IN_BUNDLE = frozenset({"reference", "trigger"})
+#: What a short-prompt check's record states that the bundle alone does not: the plan's reasons.
+_CONSISTENCY_NOT_IN_BUNDLE = frozenset({"trigger"})
 
 
 def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str | None:
@@ -77,7 +77,7 @@ def first_request_classes_difference(recorded: TestResult, derived: Sequence[Req
 
 def first_consistency_difference(recorded: TestResult, derived: ShortPromptConsistency) -> str | None:
     """The first field of the short-prompt check the record holds that differs from the one derived from the bundle's
-    outputs file; the reference and the reasons are not in the bundle and are not compared.
+    outputs file; the reasons are not in the bundle and are not compared.
 
     A record that holds no check is not compared: it claims nothing.
     """

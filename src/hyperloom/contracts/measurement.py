@@ -40,16 +40,12 @@ from hyperloom.contracts._validate import (
 )
 from hyperloom.contracts.consistency import (
     COMPARED_BY,
-    REFERENCE_ABSENT,
-    REFERENCE_COMPARED,
-    REFERENCE_STATUSES,
     SHORT_PROMPTS_COMPLETE,
     SHORT_PROMPTS_INCOMPLETE,
     SHORT_PROMPTS_STATUSES,
     OutputCounts,
     OutputDifference,
     ShortPromptConsistency,
-    ShortPromptReference,
 )
 from hyperloom.contracts.long_context import (
     LONG_CONTEXT_COMPLETE,
@@ -876,8 +872,7 @@ class TestResult:
     to do, and it is ``None`` exactly when the result has no phases (a document written before they existed, a result
     no measurement made).
     ``short_prompt_consistency`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set
-    of short prompts answered by fresh server processes, compared with each other and with the parent's, as counts and
-    positions only.
+    of short prompts answered by fresh server processes, compared with each other, as counts and positions only.
     ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
     synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
     per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``.
@@ -1080,9 +1075,6 @@ __all__ = [
     "PROMPT_NOT_RUN",
     "PROMPT_OK",
     "PROMPT_STATUSES",
-    "REFERENCE_ABSENT",
-    "REFERENCE_COMPARED",
-    "REFERENCE_STATUSES",
     "SHORT_PROMPTS_COMPLETE",
     "SHORT_PROMPTS_INCOMPLETE",
     "SHORT_PROMPTS_STATUSES",
@@ -1105,7 +1097,6 @@ __all__ = [
     "RoundValue",
     "SandboxFacts",
     "ShortPromptConsistency",
-    "ShortPromptReference",
     "TableHits",
     "TestKind",
     "TestRequest",

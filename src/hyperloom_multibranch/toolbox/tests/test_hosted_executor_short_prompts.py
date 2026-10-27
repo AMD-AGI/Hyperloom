@@ -17,8 +17,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.consistency import (
-    REFERENCE_ABSENT,
-    REFERENCE_COMPARED,
     SHORT_PROMPTS_COMPLETE,
     SHORT_PROMPTS_INCOMPLETE,
 )
@@ -27,16 +25,12 @@ from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
-from hyperloom_multibranch.toolbox.hosted_executor import REFERENCES_DIR, HostedExecutor
+from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
-PARENT_RECIPE = "sha256:" + "2" * 64
-CHILD_RECIPE = "sha256:" + "1" * 64
-PLAN = ShortPromptPlan(
-    "short-prompts-test", "a" * 64, trigger=("purpose final",), recipe=CHILD_RECIPE, parent_recipe=PARENT_RECIPE
-)
+PLAN = ShortPromptPlan("short-prompts-test", "a" * 64, trigger=("purpose final",))
 GOOD = ["good"] * 6
 
 
@@ -95,7 +89,7 @@ async def test_a_succeeded_test_carries_the_check_of_the_outputs_its_bundle_land
     assert check is not None and check.status == SHORT_PROMPTS_COMPLETE
     assert check.processes == (0, 1, 2, 3, 4, 5) and check.trigger == ("purpose final",)
     assert check.self_consistency is not None and check.self_consistency.mismatches == (0,) * 6
-    assert check.reference.status == REFERENCE_ABSENT, "the first test of a recipe has no parent output to compare with"
+    assert check.inconsistency == 0 and "reference" not in check.to_document()
     landed = tmp_path / "session" / result.output_dir / check.outputs
     assert landed.is_file()
     archived = ResultManifest.from_bytes((Path(rig.record_archive(result.request_id)) / "manifest.json").read_bytes())
@@ -113,18 +107,18 @@ async def test_a_defective_launch_among_the_candidates_processes_is_counted_and_
     assert result.validity is Validity.SUCCEEDED, "the check states a count, the measurement is still a measurement"
 
 
-async def test_a_child_test_is_compared_with_its_parents_outputs_and_the_record_survives_reverification(
+async def test_a_child_test_is_held_to_its_own_processes_only_and_the_record_survives_reverification(
     tmp_path: Path, rig
 ) -> None:
-    session = _Session(tmp_path, rig, replace(PLAN, recipe=PARENT_RECIPE, parent_recipe="sha256:" + "3" * 64))
+    session = _Session(tmp_path, rig, PLAN)
     parent = await session.run(GOOD)
-    assert (tmp_path / "session" / REFERENCES_DIR).is_dir() and parent.short_prompt_consistency is not None
 
     child = await session.run(["good", "good", "bad", "good", "good", "good"], check=PLAN)
 
-    reference = child.short_prompt_consistency.reference
-    assert reference.status == REFERENCE_COMPARED and reference.request_id == parent.request_id
-    assert [bool(n) for n in reference.counts.mismatches] == [False, False, True, False, False, False]
+    own = child.short_prompt_consistency.self_consistency
+    assert [bool(n) for n in own.mismatches] == [False, False, True, False, False, False]
+    assert parent.short_prompt_consistency.inconsistency == 0 and child.short_prompt_consistency.inconsistency > 0
+    assert not any((tmp_path / "session").rglob("short_prompt_refs")), "no parent outputs are kept for children"
     assert session.executor.difference(child) is None, "the record follows from its own bundle"
     assert session.executor.difference(parent) is None
 
@@ -146,7 +140,7 @@ async def test_an_edited_mismatch_count_with_untouched_hashes_is_named(tmp_path:
     )
 
 
-async def test_a_process_that_did_not_come_up_leaves_the_check_incomplete_and_nothing_stored(
+async def test_a_process_that_did_not_come_up_leaves_the_check_incomplete_and_the_test_succeeded(
     tmp_path: Path, rig
 ) -> None:
     session = _Session(tmp_path, rig, PLAN)
@@ -155,7 +149,8 @@ async def test_a_process_that_did_not_come_up_leaves_the_check_incomplete_and_no
 
     check = result.short_prompt_consistency
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "process 1: did not come up (test)" in check.reason
-    assert not any((tmp_path / "session" / REFERENCES_DIR).glob("*.json")), "an incomplete check is no reference"
+    assert result.validity is Validity.SUCCEEDED and result.failure_class is None, "an incomplete check blocks nothing"
+    assert check.inconsistency == 0, "the five processes that completed are still compared"
     assert session.executor.difference(result) is None
 
 
@@ -166,7 +161,8 @@ async def test_a_runner_that_left_no_outputs_gives_an_incomplete_check_never_a_c
 
     check = result.short_prompt_consistency
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "no readable short_prompts/outputs.json" in check.reason
-    assert check.processes == () and check.self_consistency is None and check.reference.status == REFERENCE_ABSENT
+    assert check.processes == () and check.self_consistency is None and check.inconsistency is None
+    assert result.validity is Validity.SUCCEEDED
 
 
 async def test_a_test_that_asked_for_no_check_carries_none(tmp_path: Path, rig) -> None:
@@ -186,13 +182,13 @@ async def test_a_test_that_did_not_succeed_makes_no_claim_about_short_prompts(tm
     assert result.validity is not Validity.SUCCEEDED and result.short_prompt_consistency is None
 
 
-async def test_test_result_shows_the_check_with_its_counts_and_its_reference(tmp_path: Path, rig) -> None:
+async def test_test_result_shows_the_check_with_its_counts_and_no_reference(tmp_path: Path, rig) -> None:
     session = _Session(tmp_path, rig, PLAN)
     result = await session.run(["good", "bad", "good", "good", "good", "good"])
 
     shown = jsonable(result)["short_prompt_consistency"]
 
-    assert shown["status"] == SHORT_PROMPTS_COMPLETE and shown["reference"]["status"] == REFERENCE_ABSENT
+    assert shown["status"] == SHORT_PROMPTS_COMPLETE and "reference" not in shown
     assert (
         shown["self_consistency"]["mismatches"][1] > 0 and shown["self_consistency"]["first_difference"]["process"] == 1
     )

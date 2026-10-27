@@ -353,7 +353,6 @@ def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_un
         ({"prompt_set": "Bad Key"}, "does not match"),
         ({"phase_cap_sec": "slow"}, "expected a number"),
         ({"trigger": [""]}, "non-empty string"),
-        ({"recipe": "abc"}, "does not match"),
         ({"extra": 1}, "unknown key 'extra'"),
     ],
 )

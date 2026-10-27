@@ -79,7 +79,7 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_warning_difference,
 )
 from hyperloom_multibranch.toolbox import long_context
-from hyperloom_multibranch.toolbox.short_prompts import ReferenceStore, consistency_of, record_reference, rederive
+from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
 __all__ = [
@@ -97,8 +97,6 @@ DEFAULT_TEST_TIMEOUT_SEC = 3600
 TEST_SILENCE_TIMEOUT_SEC = 600.0
 #: Where a test's landed files go, below the session directory: ``tests/<request_id>/attempt-<n>``.
 OUTPUTS_DIR = "tests"
-#: Where the outputs of finished short-prompt checks are kept, below the session directory.
-REFERENCES_DIR = "short_prompt_refs"
 _REPORT = "benchmark_report.json"
 _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
@@ -154,7 +152,6 @@ class HostedExecutor:
         self._python = magpie_python
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
-        self._references = ReferenceStore(self._session / REFERENCES_DIR)
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -317,18 +314,13 @@ class HostedExecutor:
     async def _with_short_prompts(
         self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall
     ) -> TestResult:
-        """``result`` with the short-prompt consistency check the test ran, read from its landed outputs and compared with
-        the parent's; a test that asked for none, or did not succeed, carries none.
-
-        A check that completed is kept as the reference of the tests whose parent is this test's recipe.
-        """
+        """``result`` with the short-prompt consistency check the test ran, read from its landed outputs (its processes
+        compared with each other); a test that asked for none, or did not succeed, carries none. An incomplete check is
+        recorded as it is and leaves the test's validity alone."""
         plan = accepted.short_prompts
         if plan is None or result.validity is not Validity.SUCCEEDED:
             return result
-        check = await asyncio.to_thread(consistency_of, plan, Path(call.output_dir), self._references)
-        await asyncio.to_thread(
-            record_reference, plan, check, Path(call.output_dir), self._references, result.request_id
-        )
+        check = await asyncio.to_thread(consistency_of, plan, Path(call.output_dir))
         return replace(result, short_prompt_consistency=check)
 
     async def _with_long_context(self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall) -> TestResult:

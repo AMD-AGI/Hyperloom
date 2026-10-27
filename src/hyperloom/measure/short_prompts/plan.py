@@ -41,8 +41,8 @@ _MAX_NEW_TOKENS = 256
 _MAX_TRIGGER_LINES = 32
 _MAX_TRIGGER_CHARS = 200
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
-_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-_RECIPE_FIELDS = ("recipe", "parent_recipe")
+#: Keys a sheet written while the toolbox stored each check's outputs by recipe may carry; read and left out.
+_FORMER_FIELDS = ("recipe", "parent_recipe")
 #: The share of server processes a defect of the kind this check looks for shows in (the measured case: one in three).
 _DEFECT_SHARE = 1 / 3
 
@@ -62,9 +62,8 @@ def _trigger_line(value: Any, path: str) -> str:
 class ShortPromptPlan:
     """One test's short-prompt check: ``prompt_set`` is the key of the staged entry and ``prompts_sha256`` the hash of its
     prompts file; ``processes`` fresh servers each answer every prompt with at most ``max_new_tokens`` greedy tokens, and
-    the whole check ends, incomplete, after ``phase_cap_sec``. ``trigger`` says why the check was asked for. ``recipe`` and
-    ``parent_recipe`` are the digests of the recipe the test measures and of its parent's, under which the toolbox stores
-    this test's outputs and finds the parent's (the runner does not read them)."""
+    the whole check ends, incomplete, after ``phase_cap_sec`` (the runner sizes it from the boots it measures once it has
+    measured one). ``trigger`` says why the check was asked for."""
 
     prompt_set: str
     prompts_sha256: str
@@ -72,8 +71,6 @@ class ShortPromptPlan:
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
     phase_cap_sec: float = DEFAULT_PHASE_CAP_SEC
     trigger: tuple[str, ...] = ()
-    recipe: str = ""
-    parent_recipe: str = ""
 
     def __post_init__(self) -> None:
         if not KEY_RE.fullmatch(self.prompt_set):
@@ -90,12 +87,9 @@ class ShortPromptPlan:
             raise DocumentError(f"short prompts: at most {_MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):
             _trigger_line(line, f"short prompts: trigger[{index}]")
-        for name in _RECIPE_FIELDS:
-            if getattr(self, name) and not _DIGEST.fullmatch(getattr(self, name)):
-                raise DocumentError(f"short prompts: {name} is not a recipe digest")
 
     def to_document(self) -> dict[str, Any]:
-        document: dict[str, Any] = {
+        return {
             "prompt_set": self.prompt_set,
             "prompts_sha256": self.prompts_sha256,
             "processes": self.processes,
@@ -103,8 +97,6 @@ class ShortPromptPlan:
             "phase_cap_sec": self.phase_cap_sec,
             "trigger": list(self.trigger),
         }
-        document.update({name: getattr(self, name) for name in _RECIPE_FIELDS if getattr(self, name)})
-        return document
 
     @classmethod
     def parse(cls, value: Any, path: str) -> ShortPromptPlan:
@@ -116,7 +108,8 @@ class ShortPromptPlan:
             max_new_tokens=r.integer("max_new_tokens", minimum=1) or 1,
             phase_cap_sec=r.number("phase_cap_sec", minimum=1) or 1.0,
             trigger=r.sequence("trigger", _trigger_line),
-            **{name: r.text(name, pattern=_DIGEST, optional=True) or "" for name in _RECIPE_FIELDS},
         )
+        for name in _FORMER_FIELDS:
+            r.optional(name)
         r.done()
         return plan

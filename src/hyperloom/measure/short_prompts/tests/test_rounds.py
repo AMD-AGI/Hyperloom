@@ -78,7 +78,7 @@ def test_a_server_that_is_wrong_for_short_prompts_in_one_launch_in_three_is_caug
 
     assert [e.status for e in entries] == [OK] * 6 and host.stopped == 6, "every process is stopped"
     found = read_outputs(tmp_path)
-    own = compare_outputs(found.completed, None, prompt_set()).self_consistency
+    own = compare_outputs(found.completed, prompt_set()).self_consistency
     assert own is not None
     assert [count > 0 for count in own.mismatches] == [i in defective for i in range(6)]
     assert (
@@ -86,15 +86,14 @@ def test_a_server_that_is_wrong_for_short_prompts_in_one_launch_in_three_is_caug
     )
 
 
-def test_a_server_that_answers_the_same_every_launch_is_clean_in_every_comparison(tmp_path):
+def test_a_server_that_answers_the_same_every_launch_is_clean(tmp_path):
     host = _Host(lambda index: good_answer)
 
     _run(host, tmp_path)
 
     found = read_outputs(tmp_path)
-    result = compare_outputs(found.completed, found.completed, prompt_set())
+    result = compare_outputs(found.completed, prompt_set())
     assert result.self_consistency.mismatches == (0,) * 6 and result.self_consistency.first is None
-    assert result.reference.mismatches == (0,) * 6 and result.reference.unstable == 0
     assert found.stopped == "" and len(found.prompts) == 64
 
 

@@ -13,8 +13,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.consistency import (
-    REFERENCE_ABSENT,
-    REFERENCE_COMPARED,
     SHORT_PROMPTS_COMPLETE,
     SHORT_PROMPTS_INCOMPLETE,
 )
@@ -28,17 +26,13 @@ from hyperloom.contracts.recipe import (
     Recipe,
 )
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.short_prompts.outputs import read_outputs
 from hyperloom.measure.short_prompts.plan import OUTPUTS_FILE, SHORT_PROMPTS_DIR, ShortPromptPlan
 from hyperloom.measure.short_prompts.tests.support import outputs_files
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.short_prompts import (
-    ReferenceAbsent,
-    ReferenceStore,
     ShortPromptSetup,
     consistency_of,
     decide,
-    record_reference,
     short_prompt_rules,
     no_patch_files,
     touch_lines,
@@ -100,7 +94,6 @@ def test_an_explore_whose_change_touches_attention_kv_cache_or_prefill_runs_the_
 
     assert plan is not None and line in plan.trigger
     assert (plan.prompt_set, plan.prompts_sha256) == (SETUP.prompt_set, SETUP.prompts_sha256)
-    assert (plan.recipe, plan.parent_recipe) == (candidate.digest(), PARENT.digest())
 
 
 @pytest.mark.parametrize(
@@ -348,8 +341,6 @@ PROMPT_PLAN = ShortPromptPlan(
     SETUP.prompt_set,
     SETUP.prompts_sha256,
     trigger=("purpose final",),
-    recipe="sha256:" + "1" * 64,
-    parent_recipe="sha256:" + "2" * 64,
 )
 
 
@@ -361,26 +352,19 @@ def _landed(tmp_path: Path, behaviours: list[str], plan: ShortPromptPlan = PROMP
     return directory
 
 
-def _store(tmp_path: Path) -> ReferenceStore:
-    return ReferenceStore(tmp_path / "refs")
-
-
-def test_six_clean_processes_with_no_reference_state_zero_self_mismatches_and_an_absent_reference(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6), _store(tmp_path))
+def test_six_clean_processes_state_zero_mismatches_and_no_inconsistency(tmp_path):
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6))
 
     assert check.status == SHORT_PROMPTS_COMPLETE and check.reason == "" and check.processes == (0, 1, 2, 3, 4, 5)
     assert check.self_consistency is not None and check.self_consistency.mismatches == (0,) * 6
-    assert check.reference.status == REFERENCE_ABSENT and check.reference.counts is None
-    assert "no recorded outputs" in check.reference.reason, "no reference is not a reference with no difference"
+    assert check.inconsistency == 0
     assert check.miss_probability_one_third == pytest.approx(0.0878, abs=1e-4)
     assert (check.prompts, check.compared_by, check.outputs) == (64, "tokens", "short_prompts/outputs.json")
     assert check.trigger == ("purpose final",)
 
 
 def test_a_defect_in_two_of_six_launches_is_counted_and_located_in_the_candidates_own_processes(tmp_path):
-    check = consistency_of(
-        PROMPT_PLAN, _landed(tmp_path, ["good", "bad", "good", "good", "bad", "good"]), _store(tmp_path)
-    )
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good", "bad", "good", "good", "bad", "good"]))
 
     own = check.self_consistency
     assert own is not None and [bool(n) for n in own.mismatches] == [False, True, False, False, True, False]
@@ -388,64 +372,8 @@ def test_a_defect_in_two_of_six_launches_is_counted_and_located_in_the_candidate
     assert first is not None and (first.process, first.position) == (1, 1) and first.prompt_tokens <= 16
 
 
-def test_the_check_of_a_complete_test_becomes_the_reference_of_its_children_and_is_compared_token_for_token(tmp_path):
-    store = _store(tmp_path)
-    parent = _landed(tmp_path, ["good"] * 6, name="parent")
-    parent_check = consistency_of(PROMPT_PLAN, parent, store)
-    assert record_reference(PROMPT_PLAN, parent_check, parent, store, "req-parent") is True
-    child_plan = replace(PROMPT_PLAN, recipe=PROMPT_PLAN.parent_recipe, parent_recipe=PROMPT_PLAN.recipe)
-
-    check = consistency_of(
-        child_plan, _landed(tmp_path, ["good", "good", "bad", "good", "good", "good"], child_plan, "child"), store
-    )
-
-    reference = check.reference
-    assert reference.status == REFERENCE_COMPARED and reference.request_id == "req-parent"
-    assert reference.counts is not None and [bool(n) for n in reference.counts.mismatches] == [
-        False,
-        False,
-        True,
-        False,
-        False,
-        False,
-    ]
-    assert reference.counts.first_difference is not None and reference.counts.first_difference.process == 2
-    assert check.self_consistency is not None and check.self_consistency.mismatches == reference.counts.mismatches
-
-
-def test_a_late_drift_against_the_parent_is_located_at_its_token_and_the_prompt_is_long(tmp_path):
-    store, two = _store(tmp_path), replace(PROMPT_PLAN, processes=2)
-    parent = _landed(tmp_path, ["good"] * 2, two, "parent")
-    record_reference(two, consistency_of(two, parent, store), parent, store, "req-parent")
-    child_plan = replace(two, recipe=two.parent_recipe, parent_recipe=two.recipe)
-
-    check = consistency_of(child_plan, _landed(tmp_path, ["good", "drift"], child_plan, "child"), store)
-
-    difference = check.reference.counts.first_difference
-    assert (
-        difference is not None
-        and difference.process == 1
-        and difference.position == 31
-        and difference.prompt_tokens > 16
-    )
-
-
-def test_a_reference_whose_own_processes_disagree_counts_those_prompts_as_unstable_not_as_clean(tmp_path):
-    store, two = _store(tmp_path), replace(PROMPT_PLAN, processes=2)
-    parent = _landed(tmp_path, ["good", "bad"], two, "parent")
-    record_reference(two, consistency_of(two, parent, store), parent, store, "req-parent")
-    child_plan = replace(two, recipe=two.parent_recipe, parent_recipe=two.recipe)
-
-    check = consistency_of(child_plan, _landed(tmp_path, ["good", "good"], child_plan, "child"), store)
-
-    assert check.reference.counts is not None and check.reference.counts.unstable_prompts > 0
-    assert check.reference.counts.mismatches == (0, 0)
-
-
 def test_a_process_that_did_not_come_up_makes_the_check_incomplete_and_says_which(tmp_path):
-    check = consistency_of(
-        PROMPT_PLAN, _landed(tmp_path, ["good", "fail", "good", "good", "good", "good"]), _store(tmp_path)
-    )
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good", "fail", "good", "good", "good", "good"]))
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "process 1: did not come up (test)" in check.reason
     assert check.processes == (0, 2, 3, 4, 5) and check.processes_planned == 6
@@ -459,29 +387,29 @@ def test_a_run_that_stopped_at_the_cap_is_incomplete_with_the_cap_as_the_reason(
     document["stopped"] = "the phase cap leaves no room for another process"
     path.write_text(json.dumps(document))
 
-    check = consistency_of(PROMPT_PLAN, landed, _store(tmp_path))
+    check = consistency_of(PROMPT_PLAN, landed)
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "phase cap" in check.reason and check.processes == (0, 1)
 
 
 def test_one_process_alone_has_no_self_consistency_and_is_incomplete(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"]), _store(tmp_path))
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"]))
 
     assert check.self_consistency is None and check.status == SHORT_PROMPTS_INCOMPLETE
 
 
 @pytest.mark.parametrize("behaviours", [["fail"] * 6, []])
 def test_when_no_process_answered_nothing_was_compared_and_the_check_says_so(tmp_path, behaviours):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, behaviours), _store(tmp_path))
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, behaviours))
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and check.processes == () and check.self_consistency is None
-    assert check.reference.status == REFERENCE_ABSENT and "nothing was compared" in check.reference.reason
+    assert check.inconsistency is None, "nothing compared is not a count of zero"
 
 
 def test_a_bundle_with_no_outputs_file_is_an_incomplete_check_not_a_clean_one(tmp_path):
     (tmp_path / "empty").mkdir()
 
-    check = consistency_of(PROMPT_PLAN, tmp_path / "empty", _store(tmp_path))
+    check = consistency_of(PROMPT_PLAN, tmp_path / "empty")
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "no readable short_prompts/outputs.json" in check.reason
     assert check.processes == () and check.self_consistency is None
@@ -490,41 +418,16 @@ def test_a_bundle_with_no_outputs_file_is_an_incomplete_check_not_a_clean_one(tm
 def test_outputs_of_another_prompt_set_are_not_read_as_the_asked_for_one(tmp_path):
     other = replace(PROMPT_PLAN, prompts_sha256="9" * 64)
 
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6, other), _store(tmp_path))
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6, other))
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "another prompt set" in check.reason
 
 
-def test_a_reference_that_cannot_be_read_is_an_absent_reference_with_that_reason(tmp_path):
-    store = _store(tmp_path)
-    (tmp_path / "refs").mkdir()
-    path = next(iter([store._path(PROMPT_PLAN.parent_recipe, PROMPT_PLAN.prompts_sha256)]))
-    path.write_text("not json")
+def test_a_late_drift_in_one_process_is_located_at_its_token_and_the_prompt_is_long(tmp_path):
+    three = replace(PROMPT_PLAN, processes=3)
 
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6), store)
+    check = consistency_of(three, _landed(tmp_path, ["good", "drift", "good"], three))
 
-    assert check.reference.status == REFERENCE_ABSENT and "cannot be read" in check.reference.reason
-
-
-def test_the_first_complete_check_of_a_recipe_is_kept_and_an_incomplete_one_is_never_stored(tmp_path):
-    store = _store(tmp_path)
-    first, second, partial = (
-        _landed(tmp_path, b, name=n) for b, n in ((["good"] * 6, "a"), (["bad"] * 6, "b"), (["good", "fail"], "c"))
-    )
-
-    assert record_reference(PROMPT_PLAN, consistency_of(PROMPT_PLAN, partial, store), partial, store, "req-0") is False
-    with pytest.raises(ReferenceAbsent):
-        store.get(PROMPT_PLAN.recipe, PROMPT_PLAN.prompts_sha256)
-    assert record_reference(PROMPT_PLAN, consistency_of(PROMPT_PLAN, first, store), first, store, "req-1") is True
-    assert record_reference(PROMPT_PLAN, consistency_of(PROMPT_PLAN, second, store), second, store, "req-2") is False
-    kept = store.get(PROMPT_PLAN.recipe, PROMPT_PLAN.prompts_sha256)
-    assert kept.request_id == "req-1" and kept.outputs.completed.keys() == set(range(6))
-    assert read_outputs(first).processes[0].outputs == kept.outputs.processes[0].outputs
-
-
-def test_a_plan_with_no_recipe_digest_stores_nothing(tmp_path):
-    store = _store(tmp_path)
-    landed = _landed(tmp_path, ["good"] * 6)
-    anonymous = replace(PROMPT_PLAN, recipe="")
-
-    assert record_reference(anonymous, consistency_of(anonymous, landed, store), landed, store, "req-1") is False
+    difference = check.self_consistency.first_difference
+    assert difference is not None and (difference.process, difference.position) == (1, 31)
+    assert difference.prompt_tokens > 16 and check.inconsistency == 1

@@ -11,14 +11,11 @@ from dataclasses import replace
 import pytest
 
 from hyperloom.contracts.consistency import (
-    REFERENCE_ABSENT,
-    REFERENCE_COMPARED,
     SHORT_PROMPTS_COMPLETE,
     SHORT_PROMPTS_INCOMPLETE,
     OutputCounts,
     OutputDifference,
     ShortPromptConsistency,
-    ShortPromptReference,
 )
 from hyperloom.contracts.measurement import MeasurementError, Purpose, TestKind, TestRequest, TestResult, Validity
 
@@ -40,7 +37,6 @@ def _check(**overrides: object) -> ShortPromptConsistency:
         "miss_probability_one_third": 0.296,
         "compared_by": "tokens",
         "self_consistency": FOUND,
-        "reference": ShortPromptReference(REFERENCE_COMPARED, request_id="r0", counts=CLEAN),
         "outputs": "short_prompts/outputs.json",
     }
     return ShortPromptConsistency(**{**fields, **overrides})  # type: ignore[arg-type]
@@ -62,7 +58,39 @@ def test_a_check_round_trips_through_json_in_a_result():
     assert _roundtrip(result).short_prompt_consistency == _check()
     document = result.to_document()["short_prompt_consistency"]
     assert document["self_consistency"]["first_difference"]["position"] == 1
-    assert document["reference"]["counts"]["mismatches"] == [0, 0, 0]
+    assert "reference" not in document, "the check compares its own processes only"
+
+
+def test_a_check_recorded_while_it_compared_with_the_parent_still_decodes_and_its_reference_is_left_out():
+    old = {
+        **_check().to_document(),
+        "self_consistency": {**FOUND.to_document(), "unstable_prompts": 0},
+        "reference": {
+            "status": "compared",
+            "reason": "",
+            "request_id": "r0",
+            "counts": {"mismatches": [0, 0, 0], "first_difference": None, "unstable_prompts": 1},
+        },
+    }
+
+    decoded = TestResult.from_document({**_result().to_document(), "short_prompt_consistency": old})
+
+    assert decoded.short_prompt_consistency == _check()
+    assert "reference" not in decoded.to_document()["short_prompt_consistency"]
+
+
+@pytest.mark.parametrize(
+    ("counts", "inconsistency"),
+    [(FOUND, 2), (CLEAN, 0), (None, None)],
+    ids=["one-process-differs", "all-agree", "not-compared"],
+)
+def test_the_inconsistency_is_the_most_prompts_one_process_answers_differently_and_none_when_not_compared(
+    counts, inconsistency
+):
+    single = {"processes_planned": 3, "processes": (0,), "status": SHORT_PROMPTS_INCOMPLETE, "reason": "two failed"}
+    check = _check(self_consistency=counts) if counts is not None else _check(**single, self_consistency=None)
+
+    assert check.inconsistency == inconsistency, "nothing compared is None, never a count of zero"
 
 
 def test_a_result_with_no_check_has_no_key_and_a_document_written_before_it_loads_with_none():
@@ -79,12 +107,11 @@ def test_an_incomplete_check_with_no_process_and_an_absent_reference_round_trips
         processes=(),
         compared_by="",
         self_consistency=None,
-        reference=ShortPromptReference(REFERENCE_ABSENT, "no process answered every prompt"),
         miss_probability_one_third=1.0,
         outputs="",
     )
 
-    assert _roundtrip(nothing).reference.counts is None
+    assert _roundtrip(nothing).self_consistency is None and nothing.inconsistency is None
 
 
 @pytest.mark.parametrize(
@@ -99,17 +126,11 @@ def test_an_incomplete_check_with_no_process_and_an_absent_reference_round_trips
         ({"miss_probability_one_third": 1.5}, "is a probability"),
         ({"compared_by": "vibes"}, "compared_by must be one of"),
         ({"self_consistency": OutputCounts((0, 0))}, "counts every completed process"),
-        ({"self_consistency": OutputCounts((0, 0, 0), None, 2)}, "no unstable prompts"),
         (
-            {
-                "processes_planned": 1,
-                "processes": (0,),
-                "self_consistency": OutputCounts((0,)),
-                "reference": ShortPromptReference(REFERENCE_ABSENT, "x"),
-            },
+            {"processes_planned": 1, "processes": (0,), "self_consistency": OutputCounts((0,))},
             "needs two processes",
         ),
-        ({"reference": "compared"}, "must be a ShortPromptReference"),
+        ({"self_consistency": "clean"}, "must be OutputCounts"),
         ({"outputs": "/abs/path"}, "relative path"),
     ],
 )
@@ -124,10 +145,6 @@ def test_a_check_that_breaks_the_contract_is_refused_naming_what(change, message
         (lambda: OutputCounts((0, 1)), "first difference is given exactly when"),
         (lambda: OutputCounts((0, 0), DIFFERENCE), "first difference is given exactly when"),
         (lambda: OutputCounts((0, -1)), "integer of at least 0"),
-        (lambda: ShortPromptReference(REFERENCE_COMPARED), "compared reference has counts"),
-        (lambda: ShortPromptReference(REFERENCE_ABSENT, "why", counts=CLEAN), "absent reference has no counts"),
-        (lambda: ShortPromptReference(REFERENCE_ABSENT), "absent reference has no counts and says why"),
-        (lambda: ShortPromptReference("maybe"), "status must be one of"),
         (lambda: OutputDifference(0, "", "sequential", 1, 0, "a", "b"), "prompt_id"),
         (lambda: OutputDifference(0, "s", "sequential", 1, -1, "a", "b"), "position"),
     ],
@@ -140,7 +157,7 @@ def test_the_parts_of_a_check_refuse_what_breaks_them(build, message):
 def test_a_check_document_is_read_strictly():
     document = _check().to_document()
 
-    for broken in ({**document, "reference": None}, {**document, "processes": "012"}, {**document, "status": None}):
+    for broken in ({**document, "self_consistency": 3}, {**document, "processes": "012"}, {**document, "status": None}):
         with pytest.raises(MeasurementError):
             ShortPromptConsistency.from_document(broken)
 
@@ -148,12 +165,6 @@ def test_a_check_document_is_read_strictly():
 def test_a_result_refuses_a_check_that_is_not_one():
     with pytest.raises(MeasurementError, match="must be a ShortPromptConsistency"):
         _result(short_prompt_consistency={"status": "complete"})
-
-
-def test_a_reference_difference_is_compared_by_its_own_mismatches_not_the_candidates():
-    check = _check(reference=ShortPromptReference(REFERENCE_COMPARED, request_id="r0", counts=FOUND))
-
-    assert _roundtrip(check).reference.counts.first_difference == DIFFERENCE
 
 
 # --- the request field ----------------------------------------------------------------------------------------------

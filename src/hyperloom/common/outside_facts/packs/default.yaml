@@ -717,9 +717,10 @@ facts:
       and a long, batched, averaged evaluation (GSM8K) did not see it. The check boots fresh server processes of a
       candidate's own launch and asks each the same short prompts greedily; processes is how many (a defect in one launch
       in three escapes six launches with probability (2/3)^6, 8.8 percent, and eight with 3.9 percent), max_new_tokens how
-      many tokens each prompt may generate, phase_cap_sec how long the whole check may take before it ends incomplete, and
-      always_purposes the test purposes that run it whatever their recipe change is (a baseline gives its descendants their
-      reference outputs, a final candidate is the one that ships). The values are read as numbers and words by the toolbox.
+      many tokens each prompt may generate, phase_cap_sec how long the whole check may take before it ends incomplete while
+      the runner has measured no server boot to size the cap from, and always_purposes the test purposes that run it
+      whatever their recipe change is (a baseline measures the inconsistency the rule gate holds every candidate to, a
+      final candidate is the one that ships). The values are read as numbers and words by the toolbox.
     names:
       processes: "6"
       max_new_tokens: "32"
