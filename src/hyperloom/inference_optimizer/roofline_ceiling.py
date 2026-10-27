@@ -949,8 +949,6 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     height, width = _read_diffusion_resolution(state)
     # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so the DiT/VAE config reads work
     # (load_model_meta re-resolves internally, so passing the resolved dir is harmless).
-    from hyperloom.common.model_paths import resolve_local_model_dir
-
     _resolved = resolve_local_model_dir(runtime.model_path)
     model_dir = str(_resolved) if _resolved is not None else runtime.model_path
     dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)
