@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -36,10 +37,10 @@ log = logging.getLogger(__name__)
 # Text in which a process says it died. Each marker names the death itself, not
 # the subsystem around it: ranks, collectives and worker ids are printed by every
 # healthy multi-GPU launch, so matching those reports a crash for a run that only
-# exited nonzero.
+# exited nonzero. A WARN is chatter even when NCCL prints it; only an error, a
+# timeout, a fault or an abort is a death.
 _WORKER_DEATH_MARKERS = (
     "nccl error",
-    "nccl warn",
     "nccl timeout",
     "unhandled system error",
     "watchdog caught",
@@ -53,7 +54,18 @@ _WORKER_DEATH_MARKERS = (
     "sigsegv",
     "sigabrt",
     "core dumped",
+    # How a death ends up worded on this hardware: a GPU page fault from the ROCm
+    # runtime, an aborted interpreter, an invalid access reported by the device
+    # runtime, and an unhandled C++ exception, each of which ends the process.
+    "memory access fault",
+    "illegal memory access",
+    "fatal python error",
+    "terminate called after throwing",
 )
+
+# A negative exit status is how a launcher reports that a signal ended the process
+# (torchrun prints ``exitcode: -6`` for SIGABRT), whichever signal it was.
+_SIGNAL_EXIT_RE = re.compile(r"exit\s*code\s*[:=]\s*-\d+")
 
 
 def _count_server_boot_failures(session_dir: Path | None) -> int:
@@ -128,7 +140,7 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
         or "engine process failed" in blob
     ):
         return "engine_core_init"
-    if any(marker in blob for marker in _WORKER_DEATH_MARKERS):
+    if any(marker in blob for marker in _WORKER_DEATH_MARKERS) or _SIGNAL_EXIT_RE.search(blob):
         return "worker_crash"
     if classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS:
         return "benchmark_harness"

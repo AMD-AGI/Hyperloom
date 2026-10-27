@@ -109,6 +109,50 @@ def test_classify_root_cause_type_needs_evidence_of_a_death():
     assert _classify_root_cause_type("subprocess_nonzero", "rank 3 killed by signal 11 (core dumped)") == "worker_crash"
 
 
+def test_classify_root_cause_type_benign_nccl_warn_is_not_a_crash():
+    """NCCL prints WARN lines on healthy launches, so a warning is not evidence of a death."""
+    warn = (
+        "ip-10-0-0-4:142:367 [0] NCCL WARN Missing ncclnet symbol, using internal network plugin\n"
+        "replay finished: 4097/4097 requests served in 4486.0s\n"
+    )
+    assert _classify_root_cause_type("subprocess_nonzero", warn) == "unknown"
+
+
+def test_classify_root_cause_type_hardware_deaths():
+    """The ways a worker dies on this hardware each count as evidence of a death."""
+    assert (
+        _classify_root_cause_type(
+            "subprocess_nonzero",
+            "Memory access fault by GPU node-2 on address 0x7f1c00000000. Reason: Page not present",
+        )
+        == "worker_crash"
+    )
+    assert _classify_root_cause_type("subprocess_nonzero", "Fatal Python error: Aborted") == "worker_crash"
+    assert (
+        _classify_root_cause_type("subprocess_nonzero", "CUDA error: an illegal memory access was encountered")
+        == "worker_crash"
+    )
+    assert (
+        _classify_root_cause_type(
+            "subprocess_nonzero", "terminate called after throwing an instance of 'c10::DistBackendError'"
+        )
+        == "worker_crash"
+    )
+    # A negative exit status is a signal, however the launcher spaces it out.
+    assert _classify_root_cause_type("subprocess_nonzero", "  exitcode  : -6 (pid: 118231)") == "worker_crash"
+    assert _classify_root_cause_type("subprocess_nonzero", "exitcode: -11") == "worker_crash"
+
+
+def test_classify_root_cause_type_death_outranks_the_harness_class():
+    """A crash after the last request is a crash, not the harness refusing the measurement."""
+    assert (
+        _classify_root_cause_type(
+            "magpie_nonzero_invalid_measurement", "Memory access fault by GPU node-2 on address 0x7f1c00000000"
+        )
+        == "worker_crash"
+    )
+
+
 def test_classify_root_cause_type_harness_class():
     """A class the attribution table calls harness-side is reported as such."""
     assert (
