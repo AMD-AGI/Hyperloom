@@ -345,20 +345,13 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             row["reason"] = UNVERIFIABLE_NO_LOCAL_SCOPE if not scope else UNVERIFIABLE_FOREIGN_SCOPE
             stuck.append(row)
             continue
-        # The release this row was waiting for is the holder's own, and it runs
-        # where the terminal row is written -- confirmed or not. So a row that
-        # gets here never reached it: the coordinator died between the write and
-        # the release, or :meth:`TaskRegistry.reclaim_dead_running` failed the
-        # task from the outside, which takes no lane back. What is left is a
-        # lane no live holder will ever release, and nothing here tries to
-        # decide it is free, because this process cannot know: a served process
-        # is setsid'd by design (:mod:`actions.executors._server_lifecycle` says
-        # so where it reads a pidfile), so it leaves the group recorded at
-        # spawn; its pidfile is written only after the server answers, so the
-        # whole model-load window has a live server nothing names; and matching
-        # a cmdline is the same kind of guess as matching a group. Releasing a
-        # lane wrongly lets two rounds onto the same cards -- silent corruption
-        # -- so this residue is kept and the operator is told.
+        # The release this row was waiting for is the holder's own, and it runs where the
+        # terminal row is written -- confirmed or not. So a row that gets here never reached
+        # it, and nothing here decides its lane free instead: a served process is setsid'd by
+        # design, so the group recorded at spawn no longer names it, and its pidfile is written
+        # only once the server answers; matching a cmdline is the same kind of guess. Releasing
+        # a lane wrongly lets two rounds onto the same cards -- silent corruption -- so this
+        # residue is kept and the operator is told.
         row["reason"] = UNVERIFIABLE_CLEANUP_UNCONFIRMED
         stuck.append(row)
     return stuck
