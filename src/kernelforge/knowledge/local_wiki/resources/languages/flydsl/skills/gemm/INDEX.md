@@ -9,7 +9,8 @@ pinned_source: ROCm/FlyDSL@dd8373349 (v0.3.2; kernels/gemm, .claude/skills/gemm-
 # FlyDSL dense GEMM — package map
 
 How to write and optimize a dense GEMM in FlyDSL on gfx950 (MI350/MI355X): fp8 (per-tensor and per-row
-scales), MXFP4, MXFP8, bf16/fp16 and int8, layouts NT/NN/TN.
+scales), MXFP4, MXFP8, bf16/fp16 and int8, layouts NT/NN/TN. Grouped and MoE expert GEMMs build on these cards
+and have their own package, `../grouped_gemm/INDEX.md`.
 
 **Three sources, used together.**
 - **FlyDSL's own GEMM guide and kernels.** `../optimize/gemm-optimization.md` walks through how a FlyDSL GEMM is

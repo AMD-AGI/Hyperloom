@@ -16,7 +16,8 @@ sources:
 
 # FlyDSL GEMM at small M
 
-> Scope: dense GEMM with M ≈ 1–256 (decode steps, speculative-decode verify), mostly bf16. Primus-Turbo's FlyDSL
+> Scope: dense GEMM with M ≈ 1–256 (decode steps, speculative-decode verify), mostly bf16. MoE expert GEMMs at
+> decode are in `../grouped_gemm/flydsl_grouped_moe_inference.md`. Primus-Turbo's FlyDSL
 > GEMMs (the exemplar elsewhere in this package) are built for training shapes and do not target small M.
 > aiter's FlyDSL a16w16 backend is FlyDSL's `gemm_a16w16_gfx950` (aiter #5145 onwards). aiter's earlier bf16
 > kernels (`splitk_hgemm.py`, `small_m_hgemm.py`) are what `../optimize/flydsl_levers/flydsl_kernel_library.md`
