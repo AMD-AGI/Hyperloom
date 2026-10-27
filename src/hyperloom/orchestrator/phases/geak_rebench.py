@@ -9,6 +9,12 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_NO_MATERIAL,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
+
 INCOMPARABLE_REVALIDATION = "incomparable"
 
 # Verdict annotations are not candidate identity.
@@ -26,7 +32,7 @@ _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
 )
 
 # Failed measurements remain retryable.
-_TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({"no_material", "no_promote"})
+_TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({REBENCH_NO_MATERIAL, REBENCH_NO_PROMOTE})
 
 
 def geak_harness_replays_workload(state: Any) -> bool:
@@ -151,7 +157,7 @@ def verify_source_artifacts(params: dict[str, Any]) -> None:
 def source_verdict_matches(result: dict[str, Any]) -> bool:
     """A canonical verdict settles only the source bytes that were reviewed."""
     settled = result["native_source_revalidation"]
-    if settled.get("status") not in {"validated", "no_promote"}:
+    if settled.get("status") not in {REBENCH_VALIDATED, REBENCH_NO_PROMOTE}:
         return False
     params = settled["params"]
     try:

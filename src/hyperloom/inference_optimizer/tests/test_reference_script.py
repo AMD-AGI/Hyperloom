@@ -13,7 +13,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.inference_optimizer.reference_script import (
     LaunchSettings,
     ServingTarget,

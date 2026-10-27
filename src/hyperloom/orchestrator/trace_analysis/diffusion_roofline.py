@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._io_utils import safe_float
+from hyperloom.common.coerce import to_float
 
 UNIFIED_CSV = "unified_perf_summary.csv"
 GPU_TIMELINE_CSV = "gpu_timeline.csv"
@@ -42,10 +42,10 @@ def aggregate_unified(rows: list[dict[str, str]]) -> dict[str, Any]:
     memory_us = 0.0
     no_model_us = 0.0
     for r in rows:
-        actual = safe_float(r.get(COL_KERNEL_TIME_SUM))
-        count = safe_float(r.get(COL_OP_COUNT)) or 1.0
+        actual = to_float(r.get(COL_KERNEL_TIME_SUM), 0.0)
+        count = to_float(r.get(COL_OP_COUNT)) or 1.0
         # Roofline Time is the per-instance ideal; scale by the aggregated count.
-        ideal = safe_float(r.get(COL_ROOFLINE_TIME)) * count
+        ideal = to_float(r.get(COL_ROOFLINE_TIME), 0.0) * count
         sigma_actual_us += actual
         sigma_ideal_us += ideal
         bound = (r.get(COL_BOUND) or "").upper()
@@ -72,13 +72,13 @@ def parse_gpu_timeline(rows: list[dict[str, str]]) -> dict[str, float]:
     for r in rows:
         kind = (r.get("type") or "").strip()
         if kind:
-            out[kind] = safe_float(r.get("percent"))
+            out[kind] = to_float(r.get("percent"), 0.0)
     return out
 
 
 def top_kernels(rows: list[dict[str, str]], k: int) -> list[dict[str, Any]]:
     """Return the top-k kernels by actual kernel time for the summary block."""
-    ranked = sorted(rows, key=lambda r: safe_float(r.get(COL_KERNEL_TIME_SUM)), reverse=True)
+    ranked = sorted(rows, key=lambda r: to_float(r.get(COL_KERNEL_TIME_SUM), 0.0), reverse=True)
     out: list[dict[str, Any]] = []
     for r in ranked[:k]:
         out.append(
@@ -86,7 +86,7 @@ def top_kernels(rows: list[dict[str, str]], k: int) -> list[dict[str, Any]]:
                 "name": (r.get(COL_NAME) or "")[:48],
                 "category": r.get(COL_CATEGORY) or "",
                 "bound": r.get(COL_BOUND) or "",
-                "kernel_time_us": safe_float(r.get(COL_KERNEL_TIME_SUM)),
+                "kernel_time_us": to_float(r.get(COL_KERNEL_TIME_SUM), 0.0),
             }
         )
     return out
@@ -157,11 +157,11 @@ def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, 
     memory_us = 0.0
     no_model_us = 0.0
     for c in hot_kernels:
-        actual = safe_float(c.get("duration_us"))
+        actual = to_float(c.get("duration_us"), 0.0)
         sigma_actual += actual
         src = str(c.get("roofline_source") or "")
         # Binding-side attainment (cross-route comparable).
-        attain = safe_float(c.get("roofline_attainment_pct"))
+        attain = to_float(c.get("roofline_attainment_pct"), 0.0)
         if src not in ("", "placeholder") and attain > 0:
             sigma_ideal += actual * (attain / 100.0)
             bound = str(c.get("bound_type") or "").upper()
@@ -186,13 +186,13 @@ def aggregate_bypass_candidates(hot_kernels: list[dict[str, Any]]) -> dict[str, 
 
 def _top_bypass_kernels(hot_kernels: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
     """Top-k bypass candidates by GPU time for the summary block."""
-    ranked = sorted(hot_kernels, key=lambda c: safe_float(c.get("duration_us")), reverse=True)
+    ranked = sorted(hot_kernels, key=lambda c: to_float(c.get("duration_us"), 0.0), reverse=True)
     return [
         {
             "name": (c.get("name") or "")[:48],
             "category": c.get("kernel_category") or "",
             "bound": c.get("bound_type") or "",
-            "kernel_time_us": safe_float(c.get("duration_us")),
+            "kernel_time_us": to_float(c.get("duration_us"), 0.0),
         }
         for c in ranked[:k]
     ]
@@ -220,9 +220,9 @@ def build_report_from_bypass(
     timeline_pct: dict[str, float] = {}
     if isinstance(timeline, dict):
         if timeline.get("busy_pct") is not None:
-            timeline_pct["busy_time"] = safe_float(timeline.get("busy_pct"))
+            timeline_pct["busy_time"] = to_float(timeline.get("busy_pct"), 0.0)
         if timeline.get("idle_pct") is not None:
-            timeline_pct["idle_time"] = safe_float(timeline.get("idle_pct"))
+            timeline_pct["idle_time"] = to_float(timeline.get("idle_pct"), 0.0)
     report = assemble_report(
         totals,
         timeline_pct,

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.jsonio import read_json
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 
 #: Precision tag -> canonical peak-table key.
 _PRECISION_ALIASES: dict[str, str] = {
@@ -35,12 +35,9 @@ _PRECISION_ALIASES: dict[str, str] = {
 
 
 def peak_tflops(gpu_type: str, precision: str) -> float:
-    """Matrix-core peak TFLOPS for ``(gpu, precision)``; 0.0 on any miss."""
-    table = (HW_SPECS.get((gpu_type or "").strip().lower()) or {}).get("peak_tflops")
-    if not table:
-        return 0.0
+    """The session roofline's compute peak TFLOPS for ``(gpu, precision)``; 0.0 on any miss."""
     key = _PRECISION_ALIASES.get((precision or "").strip().lower(), (precision or "").strip().lower())
-    return float(table.get(key, 0.0))
+    return resolve_compute_peak_provenance(gpu_type, key)["compute_peak_tflops"]
 
 
 # Low-level FLOPs primitives (2 FLOPs / MAC).

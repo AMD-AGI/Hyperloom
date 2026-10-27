@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -27,8 +26,8 @@ _BLOCKED = "blocked.md"
 _LAST_PHASE = "last_phase.txt"
 _EVAL_REPORT = "eval_report.json"
 _EVAL_SKIPPED = "eval_skipped.txt"
-#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt and
-#: every run of one model share the workspace, so the retry loop archives these before each attempt.
+#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt of
+#: one run shares the run directory, so the retry loop archives these before each attempt.
 ATTEMPT_MARKER_FILES = (_BLOCKED, _LAST_PHASE, _EVAL_REPORT, _EVAL_SKIPPED)
 
 
@@ -110,19 +109,6 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
-def _read_json(path: Path) -> tuple[dict | None, str | None]:
-    """Read and parse a JSON file."""
-    error: str | None = None
-
-    def _record_decode_error(exc: BaseException) -> None:
-        nonlocal error
-        if isinstance(exc, json.JSONDecodeError):
-            error = f"json_decode_error: {exc.msg} at line {exc.lineno}"
-
-    data = read_json(path, default=None, on_error=_record_decode_error)
-    return data, error
-
-
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:
     """Read ``run_manifest.yaml`` and pull ``outputs.quantized_model_dir``."""
 
@@ -180,20 +166,16 @@ def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
     return False
 
 
-def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
+def _strict_validation_enabled() -> bool:
     """Return whether strict validation mode is enabled."""
-    raw = (env if env is not None else os.environ).get(STRICT_VALIDATION_ENV, "1")
+    raw = os.environ.get(STRICT_VALIDATION_ENV, "1")
     return raw.strip().lower() not in ("0", "false", "no", "")
 
 
 # public entry
 
 
-def collect_artifacts(
-    workspace: Path,
-    *,
-    env: dict[str, str] | None = None,
-) -> CollectedArtifacts:
+def collect_artifacts(workspace: Path) -> CollectedArtifacts:
     """Scan a run workspace and summarize the on-disk artifacts."""
     workspace = Path(workspace)
 
@@ -208,11 +190,9 @@ def collect_artifacts(
     validation_present = validation_text is not None
     validation_steps = _parse_validation_report(validation_text) if validation_text else ValidationSteps()
 
-    eval_data, _ = _read_json(workspace / _EVAL_REPORT)
-
     return CollectedArtifacts(
         workspace=workspace,
-        strict_validation=_strict_validation_enabled(env),
+        strict_validation=_strict_validation_enabled(),
         manifest_present=manifest_present,
         manifest_parse_error=manifest_err,
         quantized_model_dir=qdir,
@@ -225,7 +205,7 @@ def collect_artifacts(
         validation_report_present=validation_present,
         validation_steps=validation_steps,
         eval_report_present=(workspace / _EVAL_REPORT).is_file(),
-        eval_report_data=eval_data,
+        eval_report_data=read_json(workspace / _EVAL_REPORT, default=None),
         eval_skipped_reason=_read_text(workspace / _EVAL_SKIPPED),
         last_phase=(_read_text(workspace / _LAST_PHASE) or "").strip() or None,
         blocked_reason=_read_text(workspace / _BLOCKED),

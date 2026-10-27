@@ -22,7 +22,6 @@ class EvalDecision:
 
     status: str  # "within" | "exceeded" | "missing"
     relative_gap: float | None
-    threshold: float
 
 
 def resolve_threshold(
@@ -54,11 +53,7 @@ def decide(
 ) -> EvalDecision:
     """Decide whether an evaluation report passes the quality gap threshold."""
     threshold = resolve_threshold(workspace, acceptable_eval_gap=acceptable_eval_gap)
-    missing = EvalDecision(
-        status="missing",
-        relative_gap=None,
-        threshold=threshold,
-    )
+    missing = EvalDecision(status="missing", relative_gap=None)
 
     if not isinstance(eval_report, dict):
         return missing
@@ -82,7 +77,6 @@ def decide(
     return EvalDecision(
         status="within" if gap <= threshold else "exceeded",
         relative_gap=gap,
-        threshold=threshold,
     )
 
 

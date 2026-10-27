@@ -34,7 +34,7 @@ def test_readiness_deep_in_the_log_still_reads_as_booted(tmp_path: Path) -> None
 
     observation = observe_bringup(server_log=read_bringup_log(log).text).observation
     assert observation.stage_reached is LadderStage.HTTP_READY
-    assert observation.booted is True
+    assert observation.stage_failed is None
 
 
 def test_the_tail_wall_still_wins_over_a_middle_milestone(tmp_path: Path) -> None:
@@ -49,7 +49,6 @@ def test_the_tail_wall_still_wins_over_a_middle_milestone(tmp_path: Path) -> Non
         )
 
     observation = observe_bringup(server_log=read_bringup_log(log).text).observation
-    assert observation.booted is False
     assert observation.stage_failed is not None
 
 

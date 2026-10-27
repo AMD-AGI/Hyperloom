@@ -487,7 +487,6 @@ class EnablementParams(CoordinatorCollaborator):
                     repo_url=repo,
                     search_modes=search_modes,
                     keywords=tuple(plan.keywords),
-                    pr_states=("all",),
                     max_search_candidates=max_candidates,
                     pr_monitor=pr_monitor,
                 )

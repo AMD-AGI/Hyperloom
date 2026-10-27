@@ -41,11 +41,9 @@ from hyperloom.orchestrator.actions.executors.explore import (
     _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
+    restates_the_baseline_launch,
 )
-from hyperloom.orchestrator.actions.executors._launch_restatement import (
-    config_launch_restated_by,
-    restates_the_baseline,
-)
+from hyperloom.orchestrator.actions.executors._launch_restatement import Launch, launch_change, named_settings
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
@@ -197,10 +195,7 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
         encoding="utf-8",
     )
-    kwargs = {
-        "framework": "sglang",
-        "base_yaml_path": base_yaml,
-    }
+    kwargs = {"base_yaml_path": base_yaml}
     kwargs.update(overrides)
     kwargs["recipe"] = GridRecipe(
         base_yaml_path=kwargs.pop("base_yaml_path"),
@@ -287,19 +282,70 @@ def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, ov
     assert dropped == []
 
 
-def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
-    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
-
-    ``unset_envs`` also pops the process env at run time, which the probe's
-    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
-    """
+def test_a_removal_changes_the_launch_only_when_the_stack_passes_what_it_removes(tmp_path):
+    """The materialized argv shows a removal; an unset also pops the process env, which no config shows."""
     grid = [
-        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("removes-a-passed-arg", remove_args=["--mem-fraction-static"]),
+        GridVariant("removes-an-absent-arg", remove_args=["--enable-dp-attention"]),
         GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
     ]
     kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
-    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
-    assert dropped == []
+    assert [gv.name for gv in kept] == ["removes-a-passed-arg", "unsets-an-env"]
+    assert dropped == [("removes-an-absent-arg", "launches the server the stack already runs (baseline noop)")]
+
+
+def test_a_row_claiming_a_revalidation_provenance_is_still_judged(tmp_path):
+    """Only a stack revalidation round is exempt; a grid row's own provenance cannot buy it a measurement."""
+    variant = _variant(_RESTATES_ARGV)
+    variant.provenance = "geak_revalidate"  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path))
+    assert kept == []
+    assert dropped == [(_CANDIDATE, "launches the server the stack already runs (baseline noop)")]
+
+
+def _agentx_noop_filter_kwargs(tmp_path: Path) -> dict:
+    workload = tmp_path / "agentx.yaml"
+    workload.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical"},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    kwargs = _noop_filter_kwargs(
+        tmp_path, observed_server_config={"kv_cache_dtype": "fp8", "max_running_requests": 512}
+    )
+    kwargs["recipe"] = GridRecipe(
+        base_yaml_path=workload,
+        base=LaunchLayer(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"}),
+        target=BenchmarkTarget(model_path=None, gpu_type=None, benchmark_script=None),
+    )
+    return kwargs
+
+
+def test_an_agentx_variant_is_judged_on_its_launch_overrides(tmp_path):
+    """AgentX carries the server argv in ``launch_overrides``, not in ``benchmark.envs``."""
+    grid = [
+        GridVariant("restates-the-stack-arg", "--kv-cache-dtype fp8"),
+        GridVariant("restates-the-engine-default", "--max-running-requests 512"),
+        GridVariant("restates-the-stack-env", extra_envs={"SGLANG_TEST": "1"}),
+        GridVariant("changes-an-arg", "--chunked-prefill-size 2048"),
+        GridVariant("changes-an-env", extra_envs={"SGLANG_TEST": "0"}),
+        GridVariant("removes-a-recipe-arg", remove_args=["--disable-radix-cache"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_agentx_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["changes-an-arg", "changes-an-env", "removes-a-recipe-arg"]
+    assert [name for name, _ in dropped] == [
+        "restates-the-stack-arg",
+        "restates-the-engine-default",
+        "restates-the-stack-env",
+    ]
 
 
 def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
@@ -324,7 +370,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
     # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
-    assert evidence["observed_server_env"] == _RECIPE_ENV
+    assert evidence["requested_server_env"] == _RECIPE_ENV
 
     # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
     # so a stack with no current best is unknown rather than read from it.
@@ -333,6 +379,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
 
     state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
     observed_config, observed_env = observed_launch_from_state(state)
+    assert observed_env == _RECIPE_ENV
     kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
 
     _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
@@ -405,7 +452,6 @@ def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
     )
     return _noop_filter_kwargs(
         tmp_path,
-        framework="vllm",
         base_yaml_path=base_yaml,
         observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
         observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
@@ -452,16 +498,29 @@ def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
     assert dropped == []
 
 
-def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
-    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+def _vllm_baseline_state(tmp_path: Path, base_argv: str = _VLLM_BASE_ARGV, **envs: object) -> SimpleNamespace:
     config = tmp_path / "baseline.yaml"
     config.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", **envs, "EXTRA_VLLM_ARGS": base_argv},
+                }
+            }
+        ),
         encoding="utf-8",
     )
-    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
-    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
-    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+    return SimpleNamespace(baseline_config_path=str(config), current_best_measurement={})
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    state = _vllm_baseline_state(tmp_path, FOO=None)
+    assert restates_the_baseline_launch(state, "", {"FOO": "None"}) is False
+    assert restates_the_baseline_launch(state, "--kv-cache-dtype fp8", {}) is True
+    missing = SimpleNamespace(baseline_config_path=str(tmp_path / "missing.yaml"), current_best_measurement={})
+    assert restates_the_baseline_launch(missing, "--kv-cache-dtype fp8", {}) is False
 
 
 @pytest.mark.parametrize(
@@ -470,33 +529,71 @@ def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
         pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
         pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
-        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, True, id="empty_request"),
         pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
         pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
         pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
         pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
         pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param("--no-enable-prefix-caching", {}, _VLLM_BASE_ARGV, False, id="negates_a_baseline_flag"),
         pytest.param(
             "--enable-prefix-caching",
             {},
             "--enable-prefix-caching --no-enable-prefix-caching",
-            False,
-            id="negated_spelling_in_the_baseline",
+            True,
+            id="dedupe_keeps_the_negation_last",
         ),
         pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
         pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
     ],
 )
-def test_restates_the_baseline(argv, envs, base_argv, expected):
-    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
-    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
+def test_restates_the_baseline_launch(tmp_path, argv, envs, base_argv, expected):
+    """Only a request that leaves the materialized launch as it was restates it; anything unreadable does not."""
+    assert restates_the_baseline_launch(_vllm_baseline_state(tmp_path, base_argv), argv, envs) is expected
+
+
+def test_the_baseline_observation_counts_only_for_the_config_it_was_made_on(tmp_path):
+    """``--max-num-seqs 256`` is the observed engine default, but only on the launch that was observed."""
+    state = _vllm_baseline_state(tmp_path)
+    observed = {"launch_evidence": {"observed_server_config": {"max_num_seqs": 64, "block_size": 16}}}
+    state.current_best_measurement = observed
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is False
+    observed["launch_evidence"]["materialized_config_path"] = state.baseline_config_path
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is True
+
+
+def test_named_settings_resolve_like_the_engine():
+    """The last spelling of a boolean flag wins, negated or not; an argv it cannot account for raises."""
+    assert named_settings("--enable-prefix-caching --no-enable-prefix-caching", "vllm") == {
+        "enable_prefix_caching": ["false"]
+    }
+    assert named_settings("--no-enable-prefix-caching --enable-prefix-caching", "vllm") == {"enable_prefix_caching": []}
+    for argv in ("fp8 --kv-cache-dtype fp8", "--kv-cache-dtype 'fp8"):
+        with pytest.raises(ValueError):
+            named_settings(argv, "vllm")
+
+
+def test_launch_change_names_every_change_and_discounts_what_the_server_resolved():
+    base = Launch({"enable_x": [], "kv_cache_dtype": ["fp8"]}, {"A": "1"}, {"unset_envs": []})
+    launch = Launch({"enable_x": ["false"], "block_size": ["128"]}, {"B": "2"}, {"unset_envs": ["C"]})
+    assert launch_change(base, launch, ({}, {})) == {
+        "settings": {"enable_x": ["false"], "block_size": ["128"]},
+        "removed": ["kv_cache_dtype"],
+        "envs": {"B": "2"},
+        "unset_envs": ["A"],
+        "controls": ["unset_envs"],
+    }
+    same_server = Launch({**base.settings, "block_size": ["128"], "enable_y": ["false"]}, {"A": "1", "B": "2"}, {})
+    observed = ({"block_size": 128, "no_enable_y": True}, {"B": "2"})
+    assert launch_change(Launch(base.settings, base.envs, {}), same_server, observed) == {}
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
+        "fingerprint": "cc" * 8,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
@@ -506,7 +603,6 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state.record_explore_accepted(variant)
     state.record_explore_accepted(variant)
     assert len(state.explore_search["accepted"]) == 1
-    assert len(state.explore_search["winners_history"]) == 2
 
 
 def test_apply_explore_search_update_preserves_accepted():
@@ -522,7 +618,6 @@ def test_apply_explore_search_update_preserves_accepted():
     # Update arrives with tested/rejected but NOT accepted; the bucket survives the merge.
     state.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "bb" * 8: {
                     "name": "b",
@@ -538,7 +633,6 @@ def test_apply_explore_search_update_preserves_accepted():
                     "reason": "not_keep",
                 }
             ],
-            "name_index": {"b": "bb" * 8},
             "cursor": 1,
             "last_round": {"round_id": "explore-001"},
         }
@@ -551,10 +645,8 @@ def test_apply_explore_search_update_preserves_accepted():
 def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
     """One round's worth of executor ledger writes."""
     return {
-        "schema_version": 1,
         "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
         "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
-        "name_index": {name: fingerprint},
         "last_round": {"round_id": f"explore-{round_no:03d}"},
     }
 
@@ -568,7 +660,6 @@ def test_apply_explore_search_update_accumulates_across_rounds():
     search = state.explore_search
     assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
     assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
-    assert search["name_index"] == {"a": "aa" * 8, "b": "bb" * 8}
 
 
 def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
@@ -684,7 +775,9 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
-async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited=""):
+async def _explore_on_an_observed_fp8_stack(
+    sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited="", **params
+):
     """Run one explore round whose stack was observed launching with ``--kv-cache-dtype fp8``."""
     sub, tr, _ = sub_agent_runner
     _force_cold_decision(monkeypatch)
@@ -710,7 +803,13 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
     task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
-            params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "out"),
+                "base_tput": 800.0,
+                "grid": grid,
+                **params,
+            },
             idempotency_key="ex-noop-stack",
         ),
     )
@@ -721,6 +820,76 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
     ):
         res = await sub.run_task(task)
     return res.result, launched
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_runs_although_it_restates_the_stack(sub_agent_runner, tmp_path, monkeypatch):
+    """A stack revalidation exists to re-measure the stack, so restating it is the point."""
+    grid = [{"name": "stack_revalidate", "extra_args": "--kv-cache-dtype fp8", "provenance": "stack_revalidate"}]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"stack_revalidate": 800.0}, source="stack_revalidate"
+    )
+
+    assert launched == ["stack_revalidate"]
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_rows_that_launch_the_same_server_are_benched_once(sub_agent_runner, tmp_path, monkeypatch):
+    """Restating the stack's fp8 beside the same change launches the server the first row already measured."""
+    grid = [
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256", "extra_envs": {}},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+
+    assert launched == ["v_seqs"]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8_seqs", "round_dup")]
+
+
+@pytest.mark.asyncio
+async def test_rows_answered_without_measuring_leave_the_proposal_queue(sub_agent_runner, tmp_path, monkeypatch):
+    """Restatements and duplicates are decided, so the auto-bench queue moves on to the proposal behind them."""
+    proposals = [
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512"},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8"},
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256"},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256"},
+        {"name": "v_lpm", "extra_args": "--schedule-policy lpm"},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        [{**row, "extra_envs": {}} for row in proposals[:4]],
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+    assert launched == ["v_seqs"]
+    tested = out["explore_search_update"]["tested"]
+    seqs_fp = next(fp for fp, row in tested.items() if row["name"] == "v_seqs")
+    skipped = {
+        row["name"]: (row["outcome"], row["reason"], row.get("duplicate_of", ""))
+        for row in tested.values()
+        if row["outcome"] == "SKIPPED_DEDUP"
+    }
+    assert skipped == {
+        "v_noop_a": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_noop_b": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_fp8_seqs": ("SKIPPED_DEDUP", "round_dup", seqs_fp),
+    }
+
+    state = SharedState()
+    state.specialist_rounds = [{"task_id": "s1", "domain": "serving_specialist", "cycle": 0, "proposal_set": proposals}]
+    state.apply_explore_search_update(out["explore_search_update"])
+    assert [row["name"] for row in state.untested_proposal_rows()] == ["v_lpm"]
 
 
 @pytest.mark.asyncio
@@ -759,7 +928,8 @@ async def test_a_variant_that_is_the_stack_is_skipped_while_the_stack_has_not_mo
     assert launched == ["v_revert"]
     noop = {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"}
     assert noop == {"v_noop_first", "v_noop_after"}
-    assert {row["name"] for row in out["explore_search_update"]["tested"].values()} == {"v_revert"}
+    outcomes = {row["name"]: row["outcome"] for row in out["explore_search_update"]["tested"].values()}
+    assert outcomes == {"v_noop_first": "SKIPPED_DEDUP", "v_revert": "REVERT", "v_noop_after": "SKIPPED_DEDUP"}
 
 
 @pytest.mark.asyncio
@@ -858,7 +1028,10 @@ async def test_a_restatement_left_leading_by_the_skip_list_is_skipped_at_its_tur
 async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_to_replace_mode(
     sub_agent_runner, tmp_path, monkeypatch
 ):
-    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag."""
+    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag.
+
+    ``fp8`` then launches the server ``v_drop`` just measured, so it is that round's duplicate.
+    """
     grid = [
         {
             "name": "v_drop",
@@ -880,7 +1053,7 @@ async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_
     assert launched == ["v_drop"]
     (keep,) = out["winners"]
     assert keep["args_mode"] == "replace"
-    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "round_dup")]
 
 
 @pytest.mark.asyncio
@@ -975,6 +1148,32 @@ async def test_a_round_of_measured_and_restated_variants_is_answered_not_failed(
         ("v_fp8", "baseline_noop"),
     }
     assert out["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_a_skip_never_replaces_a_measured_ledger_row(sub_agent_runner, tmp_path, monkeypatch):
+    """fp8 measured before the stack was observed running it; restating it later leaves the measurement in place."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: (dict(observed), {}),
+    )
+    grid = [{"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8"}]
+    await _run_explore_round(sub, tr, tmp_path, state, key="round-1", grid=grid, base_args="", bench_calls=[])
+    measured = dict(state.explore_search["tested"])
+    assert [row["outcome"] for row in measured.values()] == ["REVERT"]
+
+    observed["kv_cache_dtype"] = "fp8"
+    out = await _run_explore_round(sub, tr, tmp_path, state, key="round-2", grid=grid, base_args="", bench_calls=[])
+
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert out["explore_search_update"]["tested"] == {}
+    assert state.explore_search["tested"] == measured
 
 
 @pytest.mark.asyncio
@@ -1213,7 +1412,6 @@ async def test_explore_missing_axes_fails_closed(
     assert out["winners"] == []
     assert out["best_variant"] is None
     assert out["output_throughput"] is None
-    assert out["running_base_tput"] == base_tput
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
@@ -1401,7 +1599,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    assert out["output_throughput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
     # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
     # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
     for row in (*out["winners"], tested["v_good"]):
@@ -1546,7 +1744,7 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         assert tested["gain_pct"] is None
         assert out["losers"][0]["reason"] == "gain_below_threshold"
     assert bool(out["winners"]) is (expected_outcome == "KEEP")
-    assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
+    assert out["output_throughput"] == (output if expected_outcome == "KEEP" else None)
 
 
 @pytest.mark.asyncio
@@ -2166,7 +2364,6 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
                     },
                     "rejected": [],
                     "accepted": [],
-                    "name_index": {},
                 },
             },
             idempotency_key="ex-dedup",
@@ -2663,7 +2860,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
     # a bare, unattributed failure.
     assert res.result["error_class"] == "session_time_exhausted"
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
     # Untested variants stay out of the ledger so a resume can retry them.
     assert res.result["losers"] == []
     assert res.result["explore_search_update"]["tested"] == {}
@@ -2728,7 +2925,6 @@ async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_
 
     assert len(started) == 1
     assert result["status"] == "succeeded"
-    assert result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -2820,7 +3016,6 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     # KB a clock's verdict.
     assert [t["name"] for t in tested.values()] == ["v_measured"]
     assert [lr["name"] for lr in res.result["losers"]] == []
-    assert res.result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -2898,7 +3093,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     assert res.result["explore_search_update"]["tested"] == {}
     assert res.result["losers"] == []
     assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
 
 
 @pytest.mark.asyncio
@@ -2992,8 +3187,6 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     grid = _atom_default_grid(
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
@@ -3012,8 +3205,6 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     grid = _atom_default_grid(
         model_class="dense",
         conc=8,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_ep" not in names
@@ -3029,8 +3220,6 @@ def test_atom_default_grid_fp8_model_emits_kv_fp8():
     grid = _atom_default_grid(
         model_class="moe_fp8",
         conc=16,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_kv_fp8" in names
@@ -3076,8 +3265,6 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
         "atom",
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     assert grid, "atom framework should produce a non-empty default grid"
     assert any(v.name == "atom_level_2" for v in grid)
@@ -3593,7 +3780,6 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
                             "gain_pct": 5.0,
                         }
                     ],
-                    "name_index": {},
                 },
             },
             idempotency_key="ex-rerun-all",

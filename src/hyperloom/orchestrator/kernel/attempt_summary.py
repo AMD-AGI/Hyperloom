@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import SOURCE_GEMM_TUNING
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 
-from ._kernel_decisions import _canonical_kernel_recipe_operator
+from .kernel_decisions import _canonical_kernel_recipe_operator
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState

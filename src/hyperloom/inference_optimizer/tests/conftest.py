@@ -113,7 +113,7 @@ def seed_kernel_keep(
     task_group_key: str = "",
 ) -> str:
     """Queue one KEEP patch in the shape the integrate lane stores it; a non-KEEP decision queues nothing."""
-    from hyperloom.orchestrator.kernel._kernel_decisions import _kernel_integration_id
+    from hyperloom.orchestrator.kernel.kernel_decisions import _kernel_integration_id
 
     if decision.upper() != "KEEP":
         return ""

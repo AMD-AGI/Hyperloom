@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.kernel._kernel_decisions import _honest_flag
+from hyperloom.orchestrator.kernel.kernel_decisions import _honest_flag
 from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 from hyperloom.orchestrator.kernel import _source_import as source_import
 

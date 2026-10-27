@@ -41,12 +41,6 @@ def test_apply_llm_stability_env_respects_operator_override():
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
-def test_apply_llm_stability_env_custom_timeout():
-    env: dict[str, str] = {}
-    apply_llm_stability_env(env, api_timeout_ms="120000")
-    assert env["API_TIMEOUT_MS"] == "120000"
-
-
 async def test_run_subprocess_returns_output_normally():
     rc, stdout, stderr = await _run_subprocess(
         [sys.executable, "-c", "print('hello-stdout')"],

@@ -265,9 +265,7 @@ class TestExploreGrid:
             ("xdit", "dit", {}),
             ("xdit", "moe_mla", {}),
             ("xdit", "dit", {"conc": 32}),
-            ("xdit", "dit", {"isl": 2048}),
-            ("xdit", "dit", {"osl": 256}),
-            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+            (" XDiT ", "", {"conc": 1}),
         ],
     )
     def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
@@ -288,7 +286,7 @@ class TestExploreGrid:
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
-        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32) == []
 
     @pytest.mark.parametrize(
         "model_class,conc,model_variants",
@@ -311,7 +309,7 @@ class TestExploreGrid:
         expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
         if conc:
             expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
-        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc)
         assert [(v.name, v.extra_server_args) for v in grid] == expected
         for v in grid:
             assert v.extra_envs == {}

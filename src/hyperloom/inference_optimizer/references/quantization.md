@@ -25,9 +25,11 @@ Rules:
   the sandbox to control quantization without relying on agent judgement.
 - The `--quantize` text is the request only: scheme, kv-cache, excluded layers,
   acceptable eval gap. Do not repeat the model path or export dir.
-- The adapter folds `--model` and
-  `<workspace_root>/quantization/<model>/quantized` into the prompt
-  automatically.
+- The adapter folds `--model` and the export dir into the prompt
+  automatically. Each run quantizes in its own directory,
+  `<workspace_root>/quantization/<model>/runs/<run_id>/`, and exports to
+  `quantized/` inside it, so a rerun never overwrites a model an earlier
+  session is serving.
 - `--quantize-scheme` is the structured alternative: `none`, `fp8`,
   `ptpc_fp8`, `mxfp4`, `mxfp4_fp8`. Free-text `--quantize` wins when both are
   given.

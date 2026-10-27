@@ -18,6 +18,11 @@ from hyperloom.common.env_safety import (
     is_allowed_external_env_key,
     is_allowed_variant_env_key,
 )
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 
 log = logging.getLogger(__name__)
 
@@ -117,14 +122,14 @@ def _geak_revalidation_decision(
     measured_ok = isinstance(measured, (int, float)) and measured > 0
     baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
     if not (measured_ok and baseline_ok):
-        return "fallback"
+        return REBENCH_FALLBACK
     cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
     engaged = float(measured) >= float(baseline) * (1.0 + float(_MIN_KERNEL_ENGAGED_GAIN_PCT) / 100.0)
     if not (cfg_ok and engaged):
-        return "fallback"
+        return REBENCH_FALLBACK
     if isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best):
-        return "no_promote"
-    return "validated"
+        return REBENCH_NO_PROMOTE
+    return REBENCH_VALIDATED
 
 
 def _geak_result_has_artifact(result: dict[str, Any]) -> bool:

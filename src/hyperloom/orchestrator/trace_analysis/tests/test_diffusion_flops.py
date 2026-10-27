@@ -24,7 +24,8 @@ def test_peak_tflops_mi355_precisions():
     assert df.peak_tflops("mi355x", "fp8") == 5033.2
     # fp8 is exactly 2x bf16 on the matrix core.
     assert df.peak_tflops("mi355x", "fp8") == pytest.approx(2 * df.peak_tflops("mi355x", "bf16"))
-    assert df.peak_tflops("mi300x", "bf16") == 1307.4
+    assert df.peak_tflops("mi300x", "bf16") == 708.0
+    assert df.peak_tflops("mi325x", "bf16") == 843.0
     assert df.peak_tflops("mi355x", "nonsense") == 0.0
     assert df.peak_tflops("unknown", "bf16") == 0.0
 
