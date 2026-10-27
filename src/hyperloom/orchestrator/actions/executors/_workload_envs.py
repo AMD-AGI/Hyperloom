@@ -1509,15 +1509,14 @@ def _restate_profile_capture(
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
     if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
         current = str(envs.get(framework_env, "")).strip()
-        current_tokens = current.split()
-        lost = [f for f in window.xdit_profiler_args if f.split()[0] not in current_tokens]
-        if lost:
+        missing = [f for f in window.xdit_profiler_args if f not in current]
+        if missing:
             log.warning(
                 "profile server args lost xDiT profiler flags %r (replace_args=%s); restoring.",
-                lost,
+                missing,
                 bool(replace_args),
             )
-            envs[framework_env] = merge_server_args(current, " ".join(lost))
+            envs[framework_env] = merge_server_args(current, " ".join(missing))
     # After the restore, so a vLLM delay it re-added is divided like any other.
     if window.profiling and window.serves_requests:
         fit_capture_to_speculative(envs, framework_env)
