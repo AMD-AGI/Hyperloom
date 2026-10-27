@@ -69,6 +69,35 @@ def _unmeasured_attribution(bench_result: dict[str, Any]) -> str:
     return "" if attribution == FAILURE_ATTRIBUTION_CANDIDATE else attribution
 
 
+def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The failed verdict of a bench the run stopped or that measured nothing through no fault of the patch."""
+    bench_class = str(bench_result.get("error_class") or "")
+    stopped = stopped_by_the_run_class(bench_class)
+    attribution = "" if stopped is not None else _unmeasured_attribution(bench_result)
+    if stopped is not None:
+        fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
+    elif attribution:
+        fields = {
+            "error_class": BENCH_UNMEASURED_CLASS,
+            "bench_error_class": bench_class,
+            "failure_attribution": attribution,
+            "error": str(bench_result.get("error") or "")[-600:],
+            "reason": f"bench produced no measurement ({attribution}): {bench_class or 'no error class'}",
+        }
+    else:
+        return None
+    return {
+        "status": "failed",
+        **fields,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+    }
+
+
 def _graded_change(graded: Any, delta_pct: float | None) -> float | None:
     """The change on the graded objective; an interactivity pair reports it even when the gate leaves ``delta_pct``."""
     if graded.comparable and graded.graded_on_intvty:
@@ -97,36 +126,9 @@ class PerfGateMixin:
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
-        stopped = stopped_by_the_run_class(bench_result.get("error_class"))
-        if stopped is not None:
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "bench_result": bench_result,
-                "workspace": str(attempt.output_root),
-            }
-        attribution = _unmeasured_attribution(bench_result)
-        if attribution:
-            bench_class = str(bench_result.get("error_class") or "")
-            return {
-                "status": "failed",
-                "error_class": BENCH_UNMEASURED_CLASS,
-                "bench_error_class": bench_class,
-                "failure_attribution": attribution,
-                "error": str(bench_result.get("error") or "")[-600:],
-                "reason": f"bench produced no measurement ({attribution}): {bench_class or 'no error class'}",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "bench_result": bench_result,
-                "workspace": str(attempt.output_root),
-            }
+        unrated = _unrated_verdict(attempt, bench_result)
+        if unrated is not None:
+            return unrated
 
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
         delta_pct = _graded_delta_pct(graded, bench_result, base_tput)

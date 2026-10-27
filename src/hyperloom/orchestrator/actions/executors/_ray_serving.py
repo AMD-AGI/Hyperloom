@@ -216,11 +216,11 @@ def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
     )
 
 
-def _marked_round(bench_round: SessionKillRound) -> tuple[SessionKillRound, str]:
-    """The round carrying a reap mark in its env, and that mark; a mark the caller already set is kept."""
+def _marked_round(bench_round: SessionKillRound) -> SessionKillRound:
+    """The round carrying a reap mark in its env; a mark the caller already set is kept."""
     env = dict(bench_round.env or {})
-    mark = env.setdefault(REAP_MARK_ENV, uuid.uuid4().hex)
-    return replace(bench_round, env=env), mark
+    env.setdefault(REAP_MARK_ENV, uuid.uuid4().hex)
+    return replace(bench_round, env=env)
 
 
 def _reap_marked_round(mark: str) -> int:
@@ -581,32 +581,24 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
-        bench_round, mark = _marked_round(bench_round)
+        bench_round = _marked_round(bench_round)
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
             ref = self._actor.run_blocking.remote(bench_round)
-            return self._collect_round(
-                ref,
-                acquire_ref=acquire_ref,
-                cmd=bench_round.cmd,
-                timeout=bench_round.timeout,
-                cancel_scope=cancel_scope,
-                mark=mark,
-            )
+            return self._collect_round(ref, acquire_ref=acquire_ref, bench_round=bench_round, cancel_scope=cancel_scope)
 
     def _collect_round(
         self,
         ref: Any,
         *,
         acquire_ref: Any,
-        cmd: list[str],
-        timeout: int | float | None,
+        bench_round: SessionKillRound,
         cancel_scope: Any,
-        mark: str,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
+        cmd, timeout = bench_round.cmd, bench_round.timeout
         import subprocess as _sp
 
         import ray
@@ -629,7 +621,7 @@ class ServingLease:
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
             # benchmark failure instead of cascading. The round it ran sits in its own session and outlives a SIGKILLed
             # actor, so it is reaped here by its mark before the GPUs and the port are handed to the next round.
-            reaped = _reap_marked_round(mark)
+            reaped = _reap_marked_round((bench_round.env or {})[REAP_MARK_ENV])
             log.warning("ServingLease.run_session_kill: ray actor died: %r; reaped %d leftover pids", exc, reaped)
             self._actor = None
             from ._ray_backend import mark_ray_backend_unhealthy
