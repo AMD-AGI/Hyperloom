@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
@@ -48,6 +49,11 @@ from hyperloom.inference_optimizer.session.paths import (
     ensure_archive_root,
     hosted_session_dir,
     stop_request_path,
+)
+from hyperloom.inference_optimizer.session.resume_guard import (
+    CleanupConfirmationError,
+    confirm_scope_gone,
+    foreign_owner_scopes,
 )
 from hyperloom.plugs.errors import ManifestError
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
@@ -119,8 +125,33 @@ def _run() -> int:
         return 0
     _put_interpreter_first_on_path()
     _run_installer(info.state_dir)
+    _confirm_previous_containers_gone(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+SCOPE_GONE_REASON = "hosted resume: the host starts a leg only once the previous application container no longer exists"
+
+
+def _confirm_previous_containers_gone(session_dir: Path) -> None:
+    """On a resume in a new container, mark the work a previous container left running as interrupted.
+
+    The host runs one application container per run at a time and starts a new leg only after the previous container
+    is gone, so an owner scope in the session that is not this container's belongs to a container that no longer
+    exists.  This is ``hyperloom recover --confirm-scope-gone`` for each such scope, from the same code; a leg in the
+    container that wrote the session finds no other scope and goes through the preflight's own checks unchanged.
+    """
+    scope = local_owner_scope()
+    if not scope or not is_resumable(session_dir):
+        return
+    for gone in foreign_owner_scopes(session_dir, scope):
+        try:
+            confirm_scope_gone(session_dir, owner_scope=gone, reason=SCOPE_GONE_REASON, current_scope=scope)
+        except CleanupConfirmationError as exc:
+            raise Refused(f"the previous container's work cannot be confirmed gone: {exc}") from None
+        print(
+            "[hosted] the previous application container is gone; its unfinished work is marked interrupted", flush=True
+        )
 
 
 def _put_interpreter_first_on_path() -> None:

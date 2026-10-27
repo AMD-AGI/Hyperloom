@@ -1080,6 +1080,21 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 | `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 
+### The host's guarantee about containers, and the resume that relies on it
+
+The host guarantees that one run has at most one application container at a time, and starts a new leg only after it has
+confirmed that the previous container no longer exists. The entry relies on that guarantee when it resumes a session:
+
+* It compares the owner scopes recorded in the session's ownership ledger with the scope of its own container. With no other scope
+  (a restart in the same container) the resume goes through the preflight's own checks, unchanged.
+* Another scope means the previous container is gone. The entry then does what `hyperloom recover --confirm-scope-gone` does for each
+  such scope, with the same code: the executions that scope left running are marked interrupted, their leases are released, their
+  work is redone, and the resume proceeds. A confirmation that the code refuses (for example another owner's live lease) ends the run
+  with `{"final": true, "returncode": 2, "error": ...}`.
+* A host that starts a new container while the previous one is only unreachable breaks the guarantee: two containers would write
+  one session directory. Such a host cannot use this hosting. Supporting one would need an explicit signal, in which the host
+  states at the start of a leg that the previous container no longer exists; the entry does not read one today.
+
 ### Progress events
 
 With the hosted `events` implementation (`src/hyperloom/hosted/events.py`, selected by the `hosted-*` plug profiles) the run writes

@@ -701,3 +701,72 @@ def test_a_package_the_working_directory_shadows_as_a_namespace_still_resolves_f
     monkeypatch.setattr(entry, "_optimize_main", optimize)
     entry.main(["run"])
     assert seen == [str(real / "__init__.py")]
+
+
+# -- a leg in a new container ------------------------------------------------------------------------------------
+_THIS = "0b0b0b0b-2222-4222-8222-000000000002:4026531002"
+_GONE = "0a0a0a0a-1111-4111-8111-000000000001:4026531001"
+
+
+def _resume_rig(run, monkeypatch, *, scope_of_session):
+    """A session that a first leg started and left a running task in, resumed by an entry that runs in ``_THIS``.
+
+    The fake ``optimize`` runs the real resume preflight, as ``optimize --resume-from`` does.
+    """
+    from hyperloom.inference_optimizer.session import resume_guard
+    from hyperloom.inference_optimizer.tests.test_resume_scope_gone import _session
+
+    monkeypatch.setattr(entry, "local_owner_scope", lambda: _THIS)
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    _session(session, {"explore-1": ["benchmark_lane", "profile_lane"]}, scope=scope_of_session)
+    confirmations = []
+    real = resume_guard.confirm_scope_gone
+    monkeypatch.setattr(
+        entry, "confirm_scope_gone", lambda *a, **k: confirmations.append(k["owner_scope"]) or real(*a, **k)
+    )
+    preflight = []
+
+    def optimize(argv):
+        resume_guard.ensure_resume_safe(session, owner_scope=entry.local_owner_scope())
+        preflight.append(argv[1])
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    run.restart()
+    return session, confirmations, preflight
+
+
+def test_a_resume_in_the_same_container_confirms_nothing(run, monkeypatch):
+    _session_dir, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_THIS)
+    assert entry.main(["run"]) == 0
+    assert confirmations == [] and len(preflight) == 1
+
+
+def test_a_resume_in_a_new_container_confirms_the_old_one_gone_before_the_preflight(run, monkeypatch, capsys):
+    from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
+
+    session, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_GONE)
+    with pytest.raises(ResumeBlocked):  # without the confirmation the real preflight refuses
+        ensure_resume_safe(session, owner_scope=_THIS)
+    assert entry.main(["run"]) == 0
+    assert confirmations == [_GONE] and len(preflight) == 1
+    assert not (run.state / "exit.json").exists() or _exit(run)["returncode"] == 0
+    assert "marked interrupted" in capsys.readouterr().out
+
+
+def test_a_confirmation_that_is_refused_ends_the_run_finally_with_the_reason(run, monkeypatch):
+    from hyperloom.inference_optimizer.session.paths import db_path_for
+    from hyperloom.inference_optimizer.tests.test_resume_scope_gone import FUTURE, _lease
+    import sqlite3
+    from contextlib import closing
+
+    session, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_GONE)
+    with closing(sqlite3.connect(db_path_for(session))) as db, db:
+        _lease(db, "other_lane", "explore-1", "0c0c0c0c-3333-4333-8333-000000000003:1", FUTURE)  # a live other owner
+    assert entry.main(["run"]) == 2
+    assert preflight == []
+    document = _exit(run)
+    assert document["final"] is True and document["returncode"] == 2
+    assert "previous container's work cannot be confirmed gone" in document["error"]
