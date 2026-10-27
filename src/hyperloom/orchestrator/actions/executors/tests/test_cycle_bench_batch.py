@@ -106,6 +106,60 @@ def test_a_batch_stops_when_its_first_base_fails(tmp_path, monkeypatch):
     assert summary["valid"] is False
 
 
+def test_a_stopped_batch_boots_no_further_arm(tmp_path, monkeypatch):
+    import threading
+
+    stop = threading.Event()
+    ran: list[str] = []
+
+    def _run_arm(spec):
+        ran.append(spec.out_dir.name)
+        stop.set()
+        return _arm(10.0, 20.0)
+
+    monkeypatch.setattr(cba, "run_arm", _run_arm)
+
+    summary = cba.run_batch(_batch(tmp_path), stop=stop)
+
+    assert ran == ["base"]
+    assert (summary["valid"], summary["verdicts"]) == (False, {})
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_cycle_task_stops_its_batch_and_waits_for_the_arm_on_the_gpus(tmp_path, monkeypatch):
+    """The lanes are released when the task ends, so the thread's server must be down by then."""
+    import asyncio
+
+    from hyperloom.orchestrator.actions.executors import explore
+
+    seen: list[str] = []
+
+    def _run_batch(spec, stop=None):
+        seen.append("started")
+        if stop is not None:
+            stop.wait(10)
+        seen.append("stopped" if stop is not None and stop.is_set() else "not stopped")
+        return {"valid": False, "verdicts": {}}
+
+    monkeypatch.setattr(cba, "session_batch", lambda state, candidates, *, out_dir, port: "spec")
+    monkeypatch.setattr(cba, "run_batch", _run_batch)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="t-c", params={cba.CYCLE_ARMS_PARAM: [{"name": "a", "envs": {}}]}),
+        extra={"shared_state": SimpleNamespace(), "workspace": str(tmp_path)},
+    )
+    task = asyncio.ensure_future(explore.ExploreExecutor(session_dir=tmp_path)(ctx))
+    for _ in range(500):
+        if seen:
+            break
+        await asyncio.sleep(0.01)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=15)
+
+    assert seen == ["started", "stopped"]
+
+
 def _referenced_batch(tmp_path: Path, monkeypatch, bases: list[tuple[float, float]]) -> tuple[list[str], dict]:
     """Run a batch whose previous base2 read 10/20 ms; each base boot reads the next of *bases*."""
     ran: list[str] = []
@@ -201,7 +255,9 @@ async def test_an_explore_task_carrying_cycle_arms_runs_the_batch_instead_of_a_r
         return "spec"
 
     monkeypatch.setattr(cba, "session_batch", _session_batch)
-    monkeypatch.setattr(cba, "run_batch", lambda spec: {"valid": True, "verdicts": {"lever-a": {"verdict": "pass"}}})
+    monkeypatch.setattr(
+        cba, "run_batch", lambda spec, stop=None: {"valid": True, "verdicts": {"lever-a": {"verdict": "pass"}}}
+    )
     monkeypatch.setattr(explore, "_ExploreRound", None)
     state = SimpleNamespace()
     ctx = SimpleNamespace(
@@ -228,7 +284,7 @@ async def test_an_explore_task_with_no_cycle_arms_runs_the_reference_batch_of_it
     from hyperloom.orchestrator.actions.executors import explore
 
     monkeypatch.setattr(cba, "session_batch", lambda state, candidates, *, out_dir, port: candidates)
-    monkeypatch.setattr(cba, "run_batch", lambda spec: {"valid": True, "verdicts": {}, "ran": spec})
+    monkeypatch.setattr(cba, "run_batch", lambda spec, stop=None: {"valid": True, "verdicts": {}, "ran": spec})
     monkeypatch.setattr(explore, "_ExploreRound", None)
     ctx = SimpleNamespace(
         task=SimpleNamespace(task_id="t-ref", params={cba.CYCLE_ARMS_PARAM: []}),

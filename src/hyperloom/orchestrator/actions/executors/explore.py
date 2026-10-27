@@ -7,10 +7,12 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import is_magpie_agentx
 import asyncio
+import contextlib
 import functools
 import logging
 import os
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -1919,15 +1921,32 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         if _cycle_bench.CYCLE_ARMS_PARAM in params:
-            state = extra.get("shared_state") or extra.get("state")
-            return await asyncio.to_thread(_screen_cycle_batch, params, state, output_root)
+            return await _run_cycle_batch(params, extra.get("shared_state") or extra.get("state"), output_root)
         try:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:
             return refusal.result
 
 
-def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+async def _run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+    """Run the batch off the event loop; cancelled, it stops booting and returns once the arm on the GPUs is down.
+
+    The task's lanes are released when it ends, so a server the thread still holds would share the GPUs.
+    """
+    stop = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_screen_cycle_batch, params, state, output_root, stop))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await work
+        raise
+
+
+def _screen_cycle_batch(
+    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
+) -> dict[str, Any]:
     """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
     from hyperloom.common.ports import pick_server_port
 
@@ -1937,7 +1956,7 @@ def _screen_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -
         spec = _cycle_bench.session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
     except (OSError, KeyError, ValueError) as exc:
         return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
-    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec)}
+    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec, stop=stop)}
 
 
 def _safe(name: str) -> str:
