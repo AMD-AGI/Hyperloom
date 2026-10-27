@@ -1005,7 +1005,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_profile_status == "succeeded"
 
 
-def test_format_analysis_md_full_points_at_the_tool_instead_of_inlining():
+def test_format_analysis_md_pointer_points_at_the_tool_instead_of_inlining():
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 7,
@@ -1013,7 +1013,7 @@ def test_format_analysis_md_full_points_at_the_tool_instead_of_inlining():
         "analysis_md_text": "# Report\nverbatim body text\n",
         "analysis_md_path": "/p/analysis.md",
     }
-    rendered = s._format_analysis_md_full()
+    rendered = s._format_analysis_md_pointer()
     assert "verbatim body text" not in rendered
     assert "show_analysis_md" in rendered
     assert "snapshot #7" in rendered

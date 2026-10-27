@@ -482,7 +482,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             try:
                 from pathlib import Path as _Path
 
-                return _Path(path).read_text(encoding="utf-8")
+                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
             except OSError as exc:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"

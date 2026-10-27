@@ -171,15 +171,15 @@ def test_format_trace_analyze_skipped_kernels():
     assert "skipped_kernels_top" in out
 
 
-def test_format_analysis_md_full():
+def test_format_analysis_md_pointer():
     st = SharedState()
-    assert "no TraceLens snapshot" in st._format_analysis_md_full()
+    assert "no TraceLens snapshot" in st._format_analysis_md_pointer()
     st.last_trace_analyze = {
         "analysis_md_text": "# Analysis\nbody",
         "roofline_snapshot_id": 5,
         "roofline_baseline_gain_at_snapshot": 12.5,
     }
-    out = st._format_analysis_md_full()
+    out = st._format_analysis_md_pointer()
     assert "snapshot #5" in out
     assert "12.50%" in out
 

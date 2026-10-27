@@ -1610,11 +1610,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return err_class in _INTEGRATE_FAULT_ERROR_CLASSES
 
     def record_kernel_integrate_result(self, result: dict[str, Any]) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`.kernel_decisions`.
+        """Record an integrate result and capture the gate's verdict on the KERNEL timeline.
 
-        Also the one seam every integrate settlement passes through, so the
-        author-time capture of the gate's verdict is taken here rather than at
-        each of the three callers.
+        Every integrate settlement passes through here, so the verdict is captured once rather than at each caller.
         """
         from ..kernel import kernel_decisions as _m
 
@@ -2117,8 +2115,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def append_stack_gain_entry(self, *, new_tput: float) -> float | None:
-        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive)."""
+    def append_stack_gain_entry(self, *, new_tput: float) -> None:
+        """Mirror an optimization_stack append into gain_per_stack_entry as ``(new_tput-baseline_tput)/baseline_tput*100``."""
         try:
             base = float(self.baseline_tput or 0.0)
         except (TypeError, ValueError):
@@ -2127,9 +2125,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             tput = float(new_tput or 0.0)
         except (TypeError, ValueError):
             tput = 0.0
-        entry_gain_pct = gain_pct(tput, base)
-        self.gain_per_stack_entry.append(entry_gain_pct)
-        return entry_gain_pct
+        self.gain_per_stack_entry.append(gain_pct(tput, base))
 
     # Session budget: elapsed is summed forward across legs.
     def begin_leg(self, *, now_unix: float | None = None) -> None:

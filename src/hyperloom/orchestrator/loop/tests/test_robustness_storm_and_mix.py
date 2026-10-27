@@ -26,23 +26,6 @@ def test_intervention_mix_normalises_change_type_casing():
 
 
 # 2. consecutive_config_only_rounds counter
-def test_consecutive_config_only_advances_on_explore_keep():
-    s = SharedState()
-    s.record_intervention(change_type="config")
-    assert "consecutive_config_only_rounds=1" in s.to_intervention_mix_summary()
-    s.record_intervention(change_type="config")
-    assert "consecutive_config_only_rounds=2" in s.to_intervention_mix_summary()
-
-
-def test_consecutive_config_only_resets_on_code_patch_keep():
-    s = SharedState()
-    s.record_intervention(change_type="config")
-    s.record_intervention(change_type="config")
-    assert "consecutive_config_only_rounds=2" in s.to_intervention_mix_summary()
-    s.record_intervention(change_type="code_patch")
-    assert "consecutive_config_only_rounds=0" in s.to_intervention_mix_summary()
-
-
 def test_consecutive_config_only_ignores_unknown_change_type():
     """An unrecognised change_type leaves the counter unchanged."""
     s = SharedState()

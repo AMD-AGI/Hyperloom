@@ -508,7 +508,7 @@ class _RenderMixin:
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
-            f"analysis_md={self._format_analysis_md_full()}",
+            f"analysis_md={self._format_analysis_md_pointer()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             # Pending KEEPs the integrate gate will drain.
@@ -695,7 +695,7 @@ class _RenderMixin:
             parts.append(f"{entry.get('action', '?')}:{entry.get('variant_name', '?')}")
         return parts or "(none)"
 
-    def _format_analysis_md_full(self) -> str:
+    def _format_analysis_md_pointer(self) -> str:
         """Point the prompt at the ``show_analysis_md`` tool once a TraceLens snapshot exists. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
         if not cached.get("analysis_md_text"):

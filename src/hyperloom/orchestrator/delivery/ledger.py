@@ -105,9 +105,8 @@ def load_records(backup_root: Path | str) -> list[dict[str, Any]]:
 def _backup_of(record: Mapping[str, Any]) -> Any:
     """The copy a record names.
 
-    ``backup_path`` is the name no-git records carried before they were written as ``backup``. The fallback
-    retires once no backup ledger or persisted warm-tree ``nogit_backups`` record written under that name can
-    still be resumed or restored.
+    ``backup_path`` is the legacy no-git key, read until no resumable backup ledger or warm-tree ``nogit_backups``
+    record can carry it.
     """
     return record.get("backup_path", record.get("backup"))
 
