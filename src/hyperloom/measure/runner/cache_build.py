@@ -31,6 +31,12 @@ distribution's own build requirements name is never fetched. The lock must there
 - An entry that is already there is used when it is complete and still what a build would write (same commit tree, same
   wheel target, source and wheels intact); one that differs is never overwritten, the build refuses and names the
   difference. An entry with no manifest is the remains of a build that did not finish; it is removed and built again.
+- ``<entry>/bootstrap.sh`` is this builder's start-up script (:data:`~hyperloom.measure.runner.bootstrap.BOOTSTRAP_SCRIPT`,
+  mode 0755), not the commit's, and the manifest records its SHA-256. An entry that is otherwise what a build would write
+  but whose manifest records another script (a builder of another version made it) or none (it predates the script)
+  gets this builder's script and a manifest that records it, each replaced in one rename, under the lock; the result's
+  ``manifest_sha256`` is that new manifest's. A ``bootstrap.sh`` that does not match the hash its manifest records is
+  a difference like any other, and the build refuses.
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
@@ -40,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import secrets
@@ -50,11 +57,13 @@ import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT
 from hyperloom.measure.runner.cache_layout import (
+    BOOTSTRAP_NAME,
     CACHE_ENV,
     LOCK_FILE,
     MANIFEST_NAME,
@@ -90,6 +99,9 @@ DEFAULT_LOCK_TIMEOUT_SEC = 1800.0
 _LOCK_POLL_SEC = 0.1
 _TAIL = 2000
 _UTF8 = "utf-8"
+#: ``bootstrap.sh`` is run with ``sh`` and may be run directly: readable and executable by the sandbox's account.
+_SCRIPT_MODE = 0o755
+_BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
 #: pip never asks a question and never checks for a newer pip.
@@ -283,6 +295,34 @@ def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) 
     return tuple(entries.values())
 
 
+def _replace_file(path: Path, text: str, mode: int | None = None) -> None:
+    """Write ``text`` to ``path`` in one rename, so a reader sees the old file or the new one."""
+    pending = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
+    try:
+        pending.write_text(text, encoding=_UTF8)
+        if mode is not None:
+            pending.chmod(mode)
+        os.replace(pending, path)
+    except BaseException:
+        pending.unlink(missing_ok=True)
+        raise
+
+
+def _write_bootstrap(entry: Path) -> str:
+    """Write this builder's start-up script as ``entry/bootstrap.sh`` and return its SHA-256."""
+    _replace_file(entry / BOOTSTRAP_NAME, BOOTSTRAP_SCRIPT, _SCRIPT_MODE)
+    return file_sha256(entry / BOOTSTRAP_NAME)
+
+
+def _with_this_bootstrap(entry: Path, manifest: Manifest) -> None:
+    """Give a finished entry whose manifest records another script, or none, this builder's script and a manifest
+    that records it; the script first, so the manifest never pins a script that is not there."""
+    if manifest.bootstrap_sha256 == _BOOTSTRAP_SHA256:
+        return
+    refreshed = replace(manifest, bootstrap_sha256=_write_bootstrap(entry))
+    _replace_file(entry / MANIFEST_NAME, manifest_to_json(refreshed))
+
+
 def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) -> CacheEntry:
     """Make the entry beside ``final`` and rename it into place; the manifest is the last file written."""
     pending = final.parent / f".{sha}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
@@ -294,7 +334,8 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         wheels = pending / WHEELS_DIR
         pins = parse_lock(lock.read_text(encoding=_UTF8))
         entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
-        manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form())
+        bootstrap = _write_bootstrap(pending)
+        manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form(), bootstrap)
         (pending / MANIFEST_NAME).write_text(manifest_to_json(manifest), encoding=_UTF8)
         problems = check_entry(pending, sha, verify_hash=True)
         if problems:
@@ -337,6 +378,7 @@ def _use_or_clear(final: Path, sha: str, tree: str, options: BuildOptions) -> Ca
         raise CacheConflict(
             f"{final} is not what a build of {sha} writes, so it is left alone: {'; '.join(problems[:3])}"
         )
+    _with_this_bootstrap(final, manifest_from_json((final / MANIFEST_NAME).read_bytes()))
     return CacheEntry(final, file_sha256(final / MANIFEST_NAME), reused=True)
 
 
