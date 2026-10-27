@@ -962,6 +962,77 @@ async def test_aanthropic_messages_propagates_transport_errors():
         await aanthropic_messages(client, model="claude")
 
 
+class _FlakyAnthropicTransport(_FakeAnthropicTransport):
+    """Raises ``error`` for the first ``failures`` POSTs, then answers normally."""
+
+    def __init__(self, response: Any = None, *, error: BaseException, failures: int) -> None:
+        super().__init__(response)
+        self._connect_error = error
+        self._failures = failures
+
+    def post(self, path: str, *, json: Any) -> Any:
+        self.calls.append({"path": path, "json": json})
+        if len(self.calls) <= self._failures:
+            raise self._connect_error
+        return self._response
+
+
+class _FlakyAsyncAnthropicTransport(_FlakyAnthropicTransport):
+    async def post(self, path: str, *, json: Any) -> Any:  # type: ignore[override]
+        return _FlakyAnthropicTransport.post(self, path, json=json)
+
+
+@pytest.fixture
+def no_connect_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-dial without the waits, so the retry tests cost no wall clock."""
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+
+
+def test_anthropic_messages_redials_while_the_connection_does_not_come_up(no_connect_backoff):
+    """The OpenAI protocol path gets this from the SDK; the Messages path owes its callers the same."""
+    import httpx
+
+    client = _FlakyAnthropicTransport(
+        _FakeAnthropicResponse(body=_MESSAGE_BODY), error=httpx.ConnectTimeout("connect timed out"), failures=2
+    )
+    result = anthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_redials_while_the_connection_does_not_come_up(no_connect_backoff):
+    import httpx
+
+    client = _FlakyAsyncAnthropicTransport(
+        _FakeAnthropicResponse(body=_MESSAGE_BODY), error=httpx.ConnectError("connection refused"), failures=1
+    )
+    result = await aanthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_gives_up_after_the_connect_attempt_budget(no_connect_backoff):
+    import httpx
+
+    client = _FlakyAsyncAnthropicTransport(error=httpx.ConnectError("connection refused"), failures=99)
+    with pytest.raises(httpx.ConnectError):
+        await aanthropic_messages(client, model="claude")
+    assert len(client.calls) == llm_config.ANTHROPIC_CONNECT_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_messages_does_not_redial_once_the_request_is_on_the_wire(no_connect_backoff):
+    """Only a connection that never came up is replayed; a request already sent may have produced a completion."""
+    import httpx
+
+    client = _FlakyAsyncAnthropicTransport(error=httpx.ReadTimeout("read timed out"), failures=99)
+    with pytest.raises(httpx.ReadTimeout):
+        await aanthropic_messages(client, model="claude")
+    assert len(client.calls) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body", [{}, {"content": "nope"}])
 async def test_aanthropic_messages_tolerates_unreadable_reply_shapes(body):
