@@ -44,7 +44,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     make_conc_sweep_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -75,7 +75,7 @@ def _recorder(
 ):
     """Build a recorder the way a dispatched sweep gets one."""
     recorder = make_conc_sweep_recorder(
-        make_sink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
+        EventSink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
         task_id=task_id,
         task_kind="conc_sweep",
         reason=reason,
@@ -139,12 +139,8 @@ def _plan(recorder) -> None:
     recorder.record_budget(
         SweepBudget(
             declared_total_sec=9000,
-            granted_total_sec=21600,
             rung_cost_sec=10800.0,
-            raised=True,
-            gate_active=True,
             deadline=1780000000.0,
-            session_soft_deadline_sec=10800.0,
         )
     )
     recorder.record_environment(
@@ -264,18 +260,18 @@ def test_an_anchor_with_no_throughput_reports_no_per_gpu_number(_bound_session):
     assert anchor["input_throughput_tok_s_per_gpu"] is None
 
 
-def test_the_budget_reports_both_the_number_asked_for_and_the_number_spent(_bound_session):
+def test_the_budget_records_what_was_declared(_bound_session):
     recorder = _recorder()
     _plan(recorder)
     recorder.finish(_final())
 
     budget = _ext(_bound_session)["budget"]
-    assert budget["declared_total_sec"] == 9000
-    assert budget["granted_total_sec"] == 21600
-    assert budget["raised"] is True
-    assert budget["rung_cost_sec"] == 10800.0
-    assert budget["gate_active"] is True
-    assert budget["session_soft_deadline_sec"] == 10800.0
+    assert budget == {
+        "declared_total_sec": 9000,
+        "rung_cost_sec": 10800.0,
+        "gate_active": True,
+        "deadline": 1780000000.0,
+    }
 
 
 def test_the_sweeps_own_task_id_is_recorded_apart_from_the_dispatched_one(_bound_session):
@@ -880,7 +876,7 @@ def test_a_recorder_with_no_sink_declines_instead_of_raising(_bound_session):
 
 def test_a_malformed_event_id_declines_instead_of_breaking_the_sweep(_bound_session):
     with pytest.raises(ValueError):
-        make_sink("not-an-event-id", producer=PRODUCER)
+        EventSink("not-an-event-id", producer=PRODUCER)
 
 
 def _ceiling() -> dict[str, Any]:

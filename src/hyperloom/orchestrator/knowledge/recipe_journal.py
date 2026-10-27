@@ -844,7 +844,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one Recipe finalize attempt, settled as transport_failed
             log.exception("Recipe finalize raised")
             outcome = {
                 "status": "error",

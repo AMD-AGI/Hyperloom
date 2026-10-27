@@ -1100,6 +1100,55 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     )
 
 
+def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
+    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    monkeypatch.setattr(tla, "_reject_capture_only_input", lambda *_args: None)
+    monkeypatch.setattr(
+        tla,
+        "_probe_gpu_kernels",
+        lambda files: tla._KernelProbe(analysed=files[0], kernel_event_count=1, probed=[files[0].name], spent_bytes=0),
+    )
+    monkeypatch.setattr(
+        tla,
+        "_check_tracelens_checkout",
+        lambda *_args: tla._TraceLensCheckout(root=tmp_path, internal_root=None, skill=tmp_path / "SKILL.md"),
+    )
+    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tla,
+        "_run_trace_split",
+        lambda *_args: (trace, {"chunks_extracted": 1, "chunks_by_mode": {}}),
+    )
+    monkeypatch.setattr(tla, "write_run_config", lambda **_kwargs: None)
+
+    async def _sdk_fails(*_args, **_kwargs):
+        raise ConnectionError("model endpoint refused the connection")
+
+    monkeypatch.setattr(tla, "run_tracelens_skill", _sdk_fails)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input",
+            str(trace),
+            "--workspace-path",
+            str(tmp_path / "workspace"),
+            "--use-llm-orchestrator",
+        ],
+    )
+
+    rc = tla.main()
+    result = json.loads(capsys.readouterr().out)
+    assert (rc, result["status"], result["error"]) == (
+        1,
+        "failed",
+        "ConnectionError: model endpoint refused the connection",
+    )
+
+
 @pytest.mark.parametrize(
     ("framework", "capture", "expected_mode"),
     [("vllm", True, "inference"), ("custom", False, "default")],
@@ -1471,7 +1520,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
         return CodexSessionResult(
             text="wrote analysis.md",
             usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
-            thread_id="thread-123",
         )
 
     def _no_claude_query(**_kwargs):

@@ -12,12 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.loop import runner as runner_module
 from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.orchestrator.contracts import PlanCriticOutcome
 from kernelforge.tracker import ExperimentTracker
+from kernelforge.tests.conftest import silence_jit_rebuild
 
 
 def _loop(tmp_path, monkeypatch):
@@ -50,7 +50,7 @@ def _reopen(workspace, tmp_path, monkeypatch):
 
 
 def _open_loop(workspace, experiments_root, monkeypatch):
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
 
     loop = IterationLoop(
         IterationConfig(
@@ -621,7 +621,6 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypa
     def _no_room(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "atomic_write_json", _no_room, raising=False)
     monkeypatch.setattr("kernelforge.loop.recovery.atomic_write_json", _no_room)
 
     loop._persist_lane_queue()

@@ -663,7 +663,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
-    except Exception as e:  # noqa: BLE001 - any import failure → isolated-venv fallback
+    except (ImportError, OSError, RuntimeError, TypeError) as e:
         probed = _probe_isolated_vllm()
         if probed is None:
             log.info(
@@ -761,7 +761,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception as e:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
 
@@ -884,7 +884,7 @@ def _discover_sglang_gc_plan(
 
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception as e:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
         return None
     if not getattr(sglang, "__file__", None):

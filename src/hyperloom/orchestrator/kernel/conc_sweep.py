@@ -816,7 +816,7 @@ def _resolve_arm_strategy(run: _SweepRun, arm_name: str, *, serving_lease_held: 
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
         lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: one arm's lifecycle resolution, recorded as a fault
         log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
         if recorder is not None:
             # Named per arm: both arms resolve, and two faults reading alike
@@ -922,12 +922,13 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 ),
                 base=LaunchLayer(extra_envs=dict(resolve_backend().boot_phase_envs)),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one single-server boot rung
             log.warning(
                 "conc_sweep single-server: arm=%s boot conc=%s raised %r; trying next lower conc",
                 arm_name,
                 boot_variant.extra_envs.get("CONC", "?"),
                 exc,
+                exc_info=True,
             )
             boot_results = [_raised_result(boot_variant, "single_server_boot", exc)]
 
@@ -1002,7 +1003,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             # Safety teardown — idempotent, no-op if already torn down.
             try:
                 teardown_lifecycle_server(pid_dir=pid_dir, framework=server.framework, port=server.port)
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one arm's server teardown, recorded as a fault
                 # The last word on this arm's server: a teardown that failed here
                 # leaves it alive past the arm that owned it.
                 log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
@@ -1056,12 +1057,13 @@ async def _sweep_by_reuse(run: _SweepRun, server: _ArmServer, reuse_grid: list[G
                     warmup_before_measure=False,
                 ),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one reuse rung on the shared server
             log.warning(
                 "conc_sweep single-server: arm=%s reuse conc=%s raised %r",
                 arm_name,
                 variant.extra_envs.get("CONC", "?"),
                 exc,
+                exc_info=True,
             )
             reuse_results = [_raised_result(variant, "single_server_reuse", exc)]
         reuse_elapsed = round(time.time() - reuse_started_at, 3)
@@ -1098,8 +1100,10 @@ async def _sweep_arm_option_b(run: _SweepRun, server: _ArmServer, grid: list[Gri
             rung_started_at = time.time()
             try:
                 sub = await run.run_rung(variant, GridLaunch(serving_lease=server.lease))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
+            except Exception as exc:  # isolation boundary: one option-B rung on its own server
+                log.warning(
+                    "conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc, exc_info=True
+                )
                 sub = [_raised_result(variant, "option_b", exc)]
             rung_elapsed = round(time.time() - rung_started_at, 3)
             run.record_ran(
@@ -1213,10 +1217,7 @@ async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
         recorder.record_budget(
             SweepBudget(
                 declared_total_sec=total_budget_sec,
-                granted_total_sec=total_budget_sec,
                 rung_cost_sec=run.variant_expected_sec,
-                raised=False,
-                gate_active=total_budget_sec is not None,
                 deadline=run.started_at + total_budget_sec if total_budget_sec is not None else None,
             )
         )
@@ -1326,10 +1327,7 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = resolve_session_model_path(
-        state_model_path=str(getattr(state, "model_path", "") or ""),
-        for_serving=True,
-    )
+    resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
     # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
     # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.

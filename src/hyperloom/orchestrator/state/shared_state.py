@@ -10,15 +10,15 @@ import logging
 import os
 import time
 import traceback
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import first_text, to_int, to_str_list
+from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -47,7 +47,8 @@ from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 
-from . import kernel_decision_settings as _kernel_decision_settings
+from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
+from .failure_evidence import tail_excerpt
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
 from ._shared_state.phase_state import _control_fields
@@ -56,12 +57,6 @@ log = logging.getLogger(__name__)
 
 # Upper bound on retained crash timestamps (trailing-window rate needs only the recent tail).
 _CRASH_TIMESTAMP_CAP: int = 200
-
-# Compatibility aliases kept on shared_state for existing callers/tests.
-_DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-_MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
-resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
@@ -416,18 +411,6 @@ def effective_closing_grace_sec(
     return min(120.0, (max_minutes or 0.0) * 60.0 * 0.02)
 
 
-@contextmanager
-def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
-    """Record how long one post-deadline teardown step took on ``state``."""
-    started = time.monotonic()
-    try:
-        yield
-    finally:
-        recorder = getattr(state, "record_teardown_timing", None)
-        if callable(recorder):
-            recorder(name, time.monotonic() - started)
-
-
 from ._shared_state.elapsed import elapsed_sec_of
 from ._shared_state.render import _RenderMixin
 
@@ -522,9 +505,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
-    # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
-    # frontend has data even when the roofline (profile + trace_analyze) step fails.
-    baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
     # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
@@ -669,8 +649,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # ``0.0`` means unset or unbounded.
     elapsed_charged_sec: float = 0.0
     leg_anchor_unix: float = 0.0
-    # Wall-clock seconds spent in post-deadline teardown, keyed by step.
-    teardown_timings_sec: dict[str, float] = field(default_factory=dict)
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
@@ -814,10 +792,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
-    # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
+    # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # Current run of contiguous config KEEPs; resets when a code_patch KEEP lands.
-    consecutive_config_only_rounds: int = 0
     # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
@@ -825,13 +801,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     target_advisory_enabled: bool = True
     # Master switch for sedimenting KEEP/REVERT provenance into the persistent recipe; off => recipe stays ephemeral.
     recipe_sediment_enabled: bool = True
-    research_scout_runs: int = 0
     research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
     static_recon_enabled: bool = True
-    static_recon_runs: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
@@ -869,9 +843,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Phase state machine fields ``phase`` — run-level pipeline phase
     # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.
     phase: str = ""
-    # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
-    phase_started_ts: str = ""
-    # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
+    # Unix epoch the current phase was entered (budget judge + the prompt's ``entered`` line).
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
@@ -1003,17 +975,16 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Whether the latest profile left a trace; ``recovered`` was salvaged from a run that reported failure."""
         return self.last_profile_status in {"succeeded", "recovered"}
 
-    def profile_trace_matches_workload(self, expected: dict[str, Any] | None = None) -> bool:
-        """Whether the recorded profile trace is fresh for a target workload."""
+    def profile_trace_matches_workload(self) -> bool:
+        """Whether the recorded profile trace is fresh for the current-best workload."""
         recorded = self.last_profile_workload
         if not self.profile_trace_usable() or not isinstance(recorded, dict) or not recorded:
             return False
-        # Default to the *current-best* runtime identity, not the bare context: last_profile_workload is recorded with
-        # the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
+        # Compare against the *current-best* runtime identity, not the bare context: last_profile_workload is recorded
+        # with the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
         # overrides reports server_args="" and skips the current_best runtime backfill, so any workload with server
         # args/extra envs would compare unequal and every fresh profile would be discarded as stale.
-        target = expected if isinstance(expected, dict) and expected else self.current_profile_workload_context()
-        return recorded == target
+        return recorded == self.current_profile_workload_context()
 
     def record_profile_workload(
         self,
@@ -1169,12 +1140,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
-        out.setdefault("schema_version", 1)
         out.setdefault("tested", {})
         out.setdefault("accepted", [])
         out.setdefault("rejected", [])
-        out.setdefault("domains_round_summary", [])
-        out.setdefault("name_index", {})
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})
 
@@ -1634,15 +1602,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
-    def find_rejected_kernel_patch(
-        self,
-        payload: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.find_rejected_kernel_patch(self, payload)
-
     @staticmethod
     def _is_integrate_fault(result: dict[str, Any]) -> bool:
         """True when an integrate result is an integration *fault*, not a verdict."""
@@ -1652,29 +1611,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         err_class = str(result.get("error_class") or "").strip()
         return err_class in _INTEGRATE_FAULT_ERROR_CLASSES
 
-    def record_kernel_integrate_result(
-        self,
-        result: dict[str, Any],
-        *,
-        max_attempts: int = 3,
-        keep_threshold_pct: float = 1.0,
-        max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`.
+    def record_kernel_integrate_result(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Record an integrate result and capture the gate's verdict on the KERNEL timeline.
 
-        Also the one seam every integrate settlement passes through, so the
-        author-time capture of the gate's verdict is taken here rather than at
-        each of the three callers.
+        Every integrate settlement passes through here, so the verdict is captured once rather than at each caller.
         """
-        from ..kernel import _kernel_decisions as _m
+        from ..kernel import kernel_decisions as _m
 
-        entry = _m.record_kernel_integrate_result(
-            self,
-            result,
-            max_attempts=max_attempts,
-            keep_threshold_pct=keep_threshold_pct,
-            max_fault_attempts=max_fault_attempts,
-        )
+        entry = _m.record_kernel_integrate_result(self, result)
         self._record_integrate_verdict_on_timeline(entry)
         return entry
 
@@ -1719,55 +1663,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
-    def record_gemm_tuning(self, result: dict[str, Any]) -> None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        _m.record_gemm_tuning(self, result)
-
-    # Multi-KEEP integrate queue helpers.
-    def next_pending_keep_kernel_id(self) -> str:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.next_pending_keep_kernel_id(self)
-
-    def pending_keep_kernel_ids(self) -> list[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.pending_keep_kernel_ids(self)
-
-    def pending_kernel_integration_records(self) -> list[dict[str, Any]]:
-        """Return immutable pending KEEP snapshots in integration priority order."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.pending_kernel_integration_records(self)
-
     @property
     def roofline_snapshot_id(self) -> int:
         """Counter of the newest roofline snapshot, or 0 before the first one."""
         raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
         return int(raw) if isinstance(raw, int) else 0
-
-    @property
-    def has_keep_pending_integrate(self) -> bool:
-        """True when kernel KEEP results still await kernel ``integrate``."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.has_keep_pending_integrate(self)
-
-    # Reusable hot kernels no backend has produced a patch for yet.
-    def untried_hot_reusable_kernels(
-        self,
-        *,
-        min_gpu_pct: float | None = None,
-        top_n: int | None = None,
-    ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
 
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
@@ -1782,22 +1682,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return text
         return text[:limit]
 
-    @staticmethod
-    def _stderr_tail(value: Any, *, limit: int = 1000) -> str | None:
-        """Pull the last ``limit`` chars from a subprocess error blob (stderr's actionable signal is at the end)."""
-        if value is None:
-            return None
-        text = redact_secret_values(str(value))
-        if not text:
-            return None
-        return text[-limit:] if len(text) > limit else text
-
     def _common_result_fields(self, result: dict[str, Any]) -> dict[str, Any]:
         """Build the failure/diagnostic fields shared by the attempt + failure logs."""
         return {
             "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
-            "stderr_tail": self._stderr_tail(result.get("error")),
+            "stderr_tail": tail_excerpt(result.get("error"), limit=1000),
             "stderr_log_path": (str(result.get("stderr_log_path")) if result.get("stderr_log_path") else None),
             "workspace": (str(result.get("workspace")) if result.get("workspace") else None),
             "raw_result_path": (str(result.get("raw_result_path")) if result.get("raw_result_path") else None),
@@ -1964,38 +1854,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         framework = str(getattr(self, "framework", "") or "").strip().lower()
         return framework_registry.throughput_unit(framework)
-
-    def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
-        """Compute a standalone baseline-arm roofline ceiling and cache it."""
-        from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
-        from hyperloom.inference_optimizer.roofline_snapshot import (
-            RooflineReading,
-            attach_perfmodel_breakdown,
-            build_roofline_snapshot,
-        )
-
-        achieved = self._resolve_baseline_achieved_tput()
-        breakdown = compute_roofline_breakdown_from_state(self, arm="baseline")
-        peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
-        if peak_tput <= 0:
-            return {}
-
-        ts_iso = now_iso()
-        ceiling = build_roofline_snapshot(
-            snapshot_id=None,
-            ts=ts_iso,
-            analysis_md_path="",
-            reading=RooflineReading(breakdown, achieved, self._roofline_throughput_unit()),
-            framework=str(getattr(self, "framework", "") or ""),
-        )
-        # Mark provenance: this is the baseline-arm ceiling backup, not a trace-derived snapshot.
-        ceiling["ceiling_arm"] = "baseline"
-
-        # Per-op PerfModel breakdown + provenance (mirrors record_trace_analyze).
-        attach_perfmodel_breakdown(ceiling, self, arm="baseline")
-
-        self.baseline_roofline_ceiling = ceiling
-        return ceiling
 
     def record_trace_analyze(
         self,
@@ -2259,27 +2117,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.tick = int(self.tick or 0) + 1
         return self.tick
 
-    def append_stack_gain_entry(
-        self,
-        *,
-        action: str,
-        variant_name: str | None,
-        new_tput: float,
-        extra_server_args: str = "",
-        ts: str | None = None,
-    ) -> float | None:
-        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive)."""
-        try:
-            base = float(self.baseline_tput or 0.0)
-        except (TypeError, ValueError):
-            base = 0.0
-        try:
-            tput = float(new_tput or 0.0)
-        except (TypeError, ValueError):
-            tput = 0.0
-        entry_gain_pct = gain_pct(tput, base)
-        self.gain_per_stack_entry.append(entry_gain_pct)
-        return entry_gain_pct
+    def append_stack_gain_entry(self, *, new_tput: float) -> None:
+        """Mirror an optimization_stack append into gain_per_stack_entry as ``(new_tput-baseline_tput)/baseline_tput*100``."""
+        self.gain_per_stack_entry.append(gain_pct(to_float(new_tput, 0.0), to_float(self.baseline_tput, 0.0)))
 
     # Session budget: elapsed is summed forward across legs.
     def begin_leg(self, *, now_unix: float | None = None) -> None:
@@ -2391,18 +2231,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         spent_min = self.elapsed_minutes(now=now)
         return Deadline.after((float(self.max_minutes) - spent_min) * 60.0)
 
-    def record_teardown_timing(self, step: str, elapsed_sec: float) -> None:
-        """Record one post-deadline teardown step's duration."""
-        name = str(step or "").strip()
-        if not name:
-            return
-        timings = self.teardown_timings_sec
-        if not isinstance(timings, dict):
-            self.teardown_timings_sec = {}
-            timings = self.teardown_timings_sec
-        timings[name] = round(max(0.0, float(elapsed_sec)), 3)
-        timings["total"] = round(sum(v for k, v in timings.items() if k != "total"), 3)
-
     def closing_reserve_sec(self) -> float:
         """Seconds held back from every unit of work so CLOSE can still report."""
         return max(0.0, effective_closing_grace_sec(float(self.max_minutes or 0), self.closing_grace_sec))
@@ -2446,4 +2274,4 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         ) != int(self.validated_recipe_generation)
 
 
-__all__ = ["SharedState", "timed_teardown_step"]
+__all__ = ["SharedState"]

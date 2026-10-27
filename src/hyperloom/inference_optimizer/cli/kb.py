@@ -165,7 +165,7 @@ def _bootstrap_recipe_kb(
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: the T0 recipe warm-start anchor
         log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",

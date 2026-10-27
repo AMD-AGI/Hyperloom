@@ -580,8 +580,10 @@ class _DriverAuthoring:
                         self.last_preflight = preflight_rewrite_driver(
                             self.spec, str(self.destination), deadline_unix=deadline_unix
                         )
-                    except Exception as error:  # noqa: BLE001
-                        log.warning("driver preparation attempt %d: preflight raised: %s", attempt, error)
+                    except Exception as error:  # isolation boundary: one attempt's deterministic driver preflight
+                        log.warning(
+                            "driver preparation attempt %d: preflight raised: %s", attempt, error, exc_info=True
+                        )
                         _restore_driver(self.destination, self.original)
                         self.prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
                         continue
@@ -631,8 +633,10 @@ class _DriverAuthoring:
             _audit_text(record, "agent_output.txt", output)
         except asyncio.TimeoutError:
             _audit_json(record, "agent_event.json", {"status": "timeout", "timeout_sec": turn.timeout_sec})
-        except Exception as error:  # noqa: BLE001
-            log.warning("driver preparation attempt %d: agent invocation failed: %s", self.attempts_run, error)
+        except Exception as error:  # isolation boundary: one driver-authoring agent session
+            log.warning(
+                "driver preparation attempt %d: agent invocation failed: %s", self.attempts_run, error, exc_info=True
+            )
             _audit_json(
                 record, "agent_event.json", {"status": "error", "type": type(error).__name__, "error": str(error)}
             )

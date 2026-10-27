@@ -39,6 +39,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     s = session_of(breakdown)
     facts: list[str] = []
     warnings: list[str] = []
+    decisions: list[Decision] = []
 
     sid = str(s.get("session_id") or "")
     claw = s.get("claw_session_id")
@@ -46,11 +47,19 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     stop_reason = stop_reason_of(breakdown)
     host = str(s.get("host") or "")
     image = s.get("image")
+    has_image = isinstance(image, str) and bool(image.strip())
     code = str(s.get("code_revision") or "")
     tick = s.get("tick_count")
 
     if sid:
         facts.append(f"Hyperloom session_id=`{sid}`")
+        decisions.append(
+            Decision(
+                kind="attempted" if stop_reason else "not_attempted",
+                subject=f"session:{sid}",
+                rationale=f"stop_reason={stop_reason or 'unset'}",
+            )
+        )
     if claw:
         facts.append(f"Joined to Primus-Claw session `{claw}`")
     else:
@@ -69,7 +78,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     if host:
         facts.append(f"Ran on host `{host}`.")
-    if isinstance(image, str) and image.strip():
+    if has_image:
         facts.append(f"Container image `{image}`.")
     if code:
         facts.append(f"Hyperloom code revision `{code}`.")
@@ -79,31 +88,19 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("session_id", sid),
             ("claw_session_id", claw),
             ("sandbox_user_id", sandbox),
-            ("stop_reason", stop_reason or None),
+            ("stop_reason", stop_reason),
             ("elapsed_minutes", s.get("elapsed_minutes")),
             ("total_elapsed_minutes", s.get("total_elapsed_minutes")),
             ("tick_count", tick),
-            ("host", host or None),
+            ("host", host),
             # Always emit the image row so a missing image is visible.
-            ("image", image if (isinstance(image, str) and image.strip()) else "(not configured)"),
-            ("code_revision", code or None),
+            ("image", image if has_image else "(not configured)"),
+            ("code_revision", code),
             ("created_at_utc", s.get("created_at_utc")),
             ("ended_at_utc", s.get("ended_at_utc")),
             ("max_minutes", s.get("max_minutes")),
             ("session_dir", s.get("session_dir")),
         ]
-    )
-
-    decisions = (
-        [
-            Decision(
-                kind="attempted" if stop_reason else "not_attempted",
-                subject=f"session:{sid or 'unknown'}",
-                rationale=f"stop_reason={stop_reason or 'unset'}",
-            )
-        ]
-        if sid
-        else []
     )
 
     return RenderedSection(

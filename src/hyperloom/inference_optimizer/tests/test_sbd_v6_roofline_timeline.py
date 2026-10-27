@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_INITIAL,
     ANALYSIS_ATTEMPT_N26_RETRY,
@@ -60,7 +60,7 @@ def _recorder(
 ):
     """Build a standalone recorder, the way a dispatched roofline gets one."""
     recorder = make_roofline_recorder(
-        make_sink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
+        EventSink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
         RooflineRequest(task_id=task_id, task_kind=task_kind, reason=reason, framework=framework),
     )
     assert recorder is not None
@@ -761,7 +761,7 @@ def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
 
     event = kernel_event_id(3)
     recorder = make_roofline_recorder(
-        make_sink(event, producer=PRODUCER),
+        EventSink(event, producer=PRODUCER),
         RooflineRequest(task_id="t-reprofile", task_kind="roofline", reason="kernel_entry_g0_abc", framework="sglang"),
         owns_event=False,
     )

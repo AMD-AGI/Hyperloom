@@ -557,7 +557,7 @@ class _TrajectoryCall:
         """Feed one SDK stream message to the per-request tracker; a tracing fault never reaches the run."""
         try:
             self._tracker.observe(message)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - outermost telemetry sink: per-request trajectory tracker
             _log.debug("tracelens trajectory: request tracker rejected a message", exc_info=True)
         usage = getattr(message, "usage", None)
         if type(message).__name__ == "ResultMessage" and isinstance(usage, dict):
@@ -581,7 +581,7 @@ class _TrajectoryCall:
         # Requests are written while the call span is still the ambient parent.
         try:
             self._tracker.record_trajectory(attempt=1, fallback_model=self._model)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - outermost telemetry sink: trajectory request rows on span exit
             _log.debug("tracelens trajectory: request rows were not recorded", exc_info=True)
         return self._span_cm.__exit__(*exc_info)
 
@@ -630,7 +630,7 @@ async def _drive_sdk_stream(
                 if aclose is not None:
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
-                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 - outermost finalizer: aclose after idle abort
                         _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
@@ -639,10 +639,10 @@ async def _drive_sdk_stream(
                 chunks.append(text)
                 if log:
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: the SDK stream, returned as sdk_error
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
-        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error, exc_info=True)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error

@@ -17,12 +17,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
-    RUN_AFTER_EVAL_FAILURE,
+    RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
     BaselineInvocation,
     BaselineRequest,
     BaselineRound,
-    assemble_baseline_action,
+    assemble_baseline_actions,
     baseline_event_id,
     make_baseline_recorder,
     record_action_decision,
@@ -30,7 +30,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import BASELINE_EVENT_SECTIONS
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -67,7 +67,7 @@ def _recorder(
 ):
     """Build a recorder the way a dispatched baseline gets one."""
     recorder = make_baseline_recorder(
-        make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER),
+        EventSink(baseline_event_id(phase, macro_cycle), producer=PRODUCER),
         BaselineRequest(
             task_id=task_id,
             task_kind=task_kind,
@@ -121,7 +121,7 @@ def test_the_measurement_states_the_unit_its_throughput_is_in(tmp_path: Path) ->
 
 def test_an_image_framework_reports_its_own_throughput_unit(tmp_path: Path) -> None:
     recorder = make_baseline_recorder(
-        make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
+        EventSink(baseline_event_id("prelude", 0), producer=PRODUCER),
         BaselineRequest(
             task_id="t-1",
             framework="xdit",
@@ -294,7 +294,7 @@ def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> N
         ),
     )
     recorder.end_run(run_index=first, result=_failed(error_class="subprocess_nonzero"))
-    second = recorder.begin_run(attempt_reason=RUN_AFTER_EVAL_FAILURE)
+    second = recorder.begin_run(attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE)
     recorder.record_round(
         run_index=second,
         round_=BaselineRound(
@@ -309,7 +309,7 @@ def test_each_pass_keeps_its_own_rounds_and_says_why_it_ran(tmp_path: Path) -> N
 
     runs = _actions(tmp_path)[0]["runs"]
     assert [row["run_index"] for row in runs] == [1, 2]
-    assert [row["attempt_reason"] for row in runs] == [RUN_INITIAL, RUN_AFTER_EVAL_FAILURE]
+    assert [row["attempt_reason"] for row in runs] == [RUN_INITIAL, RUN_AFTER_MOE_RUNNER_FAILURE]
     assert [row["status"] for row in runs] == ["failed", "succeeded"]
     assert runs[0]["rounds"][0]["failure"]["error_class"] == "subprocess_nonzero"
     assert runs[1]["rounds"][0]["failure"] is None
@@ -462,17 +462,14 @@ def test_baselines_in_different_cycles_are_different_events(tmp_path: Path) -> N
     ]
 
 
-def test_one_action_can_be_assembled_on_its_own(tmp_path: Path) -> None:
+def test_each_action_is_assembled_under_its_own_task_id(tmp_path: Path) -> None:
     _recorder(task_id="t-1").finish(_measured())
     _recorder(task_id="t-2").finish(_failed())
 
-    action = assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS), event="prelude:0:baseline", task_id="t-2")
-    assert action is not None
-    assert action["status"] == "failed"
-    assert (
-        assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS), event="prelude:0:baseline", task_id="t-9")
-        is None
-    )
+    actions = assemble_baseline_actions(event_parts(BASELINE_EVENT_SECTIONS), event="prelude:0:baseline")
+    by_task = {action["task_id"]: action for action in actions}
+    assert sorted(by_task) == ["t-1", "t-2"]
+    assert by_task["t-2"]["status"] == "failed"
 
 
 def test_a_killed_session_leaves_an_interrupted_event_with_its_rows(tmp_path: Path) -> None:
@@ -516,8 +513,8 @@ def test_assembling_the_same_rows_twice_gives_the_same_event(tmp_path: Path) -> 
     recorder.finish(_measured())
 
     parts = event_parts(BASELINE_EVENT_SECTIONS)
-    once = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
-    twice = assemble_baseline_action(parts, event="prelude:0:baseline", task_id="t-1")
+    once = assemble_baseline_actions(parts, event="prelude:0:baseline")
+    twice = assemble_baseline_actions(parts, event="prelude:0:baseline")
     assert once == twice
 
 
@@ -627,8 +624,8 @@ async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_i
 
     # The guest opens and closes nothing: the host owns the shell, and here there is no host to open one.
     assert read_timeline_events(tmp_path) == []
-    action = assemble_baseline_action(event_parts(BASELINE_EVENT_SECTIONS, event=host), event=host, task_id="t-exec")
-    assert action is not None
+    (action,) = assemble_baseline_actions(event_parts(BASELINE_EVENT_SECTIONS, event=host), event=host)
+    assert action["task_id"] == "t-exec"
     assert action["status"] == "succeeded"
     assert action["measurement"]["output_throughput"] == pytest.approx(15630.28)
 
@@ -824,7 +821,7 @@ def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> 
         run_index=first, invocation=BaselineInvocation(framework_args="--moe-runner-backend triton")
     )
     recorder.end_run(run_index=first, result=_failed())
-    second = recorder.begin_run(attempt_reason=RUN_AFTER_EVAL_FAILURE)
+    second = recorder.begin_run(attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE)
     recorder.record_invocation(run_index=second, invocation=BaselineInvocation(framework_args=""))
     recorder.end_run(run_index=second, result=_measured())
     recorder.finish(_measured())
@@ -840,7 +837,7 @@ def test_a_retry_that_changed_the_args_records_both_launches(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 def test_the_action_says_how_many_baselines_had_already_failed(tmp_path: Path) -> None:
     recorder = make_baseline_recorder(
-        make_sink(baseline_event_id("prelude", 0), producer=PRODUCER),
+        EventSink(baseline_event_id("prelude", 0), producer=PRODUCER),
         BaselineRequest(
             task_id="t-1",
             task_kind="baseline",

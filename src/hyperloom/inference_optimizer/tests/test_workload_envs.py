@@ -169,6 +169,23 @@ def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
 
 
+def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
+    # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    def _unreadable_handoff():
+        raise TopologyHandoffError("topology hand-off file is not valid JSON")
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", _unreadable_handoff)
+    src = tmp_path / "base.yaml"
+    _write(src)
+    with pytest.raises(TopologyHandoffError, match="topology hand-off file is not valid JSON"):
+        _materialize(src, tmp_path / "out")
+
+
 # ---- _visible_gpu_count ---------------------------------------------------
 def test_visible_gpu_count_override_valid(monkeypatch):
     _clear_env(monkeypatch)

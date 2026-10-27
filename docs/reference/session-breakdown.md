@@ -57,16 +57,23 @@ disposition `removed in 6.1, never populated`:
 - `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
 - `kernel_agent` `entry.budget_remaining_sec`
 - `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
+- `framework_agent` `policy.source.authoring_enabled`
+- `kernel_agent` `geak.rebench.max_attempts`
+- `kernel_agent` `rebench[].source_ref`, `rebench[].dispatched_at` and
+  `rebench[].settled_at`
+- `conc_sweep` `budget.session_soft_deadline_sec`
 
 The `event_id` and `ordinal` row-scope declarations are removed from the schema
 types: they were already stripped before export and never appeared on the wire.
 `conc_sweep` `points[].budget_remaining_sec` is unchanged.
 
-Two keys that only ever carried a constant are removed with the disposition
+Four keys that only ever carried a constant are removed with the disposition
 `removed in 6.1, constant`: `roofline` event
 `ext.actions[].kernel_roofline.kernels[].roofline_measured` (always `false`;
-`roofline_source` states whether a row's bound is analytical or a placeholder)
-and `baseline` event `ext.actions[].convergence` (always `insufficient_rounds`).
+`roofline_source` states whether a row's bound is analytical or a placeholder),
+`baseline` event `ext.actions[].convergence` (always `insufficient_rounds`), and
+`conc_sweep` `budget.raised` (always `false`) and `budget.granted_total_sec`
+(always equal to `budget.declared_total_sec`).
 
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and

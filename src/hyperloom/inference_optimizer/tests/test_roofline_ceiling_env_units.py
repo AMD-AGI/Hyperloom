@@ -80,7 +80,7 @@ def test_read_baseline_yaml_benchmark(tmp_path: Path):
     assert bench.get("envs", {}).get("EXTRA_SGLANG_ARGS") == "--tp 8"
 
     # Full chain: baseline yaml -> server args string.
-    assert rc._read_baseline_yaml_server_args(state) == "--tp 8"
+    assert rc.read_baseline_server_args(state) == "--tp 8"
 
 
 def test_baseline_server_args_follow_the_accepted_anchor_not_the_last_attempt(tmp_path: Path):

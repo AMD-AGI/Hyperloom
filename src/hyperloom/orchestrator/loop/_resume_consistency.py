@@ -100,7 +100,7 @@ class ResumeConsistencyMixin:
         await self._compensate_validation_watermark(report)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Coordinator: resume consistency save failed")
         await self.bus.record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
         return report

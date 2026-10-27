@@ -10,6 +10,7 @@ import hashlib
 import logging
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -280,13 +281,19 @@ class _RewriteKb:
                     stop_at_unix=search_stop_unix,
                 )
             )
-        except Exception as error:  # noqa: BLE001 - KB failure must cold-start
+        except Exception as error:  # noqa: BLE001 - isolation boundary: the run's rewrite KB read; it cold-starts
             if kb_seed is None:
                 Path(spec.flydsl_kernel).unlink(missing_ok=True)
             else:
                 Path(spec.flydsl_kernel).write_bytes(kb_seed)
             read_error = sanitize_read_error(error, secrets=kb_store_secrets(self.target.config))
-            log.warning("rewrite KB read failed, cold start: %s", read_error)
+            # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+            log.warning(
+                "rewrite KB read failed, cold start: %s (%s)\n%s",
+                read_error,
+                type(error).__name__,
+                "".join(traceback.format_tb(error.__traceback__)),
+            )
             return RewriteKbReadResult(read_reason="read_error", read_error=read_error)
 
     def publish_port(self, port, measurement: FlydslMeasurement, port_commit: str) -> dict:

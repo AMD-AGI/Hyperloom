@@ -176,9 +176,9 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
         """Answer one provider predicate, counting a raising provider as a "no"."""
         try:
             return bool(predicate())
-        except Exception as exc:  # noqa: BLE001 - one provider must not decide the whole selection
+        except Exception as exc:  # isolation boundary: one provider predicate
             failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
-            log.warning("agent provider %s check failed: %s", provider.name, exc)
+            log.warning("agent provider %s check failed: %s", provider.name, exc, exc_info=True)
             return False
 
     providers = [provider for provider in _providers.values() if provider.auto_selectable]

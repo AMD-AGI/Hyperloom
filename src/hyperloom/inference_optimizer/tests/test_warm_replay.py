@@ -764,6 +764,35 @@ async def test_warm_replay_skips_a_recipe_that_restates_the_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_an_agentx_baseline_already_launches_with(tmp_path):
+    """AgentX carries the baseline's server args in its launch overrides, not in ``benchmark.envs``."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"})
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    launch = {"version": 1, "append_args": ["--kv-cache-dtype", "fp8"], "env": {"SGLANG_TEST": "1"}}
+    config.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical", "launch_overrides": launch},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.baseline_config_path = str(config)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
+
+
+@pytest.mark.asyncio
 async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
     """One setting the baseline does not hold is enough for the replay to run."""
     recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8 --max-num-seqs 128")

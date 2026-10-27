@@ -237,7 +237,7 @@ def render_section(
     """Run one renderer so a failing section costs itself, not the report."""
     try:
         return fn(breakdown)
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: one report section renderer
         log.exception("report section %s failed to render", section_id)
         return RenderedSection(
             section_id=section_id,

@@ -676,6 +676,47 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
         os.killpg(pgid, 0)
 
 
+def _jit_sweep_bug(coord, monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    def _bug(**_kwargs):
+        raise KeyError("lock table")
+
+    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", _bug)
+    coord.shared_state.pending_targeted_build = {"task_id": "", "aiter_jit_dir": str(tmp_path / "aiter_jit")}
+    return coord.writeback._resume_recover_pending_targeted_build, KeyError, "lock table"
+
+
+def _revalidation_row_unreadable(coord, monkeypatch, tmp_path):
+    import sqlite3
+
+    async def _locked(_task_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(coord.tasks, "get", _locked)
+    coord.shared_state.enablement.validation_pending = True
+    coord.shared_state.enablement.revalidation_task_id = "t-reval"
+    return coord.writeback._resume_recover_pending_revalidation, sqlite3.OperationalError, "database is locked"
+
+
+def _keep_log_unreadable(coord, monkeypatch, tmp_path):
+    import sqlite3
+
+    async def _locked(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(coord.bus, "tail", _locked)
+    return coord.writeback._resume_recover_orphaned_keeps, sqlite3.OperationalError, "database is locked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _keep_log_unreadable])
+async def test_a_failed_resume_recovery_step_is_not_skipped_silently(resume_coord, monkeypatch, tmp_path, broken):
+    recover, error_type, message = broken(resume_coord, monkeypatch, tmp_path)
+    with pytest.raises(error_type, match=message):
+        await recover({"fixes": [], "warnings": []})
+
+
 @pytest.mark.asyncio
 async def test_resume_no_pending_is_noop(resume_coord):
     resume_coord.writeback._resumed_from["is_resume"] = True

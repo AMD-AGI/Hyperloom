@@ -213,8 +213,8 @@ class BaseTuner(ABC):
             result = self.run()
             result.elapsed_s = time.time() - started
             return result
-        except Exception as exc:  # noqa: BLE001 - tuner body is subclass-supplied
-            log.warning("tuner %s raised: %r", self.name, exc)
+        except Exception as exc:  # isolation boundary: one tuner's validate and run
+            log.warning("tuner %s raised: %r", self.name, exc, exc_info=True)
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",

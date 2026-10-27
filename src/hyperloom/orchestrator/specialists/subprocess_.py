@@ -484,8 +484,7 @@ class SpecialistSubprocessDispatcher:
         # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
-        # Bound the spawned CLI's request transport so a stalled gateway stream
-        # raises client-side instead of hanging forever.
+        # Keep the spawned CLI off its non-essential traffic and auto-updater.
         from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
@@ -542,8 +541,8 @@ class SpecialistSubprocessDispatcher:
                                 stdin_path=str(prompt_file),
                             )
                         )
-                    except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
-                        log.warning("specialist GPU actor submit failed: %s", exc)
+                    except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
+                        log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,
@@ -558,8 +557,8 @@ class SpecialistSubprocessDispatcher:
                         _raise_if_cancelled(scope)
                         try:
                             pid = request.gpu_lease.poll_started()
-                        except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
-                            log.warning("specialist GPU actor start failed: %s", exc)
+                        except Exception as exc:  # isolation boundary: one specialist's GPU actor start
+                            log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
                             request.gpu_lease.close()
                             return SpecialistSubprocessResult(
                                 done_payload=None,

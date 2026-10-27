@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_unix, to_mapping
+from hyperloom.common.coerce import dict_rows, first_str, to_unix, to_mapping
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
@@ -319,31 +319,24 @@ def _stage_reached(
     return "install"
 
 
+#: Each PRELUDE stage with the ``state.json`` fields that show a run reached it; the first stage with any set wins.
+_PRELUDE_STAGE_FIELDS = (
+    ("roofline", ("roofline_snapshots", "last_roofline", "roofline_attempts")),
+    ("profile", ("last_profile_trace", "last_profile", "profile_attempts")),
+    ("warm_replay", ("warm_replay_attempted", "warm_replay_outcome", "warm_replay_pending")),
+    ("baseline", ("baseline_tput", "last_baseline", "baseline_attempts", "baseline_failure_streak")),
+    (
+        "warm_start",
+        ("warm_start_ts", "warm_start_recipe", "warm_start_pitfalls", "warm_start_lessons", "warm_start_context"),
+    ),
+)
+
+
 def _prelude_stage_from_state(state: dict[str, Any]) -> str:
     """PRELUDE stage from leftover state fields when the timeline is empty."""
-    if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
-        return "roofline"
-    if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
-        return "profile"
-    if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
-        return "warm_replay"
-    baseline_tput = state.get("baseline_tput")
-    if (
-        isinstance(baseline_tput, (int, float))
-        and baseline_tput > 0
-        or state.get("last_baseline")
-        or state.get("baseline_attempts")
-        or int(state.get("baseline_failure_streak") or 0) > 0
-    ):
-        return "baseline"
-    if (
-        state.get("warm_start_ts")
-        or state.get("warm_start_recipe")
-        or state.get("warm_start_pitfalls")
-        or state.get("warm_start_lessons")
-        or state.get("warm_start_context")
-    ):
-        return "warm_start"
+    for stage, fields in _PRELUDE_STAGE_FIELDS:
+        if any(state.get(field) for field in fields):
+            return stage
     return ""
 
 
@@ -478,7 +471,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # that produced the settled figure, falling back to the axis the adoptions were graded on for a session that
         # adopted but never validated -- and never from the session's configured axis, which says what was asked
         # for rather than what this figure was measured on.
-        "graded_on": str(settled.get("graded_objective") or ledger.get("objective") or "") or None,
+        "graded_on": first_str(settled.get("graded_objective"), ledger.get("objective")) or None,
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),

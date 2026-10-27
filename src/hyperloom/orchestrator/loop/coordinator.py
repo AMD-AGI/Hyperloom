@@ -58,7 +58,7 @@ from ..bus.gpu_pool import (
     resolve_whole_machine_devices,
 )
 from ..bus.resource_lock import SqliteLeaseBackend
-from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
+from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -134,7 +134,7 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
                 phase,
                 reaped,
             )
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
 
@@ -977,12 +977,10 @@ class Coordinator:
             self.shared_state.cumulative_gain_validated,
             max_minutes,
         )
-        with timed_teardown_step(self.shared_state, "close_backends"):
-            await self._close_backends()
+        await self._close_backends()
         # A server outliving the run holds every GPU it was given, so the
         # session's last act is to reap its own pidfiles.
-        with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-            await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
+        await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
         self.shared_state.save(self.session_dir)
         return stop_reason
 
@@ -1131,8 +1129,7 @@ class Coordinator:
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
             return None
-        except Exception as exc:
-            # Catch-all so one agent's bad turn never stops the loop.
+        except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
             await self.bus.record_observation(
                 "coordinator",

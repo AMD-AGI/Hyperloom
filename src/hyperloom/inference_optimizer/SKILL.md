@@ -803,9 +803,11 @@ python3 -m hyperloom optimize \
 
 - The `--quantize` text is the quantization request only (scheme / kv-cache /
   excluded layers / acceptable eval gap). **Do not** repeat the model path or
-  export dir — the adapter folds `--model` + a per-model export dir under the
-  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
-  prompt automatically.
+  export dir — the adapter folds `--model` and the export dir into the prompt
+  automatically. Each run quantizes in its own directory,
+  `<workspace_root>/quantization/<model>/runs/<run_id>/`, and exports to
+  `quantized/` inside it, so a rerun never overwrites a model an earlier
+  session is serving.
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
   `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a

@@ -22,7 +22,7 @@ from hyperloom_kb.tests.database_fixtures import new_database, postgres_conninfo
 import hyperloom_kb.collect as kb_collect
 from hyperloom.inference_optimizer import experience_collect, experience_kb_service
 from hyperloom.inference_optimizer.breakdown import exporter
-from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V6
+from hyperloom.inference_optimizer.session.sbd_v6 import SCHEMA_VERSION_V6
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope

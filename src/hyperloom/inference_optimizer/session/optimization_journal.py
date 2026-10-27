@@ -13,6 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
@@ -72,16 +73,6 @@ KIND_BASELINE: str = "baseline"
 KIND_PROFILE: str = "profile"
 KIND_GEMM_TUNING: str = "gemm_tuning"  # adopted GEMM-tuning run (GEAK / forge)
 KIND_OTHER: str = "other"
-
-
-def _optional_int(value: Any) -> int | None:
-    """Coerce a value to int, or ``None`` on absence / bad type."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _measured_float(value: Any) -> float | None:
@@ -155,7 +146,7 @@ class JournalEntry:
             scope=str(d.get("scope", "")),
             fingerprint=str(d.get("fingerprint", "")),
             metrics=dict(d.get("metrics") or {}),
-            tick=_optional_int(d.get("tick")),
+            tick=to_int(d.get("tick")),
             lever_kind=str(d.get("lever_kind", "")),
         )
 

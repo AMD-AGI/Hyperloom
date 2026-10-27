@@ -368,7 +368,7 @@ require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
-decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+decided that — in a versioned schema (`schema_version`, currently `1.2.0`), so
 consumers and triage read a contract rather than candidate internals.
 
 ---

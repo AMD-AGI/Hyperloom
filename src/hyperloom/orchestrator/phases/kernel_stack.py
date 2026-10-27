@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 from hyperloom.common.perf_metric import GradedComparison, VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from ..kernel import kernel_decisions
 from ..kernel.keep_thresholds import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
@@ -313,7 +314,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         drained = 0
         max_drain = 10
         while drained < max_drain:
-            pending_records = state.pending_kernel_integration_records()
+            pending_records = kernel_decisions.pending_kernel_integration_records(state)
             if not pending_records:
                 break
             pending = pending_records[0]
@@ -340,7 +341,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                     state.record_kernel_integrate_result(result)
                     if str(result.get("decision") or "").upper() == "KEEP":
                         await self._coord.writeback.record_integrate_keep(result)
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one pending KEEP integrate, marked rejected
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
@@ -687,6 +688,6 @@ class KernelStackPhase(CoordinatorCollaborator):
                 apply_results=apply_results,
             )
             return _stack_validation_record(stack, run, grade, settlement)
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one stack validation, reverted and recorded as abandoned
             log.warning("kernel stack %s validation failed: %s", stack.stack_id, exc, exc_info=True)
             return _abandoned_stack_record(stack, apply_results, exc)

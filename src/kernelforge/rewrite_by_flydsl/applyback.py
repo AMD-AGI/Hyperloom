@@ -758,8 +758,8 @@ class _CleanRoomAttempts:
                 return self._integrate(turn, import_plan, attempt)
             except (asyncio.TimeoutError, TimeoutError):
                 error_text = f"apply-back agent timed out after {timeout_sec}s"
-            except Exception as error:  # noqa: BLE001
-                log.warning("apply-back attempt %d failed: %s", attempt, error)
+            except Exception as error:  # isolation boundary: one apply-back attempt
+                log.warning("apply-back attempt %d failed: %s", attempt, error, exc_info=True)
                 error_text = f"{type(error).__name__}: {error}"
             finally:
                 if error_text and worktree_added:
