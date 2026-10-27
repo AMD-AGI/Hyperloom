@@ -10,6 +10,8 @@ import hashlib
 from pathlib import Path
 import subprocess
 
+from hyperloom.orchestrator.framework.optimization_scope import OptimizationScope
+
 from .settings_prelude import apply_settings_prelude, plan_settings
 
 
@@ -19,8 +21,9 @@ def _is_pycache_noise(line: bytes) -> bool:
     return b"__pycache__" in parts or path.endswith(b".pyc")
 
 
-def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
+def build_single_file(state: dict, root: Path, scope: OptimizationScope, dest: Path) -> dict:
     """Capture a clean, accepted optimization module without wrapping its API."""
+    hook = scope.file
     if hook.parent != root.resolve() or not state.get("current_best"):
         raise ValueError("No accepted single-file workload to export")
     tracked_result = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True)
@@ -37,19 +40,19 @@ def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
         tree = ast.parse(content)
     except SyntaxError as exc:
         raise ValueError("Optimization module is not valid Python") from exc
-    if not any(isinstance(node, ast.FunctionDef) and node.name == "hyperloom_optimize" for node in tree.body):
-        raise ValueError("Module must define hyperloom_optimize(model)")
+    if not any(isinstance(node, ast.FunctionDef) and node.name == scope.function for node in tree.body):
+        raise ValueError(f"Module must define {scope.function}(model)")
     base_digest = hashlib.sha256(content).hexdigest()
     best = state.get("current_best") or {}
     plan = plan_settings(best.get("extra_envs"), unset_envs=best.get("unset_envs") or ())
-    content = apply_settings_prelude(content, plan)
+    content = apply_settings_prelude(content, plan, scope.function)
     (dest / hook.name).write_bytes(content)
     return {
         "schema_version": 2,
         "status": "exported",
         "reasons": [],
         "kind": "single_file",
-        "entrypoint": "hyperloom_optimize.hyperloom_optimize",
+        "entrypoint": f"{hook.stem}.{scope.function}",
         "files": {hook.name: hashlib.sha256(content).hexdigest()},
         "settings": {
             "source": "current_best.extra_envs",
@@ -63,7 +66,7 @@ def build_single_file(state: dict, root: Path, hook: Path, dest: Path) -> dict:
         "warnings": [f"settings_not_carried: {entry['name']} ({entry['reason']})" for entry in plan.untranslated],
         "validation": "not_run",
         "accepted_performance": {"tput": state["current_best"].get("tput")},
-        "usage": "Copy hyperloom_optimize.py beside the original user script and run that script in its original runtime. "
+        "usage": f"Copy {hook.name} beside the original user script and run that script in its original runtime. "
         "Accepted runtime settings are baked into the module and applied on import -- import it once, early, before any "
         "other import (side effect only), and again at the usual call site after the model is loaded.",
     }

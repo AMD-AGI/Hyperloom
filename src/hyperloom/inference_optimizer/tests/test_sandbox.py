@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -12,12 +14,15 @@ import pytest
 
 from hyperloom.common.sandbox import (
     SANDBOX_ACTIVE_ENV,
+    SANDBOX_BIN,
     SANDBOX_HOME,
     SANDBOX_MODE_ENV,
     SANDBOX_READONLY_ENV,
     SANDBOX_WRITABLE_ENV,
     SandboxError,
+    SandboxRoots,
     build_bwrap_args,
+    interpreter_roots,
     interpreter_support_dir,
     is_sandboxed,
     probe_sandbox_capability,
@@ -378,3 +383,107 @@ def test_package_root_returns_none_for_a_wheel_install(monkeypatch, tmp_path):
     from hyperloom.common.sandbox import package_root
 
     assert package_root() is None
+
+
+# --- the Claude CLI ---------------------------------------------------------
+
+
+def _fake_cli(tmp_path):
+    cli = tmp_path / "home" / ".local" / "share" / "claude" / "2.0.0"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/bin/sh\necho fake-claude\n")
+    cli.chmod(0o755)
+    return cli
+
+
+def test_the_claude_cli_is_bound_and_first_on_path(tmp_path):
+    cli = _fake_cli(tmp_path)
+    args = _args(tmp_path, claude_cli=cli, search_path="/usr/bin:/bin")
+    joined = " ".join(args)
+    assert f"--ro-bind {cli.parent} {cli.parent}" in joined
+    assert f"--symlink {cli} {SANDBOX_BIN}/claude" in joined
+    assert f"--setenv PATH {SANDBOX_BIN}:/usr/bin:/bin" in joined
+
+
+def test_no_claude_cli_leaves_path_alone(tmp_path):
+    assert "PATH" not in _args(tmp_path)
+
+
+def test_reexec_exposes_the_resolved_claude_cli(monkeypatch, tmp_path):
+    cli = _fake_cli(tmp_path)
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(cli))
+    monkeypatch.setattr("hyperloom.common.sandbox.probe_sandbox_capability", lambda *a, **k: True)
+    monkeypatch.setattr("hyperloom.common.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    captured = {}
+    monkeypatch.setattr("hyperloom.common.sandbox.os.execv", lambda path, argv: captured.update(argv=argv))
+
+    reexec_if_required(["optimize"])
+
+    assert f"{cli} {SANDBOX_BIN}/claude" in " ".join(captured["argv"])
+
+
+@pytest.mark.skipif(
+    not shutil.which("bwrap") or not probe_sandbox_capability(shutil.which("bwrap") or "bwrap"),
+    reason="needs a working bwrap",
+)
+def test_claude_resolves_by_name_inside_a_real_sandbox(tmp_path):
+    """The CLI usually lives under $HOME, which the sandbox hides; it must still run as `claude`."""
+    cli = _fake_cli(tmp_path)
+    args = build_bwrap_args(
+        bwrap=shutil.which("bwrap"),
+        venv=Path(sys.prefix),
+        support_dir=interpreter_support_dir(),
+        claude_cli=cli,
+        search_path="/usr/bin:/bin",
+    )
+    result = subprocess.run([*args, "sh", "-c", "claude"], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "fake-claude"
+
+
+# --- roots a command derives ----------------------------------------------------
+
+
+def test_interpreter_roots_bind_a_venv_and_its_distribution(tmp_path):
+    venv = _venv(tmp_path, str(tmp_path / "dist" / "cpython-3.12" / "bin"))
+    assert interpreter_roots(venv / "bin" / "python") == (venv, tmp_path / "dist" / "cpython-3.12")
+
+
+def test_a_system_interpreter_needs_no_roots():
+    assert interpreter_roots(Path("/usr/bin/python3")) == ()
+
+
+def test_reexec_binds_the_command_roots_and_publishes_them(monkeypatch, tmp_path):
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv(SANDBOX_READONLY_ENV, str(tmp_path / "operator"))
+    monkeypatch.setattr("hyperloom.common.sandbox.probe_sandbox_capability", lambda *a, **k: True)
+    monkeypatch.setattr("hyperloom.common.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    captured = {}
+    monkeypatch.setattr("hyperloom.common.sandbox.os.execv", lambda path, argv: captured.update(argv=argv))
+    out, model = tmp_path / "workspace" / "new", tmp_path / "model"
+
+    reexec_if_required(["optimize"], roots=SandboxRoots(writable=(out,), readonly=(model,)))
+
+    joined = " ".join(captured["argv"])
+    assert f"--bind-try {out} {out}" in joined
+    assert f"--ro-bind-try {model} {model}" in joined
+    assert out.is_dir(), "a missing output root is created so the bind and its verification succeed"
+    assert writable_roots_from_env() == (out,)
+    assert readonly_roots_from_env() == (tmp_path / "operator", model)
+
+
+def test_package_root_is_the_whole_checkout_for_a_src_layout(monkeypatch, tmp_path):
+    """install.sh clones the run's tools into <checkout>/.cache, so the checkout travels, not just src/."""
+    checkout = tmp_path / "Hyperloom"
+    pkg = checkout / "src" / "hyperloom"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (checkout / "pyproject.toml").write_text("")
+    monkeypatch.setattr("hyperloom.common.sandbox.sys.prefix", str(tmp_path / "venv"))
+
+    import hyperloom
+
+    monkeypatch.setattr(hyperloom, "__file__", str(pkg / "__init__.py"))
+    from hyperloom.common.sandbox import package_root
+
+    assert package_root() == checkout

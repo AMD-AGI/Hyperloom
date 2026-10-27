@@ -1427,7 +1427,7 @@ def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
     from hyperloom.common import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
-    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(claude_oneshot, "resolve_claude_executable", lambda: "")
 
     with pytest.raises(RuntimeError, match="claude CLI is not available"):
         claude_oneshot.ensure_available()
@@ -1437,7 +1437,7 @@ def test_ensure_available_accepts_a_cli_on_path(monkeypatch):
     from hyperloom.common import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))
-    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(claude_oneshot, "resolve_claude_executable", lambda: "/usr/bin/claude")
 
     claude_oneshot.ensure_available()
 
@@ -1453,7 +1453,7 @@ def test_ensure_available_accepts_either_bundled_binary_name(monkeypatch, tmp_pa
     (bundled / binary_name).write_text("#!/bin/sh\n", encoding="utf-8")
     fake_sdk = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: fake_sdk)
-    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(claude_oneshot, "resolve_claude_executable", lambda: "")
 
     claude_oneshot.ensure_available()
     assert claude_oneshot._locate_cli(fake_sdk) == str(bundled / binary_name)
@@ -1469,7 +1469,7 @@ def test_ensure_available_ignores_non_binary_bundled_entries(monkeypatch, tmp_pa
     monkeypatch.setattr(
         claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
     )
-    monkeypatch.setattr(claude_oneshot.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(claude_oneshot, "resolve_claude_executable", lambda: "")
 
     with pytest.raises(RuntimeError, match="claude CLI is not available"):
         claude_oneshot.ensure_available()

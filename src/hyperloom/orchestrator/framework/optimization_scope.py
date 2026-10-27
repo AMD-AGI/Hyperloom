@@ -5,14 +5,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 
 from ..specialists.patch_safety import parse_patch_targets
 
+# Schema 1 predates the configurable entry function; its workspaces are resumed and exported as they are.
+_SCHEMA_1_FUNCTION = "hyperloom_optimize"
 
-def optimization_file(directory: str | None = None) -> Path | None:
+
+@dataclass(frozen=True)
+class OptimizationScope:
+    """The sole editable module and the function the user script passes its model through."""
+
+    file: Path
+    function: str
+
+
+def optimization_scope(directory: str | None = None) -> OptimizationScope | None:
     """Read the write boundary from the frozen benchmark directory, if declared."""
     if directory is None:
         directory = os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
@@ -23,18 +35,26 @@ def optimization_file(directory: str | None = None) -> Path | None:
         return None
     scope = json.loads(declaration.read_text())
     path = Path(scope["file"])
-    if scope.get("schema_version") != 1 or not path.is_absolute() or path.suffix != ".py":
+    version = scope.get("schema_version")
+    function = _SCHEMA_1_FUNCTION if version == 1 else scope.get("function")
+    if (
+        version not in (1, 2)
+        or not path.is_absolute()
+        or path.suffix != ".py"
+        or not str(function or "").isidentifier()
+    ):
         raise ValueError("Invalid single-file optimization scope")
     if path.is_symlink() or not path.is_file():
         raise ValueError("Optimization file must be an existing regular Python file")
-    return path.resolve()
+    return OptimizationScope(file=path.resolve(), function=function)
 
 
 def check_patch_scope(root: Path, texts: list[str]) -> None:
     """Reject patches outside the sole model artifact before applying them."""
-    allowed = optimization_file()
-    if allowed is None:
+    scope = optimization_scope()
+    if scope is None:
         return
+    allowed = scope.file
     if root.resolve() != allowed.parent:
         raise ValueError(f"Single-file workload permits changes only to {allowed}")
     for text in texts:
@@ -45,14 +65,14 @@ def check_patch_scope(root: Path, texts: list[str]) -> None:
 
 def scope_instructions() -> str:
     """Describe the operator's artifact boundary to optimization agents."""
-    allowed = optimization_file()
-    if allowed is None:
+    scope = optimization_scope()
+    if scope is None:
         return ""
     return (
-        f"Single-file optimization contract: only {allowed} may change. "
-        "It must define hyperloom_optimize(model) returning the optimized callable. "
-        "The user script owns inputs, weights, validation and latency measurement. "
-        "Do not edit that script or installed packages. All reusable optimization logic, "
+        f"Single-file optimization contract: only {scope.file} may change. "
+        f"It must define {scope.function}(model) returning the optimized callable. "
+        "The benchmark owns inputs, weights, validation and latency measurement. "
+        "Do not edit the user script, the benchmark directory or installed packages. All reusable optimization logic, "
         "including custom kernels and runtime setup, must live in this one Python module. "
         "External environment changes, overlays and auxiliary source files are not deliverables."
     )

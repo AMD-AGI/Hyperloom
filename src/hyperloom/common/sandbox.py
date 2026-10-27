@@ -22,12 +22,15 @@ asked to be isolated and cannot be is an error, never a silent downgrade.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+
+from .claude_cli import resolve_claude_executable
 
 #: Selects the sandbox. ``off`` (default) keeps today's behaviour exactly.
 SANDBOX_MODE_ENV = "HYPERLOOM_SANDBOX_MODE"
@@ -49,6 +52,10 @@ DEFAULT_SANDBOX_MODE = MODE_OFF
 #: ``~/.local/share/uv/python/``, and the venv would stop resolving.
 SANDBOX_HOME = "/hyperloom-home"
 
+#: Prepended to ``$PATH`` inside the sandbox; holds a ``claude`` link to the CLI
+#: resolved outside, which usually lives under the now-hidden ``$HOME``.
+SANDBOX_BIN = "/hyperloom-bin"
+
 #: Read-only system trees. ``/sys`` is not optional: ROCm reads GPU topology
 #: from ``/sys/class/kfd``, and without it ``torch.cuda.device_count()`` returns
 #: 0 -- no error, no warning, just no GPUs.
@@ -69,6 +76,14 @@ _SETENV = "--setenv"
 
 class SandboxError(RuntimeError):
     """The run asked to be sandboxed and the sandbox could not be established."""
+
+
+@dataclass(frozen=True)
+class SandboxRoots:
+    """Paths a command declares from its own arguments: outputs read-write, inputs read-only."""
+
+    writable: tuple[Path, ...] = ()
+    readonly: tuple[Path, ...] = ()
 
 
 def resolve_sandbox_mode(env: Mapping[str, str] | None = None) -> str:
@@ -136,6 +151,19 @@ def interpreter_support_dir(prefix: str | None = None) -> Path | None:
     return support
 
 
+def interpreter_roots(python: Path) -> tuple[Path, ...]:
+    """Directories another venv's interpreter needs inside the sandbox: the venv and its distribution.
+
+    ``python`` is the venv's ``bin/python``, unresolved. A system interpreter needs
+    nothing beyond the system trees, which are always bound.
+    """
+    prefix = python.parent.parent
+    if not (prefix / "pyvenv.cfg").is_file():
+        return ()
+    support = interpreter_support_dir(str(prefix))
+    return (prefix,) if support is None else (prefix, support)
+
+
 def _is_within(path: Path, parent: Path) -> bool:
     """Whether ``path`` is ``parent`` or sits beneath it."""
     try:
@@ -153,6 +181,10 @@ def package_root() -> Path | None:
     process silently imports a *different* Hyperloom -- whichever one the venv
     happens to contain -- or none at all. Silently running other code than the
     caller's is worse than failing, so the importing tree travels with it.
+
+    For a checkout (``src/`` layout next to ``pyproject.toml``) that is the whole
+    checkout: ``install.sh`` clones TraceLens, GEAK, InferenceX and Magpie into
+    its ``.cache/`` and points the run at them.
     """
     import hyperloom
 
@@ -160,6 +192,8 @@ def package_root() -> Path | None:
     if not origin:
         return None
     root = Path(origin).resolve().parent.parent
+    if root.name == "src" and (root.parent / "pyproject.toml").is_file():
+        root = root.parent
     venv = Path(sys.prefix)
     if _is_within(root, venv) or any(_is_within(root, Path(r)) for r in _SYSTEM_ROOTS):
         return None
@@ -188,6 +222,8 @@ def build_bwrap_args(
     readonly_roots: Sequence[Path] = (),
     support_dir: Path | None = None,
     package_dir: Path | None = None,
+    claude_cli: Path | None = None,
+    search_path: str = "",
 ) -> list[str]:
     """Assemble the bubblewrap invocation that the re-exec runs under.
 
@@ -204,6 +240,10 @@ def build_bwrap_args(
             :func:`interpreter_support_dir`.
         package_dir: Source tree this Hyperloom was imported from, from
             :func:`package_root`, when it sits outside the venv.
+        claude_cli: The Claude CLI resolved outside the sandbox. Its directory
+            is bound read-only and it is linked as ``claude`` on a ``$PATH``
+            entry of its own, so every lookup by name finds it.
+        search_path: The caller's ``$PATH``, kept after that entry.
 
     Returns:
         Argument list up to and including ``--``; the caller appends the command.
@@ -224,6 +264,10 @@ def build_bwrap_args(
         args += [_RO_BIND_TRY, str(root), str(root)]
     for root in writable_roots:
         args += [_BIND_TRY, str(root), str(root)]
+    if claude_cli is not None:
+        args += [_RO_BIND, str(claude_cli.parent), str(claude_cli.parent)]
+        args += ["--dir", SANDBOX_BIN, "--symlink", str(claude_cli), f"{SANDBOX_BIN}/claude"]
+        args += [_SETENV, "PATH", os.pathsep.join(filter(None, (SANDBOX_BIN, search_path)))]
     # A private home, and TMPDIR pointed inside it. An inherited TMPDIR naming an
     # unbound host path is not a missing-directory error: ROCm JIT-compiles its
     # blit kernels at device init, the compiler cannot write its temporaries, and
@@ -311,7 +355,22 @@ def verify_sandbox_bindings(
             ) from exc
 
 
-def reexec_if_required(argv: Sequence[str] | None = None) -> None:
+def _declare_roots(roots: SandboxRoots) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Merge the command's roots into the operator's, create missing outputs, and publish the result.
+
+    Publishing through the env vars lets :func:`verify_sandbox_bindings` check the
+    derived binds too, from inside the sandbox.
+    """
+    writable = tuple(dict.fromkeys((*writable_roots_from_env(), *roots.writable)))
+    readonly = tuple(dict.fromkeys((*readonly_roots_from_env(), *roots.readonly)))
+    for root in writable:
+        root.mkdir(parents=True, exist_ok=True)
+    os.environ[SANDBOX_WRITABLE_ENV] = os.pathsep.join(map(str, writable))
+    os.environ[SANDBOX_READONLY_ENV] = os.pathsep.join(map(str, readonly))
+    return writable, readonly
+
+
+def reexec_if_required(argv: Sequence[str] | None = None, roots: SandboxRoots = SandboxRoots()) -> None:
     """Re-execute this process inside the sandbox when one was asked for.
 
     Returns immediately when the mode is ``off``. When the process is already
@@ -327,6 +386,8 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
             every entry point: under ``python -c`` it holds only ``['-c']`` and
             the body is unrecoverable. Naming the module is exact for the
             console script, ``-m``, and an embedded caller alike.
+        roots: What the command derived from its own arguments, bound in
+            addition to the operator's ``HYPERLOOM_SANDBOX_*`` roots.
 
     Raises:
         SandboxError: A sandbox was requested and cannot be established. Never
@@ -352,12 +413,16 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
         )
     venv = Path(sys.prefix)
     command = [sys.executable, "-m", "hyperloom", *(list(sys.argv[1:]) if argv is None else list(argv))]
+    claude_cli = resolve_claude_executable()
+    writable, readonly = _declare_roots(roots)
     args = build_bwrap_args(
         bwrap=bwrap,
         venv=venv,
-        writable_roots=writable_roots_from_env(),
-        readonly_roots=readonly_roots_from_env(),
+        writable_roots=writable,
+        readonly_roots=readonly,
         support_dir=interpreter_support_dir(),
         package_dir=package_root(),
+        claude_cli=Path(claude_cli).resolve() if claude_cli else None,
+        search_path=os.environ.get("PATH", ""),
     )
     os.execv(bwrap, [*args, *command])

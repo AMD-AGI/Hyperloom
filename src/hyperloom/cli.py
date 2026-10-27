@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib
 import sys
 
-from hyperloom.common.sandbox import reexec_if_required
+from hyperloom.common.sandbox import MODE_OFF, SandboxRoots, is_sandboxed, reexec_if_required, resolve_sandbox_mode
 
 _IO = "hyperloom.inference_optimizer"
 
@@ -18,6 +18,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "check": (f"{_IO}.tools.preflight_optimizer", (), "Check host readiness for a model before optimizing"),
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild the artifacts of a crashed session"),
+    "script": (f"{_IO}.script_workload", (), "Prepare a workspace that optimizes an existing model script"),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
 }
@@ -45,6 +46,19 @@ def _session_usage() -> str:
     return "\n".join(lines)
 
 
+def _sandbox_roots(command: str, rest: list[str]) -> SandboxRoots:
+    """The paths a command derives from its own arguments, when it declares any and a sandbox is about to start.
+
+    Command modules are imported here, before the re-exec, so ``sandbox_roots`` must stay
+    cheap: parse arguments and read small files, never import torch or start Ray.
+    """
+    if command not in _COMMANDS or resolve_sandbox_mode() == MODE_OFF or is_sandboxed():
+        return SandboxRoots()
+    module, prefix, _ = _COMMANDS[command]
+    declare = getattr(importlib.import_module(module), "sandbox_roots", None)
+    return declare([*prefix, *rest]) if declare else SandboxRoots()
+
+
 def _run(module: str, argv: list[str]) -> int:
     return importlib.import_module(module).main(argv)
 
@@ -62,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     # HYPERLOOM_SANDBOX_MODE asks for one, this replaces the process with itself
     # running inside bubblewrap, so every subprocess a command later spawns is a
     # descendant of the sandbox. Returns untouched when the mode is off.
-    reexec_if_required()
+    reexec_if_required(roots=_sandbox_roots(command, rest))
     if command != "session":
         module, prefix, _ = _COMMANDS[command]
         return _run(module, [*prefix, *rest])

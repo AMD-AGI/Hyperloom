@@ -8,12 +8,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .claude_cli import resolve_claude_executable
 from .llm_config import AnthropicMessageResult, claude_sdk_env_options
 
 __all__ = [
@@ -76,7 +76,7 @@ def _locate_cli(sdk: Any) -> str:
         for candidate in sorted(bundled.glob("claude*")):
             if candidate.is_file():
                 return str(candidate)
-    return shutil.which("claude") or ""
+    return resolve_claude_executable()
 
 
 def ensure_available() -> None:
