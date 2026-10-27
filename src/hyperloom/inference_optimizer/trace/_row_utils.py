@@ -7,18 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none
+from hyperloom.common.coerce import text_or_none, to_int
 from hyperloom.common.timeutil import now_iso
-
-
-def coerce_optional_int(value: Any) -> int | None:
-    """Coerce a value to ``int``, or ``None`` on a miss / bad type."""
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def call_key_fields(record: Any) -> dict[str, Any]:
@@ -31,9 +21,9 @@ def call_key_fields(record: Any) -> dict[str, Any]:
         "role": text_or_none(record.role),
         "task_id": text_or_none(record.task_id),
         "dyn_id": text_or_none(record.dyn_id),
-        "tick": coerce_optional_int(record.tick),
+        "tick": to_int(record.tick),
         "phase": text_or_none(record.phase),
-        "turn": coerce_optional_int(record.turn),
+        "turn": to_int(record.turn),
         "model": text_or_none(record.model),
     }
 
@@ -60,4 +50,4 @@ def validate_closed_row(
         raise error_cls(f"{label} row 'component'={component!r} is not one of {sorted(valid_components)!r}")
 
 
-__all__ = ["call_key_fields", "coerce_optional_int", "validate_closed_row"]
+__all__ = ["call_key_fields", "validate_closed_row"]

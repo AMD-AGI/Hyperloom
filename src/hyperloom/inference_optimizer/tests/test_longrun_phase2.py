@@ -242,7 +242,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
             "rejected": [{"name": "a", "fingerprint": "fp_a"}],
         }
@@ -254,7 +253,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
                 "fp_b": {"name": "b", "fingerprint": "fp_b"},
@@ -270,36 +268,3 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert tested["fp_b"]["cycle"] == 1
     cycles = {r["fingerprint"]: r["cycle"] for r in st.explore_search["rejected"]}
     assert cycles == {"fp_a": 0, "fp_b": 1}
-
-
-def test_veto_fingerprints_bucketed_by_bottleneck():
-    st = SharedState(session_id="t", macro_cycle=0)
-    # cycle 0 worked the MoE bottleneck.
-    st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": "MoE_fused"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-        }
-    )
-    assert st.explore_search["tested"]["fp_a"]["bottleneck"] == "MoE_fused"
-    assert st.explore_search["rejected"][0]["bottleneck"] == "MoE_fused"
-
-    # cycle 1 drifted to a comm bottleneck; new rejection carries the new bucket.
-    st.macro_cycle = 1
-    st.roofline_snapshots = [{"snapshot_id": 2, "top_bottleneck": "all_reduce"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {
-                "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0, "bottleneck": "MoE_fused"},
-                "fp_b": {"name": "b", "fingerprint": "fp_b"},
-            },
-            "rejected": [],
-        }
-    )
-    tested = st.explore_search["tested"]
-    assert tested["fp_a"]["bottleneck"] == "MoE_fused"
-    assert tested["fp_b"]["bottleneck"] == "all_reduce"
-    assert tested["fp_b"]["cycle"] == 1

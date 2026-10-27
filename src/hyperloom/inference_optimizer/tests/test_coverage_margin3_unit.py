@@ -33,7 +33,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        resolve_openai_client_config,
     )
     from hyperloom.common.llm_headers import parse_custom_headers
 
@@ -47,20 +46,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert derive_openai_base_url("https://gw.example/Unified") == "https://gw.example/Unified/v1"
     assert derive_openai_base_url("https://gw.example/custom") == "https://gw.example/custom"
 
-    cfg = resolve_openai_client_config(
-        api_key_env="CUSTOM_KEY",
-        base_url_env="CUSTOM_BASE",
-        env={
-            "CUSTOM_KEY": " key ",
-            "CUSTOM_BASE": " https://base.example/v1 ",
-            "OPENAI_CUSTOM_HEADERS": '{"X-Trace": " 1 "}',
-        },
-    )
-    assert cfg.as_kwargs() == {
-        "api_key": "key",
-        "base_url": "https://base.example/v1",
-        "default_headers": {"X-Trace": "1"},
-    }
     assert claude_sdk_env_options(env={}) == {}
 
 

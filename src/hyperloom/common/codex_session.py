@@ -16,14 +16,15 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
-from hyperloom.common.llm_headers import parse_custom_headers
+from hyperloom.common.llm_headers import parse_unexpanded_headers
 from hyperloom.common.token_usage import uncached_input_tokens
 
 # Name Codex records the gateway under in its own TOML config.
@@ -79,10 +80,6 @@ class CodexHomeCleanupError(CodexSessionError):
     """Raised when a private CODEX_HOME cannot be removed within the bound."""
 
     def __init__(self, path: Path, status: str) -> None:
-        self.path = path
-        self.status = status
-        self.completed_result: CodexSessionResult | None = None
-        self.operation_error: BaseException | None = None
         super().__init__(f"CODEX_HOME cleanup failed for {path}: {status}")
 
 
@@ -92,7 +89,6 @@ class CodexSessionResult:
 
     text: str = ""
     usage: dict[str, int] = field(default_factory=dict)
-    thread_id: str = ""
     error: str = ""
 
 
@@ -129,55 +125,6 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def _api_key_env_name(*, api_key_env: str, source: Mapping[str, str]) -> str:
-    """Resolve the API key variable name from an already-effective mapping."""
-    candidates = list(dict.fromkeys([api_key_env, "OPENAI_API_KEY"]))
-    for name in candidates:
-        if (source.get(name) or "").strip():
-            return name
-    raise CodexSessionUnavailableError(f"none of {' / '.join(candidates)} is set in env; Codex cannot authenticate")
-
-
-def _unexpanded_custom_headers(raw: str | None) -> dict[str, str]:
-    """Parse custom headers without resolving ``${VAR}`` expressions."""
-    if not raw:
-        return {}
-    text = raw.strip()
-    if not text:
-        return {}
-    if text.startswith("{"):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            return {str(key).strip(): str(value).strip() for key, value in parsed.items() if str(key).strip()}
-
-    headers: dict[str, str] = {}
-    for line in raw.splitlines():
-        name, separator, value = line.partition(":")
-        if separator and name.strip():
-            headers[name.strip()] = value.strip()
-    return headers
-
-
-def _selected_custom_header_source(
-    source: Mapping[str, str],
-    *,
-    base_url_env: str,
-) -> str | None:
-    """Return the raw header setting selected by OpenAI config resolution."""
-    openai_raw = source.get("OPENAI_CUSTOM_HEADERS")
-    if parse_custom_headers(openai_raw, env=source):
-        return openai_raw
-
-    explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
-    derived_base_url = (source.get("ANTHROPIC_BASE_URL") or "").strip()
-    if not explicit_base_url and derived_base_url:
-        return source.get("ANTHROPIC_CUSTOM_HEADERS")
-    return openai_raw
-
-
 def _private_header_env_name(
     index: int,
     *,
@@ -194,50 +141,33 @@ def _private_header_env_name(
     return candidate
 
 
-def resolve_codex_provider_config(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> CodexProviderConfig:
+def resolve_codex_provider_config(*, env: dict[str, str] | None = None) -> CodexProviderConfig:
     """Resolve env-backed ``model_providers`` settings for the Codex gateway."""
-    return _resolve_codex_provider_config(
-        api_key_env=api_key_env,
-        base_url_env=base_url_env,
-        source=_effective_env(env),
-    )
+    return _resolve_codex_provider_config(_effective_env(env))
 
 
-def _resolve_codex_provider_config(
-    *,
-    api_key_env: str,
-    base_url_env: str,
-    source: Mapping[str, str],
-) -> CodexProviderConfig:
+def _resolve_codex_provider_config(source: Mapping[str, str]) -> CodexProviderConfig:
     """Resolve provider config from one already-effective environment."""
     try:
-        config = resolve_openai_client_config(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
-            env=dict(source),
-        )
+        config = resolve_openai_client_config(env=dict(source))
     except LLMConfigError as exc:
         raise CodexSessionUnavailableError(f"Codex gateway credential is missing: {exc}") from exc
     if not config.base_url:
         raise CodexSessionUnavailableError(
-            f"{base_url_env} is not set; Codex needs an explicit OpenAI-compatible gateway base URL"
+            "OPENAI_BASE_URL is not set; Codex needs an explicit OpenAI-compatible gateway base URL"
         )
 
-    key_env = _api_key_env_name(api_key_env=api_key_env, source=source)
+    if not (source.get("OPENAI_API_KEY") or "").strip():
+        raise CodexSessionUnavailableError("OPENAI_API_KEY is not set in env; Codex cannot authenticate")
     provider = CODEX_PROVIDER_NAME
     overrides = [
         f"model_provider={_toml_string(provider)}",
         f"model_providers.{provider}.name={_toml_string(provider)}",
         f"model_providers.{provider}.base_url={_toml_string(config.base_url)}",
         f"model_providers.{provider}.wire_api={_toml_string('responses')}",
-        f"model_providers.{provider}.env_key={_toml_string(key_env)}",
+        f"model_providers.{provider}.env_key={_toml_string('OPENAI_API_KEY')}",
     ]
-    raw_headers = _unexpanded_custom_headers(_selected_custom_header_source(source, base_url_env=base_url_env))
+    raw_headers = parse_unexpanded_headers(source.get(config.headers_env))
     env_additions: dict[str, str] = {}
     for index, (header, value) in enumerate(config.default_headers.items()):
         if not _TOML_BARE_KEY_RE.match(header):
@@ -331,12 +261,7 @@ def _bwrap_probe_cache_key(bwrap: str, source: Mapping[str, str]) -> tuple[Any, 
     )
 
 
-def _run_bwrap_probe(
-    bwrap: str,
-    *,
-    source: Mapping[str, str],
-    runner: Callable[..., Any],
-) -> bool:
+def _run_bwrap_probe(bwrap: str, *, source: Mapping[str, str]) -> bool:
     """Execute the namespace and root bind that Codex requires."""
     command = [
         bwrap,
@@ -348,7 +273,7 @@ def _run_bwrap_probe(
         "/bin/true",
     ]
     try:
-        completed = runner(
+        completed = subprocess.run(
             command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -360,54 +285,26 @@ def _run_bwrap_probe(
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return getattr(completed, "returncode", 1) == 0
+    return completed.returncode == 0
 
 
-def probe_codex_sandbox_capability(
-    *,
-    env: dict[str, str] | None = None,
-    bwrap_resolver: Callable[..., str | None] = shutil.which,
-    runner: Callable[..., Any] = subprocess.run,
-    use_cache: bool = True,
-) -> bool:
+def probe_codex_sandbox_capability(*, env: dict[str, str] | None = None) -> bool:
     """Return whether bubblewrap can create the sandbox Codex needs."""
-    return _probe_codex_sandbox_capability(
-        source=_effective_env(env),
-        bwrap_resolver=bwrap_resolver,
-        runner=runner,
-        use_cache=use_cache,
-    )
+    return _probe_codex_sandbox_capability(source=_effective_env(env))
 
 
-def _probe_codex_sandbox_capability(
-    *,
-    source: Mapping[str, str],
-    bwrap_resolver: Callable[..., str | None],
-    runner: Callable[..., Any],
-    use_cache: bool,
-) -> bool:
+def _probe_codex_sandbox_capability(*, source: Mapping[str, str]) -> bool:
     """Probe bubblewrap from one already-effective environment."""
-    try:
-        bwrap = bwrap_resolver("bwrap", path=source.get("PATH"))
-    except OSError:
-        return False
+    bwrap = shutil.which("bwrap", path=source.get("PATH"))
     if not bwrap:
         return False
-
-    should_cache = use_cache and bwrap_resolver is shutil.which and runner is subprocess.run
-    if not should_cache:
-        return _run_bwrap_probe(bwrap, source=source, runner=runner)
     try:
         cache_key = _bwrap_probe_cache_key(bwrap, source)
     except OSError:
         return False
     with _BWRAP_PROBE_CACHE_LOCK:
         if cache_key not in _BWRAP_PROBE_CACHE:
-            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(
-                bwrap,
-                source=source,
-                runner=runner,
-            )
+            _BWRAP_PROBE_CACHE[cache_key] = _run_bwrap_probe(bwrap, source=source)
         return _BWRAP_PROBE_CACHE[cache_key]
 
 
@@ -554,14 +451,7 @@ def _private_codex_home(
 
 def _usage_int(payload: dict[str, Any], key: str) -> int:
     """Read one non-negative token count, treating unusable values as 0."""
-    value = payload.get(key)
-    if isinstance(value, bool):
-        return 0
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed >= 0 else 0
+    return max(0, to_int(payload.get(key), 0))
 
 
 def normalize_codex_usage(usage: Any) -> dict[str, int]:
@@ -574,19 +464,12 @@ def normalize_codex_usage(usage: Any) -> dict[str, int]:
     if not isinstance(breakdown, dict):
         return {}
     cached = _usage_int(breakdown, "cached_input_tokens")
-    normalized = {
+    return {
         "input_tokens": uncached_input_tokens(_usage_int(breakdown, "input_tokens"), cached),
         "output_tokens": _usage_int(breakdown, "output_tokens"),
         "cache_read_input_tokens": cached,
         "reasoning_output_tokens": _usage_int(breakdown, "reasoning_output_tokens"),
     }
-    window_source = usage if isinstance(usage, dict) else getattr(usage, "__dict__", {}) or {}
-    if hasattr(usage, "model_dump"):
-        window_source = usage.model_dump()
-    window = _usage_int(window_source, "model_context_window")
-    if window > 0:
-        normalized["model_context_window"] = window
-    return normalized
 
 
 def _turn_error_message(result: Any) -> str:
@@ -597,26 +480,22 @@ def _turn_error_message(result: Any) -> str:
     return str(getattr(error, "message", None) or error)
 
 
-def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
+def normalize_codex_result(result: Any) -> CodexSessionResult:
     """Normalize one completed SDK turn into a :class:`CodexSessionResult`."""
     return CodexSessionResult(
         text=str(getattr(result, "final_response", "") or "").strip(),
         usage=normalize_codex_usage(getattr(result, "usage", None)),
-        thread_id=thread_id,
         error=_turn_error_message(result),
     )
 
 
 @dataclass(frozen=True)
 class CodexSessionConfig:
-    """The runtime one Codex session runs in: workspace, model, sandbox, binary and environment."""
+    """The runtime one Codex session runs in: workspace, model and the roots it may write."""
 
     cwd: Path
     model: str
     writable_roots: Sequence[Path] = ()
-    sandbox_mode: str = ""
-    codex_bin: str = ""
-    env: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cwd", Path(self.cwd))
@@ -655,12 +534,6 @@ class CodexSession:
         self._sandbox: Any = None
         self._client: Any = None
         self._thread: Any = None
-        self._thread_id: str = ""
-
-    @property
-    def thread_id(self) -> str:
-        """The SDK handle of the open conversation, or ``""`` before one opens."""
-        return self._thread_id
 
     async def __aenter__(self) -> "CodexSession":
         """Start the session and return it."""
@@ -675,7 +548,7 @@ class CodexSession:
         """Resolve policy and credentials, then open the SDK client."""
         if self._stack is not None:
             return
-        effective_env = _effective_env(self.config.env)
+        effective_env = _effective_env()
         # Tag before provider resolution so the header is mapped into ``env_http_headers`` with the gateway's own.
         if self.component:
             inject_attribution_env(
@@ -683,26 +556,14 @@ class CodexSession:
                 component=self.component,
                 operation=self.operation,
             )
-        resolved_sandbox_mode = _resolve_codex_sandbox_mode(
-            sandbox_mode=self.config.sandbox_mode,
-            source=effective_env,
-        )
-        if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(
-            source=effective_env,
-            bwrap_resolver=shutil.which,
-            runner=subprocess.run,
-            use_cache=True,
-        ):
+        resolved_sandbox_mode = _resolve_codex_sandbox_mode(sandbox_mode="", source=effective_env)
+        if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(source=effective_env):
             raise CodexSessionUnavailableError(
                 f"Codex sandbox mode {resolved_sandbox_mode!r} requires a working bubblewrap sandbox, "
                 "but the capability probe failed; refusing to fall back to bypass"
             )
 
-        provider_config = _resolve_codex_provider_config(
-            api_key_env="OPENAI_API_KEY",
-            base_url_env="OPENAI_BASE_URL",
-            source=effective_env,
-        )
+        provider_config = _resolve_codex_provider_config(effective_env)
         sdk = load_codex_sdk()
         sandbox = codex_sandbox(
             sdk,
@@ -729,7 +590,6 @@ class CodexSession:
             child_env.update(provider_config.env_additions)
             child_env["CODEX_HOME"] = str(codex_home)
             config = sdk.CodexConfig(
-                codex_bin=self.config.codex_bin or None,
                 config_overrides=config_overrides,
                 cwd=str(self.config.cwd),
                 env=child_env,
@@ -751,7 +611,6 @@ class CodexSession:
     def reset_thread(self) -> None:
         """Drop the open conversation; the next turn opens a fresh thread."""
         self._thread = None
-        self._thread_id = ""
 
     async def aclose(self) -> None:
         """Close the SDK client and remove the private state directory."""
@@ -776,7 +635,6 @@ class CodexSession:
                 model_provider=CODEX_PROVIDER_NAME,
                 sandbox=self._sandbox,
             )
-            self._thread_id = str(getattr(self._thread, "id", "") or "")
         return self._thread
 
     async def turn(self, request: CodexTurnRequest) -> CodexSessionResult:
@@ -816,7 +674,7 @@ class CodexSession:
                 turn_task.cancel()
                 # Let the cancellation settle.
                 await asyncio.gather(turn_task, return_exceptions=True)
-        return normalize_codex_result(sdk_result, self._thread_id)
+        return normalize_codex_result(sdk_result)
 
 
 async def run_codex_turn(
@@ -835,23 +693,10 @@ async def run_codex_turn(
         operation=operation,
     )
     await session.start()
-    result: CodexSessionResult | None = None
-    operation_error: BaseException | None = None
     try:
-        result = await session.turn(request)
-    except BaseException as exc:
-        operation_error = exc
-        raise
+        return await session.turn(request)
     finally:
-        try:
-            await session.aclose()
-        except CodexHomeCleanupError as cleanup_error:
-            cleanup_error.completed_result = result
-            cleanup_error.operation_error = operation_error
-            if operation_error is not None:
-                raise cleanup_error from operation_error
-            raise
-    return result
+        await session.aclose()
 
 
 __all__ = [

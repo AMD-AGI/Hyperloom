@@ -504,6 +504,24 @@ def write_minimal_final_report(session_dir: Path | str) -> Path:
 #: Value of ``producer`` in a crash-safe ``final.json``.
 FINAL_PRODUCER_COORDINATOR = "coordinator"
 
+#: ``state.json`` fields a crash-safe ``final.json`` copies, each with the type whose empty value fills an unset one.
+_CRASH_SAFE_STATE_FIELDS: dict[str, type] = {
+    "session_id": str,
+    "model_name": str,
+    "model_path": str,
+    "model_class": str,
+    "framework": str,
+    "gpu_type": str,
+    "phase": str,
+    "stop_reason": str,
+    "baseline_tput": float,
+    "baseline_accuracy": float,
+    "current_best": dict,
+    "cumulative_gain_validated": float,
+    "crash_count": int,
+    "max_minutes": int,
+}
+
 
 def write_minimal_final_json(session_dir: Path | str) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
@@ -532,31 +550,18 @@ def write_minimal_final_json(session_dir: Path | str) -> Path:
             return target
 
     state = read_json(state_path(sd), default={}, require_dict=True)
-    gpu_type = state.get("gpu_type") or ""
+    copied = {key: state.get(key) or empty() for key, empty in _CRASH_SAFE_STATE_FIELDS.items()}
     summary: dict[str, Any] = {
         # Crash-safe markers: a consumer can distinguish this from the full ReportExecutor output and know the run did
         # not finish gracefully.
         "safety_net": True,
         "report_complete": False,
         "producer": FINAL_PRODUCER_COORDINATOR,
-        "session_id": state.get("session_id") or "",
-        "model_name": state.get("model_name") or "",
-        "model_path": state.get("model_path") or "",
-        "model_class": state.get("model_class") or "",
-        "framework": state.get("framework") or "",
-        "gpu_type": gpu_type,
-        "phase": state.get("phase") or "",
-        "stop_reason": state.get("stop_reason") or "",
-        "baseline_tput": state.get("baseline_tput") or 0.0,
-        "baseline_accuracy": state.get("baseline_accuracy") or 0.0,
-        "current_best": state.get("current_best") or {},
-        "cumulative_gain_validated": state.get("cumulative_gain_validated") or 0.0,
+        **copied,
         "optimization_stack_len": len(state.get("optimization_stack") or []),
-        "crash_count": state.get("crash_count") or 0,
-        "max_minutes": state.get("max_minutes") or 0,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": platform_fingerprint(gpu_type),
+        "platform": platform_fingerprint(copied["gpu_type"]),
     }
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)

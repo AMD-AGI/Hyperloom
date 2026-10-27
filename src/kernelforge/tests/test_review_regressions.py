@@ -11,14 +11,15 @@ from kernelforge.resources import resource_path
 
 from kernelforge.tests.conftest import PACKAGE_ROOT
 
-RUNNER = PACKAGE_ROOT / "loop" / "runner.py"
+LOOP = PACKAGE_ROOT / "loop"
 
 
 def _calls_in_runner(name: str) -> int:
-    """How many times ``name`` is called in runner.py, ignoring its own def."""
-    tree = ast.parse(RUNNER.read_text())
+    """How many times ``name`` is called across the loop package, ignoring its own def."""
+    trees = [ast.parse(path.read_text()) for path in sorted(LOOP.rglob("*.py"))]
     return sum(
         1
+        for tree in trees
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and (

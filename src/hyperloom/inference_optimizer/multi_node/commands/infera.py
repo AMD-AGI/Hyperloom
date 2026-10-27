@@ -227,6 +227,18 @@ def _resolve_pd_node_counts(
     return pn, dn
 
 
+# Per-role PD overrides a PD launch records as ``last_restart_<name>``, with the value that leaves the role on the
+# shared --tp / --ep / --extra-args.
+_PD_ROLE_OVERRIDES = {
+    "pd_prefill_tp": 0,
+    "pd_decode_tp": 0,
+    "pd_prefill_ep": 0,
+    "pd_decode_ep": 0,
+    "pd_prefill_extra_args": "",
+    "pd_decode_extra_args": "",
+}
+
+
 def _infera_restart_config_matches(
     state: dict[str, Any],
     args: argparse.Namespace,
@@ -235,12 +247,10 @@ def _infera_restart_config_matches(
     kv_transfer_backend: str = "",
 ) -> bool:
     """Whether the requested restart matches the last successful Infera launch."""
-    if not state.get("last_restart_framework"):
-        return False
     base_match = (
-        str(state.get("last_restart_framework") or "") == framework
-        and str(state.get("last_restart_model") or "") == str(args.model)
-        and int(state.get("last_restart_tp") or 0) == int(args.tp)
+        state.get("last_restart_framework") == framework
+        and state.get("last_restart_model") == args.model
+        and state.get("last_restart_tp") == int(args.tp)
         and int(state.get("last_restart_ep") or 1) == int(getattr(args, "ep", 1) or 1)
         and str(state.get("last_restart_pd_mode") or "aggregated") == pd_mode
         and _mn_cli._normalize_extra_args(state.get("last_restart_extra_args"))
@@ -253,22 +263,16 @@ def _infera_restart_config_matches(
         return False
     if pd_mode != "disaggregated":
         return True
+    for name, unset in _PD_ROLE_OVERRIDES.items():
+        if (state.get(f"last_restart_{name}") or unset) != getattr(args, name):
+            return False
     # Compare effective PD topology (CLI explicit > pod-list inference), not raw CLI zeros left unset by the operator.
     prefill_n, decode_n = _pd_role_pod_counts(state)
     args_pn, args_dn = _resolve_pd_node_counts(args, state)
-    state_pn = int(state.get("last_restart_pd_prefill_nodes") or 0) or prefill_n
-    state_dn = int(state.get("last_restart_pd_decode_nodes") or 0) or decode_n
     return (
-        args_pn == state_pn
-        and args_dn == state_dn
-        and (state.get("last_restart_pd_transfer_backend") or "").strip() == (kv_transfer_backend or "").strip()
-        and int(state.get("last_restart_pd_prefill_tp") or 0) == int(getattr(args, "pd_prefill_tp", 0) or 0)
-        and int(state.get("last_restart_pd_decode_tp") or 0) == int(getattr(args, "pd_decode_tp", 0) or 0)
-        and int(state.get("last_restart_pd_prefill_ep") or 0) == int(getattr(args, "pd_prefill_ep", 0) or 0)
-        and int(state.get("last_restart_pd_decode_ep") or 0) == int(getattr(args, "pd_decode_ep", 0) or 0)
-        and (state.get("last_restart_pd_prefill_extra_args") or "")
-        == (getattr(args, "pd_prefill_extra_args", "") or "")
-        and (state.get("last_restart_pd_decode_extra_args") or "") == (getattr(args, "pd_decode_extra_args", "") or "")
+        args_pn == (state.get("last_restart_pd_prefill_nodes") or prefill_n)
+        and args_dn == (state.get("last_restart_pd_decode_nodes") or decode_n)
+        and kv_transfer_backend.strip() == (state.get("last_restart_pd_transfer_backend") or "").strip()
     )
 
 
@@ -349,15 +353,11 @@ def _infera_launch_pd_groups(
     state["pd_decode_nodes"] = dn
     state["last_restart_pd_prefill_nodes"] = pn
     state["last_restart_pd_decode_nodes"] = dn
-    state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
-    state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
     # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
     # $PD_TRANSFER_BACKEND.
     state["last_restart_pd_transfer_backend"] = kv
-    state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
-    state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
-    state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
-    state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
+    for name in _PD_ROLE_OVERRIDES:
+        state[f"last_restart_{name}"] = getattr(args, name)
     return rc_total, all_results
 
 
@@ -527,15 +527,11 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         )
         return EXIT_CONFIG_ERROR
     gpu_targets = _infera_all_gpu_targets(state)
-    if not gpu_targets:
-        err("apply-tracelens-patch (infera): no GPU pod IPs in state")
-        return EXIT_CONFIG_ERROR
     script = _mn_cli._read_pod_script("apply_tracelens_patch_multinode.py")
-    pin = getattr(args, "sglang_version_pin", None) or ""
     op_args = f"--local --tracelens-root {shlex.quote(str(tracelens_root))}"
-    if pin:
-        op_args += f" --sglang-version-pin {shlex.quote(str(pin))}"
-    patch_set = getattr(args, "patch_set", None) or ""
+    if args.sglang_version_pin:
+        op_args += f" --sglang-version-pin {shlex.quote(str(args.sglang_version_pin))}"
+    patch_set = getattr(args, "patch_set", None)
     if patch_set:
         op_args += f" --patch-set {shlex.quote(str(patch_set))}"
     timeout = _mn_cli._poll_timeout_from_args(args)
@@ -559,9 +555,9 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             failures.append({"host": ip, "sshPort": port, "error": f"timeout after {timeout}s"})
             continue
-        parsed = _mn_cli._extract_pod_json(cp.stdout or "")
-        pods = (parsed or {}).get("per_pod") or []
-        if parsed and str(parsed.get("status")) in ("applied", "skipped") and pods:
+        parsed = _mn_cli._extract_pod_json(cp.stdout) or {}
+        pods = parsed.get("per_pod")
+        if str(parsed.get("status")) in ("applied", "skipped") and pods:
             for r in pods:
                 r["host"] = ip
                 per_pod.append(r)
@@ -570,12 +566,12 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
                 {
                     "host": ip,
                     "sshPort": port,
-                    "error": (parsed or {}).get("error") or (cp.stderr or "")[-800:] or "unknown",
+                    "error": parsed.get("error") or cp.stderr[-800:] or "unknown",
                     "rc": cp.returncode,
                 }
             )
     overall = "applied" if not failures else "failed"
-    if overall == "applied" and per_pod and all(r.get("status") == "skipped" for r in per_pod):
+    if overall == "applied" and all(r.get("status") == "skipped" for r in per_pod):
         overall = "skipped"
     print(
         json.dumps(

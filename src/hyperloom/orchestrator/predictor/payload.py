@@ -12,11 +12,11 @@ completely is omitted rather than half-filled. See
 
 from __future__ import annotations
 
-import datetime as _dt
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import text_or_none, to_float, to_unix
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
@@ -52,10 +52,6 @@ def _positive(value: Any) -> float | None:
     return out if out is not None and out > 0 else None
 
 
-def _text(value: Any) -> str | None:
-    return str(value or "").strip() or None
-
-
 def _bound(value: Any) -> str | None:
     """A bound label, lower-cased; ``unknown`` is dropped because the predictor renders ``<label>-bound``."""
     text = str(value or "").strip().lower()
@@ -63,14 +59,8 @@ def _bound(value: Any) -> str | None:
 
 
 def _profile_age_sec(trace: dict[str, Any]) -> int | None:
-    raw = str(trace.get("ts") or "").strip()
-    try:
-        stamped = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamped.tzinfo is None:
-        stamped = stamped.replace(tzinfo=_dt.timezone.utc)
-    return max(0, int((_dt.datetime.now(_dt.timezone.utc) - stamped).total_seconds()))
+    stamped = to_unix(trace.get("ts"))
+    return None if stamped is None else max(0, int(time.time() - stamped))
 
 
 def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -156,7 +146,7 @@ def _stack(state: SessionView) -> list[dict[str, Any]]:
         envs = step.get("extra_envs")
         out.append(
             {
-                "candidate_extra_server_args": _text(step.get("candidate_extra_server_args")),
+                "candidate_extra_server_args": text_or_none(step.get("candidate_extra_server_args")),
                 "extra_envs": dict(envs) if isinstance(envs, dict) and envs else None,
                 "tput": _positive(step.get("tput")),
             }
@@ -167,9 +157,8 @@ def _stack(state: SessionView) -> list[dict[str, Any]]:
 def build_request(
     state: SessionView,
     *,
-    session_id: str,
     sites: Mapping[str, dict[str, Any]],
-    sidecars: Mapping[str, Any] | None = None,
+    sidecars: Mapping[str, Any],
     budget: PhaseBudget,
 ) -> dict[str, Any]:
     """Build the request body for the current decision point.
@@ -184,14 +173,14 @@ def build_request(
     best = state.current_best
     return {
         "schema": REQUEST_SCHEMA,
-        "session_id": session_id,
+        "session_id": str(state.session_id or ""),
         "identification": {
-            "model_name": _text(state.model_name),
-            "model_class": _text(state.model_class),
-            "gpu_type": _text(state.gpu_type),
-            "framework": _text(state.framework),
-            "framework_version": _text(state.framework_version),
-            "precision": _text(state.precision),
+            "model_name": text_or_none(state.model_name),
+            "model_class": text_or_none(state.model_class),
+            "gpu_type": text_or_none(state.gpu_type),
+            "framework": text_or_none(state.framework),
+            "framework_version": text_or_none(state.framework_version),
+            "precision": text_or_none(state.precision),
             "tp": state.tp,
             "ep": state.ep,
             "model_info": {key: info.get(key) for key in _MODEL_INFO_KEYS},
@@ -204,7 +193,7 @@ def build_request(
         },
         "phase": {
             "phase": PHASE_LABEL,
-            "phase_reason": _text(last_transition.get("reason")),
+            "phase_reason": text_or_none(last_transition.get("reason")),
             "phase_elapsed_seconds": round(budget.elapsed_sec, 1),
         },
         "performance": {
@@ -216,5 +205,5 @@ def build_request(
             "keep_threshold_pct": budget.keep_threshold_pct,
             "optimization_stack": _stack(state),
         },
-        "evidence": _evidence(state, sites, sidecars or {}),
+        "evidence": _evidence(state, sites, sidecars),
     }
