@@ -60,6 +60,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend_name
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
 
+_UTF8 = "utf-8"
+
 
 class PointError(RecipeError):
     """A point cannot be generated the way the request describes it."""
@@ -101,11 +103,11 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
         concurrency = pins.pop(ENV_CONC)
         options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
     path = materialize_benchmark_config(canonical.config_path, out_dir, out_name=name, **options)
-    with path.open(encoding="utf-8") as handle:
+    with path.open(encoding=_UTF8) as handle:
         config = yaml.safe_load(handle) or {}
     if concurrency is not None:
         config["benchmark"]["envs"][ENV_CONC] = int(concurrency)
-        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return config
 
 
@@ -275,6 +277,21 @@ def _profile_canonical(canonical: CanonicalMeasurement) -> CanonicalMeasurement:
     return CanonicalMeasurement(path, canonical.surface, canonical.primary_concurrency, canonical.materialize)
 
 
+#: The serving steps an AgentX profile captures when its point names no count: half the single-lineage default (256), at
+#: which a TP4 MoE head wrote more trace than the 4 GiB a result may carry.
+AGENTX_PROFILE_STEPS = 128
+
+
+def _limit_agentx_capture(point: Path) -> None:
+    """Give the AgentX profile ``point`` the capture window of :data:`AGENTX_PROFILE_STEPS` steps, unless it names one."""
+    config = yaml.safe_load(point.read_text(encoding=_UTF8)) or {}
+    profiler = config.setdefault("benchmark", {}).setdefault("profiler", {}).setdefault("torch_profiler", {})
+    if "num_steps" in profiler:
+        return
+    profiler["num_steps"] = AGENTX_PROFILE_STEPS
+    point.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+
+
 def generate_profile_point(
     environment: CompiledEnvironment, canonical: CanonicalMeasurement, out_dir: Path
 ) -> tuple[Path, ...]:
@@ -289,6 +306,7 @@ def generate_profile_point(
 
     if canonical.agentx:
         (point,) = generate_points(environment, canonical, out_dir, concurrency=(canonical.primary_concurrency,))
+        _limit_agentx_capture(point)
         enable_profile(point)
         return (point,)
     launch = environment.recipe.launch
@@ -345,6 +363,7 @@ def accept_measurement(
 
 
 __all__ = [
+    "AGENTX_PROFILE_STEPS",
     "CANONICAL_FILE",
     "AcceptedMeasurement",
     "CanonicalMeasurement",

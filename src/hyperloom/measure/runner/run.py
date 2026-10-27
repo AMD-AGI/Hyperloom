@@ -34,7 +34,7 @@ from hyperloom.measure.failures import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
+from hyperloom.measure.manifest import encode_manifest, ManifestFile, RESULT_SCHEMA
 from hyperloom.measure.phases import (
     BOOTSTRAP,
     ENV_REBUILD,
@@ -69,6 +69,7 @@ from hyperloom.measure.runner.import_outcome import install_import_watch, refine
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog
+from hyperloom.measure.runner.trace_fit import fit_traces
 from hyperloom.measure.runner.own_tmp import own_tmpdir
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -545,10 +546,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _check_node(ctx, before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
     write_rounds(ctx.files, outcome)
-    try:
-        files = inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
-    except OutputRejected as exc:
-        raise RunnerFailure(exc.error_class, str(exc)) from exc
+    files = _inventory(ctx, spec)
     cold = cold_start(ctx.files)
     report = None if session is None else session.report(cold.builds)
     if report is not None:
@@ -560,6 +558,17 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         refine_imports(refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds), farm),
         _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
     )
+
+
+def _inventory(ctx: _Context, spec: MeasurementSpec) -> tuple[ManifestFile, ...]:
+    """The output's files, a profile's traces first fitted under the size cap as far as they can be (``trace_fit``)."""
+    fitted = fit_traces(ctx.files, spec.outputs.max_total_bytes)
+    if fitted is not None:
+        ctx.notes.append(fitted)
+    try:
+        return inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
+    except OutputRejected as exc:
+        raise RunnerFailure(exc.error_class, str(exc)) from exc
 
 
 def _timing(ctx: _Context, received: float, cold: ColdStart) -> dict[str, object]:

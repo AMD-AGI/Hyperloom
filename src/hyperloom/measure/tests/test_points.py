@@ -22,6 +22,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.measure.points import (
+    AGENTX_PROFILE_STEPS,
     CANONICAL_FILE,
     PointError,
     accept_measurement,
@@ -29,6 +30,7 @@ from hyperloom.measure.points import (
     generate_points,
     generate_profile_point,
 )
+from hyperloom.measure.points import _limit_agentx_capture
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -370,12 +372,28 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
         extra_envs={"RUN_EVAL": "false"},
         model_path=str(model),
     )
+    _limit_agentx_capture(main_flow)  # the one difference: the window is sized to the result's cap
     enable_profile(main_flow)
     rendered = load(point)
     assert rendered == load(main_flow)
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+    assert rendered["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == AGENTX_PROFILE_STEPS
     assert "PROFILE" not in rendered["benchmark"]["envs"]
     assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
+
+
+def test_an_agentx_profile_captures_half_the_main_flows_steps_unless_its_point_names_a_count(tmp_path):
+    named, unnamed = tmp_path / "named.yaml", tmp_path / "unnamed.yaml"
+    named.write_text(
+        yaml.safe_dump({"benchmark": {"profiler": {"torch_profiler": {"num_steps": 64}}}}), encoding="utf-8"
+    )
+    unnamed.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang"}}), encoding="utf-8")
+
+    _limit_agentx_capture(named)
+    _limit_agentx_capture(unnamed)
+
+    assert load(named)["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == 64
+    assert load(unnamed)["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == AGENTX_PROFILE_STEPS == 256 // 2
 
 
 def test_acceptance_generates_the_agentx_profile_point_for_a_profile_request(agentx_canonical, blobs, tmp_path):
