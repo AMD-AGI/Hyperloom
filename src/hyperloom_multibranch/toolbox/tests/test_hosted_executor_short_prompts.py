@@ -29,7 +29,6 @@ from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom_multibranch.toolbox.hosted_executor import REFERENCES_DIR, HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
-from hyperloom_multibranch.toolbox.short_prompt_cap import CAP_MARGIN_FRACTION, CAP_MARGIN_SEC
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
@@ -198,23 +197,3 @@ async def test_test_result_shows_the_check_with_its_counts_and_its_reference(tmp
         shown["self_consistency"]["mismatches"][1] > 0 and shown["self_consistency"]["first_difference"]["process"] == 1
     )
     assert ShortPromptPlan.parse(PLAN.to_document(), "x") == PLAN
-
-
-async def test_a_check_is_capped_by_the_pack_until_a_boot_is_measured_then_by_the_sessions_measured_times(
-    tmp_path: Path, rig, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    session = _Session(tmp_path, rig, PLAN)
-    caps: list[float] = []
-    run_test = rig.backend.run_test
-
-    def recording(call):  # type: ignore[no-untyped-def]
-        caps.append(call.short_prompts.phase_cap_sec)
-        return run_test(call)
-
-    monkeypatch.setattr(rig.backend, "run_test", recording)
-
-    first = await session.run(GOOD)
-    await session.run(GOOD)
-
-    boot = max(80.0, first.cold_start_seconds or 0.0)  # the stand-in's processes each boot in 80 s and answer in 20 s
-    assert caps == [PLAN.phase_cap_sec, round(6 * (boot + 20.0) * (1 + CAP_MARGIN_FRACTION) + CAP_MARGIN_SEC, 1)]

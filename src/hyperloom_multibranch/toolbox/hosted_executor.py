@@ -79,7 +79,6 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_warning_difference,
 )
 from hyperloom_multibranch.toolbox import long_context
-from hyperloom_multibranch.toolbox.short_prompt_cap import CheckTimes, landed_processes
 from hyperloom_multibranch.toolbox.short_prompts import ReferenceStore, consistency_of, record_reference, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
@@ -130,9 +129,6 @@ class _Span(NamedTuple):
 class HostedExecutor:
     """Runs one attempt of a test through ``backend``.
 
-    The cap of a test's short-prompt check is sized from the server boots and prompt times the tests this executor ran
-    measured (:mod:`~hyperloom_multibranch.toolbox.short_prompt_cap`); the rule pack's cap until one boot is measured.
-
     Args:
         backend: A started hosted backend; the executor never starts or closes it.
         session_dir: The session directory; test output lands below ``<session_dir>/tests`` and a result's
@@ -159,7 +155,6 @@ class HostedExecutor:
         self._clock: Callable[[], float] = time.time
         self._workload = workload_kind
         self._references = ReferenceStore(self._session / REFERENCES_DIR)
-        self._check_times = CheckTimes()
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -176,7 +171,6 @@ class HostedExecutor:
         except subprocess.TimeoutExpired as expired:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
-        self._check_times.saw_boot(result.cold_start_seconds)
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
@@ -258,7 +252,7 @@ class HostedExecutor:
             ),
             avoid_nodes=tuple(job.avoid_nodes),
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
-            short_prompts=self._check_times.sized(accepted.short_prompts),
+            short_prompts=accepted.short_prompts,
             long_context=accepted.long_context,
         )
 
@@ -332,7 +326,6 @@ class HostedExecutor:
         if plan is None or result.validity is not Validity.SUCCEEDED:
             return result
         check = await asyncio.to_thread(consistency_of, plan, Path(call.output_dir), self._references)
-        self._check_times.saw_check(await asyncio.to_thread(landed_processes, Path(call.output_dir)))
         await asyncio.to_thread(
             record_reference, plan, check, Path(call.output_dir), self._references, result.request_id
         )

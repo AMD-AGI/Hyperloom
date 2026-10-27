@@ -16,7 +16,7 @@ from hyperloom.measure.short_prompts.client import CompletionError, complete, di
 from hyperloom.measure.short_prompts.compare import compare_outputs
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, OutputsError, read_outputs
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
-from hyperloom.measure.short_prompts.rounds import PassFailed, Serving, run_passes
+from hyperloom.measure.short_prompts.rounds import CAP_MARGIN_FRACTION, CAP_MARGIN_SEC, PassFailed, Serving, run_passes
 from hyperloom.measure.short_prompts.tests.support import (
     MODEL,
     FakeServer,
@@ -31,17 +31,26 @@ PLAN = ShortPromptPlan("short-prompts-test", "a" * 64, processes=6)
 class _Host:
     """Starts a fake server for each process; ``answers`` says how the process with that index answers."""
 
-    def __init__(self, answers: Callable[[int], object], *, failing: frozenset[int] = frozenset(), clock=None) -> None:
-        self._answers, self._failing, self._clock = answers, failing, clock
+    def __init__(
+        self,
+        answers: Callable[[int], object],
+        *,
+        failing: frozenset[int] = frozenset(),
+        clock=None,
+        boots: Callable[[int], float] = lambda index: 400.0,
+    ) -> None:
+        self._answers, self._failing, self._clock, self._boots = answers, failing, clock, boots
         self._server: FakeServer | None = None
         self.started: list[int] = []
+        self.deadlines: list[float] = []
         self.stopped = 0
         self.stop_now = False
 
     async def start(self, index: int, deadline: float) -> Serving:
         self.started.append(index)
+        self.deadlines.append(deadline)
         if self._clock is not None:
-            self._clock.now += 400.0
+            self._clock.now += self._boots(index)
         if index in self._failing:
             raise PassFailed("the server did not come up (test)")
         self._server = FakeServer(self._answers(index)).__enter__()
@@ -127,20 +136,62 @@ def test_a_server_that_breaks_on_a_prompt_fails_that_process_only(tmp_path):
     assert entries[1].status == OK
 
 
-def test_the_phase_cap_ends_the_check_with_the_reason_and_the_processes_it_got_to(tmp_path):
-    class _Clock:
-        now = 0.0
+class _Clock:
+    now = 0.0
 
-        def __call__(self) -> float:
-            return self.now
+    def __call__(self) -> float:
+        return self.now
 
+
+def _booted(output_dir, seconds: float) -> None:
+    """The ready stamp the launcher leaves beside the test's own server log: the test's server booted in ``seconds``."""
+    stamp = output_dir / "files" / "variant_00_test" / "bench" / "server_ready_at"
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text(f"1700000000.000 {seconds:.3f}\n", encoding="utf-8")
+
+
+def _sized(boot: float, answers: float = 0.0, processes: int = 6) -> float:
+    return processes * (boot + answers) * (1 + CAP_MARGIN_FRACTION) + CAP_MARGIN_SEC
+
+
+def test_the_first_check_is_capped_from_the_tests_own_boot_not_the_plans_fixed_cap(tmp_path):
+    clock = _Clock()
+    host = _Host(lambda index: good_answer, clock=clock)
+    _booted(tmp_path, 400.0)
+
+    entries = _run(host, tmp_path, PLAN, clock=clock)
+
+    assert PLAN.phase_cap_sec == 1200.0 and host.deadlines[0] == _sized(400.0) == 3120.0
+    assert [e.status for e in entries] == [OK] * 6, "six 400 s boots do not fit the plan's 1200 s, and fit 3120 s"
+    assert read_outputs(tmp_path).stopped == ""
+
+
+def test_with_no_boot_measured_the_plans_cap_holds_until_the_first_process_has_measured_one(tmp_path):
     clock = _Clock()
     host = _Host(lambda index: good_answer, clock=clock)
     plan = ShortPromptPlan("short-prompts-test", "a" * 64, processes=6, phase_cap_sec=1000.0)
 
     entries = _run(host, tmp_path, plan, clock=clock)
 
-    assert len(entries) == 2, "400 s each: a third would not fit in what is left of 1000 s"
+    assert host.deadlines[:2] == [1000.0, _sized(400.0)], "the plan's cap, then the cap the first boot sizes"
+    assert len(entries) == 6 and all(entry.boot_seconds == 400.0 for entry in entries)
+
+
+def test_the_cap_ends_a_check_whose_process_hangs_with_the_reason_and_the_processes_it_got_to(tmp_path):
+    clock = _Clock()
+    hangs = 2
+    host = _Host(
+        lambda index: good_answer,
+        clock=clock,
+        failing=frozenset({hangs}),
+        boots=lambda i: 900.0 if i == hangs else 100.0,
+    )
+    _booted(tmp_path, 100.0)
+
+    entries = _run(host, tmp_path, PLAN, clock=clock)
+
+    assert host.deadlines == [_sized(100.0)] * 3, "a failed process measures nothing, so the cap stays 870 s"
+    assert [e.status for e in entries] == [OK, OK, FAILED], "1100 s have passed: nothing fits in what is left"
     assert "phase cap" in read_outputs(tmp_path).stopped
 
 
