@@ -1184,6 +1184,47 @@ def test_levers_awaiting_the_cycle_screen_are_neither_bundled_nor_attributed_by_
     assert framework_lever_grid(state) == []
 
 
+def test_a_bundle_takes_the_levers_the_cycle_bench_passed_and_those_it_never_screened():
+    """A screened lever joins only on a positive estimate; one the screen gave back joins as it did before it."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import (
+        ATTRIBUTION_CYCLE_BENCH,
+        ATTRIBUTION_CYCLE_BROKEN,
+        ATTRIBUTION_CYCLE_INCONCLUSIVE,
+    )
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    screened = [
+        ("HL_PASS", 0.8, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_NEUTRAL", -0.2, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_REGRESS", -3.1, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_BROKEN", None, ATTRIBUTION_CYCLE_BROKEN),
+        ("HL_GIVEN_BACK", None, ATTRIBUTION_CYCLE_INCONCLUSIVE),
+        ("HL_UNSCREENED", None, None),
+    ]
+    for i, (name, gain, source) in enumerate(screened):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+        if source:
+            state.record_framework_lever_attribution(name, gain_pct=gain, source=source)
+
+    variant = dormant_lever_bundle(state)
+
+    assert variant is not None
+    assert variant["framework_lever_bundle"] == ["HL_GIVEN_BACK", "HL_PASS", "HL_UNSCREENED"]
+
+
+def test_no_bundle_forms_when_the_screen_leaves_one_patch_eligible():
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    for i, (name, gain) in enumerate((("HL_PASS", 0.8), ("HL_REGRESS", -3.1))):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+        state.record_framework_lever_attribution(name, gain_pct=gain, source=ATTRIBUTION_CYCLE_BENCH)
+
+    assert dormant_lever_bundle(state) is None
+
+
 @pytest.mark.asyncio
 async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no_bundle(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict

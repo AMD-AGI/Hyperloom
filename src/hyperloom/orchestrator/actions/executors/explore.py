@@ -65,7 +65,7 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from . import cycle_bench_arm as _cycle_bench
 from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
-from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -339,10 +339,19 @@ def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
     Each was kept dormant for missing the KEEP threshold alone; together is the only way several of them clear it,
     which is how the hand-tuned GLM-5.3 stack landed most of its 44 patches.
     """
-    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on")]
+    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
     if len(_by_patch(dormant)) < 2:
         return None
     return _switch_manifest.bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _screened_out(row: dict[str, Any]) -> bool:
+    """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
+    source = row.get("attribution_source")
+    if source == ATTRIBUTION_CYCLE_BROKEN:
+        return True
+    gain = row.get("attributed_gain_pct")
+    return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
 
 
 def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
