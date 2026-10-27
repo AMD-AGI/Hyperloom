@@ -14,10 +14,12 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FALLBACK,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
     SOURCE_GEAK_AUTHORED_KERNEL,

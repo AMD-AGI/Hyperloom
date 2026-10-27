@@ -694,7 +694,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 61
 function-lines src/kernelforge/rewrite_by_flydsl/report.py::build_result 55
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::_Rewrite.finish 61
 function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1761
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1755
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2612
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2719
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1762
@@ -716,7 +716,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1334
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4004
+module-lines src/hyperloom/orchestrator/phases/kernel.py 4003
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1928
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2488
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565

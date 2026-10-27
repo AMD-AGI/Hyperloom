@@ -10,9 +10,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE, REBENCH_VALIDATED
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
-    REBENCH_NO_PROMOTE,
-    REBENCH_VALIDATED,
     ROUTE_FORGE,
     ROUTE_GEAK,
     make_kernel_recorder,
