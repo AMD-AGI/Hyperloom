@@ -640,3 +640,25 @@ def test_a_missing_installer_ends_the_run_finally(run, monkeypatch):
 def test_the_installer_the_entry_names_is_the_packaged_asset_beside_the_optimizer():
     assert INSTALL_REAL.is_file()
     assert INSTALL_REAL.parent.parts[-3:] == ("hyperloom", "inference_optimizer", "assets")
+
+
+def test_the_installer_installs_into_the_running_venv_and_optimize_finds_its_scripts(run, monkeypatch, tmp_path):
+    venv = tmp_path / "state-venv"
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}{venv}/bin")  # the venv is on PATH, but not first
+    run.installer.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$PYTHON" "$VIRTUAL_ENV" "$INFERENCE_OPTIMIZER_FORCE_PYTHON" "${{PATH%%:*}}" > {run.work}/installer-env\n'
+    )
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    assert (run.work / "installer-env").read_text().split("\n")[:-1] == [
+        str(venv / "bin" / "python"),
+        str(venv),
+        "1",
+        str(venv / "bin"),
+    ]
+    assert fake.environments[0]["PATH"].split(os.pathsep)[0] == str(venv / "bin")
+    assert fake.environments[0]["PATH"].split(os.pathsep).count(str(venv / "bin")) == 1

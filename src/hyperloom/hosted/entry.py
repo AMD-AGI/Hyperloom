@@ -106,9 +106,34 @@ def _run() -> int:
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
         _write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
+    _put_interpreter_first_on_path()
     _run_installer(info.state_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+def _put_interpreter_first_on_path() -> None:
+    """Make the directory of the running interpreter the first entry of ``PATH`` for the installer and ``optimize``.
+
+    The console scripts the installer puts into the run's environment (the TraceLens CLIs) live there.
+    """
+    bin_dir = str(Path(sys.executable).parent)
+    entries = [item for item in os.environ.get("PATH", "").split(os.pathsep) if item and item != bin_dir]
+    os.environ["PATH"] = os.pathsep.join([bin_dir, *entries])
+
+
+def _installer_environment() -> dict[str, str]:
+    """The environment of ``install.sh``: the running interpreter and its environment are the ones it installs into.
+
+    Without ``INFERENCE_OPTIMIZER_FORCE_PYTHON`` the script prefers the image's ``/opt/venv`` over ``PYTHON``, where this
+    wheel is not installed.
+    """
+    environment = dict(os.environ)
+    environment["PYTHON"] = sys.executable
+    environment["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
+    if sys.prefix != sys.base_prefix:
+        environment["VIRTUAL_ENV"] = sys.prefix
+    return environment
 
 
 def _run_installer(state_dir: Path) -> None:
@@ -126,6 +151,7 @@ def _run_installer(state_dir: Path) -> None:
                 ["bash", str(INSTALL_SCRIPT)],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
+                env=_installer_environment(),
                 stderr=subprocess.STDOUT,
                 check=False,
             ).returncode

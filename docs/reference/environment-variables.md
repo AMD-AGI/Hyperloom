@@ -1059,7 +1059,7 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 `hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
 `HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
 packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
-wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, with its
+wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
 output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
 with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
