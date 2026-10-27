@@ -54,6 +54,9 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return replace(runner_template(name, gpus=gpus), envs=dict(envs or {}))
 
     monkeypatch.setattr(local_hosted, "local_runner_template", fake_runner)
+    # The image's variables are this process's own (ROCM_PATH, LD_LIBRARY_PATH, HIP_* on a GPU machine): a test's
+    # toolbox starts from ``runner_envs`` alone, so what a test asserts does not depend on the machine it runs on.
+    monkeypatch.setattr(local_hosted, "image_env", dict)
     made: list[LocalHostedToolbox] = []
 
     async def make(
