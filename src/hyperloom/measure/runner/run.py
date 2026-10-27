@@ -68,6 +68,7 @@ from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, b
 from hyperloom.measure.runner.import_outcome import install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
+from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog
 from hyperloom.measure.runner.own_tmp import own_tmpdir
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -489,8 +490,12 @@ def _jit_session(
 
 def _own_directories(ctx: _Context, call: TestCall, session: JitCacheSession | None, farm: Farm | None) -> TestCall:
     """``call`` with the test's compiled-code cache, the tables its farm patches and, when the cache gives aiter no JIT
-    directory, one of the test's own, so nothing the server builds lands in the image."""
+    directory, one of the test's own, so nothing the server builds lands in the image. A point that rebuilds stale aiter
+    modules at its first prefill gets a watchdog that waits for the builds (``rebuild_watchdog``)."""
     own = own_aiter_jit(call, farm, session, ctx.environ, ctx.work / OWN_AITER_JIT_DIR)
+    raised = raise_rebuild_watchdog(call, farm, ctx.environ, ctx.work)
+    if raised is not None:
+        ctx.notes.append(raised)
     return dataclasses.replace(
         call, jit=session, tables_patch=patched_configs(farm), env_overrides={**call.env_overrides, **own}
     )

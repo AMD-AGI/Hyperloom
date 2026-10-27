@@ -70,6 +70,7 @@ from hyperloom_multibranch.toolbox.tools.tune_tables import (
     tables_summary,
 )
 from hyperloom_multibranch.toolbox.tools.tune_jit import own_jit_dir
+from hyperloom_multibranch.toolbox.tools.tune_rebuild import rebuild_warning
 
 __all__ = [
     "DEFAULT_TIMEOUT_SEC",
@@ -313,7 +314,8 @@ class KernelTuneTool:
             tables = await self._tune_all(plan, lease, workdir, int(params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)))
         finally:
             self._leases.release(lease.lease_id)
-        return _output(plan, lease, tables, str(params.get(TEST_PARAM, "")))
+        rebuild = await asyncio.to_thread(rebuild_warning, tables, self._configs)
+        return _output(plan, lease, tables, str(params.get(TEST_PARAM, "")), rebuild)
 
     async def _lease(self, workdir: Path) -> BranchLease:
         try:
@@ -364,7 +366,9 @@ class KernelTuneTool:
         return read_run(demand, out, done, self._configs, plan.max_err_ratio)
 
 
-def _output(plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_request_id: str) -> ToolOutput:
+def _output(
+    plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_request_id: str, rebuild: str | None = None
+) -> ToolOutput:
     workload = plan.workload
     result = {
         "source": {"shapes": plan.source, "test_request_id": test_request_id},
@@ -384,8 +388,12 @@ def _output(plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_reque
         + (_RELAXED.format(limit=plan.max_err_ratio) if plan.max_err_ratio > ERR_RATIO_LIMIT else ""),
         "advice": _ADVICE,
     }
+    summary = f"{tables_summary(tables)}; microseconds are advice only"
+    if rebuild is not None:
+        result["rebuild_warning"] = rebuild
+        summary = f"{summary}. WARNING: {rebuild}"
     ok = any(table.status in (TableStatus.TUNED, TableStatus.NO_ROWS) for table in tables)
-    return ToolOutput(result=result, summary=f"{tables_summary(tables)}; microseconds are advice only", ok=ok)
+    return ToolOutput(result=result, summary=summary, ok=ok)
 
 
 def kernel_tune_tool(leases: BranchLeases, configs: Path) -> KernelTuneTool:
