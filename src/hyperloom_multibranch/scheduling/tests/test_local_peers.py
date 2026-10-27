@@ -24,7 +24,7 @@ import pytest
 import yaml
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
-from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -46,7 +46,7 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
-from hyperloom_multibranch.notebook.tests.factories import START, intent, judgement, profile, request, result
+from hyperloom_multibranch.notebook.tests.factories import START, delta, intent, judgement, profile, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.critic import NoCritic
@@ -637,6 +637,24 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     }
     assert served <= tools
     assert all(entry.name.startswith(SESSION_PREFIX) for entry in layout.root.iterdir())
+
+
+async def test_a_plain_explore_runs_no_accuracy_eval_while_confirm_and_integration_tests_still_do(
+    built: _Built,
+) -> None:
+    peers = built.peers
+    root = await peers.repo.init_root(Recipe(IMAGE.digest))
+    notebook = LocalNotebook(built.layout.notebook, Writer(Role.SCHEDULER, "test-scheduler"))
+
+    async def submitted(purpose: Purpose, retest_of: str | None = None) -> TestRequest:
+        test = TestRequest(TestKind.TEST, purpose, "b01", root, delta(), retest_of=retest_of)
+        return (await notebook.record(await peers.toolbox.submit_test(test))).request
+
+    explore = await submitted(Purpose.EXPLORE)
+    confirm = await submitted(Purpose.CONFIRM, explore.request_id)
+    integration = await submitted(Purpose.INTEGRATION)
+
+    assert (explore.accuracy, confirm.accuracy, integration.accuracy) == (False, True, True)
 
 
 async def test_a_session_that_lends_no_dev_sandboxes_serves_no_dev_sandbox_tools(built: _Built) -> None:

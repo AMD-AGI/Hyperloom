@@ -336,7 +336,8 @@ def _toolbox(
     host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement
 ) -> RealToolbox:
     """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
-    canonical measurement, and compiled from the session's blob store."""
+    canonical measurement, and compiled from the session's blob store. A plain explore runs no accuracy evaluation:
+    the rule gate judges it on throughput, and the confirm that follows a candidate runs the evaluation."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
@@ -358,7 +359,7 @@ def _toolbox(
     return host.backend.toolbox(
         setup,
         LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind),
+        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
         spec,
     )
 
