@@ -49,7 +49,6 @@ from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, Speci
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ConflictingWrite
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, NotebookSnapshot, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
-from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring, probation_event
 from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay, envelope_breaches
 from hyperloom_multibranch.notebook.rsi.session import judge_history, judge_open_areas
@@ -139,9 +138,8 @@ class Steering:
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the specialist lifecycle, which reports
-    each running branch's specialist, the frontier policy ``progress`` scores with and why it was chosen, the
-    toolbox the native builds each branch's tests wait for are read from, and the scheduling playbook the session
-    plays, ``None`` for a session that reads no archive."""
+    each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, and
+    the scheduling playbook the session plays, ``None`` for a session that reads no archive."""
 
     judge: Judge
     interval_seconds: float
@@ -151,7 +149,6 @@ class Steering:
     similarity: BranchSimilarity
     events: SessionEvents
     specialists: SpecialistLifecycle
-    frontier_policy: PolicyChoice
     toolbox: Toolbox
     play: PlaybookPlay | None = None
 
@@ -195,7 +192,6 @@ class Explorer:
         self._similarity = steering.similarity
         self._events = steering.events
         self._specialists = steering.specialists
-        self._frontier_policy = steering.frontier_policy
         self._toolbox = steering.toolbox
         self._play = steering.play
         self._scored: tuple[BranchProgress, ...] = ()
@@ -356,8 +352,6 @@ class Explorer:
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
             specialists=specialists,
             held=await self._held(specialists, progress),
-            frontier_policy=self._frontier_policy,
-            frontier_scorer=self._progress.guard.label,
             queued=queued_intents(snapshot.records, snapshot.intents),
             building=await waiting_builds(self._toolbox, snapshot.records),
         )

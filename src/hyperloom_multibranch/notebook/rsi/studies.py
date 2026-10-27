@@ -6,10 +6,6 @@
 ``python -m hyperloom_multibranch.notebook.rsi.studies`` runs each study and prints its report, in markdown or, with
 ``--json``, as JSON:
 
-* ``frontier --archive DIR [--log SESSION_ID=frontier.jsonl ...]``: the frontier calibration (:mod:`rsi.calibration`),
-  with the island bandit's rows (:mod:`rsi.bandit`), the scorers of :func:`rsi.scorers.custom_scorers` and the
-  expressions of the archive's pool beside it, each judged on the whole archive: for reference, since a session
-  counts only the sessions that started after a scorer was registered;
 * ``scheduling --archive DIR [--archive DIR ...] [--runs N] [--beyond optimistic|pessimistic]``: the scheduling
   playbooks of :func:`rsi.replay.variants` replayed on every archived session beside the archive (:mod:`rsi.replay`),
   the playbook's offline evaluation; ``replay-check`` with the same archives checks that replay
@@ -37,19 +33,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.llm_config import AnthropicCompletionRequest, aanthropic_completion
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
-from hyperloom_multibranch.notebook.rsi.bandit import bandit_baselines
-from hyperloom_multibranch.notebook.rsi.calibration import (
-    ROUND_SECONDS,
-    Baseline,
-    CalibrationSettings,
-    calibrate,
-    scorer_baseline,
-)
-from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
 from hyperloom_multibranch.notebook.rsi.family_stats import family_report
 from hyperloom_multibranch.notebook.rsi.generations import GENERATION_RUNS, GENERATIONS, Evolving, generations
@@ -65,7 +51,6 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     compare,
     variants,
 )
-from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
 from hyperloom_multibranch.notebook.rsi.stops import stall_study
 
 log = logging.getLogger(__name__)
@@ -80,34 +65,6 @@ COMPLETION_SECONDS = 300.0
 
 class StudyError(ValueError):
     """A study cannot run on what it was given."""
-
-
-def _session_log(text: str) -> tuple[str, Path]:
-    session_id, separator, path = text.partition("=")
-    if not separator or not session_id or not path:
-        raise argparse.ArgumentTypeError(f"expected SESSION_ID=PATH, got {text!r}")
-    return session_id, Path(path)
-
-
-def _scorer_rows(archive: Path) -> list[Baseline]:
-    """The scorers of :func:`custom_scorers` and the expressions of ``archive``'s pool, as rows judged on the whole
-    archive."""
-
-    rows = [scorer_baseline(scorer) for scorer in custom_scorers()]
-    for record in ScorerPool(archive).expressions():
-        try:
-            rows.append(scorer_baseline(ExpressionScorer.read(record.label, record.expression)))
-        except ExpressionError as exc:
-            log.warning("left out the pooled frontier scorer %s: %s", record.label, exc)
-    return rows
-
-
-def _frontier(args: argparse.Namespace) -> Any:
-    logs = {session_id: read_jsonl(path, skip_malformed=True, skip_non_dict=True) for session_id, path in args.log}
-    trees = TreeArchive(args.archive).load()
-    settings = CalibrationSettings(round_seconds=args.round_seconds, horizon_seconds=args.horizon_seconds)
-    baselines = [*bandit_baselines(trees), *_scorer_rows(args.archive)]
-    return calibrate(trees, logs=logs, settings=settings, baselines=baselines)
 
 
 def _learnings(args: argparse.Namespace) -> Any:
@@ -209,11 +166,6 @@ def _parser() -> argparse.ArgumentParser:
         sub.set_defaults(run=run)
         return sub
 
-    frontier = command("frontier", _frontier, "calibrate the frontier scores on the archived sessions")
-    frontier.add_argument(_ARCHIVE, type=Path, required=True)
-    frontier.add_argument("--log", type=_session_log, action="append", default=[], metavar="SESSION_ID=PATH")
-    frontier.add_argument("--round-seconds", type=float, default=ROUND_SECONDS)
-    frontier.add_argument("--horizon-seconds", type=float, default=None)
     replayed = command("scheduling", _scheduling, "replay the scheduling playbooks on every archived session")
     _archives(replayed)
     replayed.add_argument(_RUNS, type=int, default=REPLAY_RUNS)

@@ -8,9 +8,9 @@
   paired gain over the champion stays above 0 across the archived sessions both ways beyond the data; a change to a
   rule cannot be replayed and goes on to R2.
 * R2, :func:`r2`: the judge's own decision points (:func:`archived_points`), the prompts the archived sessions' judge
-  was asked, asked again with the candidate's playbook and the champion's. A point counts where its outcome is known: a stop at most
-  :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a stop at or past
-  the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion. A rule
+  was asked, asked again with the candidate's playbook and the champion's. A point counts where its outcome is known:
+  a stop at most :data:`EARLY_STOP_TESTS` judged tests past a commit, which the playbook should have prevented, and a
+  stop at or past the stall bar, which it should keep. The candidate passes when it gets more of them right than the champion. A rule
   change also replays :data:`JUDGED_SESSIONS` sessions :data:`JUDGED_RUNS` times each under either playbook with the
   judge asked every round (:func:`r2_sessions`), and passes when its best gain beats the champion's, paired run by
   run.

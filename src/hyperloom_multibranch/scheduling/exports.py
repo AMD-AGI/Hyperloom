@@ -10,12 +10,12 @@ archive, marking the replays of the champions PRELUDE prepared from another imag
 learnings go nowhere while MB1 runs on no Experience KB, see
 :func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
-LLM writes a generation of frontier scorers into the pool beside the archive (:func:`author_scorers`) and curates the
-RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps that never
-stop CLOSE; ``session_breakdown.json``, which also counts how the merges went and how each met a conflicting patch
-from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the whole image check the
-session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last time with the queue
-the stop left.
+LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
+curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
+that never stop CLOSE; ``session_breakdown.json``, which also counts how the merges went and how each met a
+conflicting patch from the integrator's merge log, the knowledge steps' receipts and :data:`IMAGE_CHECK_FILE`, the
+whole image check the session ran before its first phase, land in ``MB-reports/``, and the dashboard is rebuilt a last
+time with the queue the stop left.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import (
 )
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
-from hyperloom_multibranch.notebook.rsi.authoring import author_scorers
+from hyperloom_multibranch.notebook.rsi.authoring import author_playbook
 from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -81,18 +81,18 @@ _LOST_CONFLICTS = {
 }
 
 
-def knowledge_steps(knowledge: KnowledgeClose, scorers: CloseStep, curation: CloseStep) -> dict[str, CloseStep]:
-    """The knowledge steps, the scorers' step and the lesson pool's curation by their names in ``close.knowledge``:
+def knowledge_steps(knowledge: KnowledgeClose, playbook: CloseStep, curation: CloseStep) -> dict[str, CloseStep]:
+    """The knowledge steps, the playbook's step and the lesson pool's curation by their names in ``close.knowledge``:
     the steps of the breakdown and of the CLOSE report alike."""
 
-    return {**knowledge.steps(), "scorers": scorers, "lesson_curation": curation}
+    return {**knowledge.steps(), "playbook": playbook, "lesson_curation": curation}
 
 
-def knowledge_document(knowledge: KnowledgeClose, scorers: CloseStep, curation: CloseStep) -> dict[str, object]:
+def knowledge_document(knowledge: KnowledgeClose, playbook: CloseStep, curation: CloseStep) -> dict[str, object]:
     """The :func:`knowledge_steps` as JSON-ready data: ``close.knowledge`` of the breakdown and of the CLOSE report
     alike."""
 
-    return {name: encode(step) for name, step in knowledge_steps(knowledge, scorers, curation).items()}
+    return {name: encode(step) for name, step in knowledge_steps(knowledge, playbook, curation).items()}
 
 
 def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
@@ -151,32 +151,32 @@ def _merge_statistics(merge_log: Sequence[Mapping[str, Any]]) -> dict[str, objec
 
 @dataclass(frozen=True)
 class CloseExports:
-    """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the generation of frontier scorers, the
-    breakdown file, the dashboard files, and the curation of the RSI lesson pool."""
+    """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the proposed change to the scheduling
+    playbook, the breakdown file, the dashboard files, and the curation of the RSI lesson pool."""
 
     kb_write_back: RemoteWriteResult
     knowledge: KnowledgeClose
-    scorers: CloseStep
+    playbook: CloseStep
     breakdown: Path
     dashboard: DashboardFiles
     curation: CloseStep
 
     def knowledge_steps(self) -> dict[str, CloseStep]:
-        """The knowledge steps, the scorers' step and the curation: the steps the CLOSE report lists."""
+        """The knowledge steps, the playbook's step and the curation: the steps the CLOSE report lists."""
 
-        return knowledge_steps(self.knowledge, self.scorers, self.curation)
+        return knowledge_steps(self.knowledge, self.playbook, self.curation)
 
     def knowledge_document(self) -> dict[str, object]:
-        """The knowledge steps, the scorers' step and the curation as JSON-ready data: the breakdown's
+        """The knowledge steps, the playbook's step and the curation as JSON-ready data: the breakdown's
         ``close.knowledge``."""
 
-        return knowledge_document(self.knowledge, self.scorers, self.curation)
+        return knowledge_document(self.knowledge, self.playbook, self.curation)
 
 
 @dataclass(frozen=True)
-class ScorerAuthoring:
-    """The completion CLOSE asks for a generation of frontier scorers, and ``model``, the model it runs on, which
-    each written scorer's provenance names."""
+class CloseAuthoring:
+    """A completion CLOSE asks to write into the RSI pools, and ``model``, the model it runs on, which the provenance
+    of what it writes names."""
 
     completion: Completion
     model: str
@@ -200,12 +200,12 @@ class ExportSources:
 @dataclass(frozen=True)
 class ExportServices:
     """What CLOSE calls out to: the Recipe KB the final recipe is written back to, ``None`` when none is configured,
-    the LLM that writes a generation of frontier scorers, and the one that curates the RSI lesson pool, in the same
-    shape."""
+    the LLM that proposes a change to the scheduling playbook, and the one that curates the RSI lesson pool, in the
+    same shape."""
 
     kb_client: RemoteRecipeClient | None
-    scorers: ScorerAuthoring
-    curator: ScorerAuthoring
+    author: CloseAuthoring
+    curator: CloseAuthoring
 
 
 class SessionExports:
@@ -224,7 +224,7 @@ class SessionExports:
         services: ExportServices,
     ) -> None:
         self._layout = layout
-        self._scorers = services.scorers
+        self._author = services.author
         self._curator = services.curator
         self._kb_client = services.kb_client
         self._notebook = sources.notebook
@@ -252,10 +252,10 @@ class SessionExports:
             layout=self._layout,
             cross_image=_cross_image(self._warm_leads),
         )
-        scorers = await author_scorers(snapshot, self._ask_scorers, model=self._scorers.model)
+        playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
         curation = await self._curate(snapshot)
         selection = encode(final) if final is not None else None
-        stepped = knowledge_document(knowledge, scorers, curation)
+        stepped = knowledge_document(knowledge, playbook, curation)
         merges = _merge_statistics(read_jsonl(self._layout.merges))
         document = build_breakdown(
             snapshot,
@@ -275,10 +275,10 @@ class SessionExports:
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
-        return CloseExports(kb_write_back, knowledge, scorers, breakdown, dashboard, curation)
+        return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation)
 
-    async def _ask_scorers(self, system: str, user: str) -> str:
-        return (await self._scorers.completion(system, user)).text
+    async def _ask_author(self, system: str, user: str) -> str:
+        return (await self._author.completion(system, user)).text
 
     async def _curate(self, snapshot: NotebookSnapshot) -> CloseStep:
         """The lesson pool curated by the session's curator, after the knowledge steps published to it."""
@@ -316,8 +316,8 @@ __all__ = [
     "KB_FAILED",
     "CloseExports",
     "ExportServices",
+    "CloseAuthoring",
     "ExportSources",
-    "ScorerAuthoring",
     "SessionExports",
     "knowledge_document",
     "knowledge_steps",

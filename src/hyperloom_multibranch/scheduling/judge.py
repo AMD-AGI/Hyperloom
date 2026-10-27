@@ -15,8 +15,9 @@ never calls a peer; the scheduler applies its decision. The judge may neither st
 (:func:`held_branches`): a specialist branch until :data:`SETTLED_TESTS` of its explore tests measured and a repair
 branch for its protected period, unless its specialist gave up or its judging failed, and a branch with a candidate
 waiting for its confirm, unless its judging failed; the RSI playbook's safety envelope holds a branch with a near-bar
-or a stranded lead and one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again as it applies the decision, since a candidate can start waiting
-while the judge answers, and :func:`hold_decision` refuses their orders and names them in the decision.
+or a stranded lead and one drawn for probation (:func:`envelope_holds`). The scheduler finds the held branches again
+as it applies the decision, since a candidate can start waiting while the judge answers, and :func:`hold_decision`
+refuses their orders and names them in the decision.
 """
 
 from __future__ import annotations
@@ -38,7 +39,6 @@ from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.notebook import STALL_TESTS
-from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import (
     NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
@@ -93,12 +93,9 @@ the slots left open your branches. You do not admit them; stop a branch that is 
 start.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
-A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
-of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
-capped it; trust a measured trend over a floor. frontier_policy names the scoring's variation and the evidence it was
-chosen on: default, or the one that ranked the branches of similar past sessions better. frontier_policy's scorer is
-the formula behind every expected_gain_pct now: frontier-v1, or another scorer the calibration or the user chose,
-which falls back to frontier-v1 for the rest of the session once it has failed too often.
+A branch's basis says what its expected gain rests on: its own trend, the floor of a direction still being observed,
+the floor of a branch too new to have a trend, or the roofline headroom that capped it; trust a measured trend over a
+floor.
 A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
 reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
 count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
@@ -248,8 +245,6 @@ class JudgeView:
     maps a running specialist branch to what the specialist runtime knows of its specialist; a branch whose
     specialist's state is not known is not in it. ``held`` maps each branch the judge may neither stop nor lower the
     K of to why, as :func:`held_branches` finds them when the view is built; it is what the prompt shows.
-    ``frontier_policy`` is the policy the frontier scores rest on, with its label and evidence, and
-    ``frontier_scorer`` the label of the scorer that scores now, ``frontier-v1`` once the chosen one fell back.
     ``queued`` maps a branch to its explore tests not measured yet, as :func:`queued_intents` finds them, and
     ``building`` to the native builds not ready yet that its tests in flight wait for; a branch with none is not in
     either. ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
@@ -283,8 +278,6 @@ class JudgeView:
     scheduler_llm_usd: float
     specialists: Mapping[str, SpecialistStatus]
     held: Mapping[str, HoldReason]
-    frontier_policy: PolicyChoice
-    frontier_scorer: str
     queued: Mapping[str, tuple[QueuedIntent, ...]]
     building: Mapping[str, tuple[BuildStatus, ...]]
     open_areas: str = ""
@@ -529,11 +522,6 @@ def render_prompt(view: JudgeView) -> str:
     progress = {row.branch: row for row in view.progress}
     state = {
         "metric": view.metric,
-        "frontier_policy": {
-            "label": view.frontier_policy.label,
-            "evidence": view.frontier_policy.evidence,
-            "scorer": view.frontier_scorer,
-        },
         "opening": view.opening,
         "caps": asdict(view.caps),
         "free_branch_slots": view.free_slots,

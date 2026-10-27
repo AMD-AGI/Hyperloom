@@ -153,7 +153,8 @@ class BuildOutcome(str, Enum):
 
 class UsageSource(str, Enum):
     """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver, the rule gate's fix
-    critic, the LLM that writes frontier scorers at CLOSE, or the one that curates the RSI lesson pool there."""
+    critic, the LLM that proposes a change to the scheduling playbook at CLOSE, recorded as ``scorer`` in every
+    notebook, or the one that curates the RSI lesson pool there."""
 
     SPECIALIST = "specialist"
     JUDGE = "judge"

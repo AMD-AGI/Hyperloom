@@ -63,7 +63,6 @@ from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
-    FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
     PlaybookMode,
@@ -145,11 +144,6 @@ def test_run_defaults() -> None:
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
         judge_interval_seconds=600.0,
     )
-    assert _settings().frontier_policy is FrontierPolicyMode.AUTO
-
-
-def test_frontier_policy_can_keep_the_defaults() -> None:
-    assert _settings("--frontier-policy", "default").frontier_policy is FrontierPolicyMode.DEFAULT
 
 
 def test_a_session_plays_the_champion_playbook_unless_it_is_a_challenger_session() -> None:
@@ -157,17 +151,6 @@ def test_a_session_plays_the_champion_playbook_unless_it_is_a_challenger_session
     assert _settings("--playbook", "challenger").playbook is PlaybookMode.CHALLENGER
     with pytest.raises(SystemExit):
         _settings("--playbook", "favourite")
-
-
-def test_frontier_scorer_pins_the_scorer_the_session_scores_with() -> None:
-    assert _settings().frontier_scorer == ""
-    assert _settings("--frontier-scorer", "bandit-rv").frontier_scorer == "bandit-rv"
-
-
-def test_a_pinned_frontier_scorer_must_be_one_the_session_can_find() -> None:
-    cli.require_frontier_scorer("bandit-rv", "output_throughput")
-    with pytest.raises(ValueError, match="no-such-scorer"):
-        cli.require_frontier_scorer("no-such-scorer", "output_throughput")
 
 
 def test_run_options_override_the_defaults() -> None:
@@ -247,8 +230,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
-        ["run", *WORKLOAD_ARGS, "--frontier-policy", "bandit"],
-        ["run", *WORKLOAD_ARGS, "--frontier-policy", "default", "--frontier-scorer", "bandit-rv"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
         ["run", *WORKLOAD_ARGS, "--workload", "sharegpt"],
         ["run", *_without(WORKLOAD_ARGS, "--isl")],

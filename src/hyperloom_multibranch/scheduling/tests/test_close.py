@@ -42,7 +42,7 @@ from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecip
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.notebook.knowledge.tests.test_recipe_writeback import final
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
-from hyperloom_multibranch.notebook.rsi.authoring import AUTHORING_SYSTEM_PROMPT
+from hyperloom_multibranch.notebook.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
@@ -56,9 +56,9 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.exports import (
     IMAGE_CHECK_FILE,
+    CloseAuthoring,
     ExportServices,
     ExportSources,
-    ScorerAuthoring,
     SessionExports,
     step_lines,
 )
@@ -242,7 +242,7 @@ def _closer(
         blobs.put((recipe.files_root / path).read_bytes())
     dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
     sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
-    services = ExportServices(kb_client, ScorerAuthoring(author, AUTHOR_MODEL), ScorerAuthoring(curator, AUTHOR_MODEL))
+    services = ExportServices(kb_client, CloseAuthoring(author, AUTHOR_MODEL), CloseAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
@@ -285,8 +285,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     for step in ("experiences", "learnings"):
         assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, MB_FAKE_EXPERIENCE_KB)
     assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
-    assert [system for system, _user in author.calls] == [AUTHORING_SYSTEM_PROMPT]
-    assert knowledge["scorers"]["status"] in (WRITTEN, SKIPPED)
+    assert [system for system, _user in author.calls] == [PLAYBOOK_SYSTEM_PROMPT]
+    assert knowledge["playbook"]["status"] in (WRITTEN, SKIPPED)
     # The session wrote no learning, so the pool holds none to curate and the curator is not asked.
     assert (knowledge["lesson_curation"]["status"], knowledge["lesson_curation"]["reason"]) == (SKIPPED, NO_LESSONS)
     assert curator.calls == [] and knowledge["lessons"]["status"] == SKIPPED
@@ -306,7 +306,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     markdown = layout.report_markdown.read_text()
     assert "Chosen: integration `i1`" in markdown
     assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
-    assert f"Scorers: {knowledge['scorers']['status']}" in markdown
+    assert f"Playbook: {knowledge['playbook']['status']}" in markdown
     assert f"Lesson curation: {SKIPPED} {NO_LESSONS}" in markdown
     assert f"Lesson standings: {knowledge['lesson_standings']['status']}" in markdown
     assert all(line in markdown.splitlines() for line in step_lines(report.exports.knowledge_steps()))

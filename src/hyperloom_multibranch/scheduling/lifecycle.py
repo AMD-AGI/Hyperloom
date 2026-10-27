@@ -4,16 +4,13 @@
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
 PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
-EXPLORE then runs until the longest baseline test and one CLOSE grace are left before the deadline. Once the
-baseline is established, the session chooses the frontier policy EXPLORE and CLOSE score with: the scorer
-or variation the calibration over sessions like it chooses against the scorer pool's champion, the scorer
-``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``; a scorer that keeps failing falls back
-to ``frontier-v1``, recorded as a decision. With an RSI archive it also plays the scheduling playbook ``--playbook``
-asks for, the champion of the pool beside it or a playbook on trial, recorded under ``playbook`` in
-``policy_versions``. The FINAL candidates are fixed while every branch still stands, then
-exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop
-signal, the session deadline before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and
-kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
+EXPLORE then runs until the longest baseline test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE
+score the branches with the frontier's defaults for the session's budget. Once the baseline is established, a session
+with an RSI archive plays the scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a
+playbook on trial, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every
+branch still stands, then exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of
+cards to measure on, a stop signal, the session deadline before FINAL starts or an unhandled error skip straight to
+CLOSE, which always runs and kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
 stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
 grace bounds CLOSE itself; a stop signal brings that hard stop forward to the CLOSE grace from the signal, once, and the
 unwinding of the cancelled phases and CLOSE share it. An unhandled error brings it forward the same way when CLOSE
@@ -22,15 +19,14 @@ whenever it arrives, cuts the unwinding and CLOSE short at once. A CLOSE cut sho
 closing the toolbox within its own short bound and killing every registered process, and writes the report.
 A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
 and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
-carrying the stop reason that session ended with: the roster, the frontier policy and the branches are the ones that
-session persisted, and only its report, dashboard and breakdown are written again.
+carrying the stop reason that session ended with: the roster and the branches are the ones that session persisted,
+and only its report, dashboard and breakdown are written again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import logging
 import math
 from collections.abc import Awaitable, Callable
@@ -55,22 +51,9 @@ from hyperloom_multibranch.notebook.knowledge.reference_leads import (
     ReferenceLead,
     reference_leads,
 )
-from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import (
-    SETTLED_TESTS,
-    FrontierPolicy,
-    FrontierScoring,
-    ScorerGuard,
-    StopRule,
-)
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, StopRule
 from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay, PlaybookPool, session_playbook
-from hyperloom_multibranch.notebook.rsi.session import (
-    FRONTIER_LOG,
-    archived_history,
-    named_frontier_choice,
-    session_frontier_scorer,
-)
+from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -81,7 +64,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
-from hyperloom_multibranch.scheduling.exports import ExportServices, ExportSources, ScorerAuthoring, SessionExports
+from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
@@ -109,7 +92,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.reference import copy_references
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
-from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, PlaybookMode, RunSettings
+from hyperloom_multibranch.scheduling.settings import PlaybookMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopper,
@@ -130,24 +113,11 @@ POLICY_VERSIONS = {
     "judge_prompt": JUDGE_PROMPT_VERSION,
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
-#: The ``policy_versions`` key the frontier policy's label is recorded under: the defaults' until PRELUDE chose it.
-FRONTIER_POLICY_KEY = "frontier"
-#: The ``policy_versions`` key of the scorer the session scores with, which a variation's label does not name.
-FRONTIER_SCORER_KEY = "frontier_scorer"
-#: The ``policy_versions`` key that says whether the session scored with a challenger, ``"1"``, or not, ``"0"``.
-CHALLENGER_KEY = "frontier_challenger"
-#: One session in this many scores with a challenger instead of the champion: replaying the archive credits only the
-#: scorer a session ran with, since a branch it stopped gains nothing afterwards, so challengers must run sometimes.
-CHALLENGER_EVERY = 4
-#: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: a scorer's record compares only within one grace.
+#: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: two sessions' stops compare only within one grace.
 GRACE_KEY = "grace"
 #: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
 #: two sessions of one build that were shown different past lessons differ here.
 LESSONS_KEY = "lessons"
-SCORER_FALLBACK_REASON = "frontier scorer fell back"
-FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
-PINNED_EVIDENCE = "pinned by --frontier-scorer"
-UNCHOSEN_EVIDENCE = f"{DEFAULT_POLICY}: not chosen yet, PRELUDE has not established the baseline"
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
 COMPLETED_REASONS = frozenset(
@@ -201,16 +171,16 @@ class SessionServices:
     """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
     configured), what builds the critic the rule gate asks whether a proven correctness fix matters under the
-    workload, on the scheduler's notebook handle its spend is recorded through, and the completion CLOSE asks for a
-    generation of frontier scorers, with ``scorer_model`` the model it runs on; ``resolver_model`` is the model the
-    patch resolver runs on, which every patch it writes names."""
+    workload, on the scheduler's notebook handle its spend is recorded through, and the completion CLOSE asks to change
+    the scheduling playbook and to curate the RSI lesson pool, with ``author_model`` the model it runs on;
+    ``resolver_model`` is the model the patch resolver runs on, which every patch it writes names."""
 
     judge_completion: Completion
     resolver_completion: Completion
     recipe_kb: RemoteRecipeClient | None
     critic: Callable[[UsageSink], FixReviewer]
-    scorer_completion: Completion
-    scorer_model: str
+    author_completion: Completion
+    author_model: str
     resolver_model: str
 
 
@@ -287,18 +257,13 @@ class Session:
         )
 
     def _score_with_defaults(self) -> None:
-        """Score with the defaults for the session's budget until PRELUDE's choice replaces them, against the trees
-        archived by every other session."""
+        """Score with the defaults for the session's budget, against the trees archived by every other session, and
+        play no playbook until PRELUDE adopts one."""
 
-        self._challenger = False
         self._play: PlaybookPlay | None = None
-        self._choose(
-            PolicyChoice(
-                FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
-            )
-        )
+        self._policy = FrontierPolicy.for_budget(self._metric, self._budget_seconds)
         # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
-        # otherwise calibrate and score against that tree.
+        # otherwise set its stall bar and history against that tree.
         self._history = tuple(tree for tree in archived_history() if tree.session_id != self._layout.session_id)
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
@@ -313,14 +278,14 @@ class Session:
         return Integrator(records, repo, checks, resolver, self._clock)
 
     def _open_llm_roles(self, services: SessionServices) -> None:
-        """The judge, and the scorer author and curator CLOSE asks, each recording its spend on the notebook."""
+        """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the notebook."""
 
         judge = recorded(services.judge_completion, self._notebook, UsageSource.JUDGE)
         self._judge = Judge(judge, self._layout.judge, self._clock)
-        scorer = recorded(services.scorer_completion, self._notebook, UsageSource.SCORER)
-        self._scorers = ScorerAuthoring(scorer, services.scorer_model)
-        curator = recorded(services.scorer_completion, self._notebook, UsageSource.CURATOR)
-        self._curator = ScorerAuthoring(curator, services.scorer_model)
+        author = recorded(services.author_completion, self._notebook, UsageSource.SCORER)
+        self._author = CloseAuthoring(author, services.author_model)
+        curator = recorded(services.author_completion, self._notebook, UsageSource.CURATOR)
+        self._curator = CloseAuthoring(curator, services.author_model)
 
     async def run(self) -> SessionOutcome:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
@@ -351,15 +316,12 @@ class Session:
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
         make it so.
 
-        The candidates and the frontier policy are read before anything else happens, so a session FINAL cannot run
-        over is refused without a stop or a report being written. The budget is already spent, which is the state the
-        normal path is in when FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from
-        its end.
+        The candidates are read before anything else happens, so a session FINAL cannot run over is refused without a
+        stop or a report being written. The budget is already spent, which is the state the normal path is in when
+        FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from its end.
         """
 
         candidates = await self._final_candidates()
-        self._choose(self._recorded_frontier_policy())
-        self._challenger = read_manifest(self._layout.manifest).policy_versions.get(CHALLENGER_KEY) == "1"
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -445,7 +407,8 @@ class Session:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         start_commit = await self._replay_champion(prelude)
         self._adopt_playbook()
-        await self._adopt_frontier_policy()
+        manifest = read_manifest(self._layout.manifest)
+        replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
             ManifestFingerprint(
@@ -520,70 +483,19 @@ class Session:
         detail = {"playbook": choice.playbook.label, "champion": choice.champion.label, "challenger": choice.challenger}
         self._decisions.record(Decision(DecisionKind.PRELUDE, "scheduling playbook", detail=detail))
 
-    async def _adopt_frontier_policy(self) -> None:
-        """Replace the defaults with the frontier policy the session scores with from here on, and record it as a
-        scheduler decision and in the manifest: the calibration's choice for the profile PRELUDE recorded, the scorer
-        ``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``."""
-
-        defaults = self._frontier.policy
-        if self._settings.frontier_scorer:
-            choice = pinned_frontier_choice(self._settings.frontier_scorer, defaults)
-        elif self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
-            choice = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
-        else:
-            snapshot = await self._notebook.snapshot()
-            challenger = None
-            if challenger_session(self._layout.session_id):
-                challenger = await asyncio.to_thread(session_challenger, snapshot, self._history, defaults)
-            self._challenger = challenger is not None
-            choice = challenger or await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
-        self._choose(choice)
-        detail = {
-            "label": choice.label,
-            "evidence": choice.evidence,
-            "scorer": choice.scorer.label,
-            "challenger": self._challenger,
-        }
-        self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
-        manifest = read_manifest(self._layout.manifest)
-        replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
-
-    def _recorded_frontier_policy(self) -> PolicyChoice:
-        """The frontier policy the manifest records, rebuilt from its label: a run over a session that already chose
-        one scores with that choice instead of calibrating again, so the label the manifest holds stays true."""
-
-        label = read_manifest(self._layout.manifest).policy_versions[FRONTIER_POLICY_KEY]
-        choice = named_frontier_choice(label, self._frontier.policy, f"{label}: the policy the session recorded")
-        if choice is None:
-            raise ValueError(f"the frontier policy {label} the manifest records names no scorer any more")
-        return choice
-
     def _policy_versions(self) -> dict[str, str]:
         learnings = self._briefs.learnings
         return {
             **POLICY_VERSIONS,
-            FRONTIER_POLICY_KEY: self._frontier.label,
-            FRONTIER_SCORER_KEY: self._frontier.scorer.label,
-            CHALLENGER_KEY: "1" if self._challenger else "0",
             GRACE_KEY: str(SETTLED_TESTS),
             LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
             **(self._play.versions() if self._play is not None else {}),
         }
 
-    def _choose(self, choice: PolicyChoice) -> None:
-        """Score with ``choice`` from here on, through one guard that counts its scorer's failures across EXPLORE and
-        CLOSE."""
-
-        self._frontier = choice
-        self._guard = ScorerGuard(choice.scorer, on_fallback=self._fell_back)
-
     def _scoring(self) -> FrontierScoring:
         log = self._layout.reports / FRONTIER_LOG
         rule = self._play.stop_rule if self._play is not None else StopRule
-        return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard, rule)
-
-    def _fell_back(self, why: str) -> None:
-        self._decisions.record(Decision(DecisionKind.EVENT, SCORER_FALLBACK_REASON, detail={"why": why}))
+        return FrontierScoring(self._notebook, self._policy, self._history, log, rule)
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
         return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
@@ -599,7 +511,6 @@ class Session:
             self._similarity,
             self._events,
             self._lifecycle,
-            self._frontier,
             self._toolbox,
             self._play,
         )
@@ -610,7 +521,7 @@ class Session:
         sources = ExportSources(
             self._notebook, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
         )
-        services = ExportServices(self._recipe_kb, self._scorers, self._curator)
+        services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
 
@@ -719,23 +630,6 @@ class Session:
         ).write(self._layout.manifest)
 
 
-def challenger_session(session_id: str) -> bool:
-    """Whether the session ``session_id`` is one of the :data:`CHALLENGER_EVERY` that scores with a challenger; the
-    same answer for the same session every time it is asked."""
-
-    return int(hashlib.sha256(session_id.encode()).hexdigest(), 16) % CHALLENGER_EVERY == 0
-
-
-def pinned_frontier_choice(label: str, defaults: FrontierPolicy) -> PolicyChoice:
-    """The choice ``--frontier-scorer`` pins with ``label`` under ``defaults``; raise ValueError when no scorer in code
-    or in the scorer pool beside the archive has that label."""
-
-    choice = named_frontier_choice(label, defaults, f"{label}: {PINNED_EVIDENCE}")
-    if choice is None:
-        raise ValueError(f"--frontier-scorer {label} names no frontier scorer in code or in the scorer pool")
-    return choice
-
-
 @dataclass(frozen=True)
 class PersistedRun:
     """A session directory that ended without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
@@ -772,15 +666,8 @@ def persisted_run(root: Path) -> PersistedRun:
 
 __all__ = [
     "COMPLETED_REASONS",
-    "CHALLENGER_EVERY",
-    "CHALLENGER_KEY",
-    "FORCED_DEFAULT_EVIDENCE",
-    "FRONTIER_SCORER_KEY",
     "GRACE_KEY",
     "LESSONS_KEY",
-    "SCORER_FALLBACK_REASON",
-    "PINNED_EVIDENCE",
-    "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
     "PersistedRun",
     "Session",
@@ -788,6 +675,4 @@ __all__ = [
     "SessionOutcome",
     "SessionServices",
     "persisted_run",
-    "challenger_session",
-    "pinned_frontier_choice",
 ]

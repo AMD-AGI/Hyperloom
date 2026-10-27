@@ -61,15 +61,10 @@ def test_the_tree_holds_each_branch_with_its_commits_tests_cost_and_times(snapsh
     )
 
 
-def test_the_tree_keeps_when_kernel_tests_ran_and_the_roofline_bound_over_the_baseline(
-    snapshot: NotebookSnapshot,
-) -> None:
+def test_the_tree_keeps_the_roofline_bound_over_the_baseline(snapshot: NotebookSnapshot) -> None:
     searched = tree_from_snapshot(snapshot, METRIC)
-    branches = {branch.name: branch for branch in searched.branches}
     unbound = dataclasses.replace(snapshot, profile=profile(roofline_ceiling={}))
 
-    assert len(branches["s1"].kernel_test_times) == 2 and branches["s1"].kernel_test_times == branches["s1"].test_times
-    assert branches["s2"].kernel_test_times == ()
     assert searched.roofline_ceiling_pct == pytest.approx(50.0)
     assert tree_from_snapshot(unbound, METRIC).roofline_ceiling_pct is None
     assert tree_from_document(tree_document(searched)) == searched
@@ -116,11 +111,11 @@ def test_the_tree_keeps_a_commit_whose_merge_failed_and_the_stalls_a_branch_was_
 
 def test_a_branch_as_of_a_time_has_only_what_it_had_by_then() -> None:
     times = (0.0, 1800.0, 3600.0, 7200.0)
-    grown = branch("s1", LATE_BLOOMER, test_times=times, kernel_test_times=(1800.0, 7200.0), closed_s=7200.0)
+    grown = branch("s1", LATE_BLOOMER, test_times=times, closed_s=7200.0)
     then = grown.as_of(3600.0)
 
     assert [commit.t_s for commit in then.commits] == [1800.0, 3600.0] and then.final_gain_pct == pytest.approx(2.3)
-    assert (then.test_times, then.kernel_test_times) == ((0.0, 1800.0, 3600.0), (1800.0,))
+    assert then.test_times == (0.0, 1800.0, 3600.0)
     assert then.closed_s is None and then.gpu_seconds == pytest.approx(3 * HOUR)
     assert grown.as_of(7200.0).closed_s == 7200.0
 

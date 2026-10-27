@@ -8,8 +8,8 @@
   shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own. The learnings go
   to the RSI lesson pool beside the archive too, revising and retiring the past sessions' lessons they name, and the
   pooled lessons the session showed get their standing from what its branches did next (:mod:`rsi.lesson_close`).
-  Beside the receipts go the frontier calibration over the archived sessions like this one, and the stop audit of
-  this session's stops and probations against the stall odds the judge read (:mod:`rsi.stops`). A session that
+  Beside the receipts goes the stop audit of this session's stops and probations against the stall odds the judge
+  read (:mod:`rsi.stops`). A session that
   played a scheduling playbook is kept as its trial beside the playbook pool, which may crown or retire a playbook
   (:mod:`rsi.ladder`); then the scheduling replay reruns over the archive with this session's tree in it, against the
   champion, and says which of its readings moved since the last CLOSE. Then the specialists' outcomes, the menu's
@@ -17,13 +17,6 @@
   transcript, its exchanges beside the archive for R2 to ask again (:mod:`rsi.decisions`). A step that cannot be
   done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
   (``CloseOutcome.knowledge`` of ``build_breakdown``).
-* :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
-  for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
-  :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
-  which crowns nothing, is :func:`rsi.authoring.session_challenger`, beside the standings it reads);
-  :func:`named_frontier_choice` is the choice a label names, as a manifest records it or ``--frontier-scorer`` asks
-  for it. The scheduler holds the chosen scorer in one ``ScorerGuard`` a session, which stands ``frontier-v1`` in
-  where it fails.
 * :func:`judge_history` is the stall odds the judge reads every round, as text (:mod:`rsi.history`): how often a
   stalled branch and a new one went on to commit, here and in the archived sessions, and the stop bar they set;
   :func:`judge_open_areas` is where a new branch could open, and whether one should open at all
@@ -58,31 +51,13 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     SearchTree,
     TreeArchive,
     archive_session,
-    similar_trees,
     tree_from_snapshot,
 )
-from hyperloom_multibranch.notebook.rsi.calibration import (
-    DEFAULT_POLICY,
-    VARIATIONS,
-    PolicyChoice,
-    calibrate,
-    frontier_policy_for,
-    frontier_scorer_for,
-)
 from hyperloom_multibranch.notebook.rsi.decisions import archive_decisions
-from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_stall_odds, stall_odds
 from hyperloom_multibranch.notebook.rsi.lesson_close import publish_lessons, session_standings
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.notebook.rsi.menu import MENU_LOG, DirectionMenus, MenuLog
-from hyperloom_multibranch.notebook.rsi.scorers import (
-    ChampionRecord,
-    ScorerPool,
-    current_champion,
-    registered_scorers,
-    scorer_named,
-)
 from hyperloom_multibranch.notebook.rsi.ladder import (
     moved,
     record_standing,
@@ -109,8 +84,6 @@ NO_PROFILE = "no_session_profile"
 EXPERIENCE_RECEIPT = "experience_kb_experiences.json"
 MULTIBRANCH_RECEIPT = "experience_kb_multibranch_experiences.json"
 LEARNING_RECEIPT = "experience_kb_learnings.json"
-#: The frontier calibration's report, written beside the receipts at every CLOSE.
-CALIBRATION_REPORT = "frontier-calibration.md"
 #: The stop audit, written beside the receipts at every CLOSE.
 STOP_AUDIT_REPORT = "stop-audit.md"
 #: The scheduling replay rerun over the archive, written beside the receipts at every CLOSE.
@@ -118,7 +91,6 @@ SCHEDULING_REPLAY_REPORT = "scheduling-replay.md"
 NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
-NO_PROFILE_EVIDENCE = f"{DEFAULT_POLICY}: the session has no profile yet"
 NO_RETRIEVAL_LOG = "no_retrieval_log"
 NO_LESSON_SHOWN = "no_pooled_lesson_shown"
 ALREADY_RECORDED = "already_recorded"
@@ -145,8 +117,8 @@ class CloseStep:
 @dataclass(frozen=True)
 class KnowledgeClose:
     """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, the Experiences only the
-    notebook's own declaration holds (``multibranch_experiences``), the frontier calibration's report, the learnings
-    into the RSI lesson pool (``lessons``), the standing of the pooled lessons the session showed, the stop audit,
+    notebook's own declaration holds (``multibranch_experiences``), the learnings into the RSI lesson pool
+    (``lessons``), the standing of the pooled lessons the session showed, the stop audit,
     whose counts are the stops and probations by what came of them, the playbook trial, the scheduling replay rerun,
     and the specialists' outcomes."""
 
@@ -154,7 +126,6 @@ class KnowledgeClose:
     learnings: CloseStep
     archive: CloseStep
     multibranch_experiences: CloseStep = CloseStep(DISABLED, NO_KB)
-    calibration: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
     lessons: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     lesson_standings: CloseStep = CloseStep(SKIPPED, NO_ARCHIVE)
     stop_audit: CloseStep = CloseStep(SKIPPED, NO_REPORTS)
@@ -171,7 +142,6 @@ class KnowledgeClose:
             "multibranch_experiences": self.multibranch_experiences,
             "learnings": self.learnings,
             "archive": self.archive,
-            "calibration": self.calibration,
             "lessons": self.lessons,
             "lesson_standings": self.lesson_standings,
             "stop_audit": self.stop_audit,
@@ -228,24 +198,6 @@ def _archived(
     except STEP_ERRORS as exc:
         return _failed("archive the search tree", exc)
     return CloseStep(result.status, result.reason)
-
-
-def _calibrated(
-    snapshot: NotebookSnapshot, archive: TreeArchive | None, path: Path | None, bottlenecks: Mapping[str, float] | None
-) -> CloseStep:
-    """The frontier calibration over the archived sessions like this one, this one included, written to ``path``."""
-
-    if path is None:
-        return CloseStep(SKIPPED, NO_REPORTS)
-    if snapshot.profile is None:
-        return CloseStep(SKIPPED, NO_PROFILE)
-    try:
-        task = task_conditions(snapshot.profile, bottlenecks)
-        report = calibrate(tuple(item.tree for item in similar_trees(archived_history(archive), task)))
-        atomic_write_text(path, report.render() + "\n", options=WriteOptions(make_parents=True))
-    except STEP_ERRORS as exc:
-        return _failed("write the frontier calibration", exc)
-    return CloseStep(WRITTEN, report.note)
 
 
 def _trialled(
@@ -458,7 +410,6 @@ def close_knowledge(
                 receipt=targets.receipt(MULTIBRANCH_RECEIPT),
             ),
         ),
-        calibration=_calibrated(snapshot, targets.archive, targets.receipt(CALIBRATION_REPORT), bottlenecks),
         lessons=_lessons(snapshot, targets.lesson_pool()),
         lesson_standings=_standings(snapshot, targets.lesson_pool(), targets.receipt(LEARNINGS_LOG)),
         stop_audit=_audited(snapshot, metric, targets.archive, targets.receipt(STOP_AUDIT_REPORT), bottlenecks),
@@ -535,65 +486,6 @@ def session_menus(metric: str, reports: Path | None, archive: TreeArchive | None
     return DirectionMenus(archived_history(target), metric, log_to)
 
 
-def session_frontier_policy(
-    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy
-) -> PolicyChoice:
-    """The policy the session ``snapshot`` records scores with: :func:`calibration.frontier_policy_for` on its task, as
-    the scoring reads it, once PRELUDE recorded the session's profile; ``defaults`` before."""
-
-    if snapshot.profile is None:
-        return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
-    return frontier_policy_for(history, task_conditions(snapshot.profile), defaults)
-
-
-def session_frontier_scorer(
-    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
-) -> PolicyChoice:
-    """How the session ``snapshot`` records scores, once PRELUDE recorded its profile:
-    :func:`calibration.frontier_scorer_for` on its task over every scorer :mod:`rsi.scorers` registers in ``pool``, by
-    default the one beside the environment's archive, against the pool's champion; ``defaults`` before. A scorer that
-    takes the champion's place is crowned in the pool, so the sessions after this one start from it."""
-
-    if snapshot.profile is None:
-        return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
-    target = pool if pool is not None else ScorerPool.from_env()
-    scorers = registered_scorers(target, snapshot.taken_at)
-    held = current_champion(target)
-    choice = frontier_scorer_for(history, task_conditions(snapshot.profile), defaults, scorers, held)
-    holder = held.scorer.label if held is not None else FRONTIER_V1_LABEL
-    if target is not None and choice.scorer.label != holder:
-        _crown(target, ChampionRecord(choice.scorer.label, snapshot.taken_at, holder, choice.evidence))
-    return choice
-
-
-def _crown(pool: ScorerPool, record: ChampionRecord) -> None:
-    # A champion the pool cannot record costs the next sessions the ratchet, not this one its start.
-    try:
-        pool.crown(record)
-    except (OSError, ValueError) as exc:
-        log.warning("could not crown %s in %s: %s", record.label, pool.root, exc)
-
-
-def named_frontier_choice(
-    label: str, defaults: FrontierPolicy, evidence: str, pool: ScorerPool | None = None
-) -> PolicyChoice | None:
-    """The choice ``label`` names, as ``--frontier-policy`` or a manifest's ``policy_versions`` gives it, with
-    ``evidence``: the defaults, a variation of them, or a scorer of :mod:`rsi.scorers` (looked up in ``pool``, by
-    default the one beside the environment's archive) under them; ``None`` when nothing goes by that label."""
-
-    if label == DEFAULT_POLICY:
-        return PolicyChoice(defaults, label, evidence)
-    variation = next((item for item in VARIATIONS[1:] if item.label == label), None)
-    if variation is not None:
-        return PolicyChoice(variation.apply(defaults), label, evidence)
-    try:
-        scorer = scorer_named(label, pool if pool is not None else ScorerPool.from_env())
-    except ExpressionError as exc:
-        log.warning("the frontier scorer %s no longer reads: %s", label, exc)
-        return None
-    return None if scorer is None else PolicyChoice(defaults, label, evidence, scorer)
-
-
 def judge_history(
     snapshot: NotebookSnapshot,
     history: Sequence[SearchTree],
@@ -639,7 +531,6 @@ def judge_open_areas(
 
 
 __all__ = [
-    "CALIBRATION_REPORT",
     "DISABLED",
     "EXPERIENCE_RECEIPT",
     "FAILED",
@@ -665,8 +556,5 @@ __all__ = [
     "close_knowledge",
     "judge_history",
     "judge_open_areas",
-    "named_frontier_choice",
-    "session_frontier_policy",
     "session_menus",
-    "session_frontier_scorer",
 ]

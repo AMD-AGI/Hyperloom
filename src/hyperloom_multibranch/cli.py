@@ -20,15 +20,10 @@ rate for the model the specialists run on or the one the judge, the patch resolv
 would record tokens only. ``--reuse-prelude DIR`` roots the session on the child session the PRELUDE of the
 earlier session in ``DIR`` rooted on instead of starting a child, and still measures the baseline; it is a usage error
 unless that session committed its root on the same workload and on the image ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` names.
-``--frontier-policy`` says which frontier policy the session scores its branches with once PRELUDE established the
-baseline: ``auto`` (the default) takes the variation the calibration over similar archived sessions chooses, within
-its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and the session's manifest record
-the label under ``frontier`` in ``policy_versions``. ``--frontier-scorer LABEL`` pins the scorer the session scores
-with instead: ``frontier-v1``, a variation's label, a scorer in code or an expression in the archive's scorer pool; a
-label none of these has, or one given beside ``--frontier-policy default``, is a usage error. ``--playbook`` says
-which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive: ``champion`` (the
-default), or ``challenger``, which plays the oldest playbook on trial in the pool beside it and the champion while none
-is; ``policy_versions`` records the label under ``playbook``.
+``--playbook`` says which scheduling playbook the session plays once ``HYPERLOOM_RSI_ARCHIVE`` names an archive:
+``champion`` (the default), or ``challenger``, which plays the oldest playbook on trial in the pool beside it and the
+champion while none is; the manifest fingerprint and the session's manifest record the label under ``playbook`` in
+``policy_versions``.
 Each ``--autonomous-agent SOURCE`` opens one branch where EXPLORE starts, after the user's directions and within
 ``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
 carries credentials in its URL is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
@@ -97,7 +92,6 @@ from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -108,7 +102,6 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionHost,
     SessionServices,
     persisted_run,
-    pinned_frontier_choice,
 )
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -128,7 +121,6 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting
 from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
-    FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
     PlaybookMode,
@@ -188,7 +180,7 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help="An earlier session of this workload and image whose PRELUDE child to root on instead of starting one.",
     )
-    _add_frontier_options(run)
+    _add_playbook_option(run)
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
 
 
@@ -267,24 +259,9 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_frontier_options(run: argparse.ArgumentParser) -> None:
-    """Which frontier policy, or which pinned scorer, the session scores its branches with after PRELUDE."""
+def _add_playbook_option(run: argparse.ArgumentParser) -> None:
+    """Which scheduling playbook the session plays after PRELUDE."""
 
-    run.add_argument(
-        "--frontier-policy",
-        choices=[mode.value for mode in FrontierPolicyMode],
-        default=FrontierPolicyMode.AUTO.value,
-        help=(
-            "The frontier policy the session scores with after PRELUDE: auto takes the calibration's choice for similar"
-            " archived sessions, default keeps the defaults."
-        ),
-    )
-    run.add_argument(
-        "--frontier-scorer",
-        default="",
-        metavar="LABEL",
-        help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
-    )
     run.add_argument(
         "--playbook",
         choices=[mode.value for mode in PlaybookMode],
@@ -423,8 +400,6 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
     if args.dev_leases < 0:
         errors.append("--dev-leases must be 0 (none) or a positive number of sandboxes")
-    if args.frontier_scorer and FrontierPolicyMode(args.frontier_policy) is FrontierPolicyMode.DEFAULT:
-        errors.append("--frontier-scorer pins a scorer, which --frontier-policy default rules out")
     if errors:
         raise ValueError("; ".join(errors))
     try:
@@ -455,19 +430,10 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         args.judge_interval_sec,
         user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
         agents=_agents(args.agents or [], caps.max_branches - len(args.specialist_prompts or [])),
-        frontier_policy=FrontierPolicyMode(args.frontier_policy),
-        frontier_scorer=args.frontier_scorer,
         references=_references(args.references or []),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
     )
-
-
-def require_frontier_scorer(label: str, metric: str) -> None:
-    """Raise ValueError unless ``label`` names a scorer a session of ``metric`` can score with; the scorer pool is
-    read beside the archive ``HYPERLOOM_RSI_ARCHIVE`` names."""
-
-    pinned_frontier_choice(label, FrontierPolicy(metric))
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
@@ -527,8 +493,8 @@ def require_rsi_archive(env: MutableMapping[str, str]) -> None:
 
 
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
-    """The judge, the patch resolver, the fix critic and CLOSE's scorer author on the default model, and
-    ``recipe_kb``."""
+    """The judge, the patch resolver, the fix critic and CLOSE's playbook author and curator on the default model,
+    and ``recipe_kb``."""
 
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
@@ -540,8 +506,8 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
         max_tokens=MB_RESOLVER_MAX_TOKENS,
     )
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
-    scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
-    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model, model)
+    author = anthropic_completion(model, component=PROG, operation="rsi_authoring")
+    return SessionServices(judge, resolver, recipe_kb, critic, author, model, model)
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
@@ -642,13 +608,6 @@ def main(argv: list[str] | None = None) -> int:
         require_rsi_archive(os.environ)
         peer_factory = load_peers(settings.workload)
         services = session_services(recipe_kb)
-        if settings.frontier_scorer:
-            try:
-                require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
-            except ValueError as exc:
-                parser.print_usage(sys.stderr)
-                print(f"{parser.prog}: error: {exc}", file=sys.stderr)
-                raise SystemExit(EXIT_USAGE) from exc
         if persisted is not None:
             return final_only(persisted, peer_factory, services)
         return run_session(settings, peer_factory, services)
@@ -667,7 +626,6 @@ __all__ = [
     "final_only",
     "main",
     "recipe_kb_from_env",
-    "require_frontier_scorer",
     "require_priced_models",
     "require_rsi_archive",
     "require_workload_switch",

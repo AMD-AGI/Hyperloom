@@ -16,9 +16,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     PROBATION_COMPONENT,
     STALLED_COMPONENT,
     STRANDED_COMPONENT,
-    FrontierPolicy,
     StopRule,
-    is_young,
 )
 from hyperloom_multibranch.notebook.rsi.playbook import (
     FALLBACK_KEY,
@@ -41,7 +39,6 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     replaced,
     session_playbook,
 )
-from hyperloom_multibranch.notebook.rsi.tests.trees import branch
 
 LATER_STOP = replaced(H0, stall_tests=8)
 LONGER = Playbook("longer-probation", LATER_STOP.numbers, parent=H0.label, hypothesis="later", registered_at=10.0)
@@ -55,16 +52,6 @@ def test_h0_is_the_evidence_rules_with_every_number_at_its_default() -> None:
     assert text.startswith("Scheduling playbook h0:")
     assert "what the stall odds set (stall_bar)" in text and "25% of the stop candidates" in text
     assert all(f"- {line}" in text for line in SAFETY_ENVELOPE)
-
-
-def test_the_grace_ends_the_new_branch_floor_where_it_ends_the_judges_grace() -> None:
-    five = branch("s9", [], settled_times=(60.0,) * 5)
-    longer = replaced(H0, grace_tests=7)
-    defaults = FrontierPolicy("m")
-
-    assert H0.policy(defaults) == defaults
-    assert longer.policy(defaults).settled_tests == 7
-    assert not is_young(five, 120.0, H0.policy(defaults)) and is_young(five, 120.0, longer.policy(defaults))
 
 
 def test_the_numbers_and_rules_set_the_stop_rule_and_the_judges_text() -> None:

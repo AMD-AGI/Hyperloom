@@ -41,21 +41,14 @@ def archive(tmp_path: Path) -> Path:
     return root
 
 
-def test_the_command_runs_the_calibration_and_the_scheduling_replay_on_an_archive(
-    archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_the_command_runs_the_scheduling_replay_on_an_archive(
+    archive: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    log = tmp_path / "frontier.jsonl"
-    log.write_text("", encoding="utf-8")
-
-    assert main(["frontier", "--archive", str(archive), "--log", f"a={log}"]) == 0
-    calibrated = capsys.readouterr().out
     assert main(["--json", "scheduling", "--archive", str(archive), "--runs", "2", "--beyond", "pessimistic"]) == 0
     replayed = json.loads(capsys.readouterr().out)
     assert main(["scheduling", "--archive", str(archive), "--runs", "1"]) == 0
     table = capsys.readouterr().out
 
-    assert calibrated.startswith("Frontier calibration") and "Too little evidence" in calibrated
-    assert "| bandit-rv |" in calibrated and "| bandit UCB, C=1.4 |" in calibrated
     assert [row["label"] for row in replayed["rows"]][:4] == [ARCHIVE, "h0", OLD_RULE, "stall-4"]
     assert replayed["baseline"] == "h0"
     assert (replayed["runs"], replayed["beyond"], replayed["sessions"]) == (2, "pessimistic", ["a", "b"])
@@ -114,8 +107,6 @@ def test_the_command_evolves_the_playbook_asking_the_judge_at_the_decisions_the_
 def test_a_study_that_cannot_run_says_why(archive: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["scheduling", "--archive", str(tmp_path / "empty")]) == 2
     assert "the archives hold no session to replay" in capsys.readouterr().err
-    with pytest.raises(SystemExit):
-        main(["frontier", "--archive", str(archive), "--log", "no-separator"])
     with pytest.raises(SystemExit):
         main(["scheduling", "--archive", str(archive), "--beyond", "anywhere"])
 

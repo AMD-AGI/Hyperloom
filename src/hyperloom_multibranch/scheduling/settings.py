@@ -33,14 +33,6 @@ class KernelOptimizer(str, Enum):
     GEAK = "geak"
 
 
-class FrontierPolicyMode(str, Enum):
-    """How a session picks the frontier policy it scores with once PRELUDE recorded its profile: the variation the
-    calibration over similar archived sessions chooses (``auto``), or always the defaults."""
-
-    AUTO = "auto"
-    DEFAULT = "default"
-
-
 class PlaybookMode(str, Enum):
     """Which scheduling playbook a session plays once the RSI archive is configured: the champion of the pool beside
     it, or, in a challenger session, the oldest playbook on trial, the champion while none is."""
@@ -118,12 +110,10 @@ class RunSettings:
     and the judge's and patch resolver's, may cost; 0 means no limit for any of them. ``reuse_prelude`` is the earlier
     PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
     wrote, each opening one branch where EXPLORE starts, ahead of the opening batch, within the branch cap; ``agents``
-    the third-party agents the user named, each opening one autonomous branch the same way.
-    ``frontier_policy`` says how the frontier policy is chosen, and ``frontier_scorer`` names the scorer the session
-    scores with instead of choosing one, ``""`` when it chooses. ``references`` are the directories of reference
-    material the run copies in before its first phase, each with the commit it was taken at. ``dev_leases`` is how many
-    dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says which scheduling playbook
-    the session plays."""
+    the third-party agents the user named, each opening one autonomous branch the same way. ``references`` are the
+    directories of reference material the run copies in before its first phase, each with the commit it was taken at.
+    ``dev_leases`` is how many dev sandboxes the session lends its specialists at once; 0 lends none. ``playbook`` says
+    which scheduling playbook the session plays."""
 
     workload: Workload
     max_hours: float
@@ -134,8 +124,6 @@ class RunSettings:
     reuse_prelude: ReusedPrelude | None = None
     user_directions: tuple[str, ...] = ()
     agents: tuple[str, ...] = ()
-    frontier_policy: FrontierPolicyMode = FrontierPolicyMode.AUTO
-    frontier_scorer: str = ""
     references: tuple[ReferenceSource, ...] = ()
     dev_leases: int = 0
     playbook: PlaybookMode = PlaybookMode.CHAMPION
@@ -143,7 +131,6 @@ class RunSettings:
 
 __all__ = [
     "SWEEP_FACTORS",
-    "FrontierPolicyMode",
     "InferenceXShape",
     "KernelOptimizer",
     "PlaybookMode",

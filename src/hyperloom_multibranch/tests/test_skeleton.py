@@ -86,14 +86,11 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     PlaybookPool,
     replaced,
 )
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi import scorers
 from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_V1_LABEL,
     PROBATION_TESTS,
     SETTLED_TESTS,
-    Estimate,
     FrontierPolicy,
 )
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
@@ -132,17 +129,10 @@ from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldRea
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
-from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
-    CHALLENGER_KEY,
-    FORCED_DEFAULT_EVIDENCE,
-    FRONTIER_SCORER_KEY,
     GRACE_KEY,
     LESSONS_KEY,
-    SCORER_FALLBACK_REASON,
-    PINNED_EVIDENCE,
-    FRONTIER_POLICY_KEY,
     NO_CARDS_LEFT,
     Session,
     SessionHost,
@@ -157,7 +147,6 @@ from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_ve
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.settings import (
-    FrontierPolicyMode,
     InferenceXShape,
     KernelOptimizer,
     PlaybookMode,
@@ -273,10 +262,6 @@ FIX_REASONS = tuple(FIXES)
 FIX_CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
-#: The frontier policy an injected calibration chooses: a trend window longer than any start-up, no new-branch floor.
-CHOSEN_WINDOW_SECONDS = 4321.0
-CHOSEN_LABEL = "no new-branch floor"
-CHOSEN_EVIDENCE = "no new-branch floor: rank correlation 0.6 against 0.4 for the defaults"
 #: What a FINAL that cannot read the regression set fails with.
 REGRESSION_SET_GONE = "the regression set is gone"
 #: How long each FINAL test of a slow toolbox runs: longer than the whole budget.
@@ -287,7 +272,7 @@ def _reply(document: dict[str, object]) -> str:
     return json.dumps(document)
 
 
-SCORER_MODEL = "scorer-model"
+AUTHOR_MODEL = "author-model"
 RESOLVER_MODEL = "resolver-model"
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
@@ -376,7 +361,7 @@ class Stage:
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
-    scorer_author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
+    author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
     image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
     toolbox: RecordingToolbox = field(init=False)
@@ -519,8 +504,8 @@ class Stage:
                 ScriptedCompletion(),
                 self.recipe_kb,
                 self.critic,
-                self.scorer_author,
-                SCORER_MODEL,
+                self.author,
+                AUTHOR_MODEL,
                 RESOLVER_MODEL,
             ),
         )
@@ -579,8 +564,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     [fingerprint] = await observer.manifest_fingerprints()
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert fingerprint.policy_versions["scheduling"] == policy_version(SCHEDULING_POLICY)
-    assert fingerprint.policy_versions[FRONTIER_POLICY_KEY] == DEFAULT_POLICY
-    assert fingerprint.policy_versions[FRONTIER_SCORER_KEY] == FRONTIER_V1_LABEL
     assert fingerprint.policy_versions[GRACE_KEY] == str(SETTLED_TESTS)
     assert fingerprint.policy_versions[LESSONS_KEY] == ""
     [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
@@ -754,146 +737,34 @@ async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read_
     assert replay is not None and replay.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
 
 
-def _choosing(monkeypatch: pytest.MonkeyPatch, choice: Callable[[FrontierPolicy], PolicyChoice]) -> list[object]:
-    """Have the session's frontier policy be ``choice`` of the defaults; the returned list gets each call's
-    snapshot and defaults."""
-
-    calls: list[object] = []
-
-    def choose(
-        snapshot: NotebookSnapshot, history: Sequence[object], defaults: FrontierPolicy, pool: object = None
-    ) -> PolicyChoice:
-        calls.append((snapshot, defaults))
-        return choice(defaults)
-
-    monkeypatch.setattr(lifecycle, "session_frontier_scorer", choose)
-    return calls
-
-
 def _frontier_lines(stage: Stage) -> list[dict[str, Any]]:
     return [json.loads(line) for line in (stage.layout.reports / FRONTIER_LOG).read_text().splitlines()]
 
 
-async def _frontier_fingerprint(stage: Stage) -> str:
-    [fingerprint] = await stage.handle(Role.OBSERVER).manifest_fingerprints()
-    return fingerprint.policy_versions[FRONTIER_POLICY_KEY]
-
-
-async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_chooses_after_prelude(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def chosen(defaults: FrontierPolicy) -> PolicyChoice:
-        policy = replace(defaults, window_seconds=CHOSEN_WINDOW_SECONDS, new_branch_floor_pct=0.0)
-        return PolicyChoice(policy, CHOSEN_LABEL, CHOSEN_EVIDENCE)
-
-    calls = _choosing(monkeypatch, chosen)
+async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     _script(stage)
 
     outcome = await stage.run()
 
-    assert outcome.exit_code == 0
-    [(snapshot, defaults)] = calls
-    assert isinstance(snapshot, NotebookSnapshot) and snapshot.profile is not None
-    assert defaults == FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
-    assert await _frontier_fingerprint(stage) == CHOSEN_LABEL
-    manifest = json.loads(stage.layout.manifest.read_text())
-    assert manifest["policy_versions"][FRONTIER_POLICY_KEY] == CHOSEN_LABEL
-    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {
-        "label": CHOSEN_LABEL,
-        "evidence": CHOSEN_EVIDENCE,
-        "scorer": FRONTIER_V1_LABEL,
-        "challenger": False,
-    }
-    states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
-    assert states and all(
-        state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
-        for state in states
-    )
-    assert all(state["min_useful_seconds"] == round(CHOSEN_WINDOW_SECONDS) for state in states)
+    defaults = FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
     lines = _frontier_lines(stage)
-    assert lines and all(
-        (line["new_branch_floor_pct"], line["window_seconds"]) == (0.0, CHOSEN_WINDOW_SECONDS) for line in lines
-    )
+    assert outcome.exit_code == 0 and lines
+    assert all(line["scorer"] == FRONTIER_V1_LABEL for line in lines)
+    assert all(line["new_branch_floor_pct"] == defaults.new_branch_floor_pct for line in lines)
+    assert all(line["window_seconds"] >= defaults.window_seconds for line in lines)
 
 
-async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_calibration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.settings = replace(SETTINGS, frontier_scorer=BANDIT_LABEL)
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0 and calls == []
-    assert await _frontier_fingerprint(stage) == BANDIT_LABEL
-    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {
-        "label": BANDIT_LABEL,
-        "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}",
-        "scorer": BANDIT_LABEL,
-        "challenger": False,
-    }
-    lines = _frontier_lines(stage)
-    assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
-    assert all(_judge_state(prompt)["frontier_policy"]["scorer"] == BANDIT_LABEL for prompt in _judge_prompts(stage))
-
-
-async def test_close_asks_no_llm_for_frontier_scorers_without_an_archive_and_records_why(tmp_path: Path) -> None:
+async def test_close_asks_no_llm_for_a_playbook_change_without_an_archive_and_records_why(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     _script(stage)
 
     outcome = await stage.run()
 
-    assert outcome.exit_code == 0 and stage.scorer_author.calls == []
+    assert outcome.exit_code == 0 and stage.author.calls == []
     breakdown = json.loads((stage.layout.reports / "session_breakdown.json").read_text())
-    assert (
-        breakdown["close"]["knowledge"]["scorers"]["status"],
-        breakdown["close"]["knowledge"]["scorers"]["reason"],
-    ) == (
-        SKIPPED,
-        NO_ARCHIVE,
-    )
-
-
-def test_one_session_in_four_is_a_challenger_session_and_the_rest_are_not() -> None:
-    sessions = [f"MB-20261021T000000Z-{index:08x}" for index in range(400)]
-
-    flags = [lifecycle.challenger_session(session_id) for session_id in sessions]
-
-    assert flags == [lifecycle.challenger_session(session_id) for session_id in sessions]
-    assert 70 <= sum(flags) <= 130
-
-
-@pytest.mark.parametrize("offered", [True, False])
-async def test_a_challenger_session_scores_with_the_challenger_the_notebook_offers_else_the_champion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offered: bool
-) -> None:
-    champion = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
-    challenger = PolicyChoice(FrontierPolicy("output_throughput"), BANDIT_LABEL, "bandit-rv: the best challenger")
-    monkeypatch.setattr(lifecycle, "challenger_session", lambda session_id: True)
-    monkeypatch.setattr(
-        lifecycle,
-        "session_challenger",
-        lambda snapshot, history, defaults: replace(challenger, policy=defaults) if offered else None,
-    )
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0
-    manifest = json.loads(stage.layout.manifest.read_text())["policy_versions"]
-    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    if offered:
-        assert champion == [] and manifest[FRONTIER_POLICY_KEY] == BANDIT_LABEL
-        assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("1", True)
-    else:
-        assert len(champion) == 1 and manifest[FRONTIER_POLICY_KEY] == CHOSEN_LABEL
-        assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("0", False)
+    playbook = breakdown["close"]["knowledge"]["playbook"]
+    assert (playbook["status"], playbook["reason"]) == (SKIPPED, NO_ARCHIVE)
 
 
 async def test_a_session_with_an_rsi_archive_plays_the_champion_playbook_and_close_keeps_the_judges_calls(
@@ -1028,71 +899,6 @@ async def test_the_dev_leases_of_the_run_reach_the_peers(tmp_path: Path) -> None
     stage._session()
 
     assert stage.setup.dev_leases == 2
-
-
-async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lifecycle, "challenger_session", lambda session_id: True)
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.settings = replace(SETTINGS, frontier_scorer=BANDIT_LABEL)
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0
-    assert json.loads(stage.layout.manifest.read_text())["policy_versions"][CHALLENGER_KEY] == "0"
-
-
-class _Failing:
-    """A scorer that raises on every branch."""
-
-    label = "failing-v1"
-
-    def estimate(self, branch: object, t_s: float, context: object, readings: object) -> Estimate:
-        raise RuntimeError("the scorer broke")
-
-
-async def test_a_scorer_that_keeps_failing_falls_back_to_frontier_v1_as_a_recorded_decision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(scorers, "custom_scorers", lambda: (_Failing(),))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.settings = replace(SETTINGS, frontier_scorer=_Failing.label)
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0
-    [fell_back] = [row for row in _decisions(stage) if row["reason"] == SCORER_FALLBACK_REASON]
-    assert fell_back["kind"] == "event" and _Failing.label in str(fell_back["detail"]["why"])
-    assert _frontier_lines(stage)[-1]["scorer"] == FRONTIER_V1_LABEL
-
-
-async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_calibration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
-    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.settings = replace(SETTINGS, frontier_policy=FrontierPolicyMode.DEFAULT)
-    _script(stage)
-
-    outcome = await stage.run()
-
-    assert outcome.exit_code == 0 and calls == []
-    assert await _frontier_fingerprint(stage) == DEFAULT_POLICY
-    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {
-        "label": DEFAULT_POLICY,
-        "evidence": FORCED_DEFAULT_EVIDENCE,
-        "scorer": FRONTIER_V1_LABEL,
-        "challenger": False,
-    }
-    assert _judge_state(_judge_prompts(stage)[0])["frontier_policy"] == {
-        "label": DEFAULT_POLICY,
-        "evidence": FORCED_DEFAULT_EVIDENCE,
-        "scorer": FRONTIER_V1_LABEL,
-    }
-    defaults = FrontierPolicy.for_budget(GRADED_OUTPUT, SETTINGS.max_hours * MB_SECONDS_PER_HOUR)
-    assert all(line["new_branch_floor_pct"] == defaults.new_branch_floor_pct for line in _frontier_lines(stage))
 
 
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
@@ -1600,7 +1406,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
         stage.layout,
     )
     before = json.loads(stage.layout.roster.read_text())
-    frontier = json.loads(stage.layout.manifest.read_text())["policy_versions"][FRONTIER_POLICY_KEY]
+    policies = json.loads(stage.layout.manifest.read_text())["policy_versions"]
     recovery = _recovery(stage, persisted.settings)
     outcome = await recovery.finish(persisted.ended)
 
@@ -1622,7 +1428,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     branches_by_name = {branch.branch: branch for branch in (await recovery.handle(Role.OBSERVER).lineage()).branches}
     assert branches_by_name[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
     assert json.loads(stage.layout.roster.read_text()) == before
-    assert json.loads(stage.layout.manifest.read_text())["policy_versions"][FRONTIER_POLICY_KEY] == frontier
+    assert json.loads(stage.layout.manifest.read_text())["policy_versions"] == policies
     # The tests the dead session left are withdrawn before FINAL's quota, which admits the integration branch alone.
     assert recovery.toolbox.policies == [final_quota(SETTINGS.caps)]
     assert recovery.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value] * 2

@@ -45,7 +45,6 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     PROBATION_TESTS,
     SETTLED_TESTS,
     STRANDED_COMPONENT,
-    FrontierPolicy,
     StopRule,
 )
 from hyperloom_multibranch.notebook.rsi.history import MAX_STALL_TESTS, MIN_STALL_TESTS
@@ -158,11 +157,6 @@ class Playbook:
 
         numbers = self.numbers
         return StopRule(numbers.stall_tests, numbers.probation_share, numbers.probation_tests)
-
-    def policy(self, defaults: FrontierPolicy) -> FrontierPolicy:
-        """``defaults`` with this playbook's grace, so the new-branch floor ends where the judge's grace does."""
-
-        return dataclasses.replace(defaults, settled_tests=self.numbers.grace_tests)
 
     def render(self, *, challenger: bool = False) -> str:
         """The playbook as the judge reads it every round: its numbers, its rules, then the safety envelope."""

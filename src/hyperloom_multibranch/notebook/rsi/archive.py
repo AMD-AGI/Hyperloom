@@ -3,13 +3,12 @@
 
 """Archived search trees: what each past session's branches did over time, what they cost, how noisy it measured.
 
-A tree keeps what the replay, the frontier priors and their calibration, the stall odds and the stop audit need:
-when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones apart), the
-directions they tried, when its commits landed, the cumulative gain they reached and whether their merge failed, the
-stalls the scheduler held it through on probation, the GPU time it spent, the session's task conditions, its roofline
-bound, its baseline's dispersion and where it measured. A tree an older version wrote, or one backfilled from a
-session that recorded no intents, reads with no stop reasons, no directions, no kernel test times, no probations and
-no roofline bound, and with every commit merged. Trees are written once, under
+A tree keeps what the replay, the stall odds and the stop audit need: when each branch opened and stopped and why,
+when its tests were requested, the directions they tried, when its commits landed, the cumulative gain they reached
+and whether their merge failed, the stalls the scheduler held it through on probation, the GPU time it spent, the
+session's task conditions, its roofline bound, its baseline's dispersion and where it measured. A tree an older
+version wrote, or one backfilled from a session that recorded no intents, reads with no stop reasons, no directions,
+no probations and no roofline bound, and with every commit merged. Trees are written once, under
 ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its session
 with :func:`archive_session`, which says why when it archives nothing.
 """
@@ -110,8 +109,7 @@ class TreeBranch:
     """One branch on the session clock (seconds since the session started); gains are over the session's baseline.
 
     ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
-    tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
-    frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
+    tried, in the order it first tried them. ``measured_times`` and ``judged_times`` are when its tests
     were measured and judged, ``ended_times`` when its explore tests got a result of any validity, and
     ``settled_times`` when its explore tests that succeeded were judged, as the judge's grace counts them; each
     ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree archived before it was
@@ -131,7 +129,6 @@ class TreeBranch:
     test_times: tuple[float, ...] = ()
     stop_reason: str = ""
     directions: tuple[TreeDirection, ...] = ()
-    kernel_test_times: tuple[float, ...] = ()
     measured_times: tuple[float, ...] | None = None
     judged_times: tuple[float, ...] | None = None
     ended_times: tuple[float, ...] | None = None
@@ -198,7 +195,6 @@ class TreeBranch:
             commits=tuple(commit for commit in self.commits if commit.t_s <= t_s),
             test_times=tests,
             directions=(),
-            kernel_test_times=tuple(when for when in self.kernel_test_times if when <= t_s),
             measured_times=_by(self.measured_times, t_s),
             judged_times=_by(self.judged_times, t_s),
             ended_times=_by(self.ended_times, t_s),
@@ -400,15 +396,14 @@ def _directions(
 @dataclass(frozen=True)
 class _TreeReading:
     """What every branch of one session's search tree is read against: its gains off ``metric`` from the baseline
-    value ``anchor``, its times from ``start``, each branch's tests, the intents that change a kernel, the Recipe KB
-    champions built on another image whose replays it tested, and the commits whose merge failed."""
+    value ``anchor``, its times from ``start``, each branch's tests, the Recipe KB champions built on another image
+    whose replays it tested, and the commits whose merge failed."""
 
     snapshot: NotebookSnapshot
     metric: str
     anchor: float
     start: float
     tests: Mapping[str, Sequence[TestRecord]]
-    kernel: frozenset[str]
     cross_image: frozenset[str] = frozenset()
     merge_failed: frozenset[str] = frozenset()
 
@@ -440,11 +435,6 @@ class _TreeReading:
             stop_reason=node.stop_reason or "",
             directions=(
                 () if node.branch == INTEGRATION_BRANCH else _directions(tests, self.snapshot.intents, self.cross_image)
-            ),
-            kernel_test_times=tuple(
-                sorted(
-                    record.requested_at - start for record in tests if record.request.intent_fingerprint in self.kernel
-                )
             ),
             measured_times=_measured_times(tests, start),
             judged_times=_judged_times(tests, start),
@@ -481,12 +471,11 @@ def tree_from_snapshot(
     tests: dict[str, list[TestRecord]] = defaultdict(list)
     for record in snapshot.records:
         tests[record.request.branch].append(record)
-    kernel = frozenset(fp for fp, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL)
     failed = frozenset(
         item.commit_id for item in snapshot.committed if item.first_failed_at is not None and item.merged_into is None
     )
     reading = _TreeReading(
-        snapshot, metric, anchor, start, tests, kernel, cross_image=frozenset(cross_image), merge_failed=failed
+        snapshot, metric, anchor, start, tests, cross_image=frozenset(cross_image), merge_failed=failed
     )
     ceiling = profile.roofline_ceiling.get(metric)
     return SearchTree(
@@ -550,8 +539,8 @@ def as_of_from_env(env: Mapping[str, str] | None = None) -> float | None:
 
 class TreeArchive:
     """The shared folder of archived search trees; with ``as_of``, read as it stood then: only the trees of sessions
-    whose budget ran out by then. Every archive beside it, the lesson pool and the playbook pool, is read as of then too.
-    """
+    whose budget ran out by then. Every archive beside it, the lesson pool and the playbook pool, is read as of then
+    too."""
 
     def __init__(self, root: Path, as_of: float | None = None) -> None:
         self.root = Path(root) / "trees"

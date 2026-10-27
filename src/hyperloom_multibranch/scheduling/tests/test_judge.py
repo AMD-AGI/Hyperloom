@@ -27,14 +27,11 @@ from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, MergeO
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
-from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import (
-    FRONTIER_V1_LABEL,
     NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
     SETTLED_TESTS,
     STRANDED_COMPONENT,
-    FrontierPolicy,
 )
 from hyperloom_multibranch.notebook.rsi.playbook import H0
 from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
@@ -111,11 +108,6 @@ ROSTER = (
 
 
 OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
-CHOSEN = PolicyChoice(
-    FrontierPolicy(METRIC, window_seconds=1800.0),
-    "window x2",
-    "window x2: rank correlation 0.61 against 0.42 for the defaults, over 24 compared rounds in 3 similar sessions",
-)
 WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
 
 
@@ -182,8 +174,6 @@ def _view(
         scheduler_llm_usd=0.27183,
         specialists=specialists or {},
         held=held or {},
-        frontier_policy=CHOSEN,
-        frontier_scorer=FRONTIER_V1_LABEL,
         queued=queued or {},
         building=building or {},
     )
@@ -239,16 +229,6 @@ def test_the_prompt_shows_the_open_areas_and_the_playbook_before_the_reply_forma
     assert "stop_candidate is 1 when its stall reached the bar and nothing holds it" in prose
     assert "for stops it replaces the lowest expected gain" in prose
     assert "near_bar_lead, stranded_lead and probation" in prose
-
-
-def test_the_prompt_names_the_frontier_policy_the_evidence_it_was_chosen_on_and_the_scorer_scoring_now() -> None:
-    assert _state(_view())["frontier_policy"] == {
-        "label": CHOSEN.label,
-        "evidence": CHOSEN.evidence,
-        "scorer": FRONTIER_V1_LABEL,
-    }
-    assert "frontier_policy's scorer" in JUDGE_SYSTEM_PROMPT
-    assert "frontier_policy names the scoring's variation" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 
 def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> None:

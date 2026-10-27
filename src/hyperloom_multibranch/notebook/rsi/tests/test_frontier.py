@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The frontier score of each running specialist branch: trend, spend, headroom, Amdahl ceiling, prior, observation."""
+"""The frontier score of each running specialist branch: trend, spend, headroom, Amdahl ceiling, observation."""
 
 from __future__ import annotations
 
 import dataclasses
 import json
-import math
 from pathlib import Path
 
 import pytest
@@ -27,11 +26,9 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, Conclusion, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, longest_root_test_seconds
+from hyperloom_multibranch.notebook.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
     CANDIDATE_COMPONENT,
-    FALLBACK_COMPONENT,
-    FALLBACK_LIMIT,
     FRONTIER_LOG_FORMAT,
     FRONTIER_V1,
     FRONTIER_V1_LABEL,
@@ -51,25 +48,21 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     FrontierPolicy,
     FrontierScoring,
     Readings,
-    ScorerError,
-    ScorerGuard,
     ScoringContext,
     StallBar,
     StopRule,
-    checked_estimate,
     drawn_for_probation,
+    enveloped,
     is_young,
     paced,
     probation_event,
-    remaining_prior,
     score_at,
     score_progress,
-    score_with,
     stall_evidence,
     trend_start,
 )
 from hyperloom_multibranch.notebook.rsi.history import DEFAULT_STALL_TESTS
-from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import GEMM_AGAIN, METRIC, scripted_session
@@ -80,17 +73,6 @@ PAYS_LATE = tree(
     "late", branch("s1", [(600.0, 2.0), (1800.0, 6.0)], test_times=(0.0, 600.0, 1200.0, 1800.0)), task=TASK
 )
 PAYS_SOON = tree("soon", branch("s1", [(1800.0, 3.0)], test_times=(0.0, 900.0, 1800.0)), task=TASK)
-# The same GPU on another framework: 3 of 5 label weights match.
-SAME_GPU = TaskConditions(labels={"gpu": TASK.labels["gpu"], "framework": "sglang"})
-# The same GPU and nothing else: 3 of 7.
-ONLY_THE_GPU = TaskConditions(
-    labels={"gpu": TASK.labels["gpu"], "framework": "sglang", "model": "Qwen/Qwen3-8B", "precision": "bf16"}
-)
-
-
-def _sessions(task: TaskConditions, count: int) -> tuple[SearchTree, ...]:
-    gains = [(1800.0, 3.0)]
-    return tuple(tree(f"t{n}", branch("s1", gains, test_times=(0.0, 900.0, 1800.0)), task=task) for n in range(count))
 
 
 def _scores(snapshot: NotebookSnapshot, *history: object, policy: FrontierPolicy = POLICY) -> dict[str, object]:
@@ -110,43 +92,24 @@ def test_a_running_specialist_branch_is_scored_and_the_others_are_not(snapshot: 
     assert "prior_remaining_pct" not in s1.components
 
 
-def test_a_branch_an_autonomous_agent_drives_is_not_scored_and_is_no_evidence_for_the_prior(
-    snapshot: NotebookSnapshot,
-) -> None:
+def test_a_branch_an_autonomous_agent_drives_is_not_scored(snapshot: NotebookSnapshot) -> None:
     lineage = snapshot.lineage
     nodes = tuple(
         dataclasses.replace(node, driver=BranchDriver.AUTONOMOUS) if node.branch == "s1" else node
         for node in lineage.branches
     )
     driven = dataclasses.replace(snapshot, lineage=dataclasses.replace(lineage, branches=nodes))
-    agent = branch("agent", [(600.0, 9.0)], test_times=(0.0, 300.0, 600.0), driver=BranchDriver.AUTONOMOUS)
-    with_agent = dataclasses.replace(PAYS_LATE, branches=(*PAYS_LATE.branches, agent))
 
     assert _scores(snapshot)["s1"] is not None and _scores(driven)["s1"] is None
-    assert remaining_prior((with_agent,), TASK, 2) == remaining_prior((PAYS_LATE,), TASK, 2)
 
 
 def test_the_built_in_reads_the_trend_however_many_similar_sessions_the_archive_holds(
     snapshot: NotebookSnapshot,
 ) -> None:
     backed = _scores(snapshot, PAYS_LATE, PAYS_SOON)["s1"]
-    prior = remaining_prior((PAYS_LATE, PAYS_SOON), TASK, 2)
 
-    assert prior is not None and prior.remaining_pct == pytest.approx(3.5)
-    assert prior.effective_sessions == pytest.approx(2.0)
     assert backed is not None and backed.expected_gain_pct == pytest.approx(4.0)
     assert backed.basis is FrontierBasis.TREND and "prior_remaining_pct" not in backed.components
-
-
-def test_a_prior_counts_sessions_at_least_half_similar_each_by_its_similarity() -> None:
-    two, three = remaining_prior(_sessions(SAME_GPU, 2), TASK, 2), remaining_prior(_sessions(SAME_GPU, 3), TASK, 2)
-
-    assert task_similarity(TASK, SAME_GPU) == pytest.approx(0.6)
-    assert task_similarity(TASK, ONLY_THE_GPU) == pytest.approx(3 / 7)
-    assert remaining_prior(_sessions(ONLY_THE_GPU, 5), TASK, 2) is None
-    assert two is not None and two.effective_sessions == pytest.approx(1.2)
-    assert three is not None and three.effective_sessions == pytest.approx(1.8)
-    assert three.remaining_pct == pytest.approx(3.0)
 
 
 async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settle(tmp_path: Path) -> None:
@@ -423,13 +386,6 @@ def test_a_baseline_read_from_the_prelude_childs_run_paces_the_window_by_that_ru
     assert longest == 5288.0 and paced(POLICY, longest).window_seconds == 4 * 5288.0
 
 
-def test_the_prior_counts_only_branches_that_spent_as_many_tests() -> None:
-    assert remaining_prior((PAYS_LATE, PAYS_SOON), TASK, 4) == remaining_prior((PAYS_LATE,), TASK, 4)
-    assert remaining_prior((PAYS_SOON,), TASK, 4) is None
-    from_the_start = remaining_prior((PAYS_SOON,), TASK, 0)
-    assert from_the_start is not None and from_the_start.remaining_pct == pytest.approx(3.0)
-
-
 def test_the_headroom_caps_the_score_and_observation_keeps_a_floor(snapshot: NotebookSnapshot) -> None:
     tight = dataclasses.replace(snapshot, profile=profile(roofline_ceiling={METRIC: 1050.0}))
     capped = _scores(tight)["s1"]
@@ -510,10 +466,7 @@ async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path:
     assert len(lines) == 2 and lines[0]["at"] < lines[1]["at"]
     first = lines[0]
     assert (first["format"], first["metric"], first["window_seconds"]) == (FRONTIER_LOG_FORMAT, METRIC, 900.0)
-    assert (first["new_branch_floor_pct"], first["min_similarity"]) == (
-        policy.new_branch_floor_pct,
-        policy.min_similarity,
-    )
+    assert first["new_branch_floor_pct"] == policy.new_branch_floor_pct
     assert first["t_s"] > 0
     assert [row["branch"] for row in first["branches"]] == ["s1"]
     s1 = first["branches"][0]
@@ -522,91 +475,21 @@ async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path:
     assert first["scorer"] == s1["frontier"]["scorer"] == FRONTIER_V1_LABEL
 
 
-@dataclasses.dataclass(frozen=True)
-class _Fixed:
-    """A scorer that expects ``gain`` of every branch, resting on ``basis``."""
-
-    gain: float
-    basis: FrontierBasis = FrontierBasis.CUSTOM
-    components: tuple[tuple[str, float], ...] = ()
-    label: str = "fixed-v1"
-
-    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
-        return Estimate(self.gain, dict(self.components), self.basis)
-
-
-class _Failing:
-    label = "failing-v1"
-
-    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
-        raise RuntimeError("no estimate today")
-
-
-def test_any_scorer_is_held_to_the_envelope_and_named_in_its_score() -> None:
+def test_the_envelope_floors_a_young_branchs_own_trend_lifts_it_to_a_pending_gain_and_caps_it() -> None:
     context = ScoringContext(TASK, (), POLICY)
     young, settled = branch("s9", []), branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
 
-    floored = score_with(_Fixed(-1.0), young, 60.0, context)
-    resting = score_with(_Fixed(-1.0, FrontierBasis.PRIOR), young, 60.0, context)
-    capped = score_with(_Fixed(9.0), settled, 60.0, context, Readings(headroom_pct=2.0, pending_pct=1.0))
-    lifted = score_with(_Fixed(0.2), settled, 60.0, context, Readings(pending_pct=1.0))
+    floored = enveloped(Estimate(-1.0), young, 60.0, context, Readings())
+    observed = enveloped(Estimate(0.2, basis=FrontierBasis.OBSERVING), young, 60.0, context, Readings())
+    capped = enveloped(Estimate(9.0), settled, 60.0, context, Readings(headroom_pct=2.0, pending_pct=1.0))
+    lifted = enveloped(Estimate(0.2), settled, 60.0, context, Readings(pending_pct=1.0))
 
     assert (floored.expected_gain_pct, floored.basis) == (POLICY.new_branch_floor_pct, FrontierBasis.NEW)
-    assert floored.scorer == "fixed-v1" and score_at(settled, 60.0, context).scorer == FRONTIER_V1_LABEL
-    assert (resting.expected_gain_pct, resting.basis) == (0.0, FrontierBasis.PRIOR)
+    assert (observed.expected_gain_pct, observed.basis) == (0.2, FrontierBasis.OBSERVING)
     assert (capped.expected_gain_pct, capped.basis) == (2.0, FrontierBasis.HEADROOM)
     assert capped.components == {"pending_pct": 1.0, "headroom_pct": 2.0}
     assert (lifted.expected_gain_pct, lifted.basis) == (1.0, FrontierBasis.PENDING)
-
-
-@pytest.mark.parametrize(
-    ("scorer", "why"),
-    [
-        (_Fixed(math.nan), "not a finite number"),
-        (_Fixed(1.0, components=(("gpu_hours", math.inf),)), "not finite numbers: gpu_hours"),
-        (_Fixed(1.0, components=(("headroom_pct", 1.0),)), "components the envelope writes: headroom_pct"),
-        (_Fixed(1.0, FrontierBasis.NEW), "the envelope's to give"),
-    ],
-)
-def test_an_estimate_that_breaks_the_scorer_contract_is_refused(scorer: _Fixed, why: str) -> None:
-    with pytest.raises(ScorerError, match=why):
-        score_with(scorer, branch("s9", []), 60.0, ScoringContext(TASK, (), POLICY))
-    with pytest.raises(ScorerError, match="not an Estimate"):
-        checked_estimate("fixed-v1", 1.0)
-
-
-def test_the_guard_stands_frontier_v1_in_for_a_failing_scorer_then_scores_the_rest_of_the_session_with_it() -> None:
-    told: list[str] = []
-    guard = ScorerGuard(_Failing(), on_fallback=told.append)
-    context = ScoringContext(TASK, (), POLICY)
-    settled = branch("s9", [(30.0, 1.0)], ended_times=(0.0,) * SETTLED_TESTS)
-
-    first = guard.score(settled, 60.0, context, Readings())
-    for _ in range(FALLBACK_LIMIT - 1):
-        guard.score(settled, 60.0, context, Readings())
-    after = guard.score(settled, 60.0, context, Readings())
-
-    assert first.scorer == FRONTIER_V1_LABEL and first.components[FALLBACK_COMPONENT] == 1.0
-    assert first.expected_gain_pct == score_at(settled, 60.0, context).expected_gain_pct
-    assert (guard.failures, guard.label, guard.chosen.label) == (FALLBACK_LIMIT, FRONTIER_V1_LABEL, "failing-v1")
-    assert FALLBACK_COMPONENT not in after.components
-    assert told == [
-        f"the frontier scorer failing-v1 failed {FALLBACK_LIMIT} times; {FRONTIER_V1_LABEL} scores the rest of the "
-        "session"
-    ]
-
-
-async def test_the_scoring_scores_with_its_guards_scorer_and_logs_its_label(tmp_path: Path) -> None:
-    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
-    path = tmp_path / "frontier.jsonl"
-    scoring = FrontierScoring(notebook, POLICY, log=path, guard=ScorerGuard(_Fixed(3.0)))
-
-    rows = {row.branch: row for row in await scoring.progress()}
-    line = json.loads(path.read_text(encoding="utf-8"))
-
-    assert rows["s1"].frontier is not None and rows["s1"].frontier.scorer == "fixed-v1"
-    assert rows["s1"].frontier.expected_gain_pct == 3.0
-    assert line["scorer"] == "fixed-v1" and line["branches"][0]["frontier"]["basis"] == "custom"
+    assert score_at(settled, 60.0, context).scorer == FRONTIER_V1_LABEL
 
 
 async def test_a_round_that_scored_nothing_writes_no_line(tmp_path: Path) -> None:
