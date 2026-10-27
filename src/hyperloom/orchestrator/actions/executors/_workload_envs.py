@@ -1071,24 +1071,6 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
 
-def _write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
-    from ._profile_setup import _TRACELENS_PATCH_UNAVAILABLE
-
-    if not attempted:
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-    elif patched:
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
-    else:
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
-        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-        log.warning(
-            "TraceLens runtime patch unavailable for framework=%s; "
-            "profile will omit annotation-only flags and roofline "
-            "analysis may be degraded.",
-            fw or "<unset>",
-        )
-
-
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1120,19 +1102,20 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     if _is_xdit_profile:
         from ._server_patcher import ensure_xdit_patched_for_tracelens
 
-        from ._profile_setup import _tracelens_patch_enabled
+        from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
 
         xdit_patch_attempted = _tracelens_patch_enabled()
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+        needed = ["--profile_wait 1"]
+        if xdit_patched:
+            needed += ["--profile_capture_phase", "--profile_with_stack"]
         existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
-        profiler_args = ""
-        if "--profile_wait" not in existing:
-            profiler_args = (
-                "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
-            )
-            envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {profiler_args}".strip()
-        _write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
-        xdit_saved_args = profiler_args
+        existing_tokens = existing.split()
+        missing = [f for f in needed if f.split()[0] not in existing_tokens]
+        if missing:
+            envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
+        write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+        xdit_saved_args = " ".join(needed)
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []

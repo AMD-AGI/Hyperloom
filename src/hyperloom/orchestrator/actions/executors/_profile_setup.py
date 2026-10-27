@@ -413,6 +413,25 @@ def _apply_framework_profile(
     return ProfileInstrumentation(num_prompts, None, [], 0)
 
 
+def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
+    """Write ``HYPERLOOM_TRACELENS_PATCH_STATUS`` and the degraded reason from a single owner."""
+    if envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE:
+        envs.pop("HYPERLOOM_PROFILE_DEGRADED_REASON")
+    if not attempted:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+    elif patched:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
+    else:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit annotation-only flags and roofline "
+            "analysis may be degraded.",
+            fw or "<unset>",
+        )
+
+
 def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]:
     """Patch the installed server the way the fixed-sequence profile does."""
     from hyperloom.orchestrator.actions.executors._server_patcher import (
@@ -424,9 +443,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
     is_atom = "atom" in framework
     is_sglang = "sglang" in framework
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-    if envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE:
-        envs.pop("HYPERLOOM_PROFILE_DEGRADED_REASON")
+    write_tracelens_patch_status(envs, attempted=False, patched=False, fw=framework)
     if is_atom or not _tracelens_patch_enabled():
         return False, sitecustomize
     if "vllm" in framework:
