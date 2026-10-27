@@ -64,7 +64,7 @@ from .assembler import event_parts
 from .event_fields import clip as _clip, failure_row as _failure_row, now_iso_seconds as _now_iso
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import make_sink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .kernel_gain import claimed_gain, lane_gain_axis, lane_gain_pct, stamp_gate_gain, stamp_rebench_gain
 from .kernel_records import (
@@ -261,9 +261,9 @@ def kernel_event_id(macro_cycle: Any) -> str:
 
 def record_geak_attempts(*, event: str, journey: dict[str, Any] | None) -> None:
     """Replay a GEAK journey into its originating event, including during recovery."""
-    if not make_sink(event, producer=PRODUCER).has_row(SECTION_EVENT):
+    if not EventSink(event, producer=PRODUCER).has_row(SECTION_EVENT):
         return
-    sink = make_sink(event, producer=PRODUCER_GEAK)
+    sink = EventSink(event, producer=PRODUCER_GEAK)
     parsed = _as_dict(journey)
     prior = {
         row.get("kernel_id"): _as_dict(row.get("e2e"))
@@ -371,9 +371,9 @@ def reject_geak_attempts(
     rejection_reason: str,
 ) -> None:
     """Revoke imported KEEPs by event identity, including after KERNEL closes."""
-    if not make_sink(event, producer=PRODUCER).has_row(SECTION_EVENT):
+    if not EventSink(event, producer=PRODUCER).has_row(SECTION_EVENT):
         return
-    sink = make_sink(event, producer=PRODUCER_GEAK)
+    sink = EventSink(event, producer=PRODUCER_GEAK)
     parts = event_parts((SECTION_GEAK_ATTEMPT,), event=event)
     rows = rows_for_event(parts.get(SECTION_GEAK_ATTEMPT) or [], event)
     for row in rows:
@@ -426,7 +426,7 @@ def record_integrate_verdict(*, macro_cycle: Any, verdict: IntegrateVerdict) -> 
     """
     if not str(verdict.integration_id or ""):
         return
-    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    sink = EventSink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the integrate verdict for %s",
@@ -450,7 +450,7 @@ def record_integrate_axis(*, macro_cycle: Any, integration_id: str, graded_objec
     verdict that has no row or an axis the gate did not report.
     """
     axis = _text(graded_objective)
-    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    sink = EventSink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not (axis and integration_id and sink.has_row(SECTION_EVENT)):
         return
     row = {"integration_id": str(integration_id), "graded_objective": axis}
@@ -529,7 +529,7 @@ def record_trace_analyze_request(*, macro_cycle: Any, run: TraceAnalyzeRun) -> N
     """
     if not str(run.run_id or ""):
         return
-    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    sink = EventSink(kernel_event_id(macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_EVENT):
         log.debug(
             "kernel timeline: no event %s to hold the trace_analyze request %s",
@@ -925,8 +925,8 @@ class KernelEventRecorder:
     ):
         """Bind a recorder to the event of one KERNEL entry."""
         self._event_id = kernel_event_id(macro_cycle)
-        self._sink = make_sink(self._event_id, producer=PRODUCER)
-        self._geak_sink = make_sink(self._event_id, producer=PRODUCER_GEAK)
+        self._sink = EventSink(self._event_id, producer=PRODUCER)
+        self._geak_sink = EventSink(self._event_id, producer=PRODUCER_GEAK)
         self._t0 = time.monotonic()
         self._start_time = _now_iso()
         self._sequence: int | None = None

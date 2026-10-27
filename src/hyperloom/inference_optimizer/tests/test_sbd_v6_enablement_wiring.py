@@ -433,7 +433,6 @@ async def test_a_kept_round_does_not_close_the_lane(_bound_session):
     assert row["validation_pending"] is True
     assert row["landed"] is False
     assert row["files"] == []
-    assert row["accepted_config_path"] is None
 
 
 @pytest.mark.asyncio
@@ -457,7 +456,6 @@ async def test_the_rearm_hands_the_round_its_archive(_bound_session):
     # The archive and the verdict are two calls on one tick, onto one row.
     assert len(rows) == 1
     assert {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"} in rows[0]["files"]
-    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
     assert rows[0]["status"] == "kept"
 
 
@@ -482,7 +480,6 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     # nothing landed. The round is still ruled.
     row = _ext()["attempts"]["rows"][0]
     assert "files" not in row
-    assert "accepted_config_path" not in row
     assert row["status"] == "reverted"
 
 

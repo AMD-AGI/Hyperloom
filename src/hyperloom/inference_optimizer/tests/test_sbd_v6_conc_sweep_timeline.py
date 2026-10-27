@@ -44,7 +44,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     make_conc_sweep_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -75,7 +75,7 @@ def _recorder(
 ):
     """Build a recorder the way a dispatched sweep gets one."""
     recorder = make_conc_sweep_recorder(
-        make_sink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
+        EventSink(conc_sweep_event_id(phase=phase, macro_cycle=macro_cycle), producer=PRODUCER),
         task_id=task_id,
         task_kind="conc_sweep",
         reason=reason,
@@ -880,7 +880,7 @@ def test_a_recorder_with_no_sink_declines_instead_of_raising(_bound_session):
 
 def test_a_malformed_event_id_declines_instead_of_breaking_the_sweep(_bound_session):
     with pytest.raises(ValueError):
-        make_sink("not-an-event-id", producer=PRODUCER)
+        EventSink("not-an-event-id", producer=PRODUCER)
 
 
 def _ceiling() -> dict[str, Any]:
