@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import logging
 import os
 import re
@@ -570,6 +572,69 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
     return True
 
 
+#: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
+#: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
+AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
+_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tables_sha256(configs_dir: Path) -> str:
+    """The prewarm's digest of aiter's tuned tables: a line ``<relative path>\\t<sha256>\\n`` per file, by path."""
+    files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
+    digest = hashlib.sha256()
+    for relative, path in files:
+        digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
+    return digest.hexdigest()
+
+
+def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None) -> frozenset[str]:
+    """Serving modules the prewarm built from the image's own tree and tables that are still what it installed.
+
+    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now and with the
+    tables ``configs_dir`` holds now, and this round leaves its ``AITER_CONFIG_*`` unset: it is then the
+    module aiter would build at the first call, so moving it aside only makes the next start compile it
+    again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
+    the image's own for this round.
+    """
+    try:
+        document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(document, dict) or document.get("schema") != _PREWARM_SCHEMA:
+        return frozenset()
+    overridden = {
+        m
+        for key, value in (envs or {}).items()
+        if str(value).strip()
+        for m in AITER_ENV_TO_SERVING_MODULES.get(key, ())
+    }
+    tables: str | None = None
+    own: set[str] = set()
+    for entry in document.get("modules") or []:
+        name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
+        so_path = jit_dir / f"{name}.so"
+        if not name or name in overridden or not so_path.is_file():
+            continue
+        try:
+            if _file_sha256(so_path) != entry.get("sha256"):
+                continue
+            tables = _tables_sha256(configs_dir) if tables is None else tables
+        except OSError:
+            continue
+        if entry.get("tables_sha256") == tables:
+            own.add(name)
+    return frozenset(own)
+
+
 def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
     """Invalidate selected modules and build state, surfacing transaction failure."""
     record = invalidate_jit_cache(jit_build, backup_dir, modules=modules)
@@ -656,9 +721,13 @@ def prepare_serving_so_for_csvs(
                 resolved = serving_module_for_kernel(name, libtype)
                 if resolved:
                     modules_needed.append(resolved)
-    modules_needed_t = tuple(dict.fromkeys(modules_needed))
+    own = image_own_modules(jit_dir, configs_dir, envs) if modules_needed else frozenset()
+    modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
     if not modules_needed_t:
-        return {"action": "skip", "jit_dir": str(jit_dir)}
+        skipped: dict[str, Any] = {"action": "skip", "jit_dir": str(jit_dir)}
+        if own:
+            skipped["kept_image_own"] = sorted(own)
+        return skipped
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules_needed_t)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -695,9 +764,11 @@ def drop_serving_so_for_envs(
     )
     if context is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    _, jit_build = context
+    package_root, jit_build = context
     jit_dir = jit_build.parent
-    modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
+    # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
+    own = image_own_modules(jit_dir, package_root / "configs", envs) - set(also_modules)
+    modules = tuple(m for m in dict.fromkeys((*_modules_for_envs(envs), *also_modules)) if m not in own)
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -724,6 +795,7 @@ __all__ = [
     "AITER_ENV_TO_TUNED_FILE",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
+    "AITER_PREWARM_MANIFEST",
     "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
@@ -734,6 +806,7 @@ __all__ = [
     "csvs_aiter_will_load",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
+    "image_own_modules",
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
