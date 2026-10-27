@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import first_text, to_int, to_str_list
+from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -2117,15 +2117,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def append_stack_gain_entry(self, *, new_tput: float) -> None:
         """Mirror an optimization_stack append into gain_per_stack_entry as ``(new_tput-baseline_tput)/baseline_tput*100``."""
-        try:
-            base = float(self.baseline_tput or 0.0)
-        except (TypeError, ValueError):
-            base = 0.0
-        try:
-            tput = float(new_tput or 0.0)
-        except (TypeError, ValueError):
-            tput = 0.0
-        self.gain_per_stack_entry.append(gain_pct(tput, base))
+        self.gain_per_stack_entry.append(gain_pct(to_float(new_tput, 0.0), to_float(self.baseline_tput, 0.0)))
 
     # Session budget: elapsed is summed forward across legs.
     def begin_leg(self, *, now_unix: float | None = None) -> None:

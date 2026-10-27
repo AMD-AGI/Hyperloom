@@ -14,7 +14,7 @@ from typing import Any, NamedTuple
 from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import env_flag
 
 from .patch_landing import (
@@ -502,10 +502,7 @@ def _kernel_trace_impact_pct(state, kernel_id: str) -> float:
             continue
         if str(row.get("kernel_id") or "").strip() != kid:
             continue
-        try:
-            return float(row.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+        return to_float(row.get("gpu_pct"), 0.0)
     return 0.0
 
 
@@ -553,11 +550,7 @@ class _HotRow(NamedTuple):
 
 def _resolve_hot_kernel_top_n() -> int:
     """The gate's per-ranking cap, ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``, never below one."""
-    try:
-        top_n = int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", _DEFAULT_HOT_KERNEL_GATE_TOP_N))
-    except ValueError:
-        top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    return max(1, top_n)
+    return max(1, to_int(os.environ.get("HYPERLOOM_KERNEL_OPT_GATE_TOP_N"), _DEFAULT_HOT_KERNEL_GATE_TOP_N))
 
 
 def _hot_rows(
@@ -580,10 +573,7 @@ def _hot_rows(
         kid = str(k.get("kernel_id") or "")
         if not kid:
             continue
-        try:
-            gpu_pct = float(k.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
+        gpu_pct = to_float(k.get("gpu_pct"), 0.0)
         src = str(k.get("source_file") or "")
         group_info = kid_to_group.get(kid)
         rank = int(k.get("tracelens_pitem_rank") or 0)

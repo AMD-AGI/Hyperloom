@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from typing import Any, NamedTuple
 
+from hyperloom.common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
@@ -709,11 +710,8 @@ class _RenderMixin:
                 "them directly if the situation warrants it.)"
             )
         snap = cached.get("roofline_snapshot_id", "?")
-        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
-        try:
-            gain_str = f"{float(gain):.2f}"
-        except (TypeError, ValueError):
-            gain_str = "?"
+        gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
+        gain_str = "?" if gain is None else f"{gain:.2f}"
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
             "full report not inlined; see profiler_digest above or call the "
