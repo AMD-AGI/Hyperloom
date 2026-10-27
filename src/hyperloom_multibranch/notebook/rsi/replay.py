@@ -10,10 +10,12 @@ does not:
 * a branch the playbook stops earlier than the archive did loses what it did after, which is exact;
 * a branch the judge stopped and the playbook keeps goes on with sampled tests, one every interval it kept, each
   committing with ``h(k)`` of the stall odds (``g(i)`` before its first commit) and adding a gain drawn from the
-  commits of the other archived sessions, of the same model type where they are enough;
+  commits of the other archived sessions, of the same model type where they are enough, that started from a gain on
+  the branch's side of their median (:class:`Gains`): the big gains come early;
 * a slot the playbook frees opens the next branch of the archive not opened yet, its record shifted to start then,
-  from the integration gain then, or a sampled branch once the archive runs out; none opens in the last
-  ``last_open_minutes`` of the session, by default the median time a new branch took to its first commit.
+  from the integration gain then, or a sampled branch once the archive runs out, which commits as the branches opened
+  mid-session did; none opens in the last ``last_open_minutes`` of the session, by default the median time such a
+  branch took to its first commit.
 
 A branch a cause other than the judge ended, its specialist giving up or failing to start, ends where it did; no
 playbook keeps it. The integration branch is taken as the best gain any branch has reached, so the replay's measure
@@ -54,6 +56,7 @@ from hyperloom_multibranch.notebook.rsi.history import (
     WORKLOAD_LABEL,
     Odds,
     judged_tests,
+    opened_with,
     stall_odds,
 )
 from hyperloom_multibranch.notebook.rsi.playbook import H0, Playbook, PlaybookNumbers, replaced
@@ -119,14 +122,45 @@ class Draws:
 
 
 @dataclass(frozen=True)
+class Gains:
+    """The gains the other sessions' commits added, split at the median gain they started from: a commit starting
+    below it draws from ``below``, one starting at or above it from ``above``, each sorted."""
+
+    split: float = 0.0
+    below: tuple[float, ...] = ()
+    above: tuple[float, ...] = ()
+
+    @classmethod
+    def of(cls, steps: Sequence[tuple[float, float]]) -> Gains:
+        """The gains of ``steps``, each the gain a commit started from and the gain it added."""
+
+        if not steps:
+            return cls()
+        split = statistics.median(base for base, _ in steps)
+        return cls(
+            split,
+            tuple(sorted(added for base, added in steps if base < split)),
+            tuple(sorted(added for base, added in steps if base >= split)),
+        )
+
+    def drawn(self, base: float, picked: float) -> float | None:
+        """The gain a commit starting from ``base`` adds, at ``picked``, in [0, 1), along its side; ``None`` for no
+        gains at all."""
+
+        pool = (self.below if base < self.split else self.above) or self.below or self.above
+        return pool[min(int(picked * len(pool)), len(pool) - 1)] if pool else None
+
+
+@dataclass(frozen=True)
 class Pace:
-    """What a session is replayed with, read off the other sessions: ``h(k)`` and ``g(i)`` by position, the first at
-    index 0; the gains a commit added, sorted; the stop bar their stall odds set; the median seconds a new branch
-    took to its first commit."""
+    """What a session is replayed with, read off the other sessions: ``h(k)``, ``g(i)`` of a branch opened mid-session
+    and ``g(i)`` of one of the opening batch by position, the first at index 0; the gains a commit added; the stop bar
+    their stall odds set; the median seconds a branch opened mid-session took to its first commit."""
 
     hazard: tuple[float, ...]
     new_branch: tuple[float, ...]
-    gains: tuple[float, ...]
+    opening_branch: tuple[float, ...]
+    gains: Gains
     bar: int
     first_commit_seconds: float
 
@@ -154,12 +188,14 @@ def _own(branch: TreeBranch) -> list[tuple[float, float]]:
     )
 
 
-def _increments(branch: TreeBranch) -> list[float]:
-    reached, before = [], branch.fork_gain_pct
+def _increments(branch: TreeBranch) -> list[tuple[float, float]]:
+    """Each of the branch's own commits as the gain it started from and the gain it added."""
+
+    steps, before = [], branch.fork_gain_pct
     for _, gain in _own(branch):
-        reached.append(gain - before)
+        steps.append((before, gain - before))
         before = gain
-    return reached
+    return steps
 
 
 def _label(tree: SearchTree, key: str, default: str = "") -> str:
@@ -175,15 +211,16 @@ def pace_for(tree: SearchTree, history: Sequence[SearchTree], beyond: str = OPTI
     alike = [item for item in others if _label(item, WORKLOAD_LABEL, DEFAULT_WORKLOAD) == workload]
     same = [item for item in alike if _label(item, MODEL_TYPE_LABEL) == _label(tree, MODEL_TYPE_LABEL)]
 
-    def gains(trees: Sequence[SearchTree]) -> list[float]:
-        return [gain for item in trees for branch in item.branches if branch.steered for gain in _increments(branch)]
+    def steps(trees: Sequence[SearchTree]) -> list[tuple[float, float]]:
+        return [step for item in trees for branch in item.branches if branch.steered for step in _increments(branch)]
 
-    drawn = gains(same)
+    drawn = steps(same)
     minutes = odds.first_commit_minutes if odds.first_commit_minutes is not None else DEFAULT_FIRST_COMMIT_MINUTES
     return Pace(
         hazard=_curve(odds.hazard, beyond),
         new_branch=_curve(odds.new_branch, beyond),
-        gains=tuple(sorted(drawn if len(drawn) >= MIN_GAINS else gains(alike))),
+        opening_branch=_curve(odds.opening_branch, beyond),
+        gains=Gains.of(drawn if len(drawn) >= MIN_GAINS else steps(alike)),
         bar=odds.stall_tests,
         first_commit_seconds=minutes * _SECONDS_PER_MINUTE,
     )
@@ -261,8 +298,8 @@ class _Test:
 
 @dataclass
 class _Branch:
-    """One branch as the replay runs it: its tests from here on, the one due next, how it stands, and where its
-    record ends."""
+    """One branch as the replay runs it: its tests from here on, the one due next, how it stands, where its record
+    ends, and whether it opened with the session's opening batch."""
 
     key: str
     opened: float
@@ -274,6 +311,7 @@ class _Branch:
     position: int = 0
     judged: int = 0
     commits: int = 0
+    opening: bool = False
 
 
 @dataclass
@@ -296,6 +334,7 @@ class _Run:
     session_gap: float = field(init=False)
     session_gpu: float = field(init=False)
     archive_best: list[tuple[float, float]] = field(init=False)
+    opening_end: float = field(init=False)
 
     def __post_init__(self) -> None:
         steered = _steered(self.tree)
@@ -304,12 +343,22 @@ class _Run:
         rates = [rate for rate in map(_gpu_per_test, steered) if rate > 0]
         self.session_gpu = statistics.median(rates) if rates else 0.0
         self.archive_best = sorted((when, gain) for branch in steered for when, gain in _own(branch))
+        self.opening_end = opened_with(self.tree)
 
     def play(self) -> None:
         raise NotImplementedError
 
     def archive_gain_at(self, t: float) -> float:
         return max((gain for when, gain in self.archive_best if when <= t), default=0.0)
+
+    def commit_odds(self, branch: _Branch) -> float:
+        """The odds ``branch``'s next test commits: ``h`` past its last commit, or before its first ``g`` of the
+        opening batch or of a branch opened mid-session, as it opened."""
+
+        if branch.commits:
+            return self.pace.hazard[min(branch.position + 1, MAX_POSITION) - 1]
+        first = self.pace.opening_branch if branch.opening else self.pace.new_branch
+        return first[min(branch.judged + 1, MAX_POSITION) - 1]
 
     def draws(self, key: str) -> random.Random:
         return _seeded(self.seed, self.tree.session_id, self.run, key)
@@ -447,33 +496,28 @@ class _PlaybookRun(_Run):
         hard_end = math.inf if extendable else _end(source, self.tree) + offset
         gap = _median_gap([when for when, _ in recorded]) or self.session_gap
         rate = _gpu_per_test(source) or self.session_gpu
-        branch = _Branch(source.name, at, iter(()), rate, hard_end, gain=base)
+        branch = _Branch(source.name, at, iter(()), rate, hard_end, gain=base, opening=at <= self.opening_end)
         tail = self.extension(branch, recorded[-1][0] if recorded else at, gap) if extendable else iter(())
         branch.tests = _chain((_Test(when, gain) for when, gain in recorded), tail)
         return branch
 
     def sampled(self, key: str, at: float, gap: float | None) -> _Branch:
-        branch = _Branch(key, at, iter(()), self.session_gpu, math.inf, gain=self.best)
+        opening = at <= self.opening_end
+        branch = _Branch(key, at, iter(()), self.session_gpu, math.inf, gain=self.best, opening=opening)
         branch.tests = self.extension(branch, at, gap or self.session_gap)
         return branch
 
     def extension(self, branch: _Branch, after: float, gap: float) -> Iterator[_Test]:
-        """Sampled tests every ``gap`` from ``after``: each commits with ``h(k)``, or ``g(i)`` before the branch's
-        first commit, adding a gain drawn from :attr:`Pace.gains`."""
+        """Sampled tests every ``gap`` from ``after``: each commits with :meth:`commit_odds`, adding a gain drawn from
+        :attr:`Pace.gains` for the gain the branch stands at."""
 
         draws, gains = self.draws(branch.key), self.pace.gains
         at = after
         while True:
             at += gap
             committed, picked = draws.random(), draws.random()
-            if branch.commits:
-                odds = self.pace.hazard[min(branch.position + 1, MAX_POSITION) - 1]
-            else:
-                odds = self.pace.new_branch[min(branch.judged + 1, MAX_POSITION) - 1]
-            if committed < odds and gains:
-                yield _Test(at, branch.gain + gains[min(int(picked * len(gains)), len(gains) - 1)])
-            else:
-                yield _Test(at)
+            added = gains.drawn(branch.gain, picked) if committed < self.commit_odds(branch) else None
+            yield _Test(at) if added is None else _Test(at, branch.gain + added)
 
     def tested(self, branch: _Branch, at: float) -> bool:
         """Count the test due at ``at`` and say whether the branch keeps running after it."""
@@ -601,7 +645,8 @@ class _CutRun(_Run):
         archive's."""
 
         base = source.fork_gain_pct + (self.best - self.archive_gain_at(at) if at > self.cut else 0.0)
-        branch = _Branch(source.name, at, iter(()), _gpu_per_test(source), math.inf, gain=base)
+        opening = at <= self.opening_end
+        branch = _Branch(source.name, at, iter(()), _gpu_per_test(source), math.inf, gain=base, opening=opening)
         branch.tests = self.outcomes(branch, source, base)
         self.start(branch)
 
@@ -612,12 +657,8 @@ class _CutRun(_Run):
             if at <= self.cut:
                 yield _Test(at, gain)
                 continue
-            if branch.commits:
-                odds = self.pace.hazard[min(branch.position + 1, MAX_POSITION) - 1]
-            else:
-                odds = self.pace.new_branch[min(branch.judged + 1, MAX_POSITION) - 1]
-            sampled = gains[min(int(picked * len(gains)), len(gains) - 1)] if gains else 0.0
-            yield _Test(at, branch.gain + sampled if committed < odds and gains else None)
+            added = gains.drawn(branch.gain, picked) if committed < self.commit_odds(branch) else None
+            yield _Test(at) if added is None else _Test(at, branch.gain + added)
 
 
 @dataclass(frozen=True)
@@ -913,6 +954,7 @@ __all__ = [
     "STOP_REPLY",
     "CutCheck",
     "Draws",
+    "Gains",
     "Pace",
     "PolicyRow",
     "ReplayCheck",

@@ -19,6 +19,7 @@ from hyperloom_multibranch.notebook.rsi.replay import (
     PESSIMISTIC,
     STOP_REPLY,
     Draws,
+    Gains,
     Pace,
     archive_cap,
     check,
@@ -32,8 +33,10 @@ from hyperloom_multibranch.notebook.rsi.replay import (
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
 
 MINUTE = 60.0
-NEVER = Pace((0.0,) * MAX_POSITION, (0.0,) * MAX_POSITION, (2.0,), 6, 40 * MINUTE)
-ALWAYS = Pace((1.0,) * MAX_POSITION, (1.0,) * MAX_POSITION, (2.0,), 6, 40 * MINUTE)
+#: Every commit adds 2 points.
+TWO = Gains(0.0, (), (2.0,))
+NEVER = Pace((0.0,) * MAX_POSITION, (0.0,) * MAX_POSITION, (0.0,) * MAX_POSITION, TWO, 6, 40 * MINUTE)
+ALWAYS = Pace((1.0,) * MAX_POSITION, (1.0,) * MAX_POSITION, (1.0,) * MAX_POSITION, TWO, 6, 40 * MINUTE)
 #: A bar of four tests past a commit, a grace of three tests, no probation, and no branch opened after the start.
 STRICT = replaced(H0, stall_tests=4, grace_tests=3, probation_share=0.0, last_open_minutes=240.0)
 #: As STRICT, opening into a freed slot up to the end.
@@ -160,7 +163,8 @@ def test_once_the_archive_runs_out_a_freed_slot_opens_a_sampled_branch_but_not_n
 
 
 def test_the_same_run_meets_the_same_draws_and_another_run_its_own() -> None:
-    coin = dataclasses.replace(ALWAYS, hazard=(0.5,) * MAX_POSITION, new_branch=(0.5,) * MAX_POSITION)
+    half = (0.5,) * MAX_POSITION
+    coin = dataclasses.replace(ALWAYS, hazard=half, new_branch=half, opening_branch=half)
     session = _tree(EARLY, budget=10 * HOUR)
 
     runs = [simulate(session, STRICT, coin, run=run).best_gain_pct for run in range(8)]
@@ -170,16 +174,27 @@ def test_the_same_run_meets_the_same_draws_and_another_run_its_own() -> None:
 
 
 def test_the_pace_of_a_session_is_read_off_the_others_and_held_or_dropped_beyond_their_data() -> None:
-    # Ten sessions without a model type, each weighing half: five observations a position, enough to read.
-    paid = branch("b1", [(1200.0, 2.0)], judged_times=_judged(10, 20, 30))
-    others = [tree(f"o{n}", paid, task=TASK) for n in range(10)]
+    # Ten sessions without a model type, each weighing half: five observations a position, enough to read. Each opens
+    # one branch with the session, which commits at its 2nd test, and one an hour in, which commits at its 3rd.
+    opening = branch("b1", [(1200.0, 2.0)], judged_times=_judged(10, 20, 30))
+    later = branch("b2", [(90 * MINUTE, 2.0)], opened_s=HOUR, judged_times=_judged(70, 80, 90))
+    others = [tree(f"o{n}", opening, later, task=TASK) for n in range(10)]
     own = tree("s", branch("b1", [(600.0, 9.0)], judged_times=_judged(10)), task=TASK)
 
     held, dropped = pace_for(own, (own, *others), OPTIMISTIC), pace_for(own, (own, *others), PESSIMISTIC)
 
-    assert held.gains == dropped.gains == (2.0,) * 10
-    assert held.hazard[0] == 0.0 and held.new_branch[1] == 1.0
-    assert held.new_branch[2:] == (1.0,) * (MAX_POSITION - 2) and dropped.new_branch[2:] == (0.0,) * (MAX_POSITION - 2)
+    assert held.gains == dropped.gains == Gains(0.0, (), (2.0,) * 20)
+    assert held.hazard[0] == 0.0 and held.opening_branch[1] == 1.0 and held.new_branch[:3] == (0.0, 0.0, 1.0)
+    assert held.new_branch[3:] == (1.0,) * (MAX_POSITION - 3) and dropped.new_branch[3:] == (0.0,) * (MAX_POSITION - 3)
+    assert held.first_commit_seconds == 30 * MINUTE
+
+
+def test_a_commit_draws_its_gain_from_the_commits_that_started_on_its_side_of_the_median() -> None:
+    gains = Gains.of([(0.0, 9.0), (1.0, 7.0), (40.0, 3.0), (50.0, 1.0)])
+
+    assert (gains.split, gains.below, gains.above) == (20.5, (7.0, 9.0), (1.0, 3.0))
+    assert (gains.drawn(5.0, 0.0), gains.drawn(5.0, 0.99), gains.drawn(45.0, 0.99)) == (7.0, 9.0, 3.0)
+    assert Gains(10.0, (), (2.0,)).drawn(5.0, 0.5) == 2.0 and Gains().drawn(5.0, 0.5) is None
 
 
 def test_a_cut_ranks_the_real_outcome_among_replays_that_sample_every_outcome_after_it() -> None:

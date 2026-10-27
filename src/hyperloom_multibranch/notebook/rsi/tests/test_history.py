@@ -15,6 +15,7 @@ from hyperloom_multibranch.notebook.rsi.history import (
     DEFAULT_STALL_TESTS,
     MAX_POSITION,
     MAX_STALL_TESTS,
+    OPENING_SECONDS,
     OTHER_MODEL_WEIGHT,
     PRIOR_TESTS,
     Odds,
@@ -126,7 +127,19 @@ def test_another_model_type_weighs_less() -> None:
     both = 1.0 + OTHER_MODEL_WEIGHT
     assert (odds.sessions, odds.same_model) == (2, 1)
     assert odds.hazard == {1: Odds(0.0, 2 * both), 2: Odds(both, 2 * both), 3: Odds(0.0, both)}
-    assert odds.new_branch == {1: Odds(0.0, both), 2: Odds(both, both)}
+    assert odds.opening_branch == {1: Odds(0.0, both), 2: Odds(both, both)}
+
+
+def test_only_a_branch_opened_after_the_opening_batch_tells_what_a_new_branch_does() -> None:
+    opened = OPENING_SECONDS + 60.0
+    opening = branch("b1", [(1250.0, 1.0)], judged_times=_judged(5))
+    later = branch("b2", [], opened_s=opened, judged_times=tuple(opened + 600.0 * n for n in (1, 2, 3)))
+
+    odds = stall_odds((tree("s", opening, later, task=MOE),), MOE)
+
+    assert odds.new_branch == {1: Odds(0.0, 1.0), 2: Odds(0.0, 1.0), 3: Odds(0.0, 1.0)}
+    assert odds.opening_branch == {1: Odds(0.0, 1.0), 2: Odds(1.0, 1.0)}
+    assert "A branch opened mid-session commits within its first 4 judged tests: too few." in odds.render()
 
 
 def test_the_archive_cap_leaves_the_running_session_its_full_weight() -> None:
@@ -134,8 +147,8 @@ def test_the_archive_cap_leaves_the_running_session_its_full_weight() -> None:
 
     odds = stall_odds((_many("crowd", 30, MOE),), MOE, session=live)
 
-    assert odds.new_branch[1] == Odds(0.0, PRIOR_TESTS + 1.0)
-    assert odds.new_branch[2] == Odds(PRIOR_TESTS, PRIOR_TESTS + 1.0)
+    assert odds.opening_branch[1] == Odds(0.0, PRIOR_TESTS + 1.0)
+    assert odds.opening_branch[2] == Odds(PRIOR_TESTS, PRIOR_TESTS + 1.0)
     assert odds.session_tests == 5
     assert "and this session's 5 judged tests" in odds.render()
 
@@ -146,15 +159,15 @@ def test_another_workload_and_the_session_itself_are_left_out() -> None:
     odds = stall_odds((live, _many("agent", 1, AGENTX)), MOE, session=live)
 
     assert odds.sessions == 0
-    assert odds.new_branch == {1: Odds(0.0, 1.0), 2: Odds(1.0, 1.0)}
+    assert odds.opening_branch == {1: Odds(0.0, 1.0), 2: Odds(1.0, 1.0)}
 
 
-def test_the_first_commit_time_is_the_median_over_branches_opened_after_the_root() -> None:
-    quick = branch("b1", [(1200.0, 1.0)], opened_s=600.0, judged_times=_judged(4))
-    slow = branch("b2", [(4200.0, 1.0)], opened_s=600.0, judged_times=_judged(4))
-    root = branch("b3", [(60.0, 1.0)], origin=LineageKind.ROOT, judged_times=_judged(4))
+def test_the_first_commit_time_is_the_median_over_branches_opened_mid_session() -> None:
+    quick = branch("b1", [(2400.0, 1.0)], opened_s=1800.0, judged_times=(2100.0, 2400.0))
+    slow = branch("b2", [(5400.0, 1.0)], opened_s=1800.0, judged_times=(2100.0, 5400.0))
+    opening = branch("b3", [(60.0, 1.0)], judged_times=_judged(4))
 
-    odds = stall_odds((tree("s", quick, slow, root, task=MOE),), MOE)
+    odds = stall_odds((tree("s", quick, slow, opening, task=MOE),), MOE)
 
     assert odds.first_commit_minutes == 10.0
 

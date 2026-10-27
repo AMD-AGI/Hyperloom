@@ -172,8 +172,8 @@ class StopAudit:
             "",
             f"{note[0].upper()}{note[1:]}.",
             "",
-            f"A new branch commits within its first {HORIZON_TESTS} judged tests: {_odds(self.new_branch_odds)}; the "
-            f"stop bar stands at {bar} judged tests. p(k) is a stopped branch's odds of a commit within its next "
+            f"A branch opened mid-session commits within its first {HORIZON_TESTS} judged tests: "
+            f"{_odds(self.new_branch_odds)}; the stop bar stands at {bar} judged tests. p(k) is a stopped branch's odds of a commit within its next "
             f"{HORIZON_TESTS}.",
             "",
             *table(

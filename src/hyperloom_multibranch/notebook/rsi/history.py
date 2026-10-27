@@ -8,16 +8,19 @@ branch's next tests for a new branch's, so :func:`stall_odds` reads two curves o
 observation for every judged test:
 
 * ``h(j)``, how often a branch's ``j``-th judged test past its last commit committed;
-* ``g(i)``, how often a new branch's ``i``-th judged test committed while it had not committed yet.
+* ``g(i)``, how often the ``i``-th judged test of a branch opened mid-session, after its session's opening batch
+  (:data:`OPENING_SECONDS`), committed while it had not committed yet. A branch opened now, into the slot a stop
+  frees, starts after the opening batch took the easy wins, so the opening batch would overstate it.
 
 From them, ``p(k)``, the odds that a branch stalled ``k`` tests commits within its next :data:`HORIZON_TESTS`, is
-``1 - (1 - h(k+1)) ... (1 - h(k+HORIZON_TESTS))``, and ``q``, the odds a new branch commits within its first
-:data:`HORIZON_TESTS`, the same product over ``g``. Counting each test once, rather than whole windows, keeps a branch
+``1 - (1 - h(k+1)) ... (1 - h(k+HORIZON_TESTS))``, and ``q``, the odds a branch opened mid-session commits within its
+first :data:`HORIZON_TESTS`, the same product over ``g``. Counting each test once, rather than whole windows, keeps a branch
 the judge stopped early as evidence for the tests it did run. The stop bar, :attr:`StallOdds.stall_tests`, is the
 first ``k`` from :data:`MIN_STALL_TESTS` on whose ``p(k)`` falls below ``q``. Where too few branches ran that far to
 read ``p(k)``, the bar is that ``k``, and :data:`DEFAULT_STALL_TESTS` at least: the archive cannot show keeping such a
-branch is worse, so it is kept until probation shows more. The odds also give the median time from a branch's opening
-to its first commit, which tells the judge when a branch opened late has no time left to commit.
+branch is worse, so it is kept until probation shows more. The odds also give the median time from the opening of a
+branch opened mid-session to its first commit, which tells the judge when a branch opened late has no time left to
+commit.
 
 A session of the same model type weighs 1 and any other :data:`OTHER_MODEL_WEIGHT`; sessions of another workload do
 not count. The archive's weight at each test is capped at :data:`PRIOR_TESTS` observations, so the running session's
@@ -49,6 +52,9 @@ OTHER_MODEL_WEIGHT = 0.5
 PRIOR_TESTS = 20.0
 #: The fewest observations, weighted, a test position needs to be read.
 MIN_SEEN = 5.0
+#: How long after a session's first branch its opening batch still opens: the archived sessions opened theirs within
+#: this, and every branch after it opened mid-session.
+OPENING_SECONDS = 15 * 60.0
 MAX_CHARS = 1500
 MODEL_TYPE_LABEL = "model_type"
 WORKLOAD_LABEL = "workload"
@@ -95,16 +101,19 @@ def within(curve: Mapping[int, Odds], first: int, tests: int = HORIZON_TESTS) ->
 class StallOdds:
     """The odds a session's stop rule rests on.
 
-    ``hazard`` maps a test position past the last commit to ``h``'s odds, ``new_branch`` a new branch's test position
-    to ``g``'s, ``first_commit_minutes`` is the weighted median time from a branch's opening to its first commit, and
-    ``stall_tests`` the stop bar; ``sessions`` and ``same_model`` say how many archived sessions counted, and how many
-    of this model type, and ``session_tests`` how many judged tests of the running session.
+    ``hazard`` maps a test position past the last commit to ``h``'s odds, ``new_branch`` the test position of a branch
+    opened mid-session to ``g``'s, and ``opening_branch`` that of a branch of the opening batch to the same odds,
+    which only a replay reads. ``first_commit_minutes`` is the weighted median time from a mid-session branch's
+    opening to its first commit, and ``stall_tests`` the stop bar; ``sessions`` and ``same_model`` say how many
+    archived sessions counted, and how many of this model type, and ``session_tests`` how many judged tests of the
+    running session.
     """
 
     sessions: int
     same_model: int
     hazard: Mapping[int, Odds] = field(default_factory=dict)
     new_branch: Mapping[int, Odds] = field(default_factory=dict)
+    opening_branch: Mapping[int, Odds] = field(default_factory=dict)
     first_commit_minutes: float | None = None
     stall_tests: int = DEFAULT_STALL_TESTS
     session_tests: int = 0
@@ -192,28 +201,43 @@ def _added(curve: Mapping[int, Odds], position: int, odds: Odds) -> dict[int, Od
     return {**curve, key: curve.get(key, Odds()).plus(odds)}
 
 
+def opened_with(tree: SearchTree) -> float:
+    """The last moment a branch of ``tree`` opened with its opening batch: :data:`OPENING_SECONDS` past its first
+    steered branch."""
+
+    return min((branch.opened_s for branch in tree.branches if branch.steered), default=0.0) + OPENING_SECONDS
+
+
 @dataclass
 class _Tally:
     hazard: dict[int, Odds] = field(default_factory=dict)
     new_branch: dict[int, Odds] = field(default_factory=dict)
+    opening_branch: dict[int, Odds] = field(default_factory=dict)
     first_commits: list[tuple[float, float]] = field(default_factory=list)
 
     def add(self, tree: SearchTree, weight: float) -> None:
+        opening = opened_with(tree)
         for branch in tree.branches:
             if not branch.steered:
                 continue
             for position, committed in hazard_observations(branch):
                 self.hazard = _added(self.hazard, position, Odds(weight * committed, weight))
+            mid_session = branch.opened_s > opening
             for position, committed in new_branch_observations(branch):
-                self.new_branch = _added(self.new_branch, position, Odds(weight * committed, weight))
+                seen = Odds(weight * committed, weight)
+                if mid_session:
+                    self.new_branch = _added(self.new_branch, position, seen)
+                else:
+                    self.opening_branch = _added(self.opening_branch, position, seen)
             minutes = _first_commit_minutes(branch)
-            if minutes is not None and branch.origin is not LineageKind.ROOT:
+            if mid_session and minutes is not None and branch.origin is not LineageKind.ROOT:
                 self.first_commits.append((minutes, weight))
 
     def capped(self) -> _Tally:
         return _Tally(
             {position: odds.capped(PRIOR_TESTS) for position, odds in self.hazard.items()},
             {position: odds.capped(PRIOR_TESTS) for position, odds in self.new_branch.items()},
+            {position: odds.capped(PRIOR_TESTS) for position, odds in self.opening_branch.items()},
             list(self.first_commits),
         )
 
@@ -221,6 +245,7 @@ class _Tally:
         return _Tally(
             _sum(self.hazard, other.hazard),
             _sum(self.new_branch, other.new_branch),
+            _sum(self.opening_branch, other.opening_branch),
             [
                 *self.first_commits,
                 *other.first_commits,
@@ -288,6 +313,7 @@ def stall_odds(history: Sequence[SearchTree], task: TaskConditions, *, session: 
         same_model=same_model,
         hazard=dict(sorted(tally.hazard.items())),
         new_branch=dict(sorted(tally.new_branch.items())),
+        opening_branch=dict(sorted(tally.opening_branch.items())),
         first_commit_minutes=_weighted_median(tally.first_commits),
         stall_tests=stall_bar(tally.hazard, tally.new_branch),
         session_tests=round(sum(odds.seen for odds in own.hazard.values())),
@@ -338,10 +364,11 @@ def _lines(odds: StallOdds) -> list[str]:
         f"{', '.join(hazard) or 'too few tests yet'}.",
         f"So a branch stalled k tests commits within its next {HORIZON_TESTS}: {', '.join(known) or 'too few tests yet'}"
         f"{rest}.",
-        f"A new branch commits within its first {HORIZON_TESTS} judged tests: {_share(odds.new_branch_odds)}.",
+        f"A branch opened mid-session commits within its first {HORIZON_TESTS} judged tests: "
+        f"{_share(odds.new_branch_odds)}.",
     ]
     if odds.first_commit_minutes is not None:
-        lines.append(f"A new branch's first commit came {odds.first_commit_minutes:.0f} min after it opened (median).")
+        lines.append(f"Its first commit came {odds.first_commit_minutes:.0f} min after it opened (median).")
     lines.append(
         f"Stop bar: {odds.stall_tests} judged tests past a branch's last commit that did not fail to merge, "
         f"{_bar_reason(odds)}."
@@ -359,6 +386,7 @@ __all__ = [
     "MIN_SEEN",
     "MIN_STALL_TESTS",
     "MODEL_TYPE_LABEL",
+    "OPENING_SECONDS",
     "OTHER_MODEL_WEIGHT",
     "PRIOR_TESTS",
     "WORKLOAD_LABEL",
@@ -367,6 +395,7 @@ __all__ = [
     "hazard_observations",
     "judged_tests",
     "new_branch_observations",
+    "opened_with",
     "session_stall_odds",
     "stall_bar",
     "stall_odds",
