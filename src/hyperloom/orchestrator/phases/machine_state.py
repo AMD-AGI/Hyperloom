@@ -505,10 +505,7 @@ def phase_status_summary(
             f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
             f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
         )
-    from datetime import datetime as _dt, timezone as _tz
-
-    entered_unix = _phase_started_unix(state)
-    entered = _dt.fromtimestamp(entered_unix, _tz.utc).isoformat(timespec="seconds") if entered_unix > 0 else "(unset)"
+    entered = time.strftime("%FT%TZ", time.gmtime(t0)) if (t0 := _phase_started_unix(state)) > 0 else "(unset)"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [

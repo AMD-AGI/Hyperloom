@@ -148,7 +148,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
-    assert f"entered   : {datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat(timespec='seconds')}" in out
+    assert "entered   : 1970-01-12T13:46:40Z" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
     expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
