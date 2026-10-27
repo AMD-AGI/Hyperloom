@@ -51,7 +51,10 @@ _SERVER_LOG = "server.log"
 
 @dataclass(frozen=True)
 class BatchSpec:
-    """One cycle-bench batch: the baseline's launch, the weights, the candidates' switch envs, and where it runs."""
+    """One cycle-bench batch: the stack's launch, the weights, the candidates' switch envs, and where it runs.
+
+    *reference* is the previous batch's base2 on the same stack, the tree before this batch's patches were admitted.
+    """
 
     argv: list[str]
     env: dict[str, str]
@@ -62,6 +65,7 @@ class BatchSpec:
     prompt_tokens: int
     vocab_size: int
     bands: cb.Bands
+    reference: dict[int, float] | None = None
 
 
 def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -104,29 +108,58 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
         prompt_tokens=int(isl["p50"]),
         vocab_size=int(config["vocab_size"]),
         bands=CYCLE_BANDS,
+        reference=_reference(state),
     )
 
 
+def _reference(state: Any) -> dict[int, float] | None:
+    """The previous valid batch's base2 cycle, when it ran the stack the session holds now."""
+    ref = getattr(state, "cycle_reference", None) or {}
+    if not ref or int(ref.get("stack_len", -1)) != len(getattr(state, "optimization_stack", None) or []):
+        return None
+    return {int(bs): float(ms) for bs, ms in (ref.get("cycle_ms") or {}).items()} or None
+
+
 def run_batch(spec: BatchSpec) -> dict[str, Any]:
-    """Run ``base``, each candidate, then ``base2``, one server boot each, and grade the candidates."""
-    arms: dict[str, ArmResult] = {}
-    plan = [(_BASES[0], {}), *spec.candidates, (_BASES[1], {})]
-    for name, switches in plan:
-        arms[name] = run_arm(
-            ArmSpec(
-                argv=cb.bench_argv(spec.argv, port=spec.port),
-                env=cb.bench_env({**os.environ, **spec.env, **switches}),
-                out_dir=spec.out_dir / name,
-                port=spec.port,
-                batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0) or BATCH_GRID,
-                prompt_tokens=spec.prompt_tokens,
-                vocab_size=spec.vocab_size,
-            )
-        )
-        if name == _BASES[0] and arms[name].error:
-            break
+    """Run ``base``, each candidate, then ``base2``, one server boot each, and grade the candidates.
+
+    A base off the reference is booted once more; off it again, the admitted patches moved the switched-off tree and
+    the batch stops before its candidates.
+    """
+    arms = {_BASES[0]: _boot(spec, _BASES[0], {})}
+    if not arms[_BASES[0]].error and not _matches_reference(spec, arms[_BASES[0]]):
+        arms[_BASES[0]] = _boot(spec, "base-rerun", {})
+        if not arms[_BASES[0]].error and not _matches_reference(spec, arms[_BASES[0]]):
+            gap = cb.weighted_gain_pct(spec.reference or {}, arms[_BASES[0]].cycle_ms, spec.weights)
+            reason = f"the switched-off tree runs {gap:+.2f}% against the previous batch's base2"
+            return _graded(spec, arms, {"valid": False, "parity_broken": True, "reason": reason, "verdicts": {}})
+    if not arms[_BASES[0]].error:
+        for name, switches in [*spec.candidates, (_BASES[1], {})]:
+            arms[name] = _boot(spec, name, switches)
     summary = summarize_batch(arms, [name for name, _ in spec.candidates], spec.weights, bands=spec.bands)
+    return _graded(spec, arms, {**summary, "parity_broken": False})
+
+
+def _matches_reference(spec: BatchSpec, base: ArmResult) -> bool:
+    return not spec.reference or cb.batch_valid(spec.reference, base.cycle_ms, spec.weights, bands=spec.bands)
+
+
+def _graded(spec: BatchSpec, arms: dict[str, ArmResult], summary: dict[str, Any]) -> dict[str, Any]:
     return {**summary, "arms": {name: arm.__dict__ for name, arm in arms.items()}, "weights": spec.weights}
+
+
+def _boot(spec: BatchSpec, name: str, switches: dict[str, str]) -> ArmResult:
+    return run_arm(
+        ArmSpec(
+            argv=cb.bench_argv(spec.argv, port=spec.port),
+            env=cb.bench_env({**os.environ, **spec.env, **switches}),
+            out_dir=spec.out_dir / name,
+            port=spec.port,
+            batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0) or BATCH_GRID,
+            prompt_tokens=spec.prompt_tokens,
+            vocab_size=spec.vocab_size,
+        )
+    )
 
 
 def summarize_batch(

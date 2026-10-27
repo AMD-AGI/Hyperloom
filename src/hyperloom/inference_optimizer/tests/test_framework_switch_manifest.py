@@ -1326,6 +1326,55 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
     assert coord.shared_state.gain_gated_action_count == 0
 
 
+async def _promote_cycle_batch(tmp_path, result: dict):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    coord.shared_state.optimization_stack = [{"kind": "config"}]
+    coord.shared_state.cycle_reference = {"stack_len": 1, "cycle_ms": {"1": 9.0}}
+    coord.shared_state.record_authored_framework_levers(
+        [_entry_parsed("HL_A")], default_on=False, specialist_task_id="t"
+    )
+    coord.shared_state.record_framework_lever_attribution("HL_A", gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    arms = [{"name": "a", "envs": {"HL_A": "1"}}]
+    await coord.writeback._promote_explore(
+        {"status": STATUS_SCREENED, "cycle_arms": arms, **result}, None, _PromoteOutcome(verdict=Verdict.RECORDED)
+    )
+    return coord.shared_state
+
+
+@pytest.mark.asyncio
+async def test_a_valid_cycle_batch_leaves_its_base2_as_the_next_batchs_reference(tmp_path):
+    arms = {"base": {"cycle_ms": {1: 10.1, 2: 20.1}}, "base2": {"cycle_ms": {1: 10.0, 2: 20.0}}}
+    result = {"valid": True, "parity_broken": False, "verdicts": {"a": {"verdict": "pass", "gain_pct": 0.8}}}
+
+    state = await _promote_cycle_batch(tmp_path, {**result, "arms": arms})
+
+    assert state.cycle_reference == {"stack_len": 1, "cycle_ms": {"1": 10.0, "2": 20.0}}
+    assert state.cycle_screen_refused == ""
+
+
+@pytest.mark.asyncio
+async def test_a_batch_whose_switched_off_tree_moved_closes_the_screen_and_hands_its_levers_back(tmp_path):
+    reason = "the switched-off tree runs -3.00% against the previous batch's base2"
+    result = {"valid": False, "parity_broken": True, "reason": reason, "verdicts": {}, "arms": {}}
+
+    state = await _promote_cycle_batch(tmp_path, result)
+
+    assert state.cycle_screen_refused == reason
+    assert state.cycle_reference == {"stack_len": 1, "cycle_ms": {"1": 9.0}}
+    rows = [(r["switch"], r["attribution_source"]) for r in state.authored_framework_levers]
+    assert rows == [("HL_A", "cycle_bench_inconclusive")]
+
+
 @pytest.mark.asyncio
 async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribution(tmp_path):
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING

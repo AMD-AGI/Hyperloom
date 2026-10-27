@@ -106,6 +106,67 @@ def test_a_batch_stops_when_its_first_base_fails(tmp_path, monkeypatch):
     assert summary["valid"] is False
 
 
+def _referenced_batch(tmp_path: Path, monkeypatch, bases: list[tuple[float, float]]) -> tuple[list[str], dict]:
+    """Run a batch whose previous base2 read 10/20 ms; each base boot reads the next of *bases*."""
+    ran: list[str] = []
+    readings = iter(bases)
+
+    def _run_arm(spec):
+        ran.append(spec.out_dir.name)
+        return _arm(*next(readings)) if spec.out_dir.name.startswith("base") else _arm(9.0, 18.0)
+
+    monkeypatch.setattr(cba, "run_arm", _run_arm)
+    spec = _batch(tmp_path)
+    summary = cba.run_batch(cba.BatchSpec(**{**spec.__dict__, "reference": {1: 10.0, 2: 20.0}}))
+    return ran, summary
+
+
+def test_a_base_that_agrees_with_the_previous_base2_runs_once(tmp_path, monkeypatch):
+    ran, summary = _referenced_batch(tmp_path, monkeypatch, [(10.05, 20.1), (10.0, 20.0)])
+
+    assert ran == ["base", "lever-a", "base2"]
+    assert (summary["valid"], summary["parity_broken"]) == (True, False)
+
+
+def test_a_base_off_the_previous_base2_is_rerun_and_the_rerun_grades_the_batch(tmp_path, monkeypatch):
+    ran, summary = _referenced_batch(tmp_path, monkeypatch, [(10.4, 20.8), (10.0, 20.0), (10.0, 20.0)])
+
+    assert ran == ["base", "base-rerun", "lever-a", "base2"]
+    assert (summary["valid"], summary["parity_broken"]) == (True, False)
+    assert summary["verdicts"]["lever-a"]["gain_pct"] == 10.0
+
+
+def test_a_base_off_the_previous_base2_twice_refuses_the_batch_before_its_candidates(tmp_path, monkeypatch):
+    ran, summary = _referenced_batch(tmp_path, monkeypatch, [(10.4, 20.8), (10.3, 20.6)])
+
+    assert ran == ["base", "base-rerun"]
+    assert (summary["valid"], summary["parity_broken"], summary["verdicts"]) == (False, True, {})
+    assert summary["reason"] == "the switched-off tree runs -3.00% against the previous batch's base2"
+
+
+def _referenced_state(tmp_path: Path, reference: dict | None, stack: list) -> SimpleNamespace:
+    decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    state = _workspace(tmp_path, decode, {"effective_argv": ["x"]})
+    state.cycle_reference = reference
+    state.optimization_stack = stack
+    return state
+
+
+def test_a_session_batch_takes_the_previous_base2_of_the_same_stack_as_its_reference(tmp_path):
+    state = _referenced_state(tmp_path, {"stack_len": 1, "cycle_ms": {"1": 10.0, "4": 30.0}}, [{"kind": "config"}])
+
+    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
+
+    assert spec.reference == {1: 10.0, 4: 30.0}
+
+
+@pytest.mark.parametrize("reference", [None, {}, {"stack_len": 0, "cycle_ms": {"1": 10.0}}])
+def test_a_session_batch_has_no_reference_from_another_stack_or_none_at_all(tmp_path, reference):
+    state = _referenced_state(tmp_path, reference, [{"kind": "config"}])
+
+    assert cba.session_batch(state, [], out_dir=tmp_path / "o", port=1).reference is None
+
+
 def test_the_session_batch_reads_the_baselines_launch_log_corpus_and_vocabulary(tmp_path):
     workspace = tmp_path / "baseline" / "benchmark_sglang_1"
     workspace.mkdir(parents=True)

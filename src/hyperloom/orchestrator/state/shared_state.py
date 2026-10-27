@@ -627,6 +627,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Authored patches this session spent a benchmark round on, keyed by the lines they changed rather than by what
     # they were named, so a later proposal can be told it repeats one. Newest last, capped.
     measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
+    # The last valid cycle batch's base2 cycle (``cycle_ms`` per batch size) and the stack length it ran; the next
+    # batch's base runs the tree with every dormant switch off and is held to it.
+    cycle_reference: dict[str, Any] = field(default_factory=dict)
+    # Why dormant admission for the cycle screen is closed for the rest of the session; empty while it is open.
+    cycle_screen_refused: str = ""
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;

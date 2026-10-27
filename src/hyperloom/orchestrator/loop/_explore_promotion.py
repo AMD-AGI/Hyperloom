@@ -68,7 +68,7 @@ class ExplorePromotionMixin:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
         if result.get("status") == STATUS_SCREENED:
             # A cycle batch grades levers for a later bundle; it measured no replay and lifts nothing.
-            self._record_cycle_batch(result)
+            await self._record_cycle_batch(result)
             outcome.changed = True
             return
         changed = False
@@ -127,16 +127,35 @@ class ExplorePromotionMixin:
         outcome.changed = changed
         outcome.audit_extras = _explore_audit_extras(result)
 
-    def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
-        """Write a cycle batch's verdict onto every lever its arms switched on."""
+    async def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
+        """Write a cycle batch's verdict onto every lever its arms switched on, and keep its base2 as the reference."""
+        if result.get("parity_broken"):
+            await self._close_cycle_screen(str(result.get("reason") or "the switched-off tree moved"))
         if not result.get("valid"):
             self._release_unscreened_levers(result)
             return
+        self._keep_cycle_reference(result)
         verdicts = result.get("verdicts") or {}
         for arm in result.get(CYCLE_ARMS_PARAM) or []:
             gain, source = _cycle_attribution(verdicts.get(str(arm.get("name") or "")) or {})
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
+
+    def _keep_cycle_reference(self, result: Mapping[str, Any]) -> None:
+        base2 = ((result.get("arms") or {}).get("base2") or {}).get("cycle_ms") or {}
+        if base2:
+            self.shared_state.cycle_reference = {
+                "stack_len": len(self.shared_state.optimization_stack or []),
+                "cycle_ms": {str(bs): float(ms) for bs, ms in base2.items()},
+            }
+
+    async def _close_cycle_screen(self, reason: str) -> None:
+        """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""
+        self.shared_state.cycle_screen_refused = reason
+        log.warning("cycle bench: dormant admission closed for the session: %s", reason)
+        await self.bus.record_observation(
+            "coordinator", "observation", {"kind": "cycle_screen_closed", "reason": reason}
+        )
 
     def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
         """Hand a cycle batch's levers back to replay attribution when the batch ended without verdicts."""
