@@ -558,7 +558,7 @@ function-lines src/kernelforge/loop/insession_gate.py::InSessionGate._stop_perfo
 function-lines src/kernelforge/loop/knowledge_integration.py::_WarmStartAttempt.measure_and_adopt 74
 function-lines src/kernelforge/loop/knowledge_integration.py::_try_apply_candidate 112
 function-lines src/kernelforge/loop/knowledge_integration.py::kb_warmstart 56
-function-lines src/kernelforge/loop/knowledge_integration.py::write_experience_to_kb 57
+function-lines src/kernelforge/loop/knowledge_integration.py::write_experience_to_kb 54
 function-lines src/kernelforge/loop/lessons.py::build_summary_prompt 96
 function-lines src/kernelforge/loop/recovery.py::publish_warm_start_recovery 68
 function-lines src/kernelforge/loop/reporting.py::BestResultPublisher._store_version 53

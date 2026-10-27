@@ -119,7 +119,7 @@ class CampaignReportMixin:
             print(self._supervisor_banner())
 
         print(LOOP_BANNER)
-        print(kernel_line(self.ic.kernel_file))
+        print(f"  Kernel: {self.ic.kernel_file}")
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
             f"  Budget: {self.ic.max_time_hours}h "
@@ -139,7 +139,7 @@ class CampaignReportMixin:
                 f"{max(0.0, _budget_sec - self.ic.budget_reserve_sec) / 60:.0f} min. "
                 f"Raise --max-hours for a longer run."
             )
-        print(f"  Experiment: {self.experiment.experiment_id}")
+        print(experiment_line(self.experiment.experiment_id))
         print()
 
     def _print_final_report(self) -> None:
@@ -187,7 +187,7 @@ class CampaignReportMixin:
         if self.llm_usage.get("calls"):
             for line in llm_spend_lines(self.llm_usage):
                 print(line)
-        print(f"  Experiment: {self.experiment.experiment_id}")
+        print(experiment_line(self.experiment.experiment_id))
 
     def _implementer_history(self, *, digest, optimization_plan_path) -> str:
         """Assemble the cross-iteration experience the Implementer session reads.
