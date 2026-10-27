@@ -928,6 +928,23 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
+### Cycle screen
+
+A replay round cannot resolve the 1–3% change most framework patches make. With
+`HYPERLOOM_CYCLE_BENCH=1`, an AgentX session admits a specialist patch that gates
+its rewrite behind default-off switches without a replay round, and screens its
+switches on the decode cycle of the current stack (bs 1/2/4, about eight minutes
+per server boot, serialized through the GPU locks). Only switches that read
+faster join the dormant-lever bundle that is replayed against the KEEP rule.
+Before the first batch on a stack, and after each KEEP, two bases are measured
+alone; each batch's base is held to the previous batch's last base, and a tree
+that moved with every switch off closes the screen for the rest of the session.
+Off, a switched patch takes its own replay round as before.
+
+| Variable                 | Default | Description |
+|--------------------------|---------|-------------|
+| `HYPERLOOM_CYCLE_BENCH`  | off     | `1` turns the cycle screen on for AgentX sessions. Read when a patch is submitted and again when it is integrated, so switching it off on resume returns already-marked patches to their replay round. |
+
 ### MLPerf agentic backend
 
 `HYPERLOOM_AGENTIC_BACKEND=mlperf` (with `HYPERLOOM_AGENTX=1`) keeps Magpie's

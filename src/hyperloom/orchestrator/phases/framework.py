@@ -3039,7 +3039,9 @@ class FrameworkPhase(ProposalBench):
             markers["framework_agent_authoring"] = True
         if identity["line_keys"]:
             markers["patch_identity"] = identity
-        if not enablement and agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
+        from ..actions.executors.cycle_bench_arm import cycle_bench_enabled
+
+        if not enablement and cycle_bench_enabled() and agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
             # Admitted dormant only if switched and the screen can hold it to a reference when it runs.
             markers[_integrate_vocabulary.SCREEN_PARAM] = _integrate_vocabulary.SCREEN_CYCLE
         return markers

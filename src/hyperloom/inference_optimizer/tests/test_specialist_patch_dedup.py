@@ -94,14 +94,20 @@ async def test_a_relative_patch_path_is_fingerprinted_on_the_integrate_task(sess
 
 
 @pytest.mark.parametrize(
-    ("mode", "params", "screen"),
-    [("agentx", _FREEFORM, "cycle"), ("", _FREEFORM, None), ("agentx", {**_FREEFORM, "enablement": True}, None)],
+    ("switch", "mode", "params", "screen"),
+    [
+        ("1", "agentx", _FREEFORM, "cycle"),
+        ("", "agentx", _FREEFORM, None),
+        ("1", "", _FREEFORM, None),
+        ("1", "agentx", {**_FREEFORM, "enablement": True}, None),
+    ],
 )
 @pytest.mark.asyncio
-async def test_an_agentx_optimizing_patch_is_marked_for_the_cycle_screen(
-    session_dir: Path, mode: str, params: dict, screen: str | None
+async def test_an_agentx_optimizing_patch_is_marked_for_the_cycle_screen_only_when_it_is_switched_on(
+    session_dir: Path, monkeypatch, switch: str, mode: str, params: dict, screen: str | None
 ) -> None:
     """Enablement climbs to a booting model, so its patch is measured as before rather than admitted dormant."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
     coord = _coordinator(session_dir)
     coord.shared_state.benchmark_mode = mode
     try:

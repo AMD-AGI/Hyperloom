@@ -216,9 +216,10 @@ def _agentx_phase(**kwargs):
     return fp
 
 
-async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases_alone():
+async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases_alone(monkeypatch):
     from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     fp = _agentx_phase()
     fp._coord.shared_state.optimization_stack = [{"kind": "config"}]
     fp._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
@@ -229,8 +230,10 @@ async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases
     assert (batch["params"][CYCLE_ARMS_PARAM], batch["idempotency_key"]) == ([], "cycle-reference-c0-s1")
 
 
-async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit():
+async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch):
     from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
 
     referenced = _agentx_phase()
     referenced._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
@@ -267,3 +270,11 @@ async def test_a_batch_carries_at_most_its_arm_limit_oldest_patches_first():
 
     (batch,) = _explores(fp)
     assert [arm["name"] for arm in batch["params"][CYCLE_ARMS_PARAM]] == [f"t-{i}" for i in range(CYCLE_BATCH_MAX_ARMS)]
+
+
+async def test_no_reference_batch_while_the_cycle_bench_is_switched_off(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_CYCLE_BENCH", raising=False)
+    fp = _agentx_phase()
+
+    assert await fp.enqueue_cycle_batch() is False
+    assert _explores(fp) == []

@@ -20,12 +20,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.measurement import cycle_bench as cb
 from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, decode_cycles_ms
 
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
+
+#: Operator switch for the cycle screen (default off): switched patches are admitted dormant and screened by
+#: cycle-bench batches instead of each taking a replay round.
+CYCLE_BENCH_ENV = "HYPERLOOM_CYCLE_BENCH"
 
 #: Explore task param carrying a cycle-bench batch: ``[{"name": ..., "envs": {...}}]`` per candidate.
 CYCLE_ARMS_PARAM = "cycle_arms"
@@ -112,9 +117,19 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
     )
 
 
+def cycle_bench_enabled() -> bool:
+    """Whether the operator switched the cycle screen on; off, switched patches are benched as before."""
+    return env_bool(CYCLE_BENCH_ENV)
+
+
 def screen_open(state: Any) -> bool:
-    """Whether a switched patch may be admitted dormant now: the screen is open and the stack has a reference."""
-    return state is not None and not getattr(state, "cycle_screen_refused", "") and _reference(state) is not None
+    """Whether a switched patch may be admitted dormant now: the screen is on and open, and the stack has a reference."""
+    return (
+        cycle_bench_enabled()
+        and state is not None
+        and not getattr(state, "cycle_screen_refused", "")
+        and _reference(state) is not None
+    )
 
 
 def _reference(state: Any) -> dict[int, float] | None:

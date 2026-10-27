@@ -1143,6 +1143,7 @@ async def test_an_inert_lever_carries_the_change_its_round_measured(tmp_path, mo
 @pytest.mark.asyncio
 async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant_without_a_bench(tmp_path, monkeypatch):
     """The cycle bench screens its levers later, so admission spends no replay and writes no lesson."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     import subprocess
 
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
@@ -1163,13 +1164,18 @@ async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
-@pytest.mark.parametrize("screen", [{"reference": False}, {"refused": "the switched-off tree moved"}])
+@pytest.mark.parametrize(
+    ("switch", "screen"),
+    [("1", {"reference": False}), ("1", {"refused": "the switched-off tree moved"}), ("", {})],
+)
 @pytest.mark.asyncio
 async def test_a_switched_patch_is_benched_while_the_screen_cannot_hold_it_to_a_reference(
-    tmp_path, monkeypatch, screen
+    tmp_path, monkeypatch, switch, screen
 ):
-    """No reference on this stack, or a screen closed by a moved tree: admitting it dormant would go unchecked."""
+    """No reference, a screen a moved tree closed, or the cycle bench switched off since the patch was marked."""
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
 
     kb: list[Any] = []
     result, _, _, legs = await _run_rewrite_integrate(
@@ -1260,6 +1266,7 @@ def test_no_bundle_forms_when_the_screen_leaves_one_patch_eligible():
 
 @pytest.mark.asyncio
 async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import (
         ATTRIBUTION_CYCLE_PENDING,
@@ -1441,6 +1448,7 @@ async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribu
 
 @pytest.mark.asyncio
 async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
 
     for sub in ("benched", "screened"):

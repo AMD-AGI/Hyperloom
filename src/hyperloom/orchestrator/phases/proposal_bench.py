@@ -167,7 +167,8 @@ class ProposalBench(CoordinatorCollaborator):
         state = self.shared_state
         stack_len = len(state.optimization_stack or [])
         if (
-            not agentx_active(benchmark_mode=state.benchmark_mode)
+            not cba.cycle_bench_enabled()
+            or not agentx_active(benchmark_mode=state.benchmark_mode)
             or state.cycle_screen_refused
             or (state.cycle_reference or {}).get("stack_len") == stack_len
             or self._coord.dispatcher.admission_frozen
