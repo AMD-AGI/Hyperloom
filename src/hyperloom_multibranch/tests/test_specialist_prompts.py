@@ -18,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
+from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
     RECENT_ENTRIES,
@@ -816,3 +817,15 @@ def test_the_role_retries_a_lead_the_integrator_refused_only_with_a_reason_it_wo
 
     assert "A lead the integrator measured not stackable on the integration head" in prompt
     assert "only with a stated reason it would now stack" in prompt
+
+
+def test_the_role_names_native_sources_only_when_the_session_lays_them_out(tmp_path):
+    tree = NativeTree(
+        SourceRoot("python/sglang/kernels/aot", tmp_path), "https://github.com/sgl-project/sglang.git", "2" * 40
+    )
+
+    native = role_prompt(WORKLOAD, native={"sgl_kernel": tree})
+
+    assert "sgl_kernel" not in role_prompt(WORKLOAD).split("sglang/kernels/jit/csrc")[1]
+    assert "python/sglang/kernels/aot" in native and "pending_build" in native and "CMakeLists.txt" in native
+    assert native.startswith(role_prompt(WORKLOAD))

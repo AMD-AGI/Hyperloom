@@ -27,10 +27,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
+from hyperloom_multibranch.contracts.sources import NativeTree
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.following import REROOT
@@ -429,16 +431,39 @@ _DEV_SANDBOX = (
 )
 
 
-def role_prompt(workload: str, references: Mapping[str, Path] | None = None, *, dev_leases: int = 0) -> str:
+def role_prompt(
+    workload: str,
+    references: Mapping[str, Path] | None = None,
+    *,
+    dev_leases: int = 0,
+    native: Mapping[str, NativeTree] | None = None,
+) -> str:
     """The system prompt of every session of every specialist; ``workload`` names what the session optimizes,
     ``references`` the reference material the session was given, each source's name and the directory it was copied
-    to, and ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU)."""
+    to, ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and
+    ``native`` the native trees its worktrees hold, by component (none: native code is not built)."""
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
     gpu_rule = _DEV_SANDBOX if dev_leases > 0 else _NO_GPU
     role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=gpu_rule)
-    return role + _references(references or {})
+    return role + _native(native or {}) + _references(references or {})
+
+
+_NATIVE = """
+Native sources: your worktree also holds, at the commit the image installs, {trees}. An edit there is measured like \
+any other source change: worktree_patch returns a delta that names that commit, and the toolbox compiles the change \
+before the test, which waits as pending_build. A build your change breaks ends compile_error with the compiler's \
+lines. A change to {refused} is refused: the build definition stays as the image has it."""
+
+
+def _native(trees: Mapping[str, NativeTree]) -> str:
+    if not trees:
+        return ""
+    named = ", ".join(
+        f"{component}'s C++/HIP sources under {tree.root.prefix}" for component, tree in sorted(trees.items())
+    )
+    return _NATIVE.format(trees=named, refused=", ".join(NATIVE_BUILD_REFUSE))
 
 
 #: What a well-known reference source holds, by the name a session gives it.
