@@ -1918,7 +1918,7 @@ class ExploreExecutor:
             or runs_dir(self.session_dir, "explore", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
-        if params.get(_cycle_bench.CYCLE_ARMS_PARAM):
+        if _cycle_bench.CYCLE_ARMS_PARAM in params:
             state = extra.get("shared_state") or extra.get("state")
             return await asyncio.to_thread(_screen_cycle_batch, params, state, output_root)
         try:

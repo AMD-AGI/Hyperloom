@@ -207,6 +207,39 @@ def test_a_cycle_batch_is_priced_per_arm_and_its_two_bases():
 
     arms = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
     assert explore_admission_minutes(78.0, {"cycle_arms": arms}) == 5 * CYCLE_ARM_MINUTES
+    assert explore_admission_minutes(78.0, {"cycle_arms": []}) == 2 * CYCLE_ARM_MINUTES
+
+
+def _agentx_phase(**kwargs):
+    fp = _phase(**kwargs)
+    fp._coord.shared_state.benchmark_mode = "agentx"
+    return fp
+
+
+async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases_alone():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    fp = _agentx_phase()
+    fp._coord.shared_state.optimization_stack = [{"kind": "config"}]
+    fp._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert (batch["params"][CYCLE_ARMS_PARAM], batch["idempotency_key"]) == ([], "cycle-reference-c0-s1")
+
+
+async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    referenced = _agentx_phase()
+    referenced._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
+    closed = _agentx_phase()
+    closed._coord.shared_state.cycle_screen_refused = "the switched-off tree moved"
+    queued = SimpleNamespace(kind="explore", params={CYCLE_ARMS_PARAM: []}, requires_lanes=())
+    for fp in (referenced, closed, _phase(), _agentx_phase(frozen=True), _agentx_phase(queued=[queued])):
+        assert await fp.enqueue_cycle_batch() is False
+        assert _explores(fp) == []
 
 
 async def test_a_phase_on_its_way_out_hands_unscreened_levers_back_to_replay_attribution():

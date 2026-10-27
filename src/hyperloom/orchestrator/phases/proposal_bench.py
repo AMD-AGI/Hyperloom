@@ -42,6 +42,13 @@ def kb_exposure_of(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return {"kb_read_id": read_ids.pop() if len(read_ids) == 1 else "", "kb_rendered_refs": list(refs.values())}
 
 
+def _holds_cycle_batch(tasks: Iterable[Any]) -> bool:
+    """Whether a cycle-bench batch is among *tasks*; a reference batch carries an empty arm list."""
+    from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    return any(CYCLE_ARMS_PARAM in (getattr(task, "params", None) or {}) for task in tasks)
+
+
 class ProposalBench(CoordinatorCollaborator):
     """Benches untested proposals, the operator-defined specialist's first, and tracks that operator work."""
 
@@ -121,7 +128,7 @@ class ProposalBench(CoordinatorCollaborator):
 
         arms = cba.cycle_arms(list(self.shared_state.authored_framework_levers or []))
         if not arms:
-            return False
+            return await self._enqueue_cycle_reference()
         if self._coord.dispatcher.admission_frozen:
             # A batch queued now would be cancelled by the transition; the levers go back to replay attribution.
             for switch in (s for arm in arms for s in arm["envs"]):
@@ -130,7 +137,7 @@ class ProposalBench(CoordinatorCollaborator):
                 )
             return False
         live = [*await self.tasks.queued(), *await self.tasks.running()]
-        if any((t.params or {}).get(cba.CYCLE_ARMS_PARAM) for t in live):
+        if _holds_cycle_batch(live):
             return False
         serving = ("server_lifecycle", "benchmark_lane")
         if len(arms) < 2 and any(lane in serving for t in live for lane in (getattr(t, "requires_lanes", ()) or ())):
@@ -146,6 +153,33 @@ class ProposalBench(CoordinatorCollaborator):
         )
         if task is not None:
             log.info("cycle bench: enqueued batch task_id=%s over %s", task.task_id, [arm["name"] for arm in arms])
+        return task is not None
+
+    async def _enqueue_cycle_reference(self) -> bool:
+        """Enqueue the two bases alone for an AgentX stack no batch has measured, so the patches admitted dormant
+        on it are held to the tree before them; whether one was enqueued."""
+        from hyperloom.common.perf_metric import agentx_active
+
+        from ..actions.executors import cycle_bench_arm as cba
+
+        state = self.shared_state
+        stack_len = len(state.optimization_stack or [])
+        if (
+            not agentx_active(benchmark_mode=state.benchmark_mode)
+            or state.cycle_screen_refused
+            or (state.cycle_reference or {}).get("stack_len") == stack_len
+            or self._coord.dispatcher.admission_frozen
+        ):
+            return False
+        if _holds_cycle_batch([*await self.tasks.queued(), *await self.tasks.running()]):
+            return False
+        params = {"source": "coordinator_internal", "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
+        key = f"cycle-reference-c{int(state.macro_cycle or 0)}-s{stack_len}"
+        task = await self._enqueue_coordinator_explore(params, idempotency_key=key)
+        if task is not None:
+            log.info(
+                "cycle bench: enqueued the reference batch task_id=%s for stack length %d", task.task_id, stack_len
+            )
         return task is not None
 
     async def operator_work_pending(self) -> bool:

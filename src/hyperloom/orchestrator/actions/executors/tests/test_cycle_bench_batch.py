@@ -224,6 +224,23 @@ async def test_an_explore_task_carrying_cycle_arms_runs_the_batch_instead_of_a_r
 
 
 @pytest.mark.asyncio
+async def test_an_explore_task_with_no_cycle_arms_runs_the_reference_batch_of_its_two_bases(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import explore
+
+    monkeypatch.setattr(cba, "session_batch", lambda state, candidates, *, out_dir, port: candidates)
+    monkeypatch.setattr(cba, "run_batch", lambda spec: {"valid": True, "verdicts": {}, "ran": spec})
+    monkeypatch.setattr(explore, "_ExploreRound", None)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(task_id="t-ref", params={cba.CYCLE_ARMS_PARAM: []}),
+        extra={"shared_state": SimpleNamespace(), "workspace": str(tmp_path)},
+    )
+
+    result = await explore.ExploreExecutor(session_dir=tmp_path)(ctx)
+
+    assert result == {"status": "cycle_screened", cba.CYCLE_ARMS_PARAM: [], "valid": True, "verdicts": {}, "ran": []}
+
+
+@pytest.mark.asyncio
 async def test_a_cycle_batch_without_a_baseline_launch_fails_named(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import explore
 
