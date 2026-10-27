@@ -11,11 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.jit import key as key_module
 from hyperloom.measure.jit.key import (
     BuildSurface,
     Machine,
     aiter_key,
     build_surface,
+    env_names_in,
     scan_env_names,
     touches_build_surface,
     tree_identity,
@@ -88,6 +90,18 @@ def test_a_variable_a_patch_adds_to_csrc_or_hsa_is_found_in_the_farms_meta_direc
     assert scan_env_names([package, checkout], [meta]) >= {"AITER_PATCHED_CSRC_SWITCH", "AITER_PATCHED_HSA_SWITCH"}
     assert "AITER_PATCHED_CSRC_SWITCH" not in scan_env_names([package, checkout])
     assert "AITER_NOT_A_BUILD_INPUT" not in scan_env_names([package], [meta])
+
+
+def test_a_link_back_above_itself_is_read_once_and_ends_the_walk(tmp_path, monkeypatch) -> None:
+    (tmp_path / "pkg" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg" / "sub" / "a.py").write_text('import os\nos.getenv("A_VAR")\n')
+    (tmp_path / "pkg" / "sub" / "loop").symlink_to(tmp_path / "pkg", target_is_directory=True)
+    read: list[str] = []
+    real = key_module._names_in
+    monkeypatch.setattr(key_module, "_names_in", lambda path: read.append(path.name) or real(path))
+
+    assert env_names_in([tmp_path / "pkg"]) == {"A_VAR"}
+    assert read == ["a.py"], "each directory once, however many links lead to it"
 
 
 def test_no_build_path_is_no_names(tmp_path) -> None:

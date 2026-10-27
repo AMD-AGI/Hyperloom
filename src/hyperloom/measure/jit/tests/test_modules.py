@@ -283,3 +283,18 @@ def test_a_module_whose_code_cannot_be_told_reads_every_generator_of_csrc_and_hs
 
     assert {"GEMM_GEN_VAR", "TOPK_SOURCE_VAR", "HSA_GEN_VAR", "OTHER_GEN_VAR"} | BUILDER <= names
     assert "AITER_USE_SYSTEM_TRITON" not in names
+
+
+def test_a_directory_the_package_links_to_is_read_like_one_it_holds(checkout, tmp_path):
+    """A test's farm mirrors a directory no patch touches as one link to the image's (``aiter/jit/utils`` among them,
+    where aiter reads ``PYTORCH_ROCM_ARCH`` and sets ``AITER_GPU_ARCHS``): the farm must give the names the image gives."""
+    image_utils = checkout / "aiter" / "jit" / "utils"
+    (image_utils / "chip_info.py").write_text('import os\nos.environ["AITER_GPU_ARCHS"] = "gfx950"\n')
+    farm = write_tree(tmp_path / "farm", {"aiter/jit/core.py": _reads("BUILDER_VAR")})
+    (farm / "aiter" / "jit" / "utils").symlink_to(image_utils, target_is_directory=True)
+    (farm / "aiter" / "jit" / "utils" / "again").symlink_to(farm / "aiter" / "jit", target_is_directory=True)
+
+    image = build_env_names(checkout / "aiter", checkout, CONFIG, {"module_activation"})
+    mirrored = build_env_names(farm / "aiter", checkout, CONFIG, {"module_activation"})
+
+    assert mirrored == image == BUILDER | {"AITER_GPU_ARCHS"}

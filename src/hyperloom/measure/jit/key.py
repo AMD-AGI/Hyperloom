@@ -43,6 +43,7 @@ no test is meant to depend on; the key already fixes the image, and treats code 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -199,7 +200,10 @@ def scan_env_names(package_dirs: Iterable[Path], meta_dirs: Iterable[Path] = ())
 
 def env_names_in(paths: Iterable[Path]) -> frozenset[str]:
     """The environment variables the Python code at ``paths`` reads: a ``.py`` file's own, every ``.py`` file's below a
-    directory; a path that is neither adds none."""
+    directory; a path that is neither adds none.
+
+    A directory below is read through a symbolic link too: a test's farm mirrors every directory a patch leaves alone as
+    one link to the image's, so a walk that stopped at links would read less of the farm than of the image."""
     names: set[str] = set()
     for path in paths:
         for found in _python_files(Path(path).resolve()):
@@ -212,7 +216,23 @@ def _python_files(path: Path) -> Iterable[Path]:
         return (path,) if path.suffix == _PYTHON_SUFFIX else ()
     if not path.is_dir():
         return ()
-    return (found for found in path.rglob(f"*{_PYTHON_SUFFIX}") if found.is_file())
+    return _python_files_below(path)
+
+
+def _python_files_below(directory: Path) -> Iterable[Path]:
+    """The ``.py`` files below ``directory``, links to directories followed, each directory read once (a link that
+    points back above itself ends there)."""
+    seen: set[str] = set()
+    for current, directories, files in os.walk(directory, followlinks=True):
+        real = os.path.realpath(current)
+        if real in seen:
+            directories.clear()
+            continue
+        seen.add(real)
+        for name in files:
+            found = Path(current, name)
+            if name.endswith(_PYTHON_SUFFIX) and found.is_file():
+                yield found
 
 
 def _names_in(path: Path) -> set[str]:
