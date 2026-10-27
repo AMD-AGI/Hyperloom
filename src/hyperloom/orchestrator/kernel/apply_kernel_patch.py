@@ -26,6 +26,7 @@ from hyperloom.common import aiter_jit_cache
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.unified_diff import PatchOp, PatchTarget, repo_relative_manifest
 from hyperloom.inference_optimizer.framework_paths import resolve_flydsl_source_roots
+from hyperloom.inference_optimizer.multi_node.scripts.patch_path_safety import DEFAULT_KERNEL_BACKUP_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +45,6 @@ _EDITABLE_KERNEL_DEPLOY_ROOTS = (
 )
 
 
-_UNSAFE_COMMAND_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "<<", "`"}
 _UNSAFE_COMMAND_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
 _SHELL_COMMAND_NAMES = {"bash", "dash", "sh", "zsh", "ksh"}
 
@@ -69,11 +69,9 @@ def _coerce_rebuild_command(rebuild_command: "list[str] | str | None") -> list[s
         argv = [str(part) for part in rebuild_command]
     if not argv:
         return []
-    if any(part in _UNSAFE_COMMAND_TOKENS for part in argv) or any(
-        _UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv
-    ):
+    if any(_UNSAFE_COMMAND_CHARS_RE.search(part) for part in argv):
         raise ValueError("rebuild_command must be argv-like and cannot contain shell control operators")
-    if any(("\n" in part or "\r" in part or "\x00" in part) for part in argv):
+    if any("\x00" in part for part in argv):
         raise ValueError("rebuild_command contains invalid control characters")
     exe = Path(argv[0]).name.lower()
     if exe in _SHELL_COMMAND_NAMES and any(part in {"-c", "-lc"} for part in argv[1:]):
@@ -86,7 +84,7 @@ _MANIFEST_NAME = "manifest.json"
 
 
 def _pod_backup_dir() -> str:
-    return os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", "/var/kernel_patch_backups")
+    return os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR", DEFAULT_KERNEL_BACKUP_ROOT)
 
 
 def _is_multi_node() -> bool:
@@ -363,8 +361,7 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
         target (Path): The file that would be replaced.
 
     Raises:
-        ValueError: If the patch is incompatible, not a complete source file,
-            or not decodable as text.
+        ValueError: If the patch is incompatible or not a complete source file.
     """
     patch_suffix = patch.suffix.lower()
     target_suffix = target.suffix.lower()
@@ -374,10 +371,7 @@ def _validate_patch_source(patch: Path, target: Path) -> None:
         raise ValueError(
             f"patch suffix {patch_suffix or '<none>'} does not match target suffix {target_suffix or '<none>'}"
         )
-    try:
-        text = patch.read_text(encoding="utf-8", errors="replace")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"patch_path is not text source: {patch}") from exc
+    text = patch.read_text(encoding="utf-8", errors="replace")
     if not _source_text_looks_complete(text, target_suffix):
         raise ValueError(f"patch_path does not look like a complete {target_suffix} source file: {patch}")
     target_text = target.read_text(encoding="utf-8", errors="replace")
@@ -889,7 +883,7 @@ def _restore_aiter_jit_build(
     jit_build_backup: dict[str, Any],
     *,
     expected_jit_build_dir: str | Path | None = None,
-    backup_root: str | Path | None = None,
+    backup_root: str | Path,
 ) -> dict[str, Any]:
     """Restore AITER build and serving-module state within the recorded scope.
 
@@ -1972,10 +1966,7 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
-        try:
-            strat = _detect_strategy(p)
-        except ValueError:
-            continue
+        strat = _detect_strategy(p)
         if not strat["compiled"]:
             continue
         key = (strat["root"] or str(p.parent), strat["rebuild_mode"])
@@ -2465,10 +2456,7 @@ def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
         descriptors = repo_relative_manifest(patch.read_text(encoding="utf-8", errors="replace"))
     except ValueError as exc:
         raise _PatchRefused({"status": "failed", "error": f"unparseable patch: {exc}"}) from exc
-    try:
-        primary_strategy = _detect_strategy(target)
-    except ValueError as exc:
-        raise _PatchRefused({"status": "failed", "error": str(exc)}) from exc
+    primary_strategy = _detect_strategy(target)
     # Coerce/validate rebuild_command BEFORE any file/pod mutation (all-or-nothing).
     command_override = _patch_rebuild_argv(request)
     resolved_root = str(request.repo_root or "") or primary_strategy["root"]
