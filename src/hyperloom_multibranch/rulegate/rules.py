@@ -22,7 +22,6 @@ from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
-    write_agentx_baseline,
     write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
@@ -118,7 +117,7 @@ class AgentXRule(Rule):
     min_baselines = 0
 
     async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
-        return await write_agentx_baseline(store, root_commit, records)
+        raise ValueError("an AgentX baseline is the PRELUDE child's run of the root, not root tests")
 
     async def prelude_baseline(
         self, store: GateRecords, root_commit: str, result: TestResult, *, source: str, wall_seconds: float

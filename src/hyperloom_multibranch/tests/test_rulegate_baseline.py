@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 
 import dataclasses
-import statistics
 
 import pytest
 
@@ -25,7 +24,6 @@ from hyperloom_multibranch.notebook.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
-    write_agentx_baseline,
     write_agentx_prelude_baseline,
     write_inferencex_baseline,
 )
@@ -133,34 +131,6 @@ async def test_only_a_prelude_baseline_of_the_root_is_a_baseline(session, fields
     baselines = [await session.inferencex("b0", 1000.0), await session.inferencex("b1", 1010.0, **fields)]
     with pytest.raises(ValueError, match="is not a baseline test of the root"):
         await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
-
-
-async def test_an_agentx_baseline_averages_every_metric_its_baselines_share(session):
-    first = await session.measured("b0", metrics={**AGENTX, "e2e_norm_intvty_p90": 30.0})
-    second = await session.measured("b1", metrics={**AGENTX, GRADED_INTVTY_P50: 44.0})
-
-    record = await write_agentx_baseline(session.gate, ROOT, [first, second])
-
-    assert record.values == {**AGENTX, GRADED_INTVTY_P50: 42.0}
-    assert record.dispersion_pct == {GRADED_INTVTY_P50: pytest.approx(statistics.stdev((40.0, 44.0)) / 42.0 * 100)}
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
-
-
-async def test_an_agentx_baseline_of_one_reading_records_no_spread(session):
-    only = await session.measured("b0", metrics=AGENTX)
-
-    record = await write_agentx_baseline(session.gate, ROOT, [only])
-
-    assert record.values == AGENTX
-    assert record.dispersion_pct == {}
-    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
-
-
-async def test_an_agentx_baseline_needs_what_every_comparison_reads(session):
-    partial = {key: value for key, value in AGENTX.items() if key != GRADED_DURATION}
-    baselines = [await session.measured("b0", metrics=AGENTX), await session.measured("b1", metrics=partial)]
-    with pytest.raises(UnreadableResult, match=GRADED_DURATION):
-        await write_agentx_baseline(session.gate, ROOT, baselines)
 
 
 def _child_run(metrics):
