@@ -1070,14 +1070,14 @@ restart finds the same directory and resumes it when it holds `manifest.json` an
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
 archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user.
 
-`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom.
+`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
 `scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
-| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and the dependencies are installed with `--require-hashes` from the commit's `requirements/app.lock` into `$HYPERLOOM_STATE_DIR/venv`. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and the dependencies are installed with `--require-hashes` from the commit's `requirements/app.lock`, then the wheel (reinstalled, so a new commit replaces an old one), into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. The lock holds no torch, triton or ROCm package, but its pins replace same-named packages of that environment. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 
 ### Progress events

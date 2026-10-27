@@ -40,7 +40,7 @@ it.
   `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. Host-only inputs, including the
   new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. The entry runs the packaged `install.sh`
   before `optimize` on every leg; a failing installer ends the run finally. `src/hyperloom/hosted/app_bootstrap.sh`
-  builds the wheel of a commit once and installs its hash-pinned `requirements/app.lock` into a venv.
+  builds the wheel of a commit once and installs its hash-pinned `requirements/app.lock` into the image's framework Python environment.
 - **The accuracy eval can no longer be turned off.** `--no-eval`, the
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of

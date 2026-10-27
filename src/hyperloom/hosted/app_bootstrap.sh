@@ -7,11 +7,13 @@
 # The host runs this script as the application's command. It
 #   1. reads the version to run from HYPERLOOM_SOURCE_REPO and HYPERLOOM_SOURCE_SHA (a full commit id),
 #   2. builds the wheel for that commit once, into $USER_DATA_PATH/.hyperloom/wheels/<sha>/, and reuses it after,
-#   3. creates a venv with --system-site-packages in $HYPERLOOM_STATE_DIR/venv and installs the dependencies from
-#      the commit's requirements/app.lock with --require-hashes, then the wheel,
-#   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run`.
+#   3. installs the dependencies from the commit's requirements/app.lock with --require-hashes, then the wheel, into
+#      the framework's own Python environment (the one the legacy flow's install.sh installs into, with the image's
+#      torch and ROCm stack), not into a venv of its own: a venv made from it cannot see that stack,
+#   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with that Python.
 #
-# Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version. An input the
+# Nothing of the checkout stays behind: the wheel carries no .git, so a restart sees the same code version.
+# The lock holds no torch, triton or ROCm package, but its pins replace same-named packages of the framework environment. An input the
 # script cannot work with (no commit, a bad one, no lock file) ends the run with a final exit.json; a failure that may be
 # transient (the network, the disk) exits without one, and the host restarts the run.
 
@@ -52,11 +54,29 @@ else
   fail_final "HYPERLOOM_SOURCE_REPO is neither OWNER/NAME nor a git URL"
 fi
 
+# The framework Python, chosen as install.sh's resolve_python does (that script is in the wheel, which is not
+# installed yet): the image's /opt/venv first, then an executable $PYTHON, then python3 on PATH.
+if [[ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" && -x /opt/venv/bin/python ]]; then
+  framework_py=/opt/venv/bin/python
+elif [[ -n "${PYTHON:-}" && -x "${PYTHON}" ]]; then
+  framework_py="$PYTHON"
+elif framework_py="$(command -v python3)"; then
+  :
+else
+  fail_final "no framework Python was found (no /opt/venv/bin/python, PYTHON or python3)"
+fi
+
 cache_root="$USER_DATA_PATH/.hyperloom"
 wheel_dir="$cache_root/wheels/$sha"
-venv="$state_dir/venv"
-stamp="$venv/.hyperloom-install"
-pip=("$venv/bin/python" -m pip --disable-pip-version-check --no-input)
+# What the install of this environment holds, kept in the environment: a new container starts without it.
+env_prefix="$("$framework_py" -c 'import sys; print(sys.prefix)')"
+in_venv="$("$framework_py" -c 'import sys; print(int(sys.prefix != sys.base_prefix))')"
+stamp="$env_prefix/.hyperloom-install"
+pip=("$framework_py" -m pip --disable-pip-version-check --no-input)
+# Outside a virtual environment pip refuses to modify the interpreter's packages without this (install.sh does the same).
+if [[ "$in_venv" == "0" ]] && "$framework_py" -m pip install --break-system-packages --help >/dev/null 2>&1; then
+  pip+=(--break-system-packages)
+fi
 
 work=""
 cleanup() {
@@ -85,25 +105,27 @@ build_wheel() {
   cleanup
 }
 
-install_into_venv() {
-  rm -rf "$venv"
-  python3 -m venv --system-site-packages "$venv"
+install_into_framework() {
   if [[ -f "$wheel_dir/.complete" ]]; then
     "${pip[@]}" install -q --require-hashes --no-deps -r "$wheel_dir/app.lock"
   else
-    build_wheel # leaves the pinned dependencies installed in the venv
+    build_wheel # leaves the pinned dependencies installed
   fi
   local wheels=("$wheel_dir"/*.whl)
   [[ ${#wheels[@]} -eq 1 && -f "${wheels[0]}" ]] || fail "expected exactly one wheel in $wheel_dir"
-  "${pip[@]}" install -q --no-deps --no-index "${wheels[0]}"
+  # Reinstall: another commit's wheel has the same version and pip would keep it.
+  "${pip[@]}" install -q --force-reinstall --no-deps --no-index "${wheels[0]}"
   printf '%s\n' "$sha" >"$stamp"
 }
 
 if [[ "$(cat "$stamp" 2>/dev/null || true)" != "$sha" ]]; then
-  install_into_venv
+  install_into_framework
 fi
 
 export HYPERLOOM_CODE_REVISION="$sha"
-export VIRTUAL_ENV="$venv"
-export PATH="$venv/bin:$PATH"
-exec "$venv/bin/python" -m hyperloom hosted run
+if [[ "$in_venv" == "1" ]]; then
+  export VIRTUAL_ENV="$env_prefix"
+fi
+framework_bin="$(dirname "$framework_py")"
+export PATH="$framework_bin:$PATH"
+exec "$framework_py" -m hyperloom hosted run
