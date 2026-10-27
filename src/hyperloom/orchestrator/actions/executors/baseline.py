@@ -199,6 +199,10 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 FAST_EXIT_THRESHOLD_SEC = 30.0
 # The error class of a subprocess that exited nonzero for no recognised cause.
 _SUBPROCESS_NONZERO = "subprocess_nonzero"
+# The error class of a benchmark that served its whole protocol and still left no usable
+# measurement behind: the round ran to the end, so the nonzero exit came from the harness
+# around it. The grid runner already names this shape the same way.
+_MAGPIE_NONZERO_INVALID = "magpie_nonzero_invalid_measurement"
 _ARG_ERROR_CLASS = "fast_exit_arg_error"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
@@ -722,10 +726,14 @@ def _classify_subprocess_error(
 
 
 _SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
+# The classes whose failures are told apart by their output. Both are given to a process
+# whose exit Hyperloom cannot explain, so the output is all there is to compare; the other
+# classes carry a fixed sentence that two unrelated failures share.
+_SIGNED_FAILURE_CLASSES = frozenset({_SUBPROCESS_NONZERO, _MAGPIE_NONZERO_INVALID})
 
 
 def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
-    """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
+    """Identify an unexplained nonzero exit by the process's whole output, ignoring numbers.
 
     The result's ``error`` is only the last 2000 characters of one stream, and two
     different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
@@ -735,9 +743,9 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
     for the same reason, so they are folded away.
 
     Args:
-        err_class: The class the failure was given; only ``subprocess_nonzero`` gets a
-            signature, because other classes carry a fixed sentence that unrelated
-            failures share.
+        err_class: The class the failure was given; only a class in
+            :data:`_SIGNED_FAILURE_CLASSES` gets a signature, because other classes carry
+            a fixed sentence that unrelated failures share.
         proc_stdout: The process's whole stdout.
         proc_stderr: The process's whole stderr.
 
@@ -745,7 +753,7 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
         ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
         no output: two failures that said nothing are not known to be the same failure).
     """
-    if err_class != _SUBPROCESS_NONZERO:
+    if err_class not in _SIGNED_FAILURE_CLASSES:
         return ""
     text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
     if not text:
@@ -3666,7 +3674,14 @@ class BenchmarkRunExecutor:
             if boot is not None:
                 error_class, error = boot
             elif finished.returncode != 0:
-                error_class, error = _classify_subprocess_error(finished.runtime_sec, tail, finished.returncode), tail
+                error = tail
+                error_class = _classify_subprocess_error(finished.runtime_sec, tail, finished.returncode)
+                if error_class == _SUBPROCESS_NONZERO and served_complete_protocol(measurement):
+                    # The run's own artifact records every requested request as served, so the exit
+                    # happened after the workload rather than during it. That is what the exit code
+                    # cannot say on its own, and it is the difference between a harness that refused
+                    # the result and a process that died mid-round.
+                    error_class = _MAGPIE_NONZERO_INVALID
             elif not report_path.exists():
                 error_class = "no_report"
                 error = f"{_BENCHMARK_REPORT_NAME} missing under {workspace}"

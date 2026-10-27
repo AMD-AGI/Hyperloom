@@ -90,8 +90,42 @@ def test_classify_root_cause_type():
     assert _classify_root_cause_type("server_init_dead", "HIP out of memory") == "oom"
     assert _classify_root_cause_type("timeout", "baseline benchmark exceeded 600s") == "benchmark_timeout"
     assert _classify_root_cause_type("server_init_dead", "EngineCore failed to start") == "engine_core_init"
-    assert _classify_root_cause_type("subprocess_nonzero", "boom") == "worker_crash"
+    assert _classify_root_cause_type("subprocess_nonzero", "boom") == "unknown"
     assert _classify_root_cause_type("unknown", "") == "unknown"
+
+
+def test_classify_root_cause_type_needs_evidence_of_a_death():
+    """A nonzero exit Hyperloom could not explain is not a crash on its own."""
+    clean_shutdown = (
+        "replay finished: 4097/4097 requests served in 4486.0s\n"
+        "power validation failed: expected 4 GPUs, sampled 8\n"
+        "INFO: server received SIGTERM, worker 3 of 4 shutting down\n"
+    )
+    assert _classify_root_cause_type("subprocess_nonzero", clean_shutdown) == "unknown"
+    assert (
+        _classify_root_cause_type("subprocess_nonzero", "RuntimeError: NCCL error: unhandled system error")
+        == "worker_crash"
+    )
+    assert _classify_root_cause_type("subprocess_nonzero", "rank 3 killed by signal 11 (core dumped)") == "worker_crash"
+
+
+def test_classify_root_cause_type_harness_class():
+    """A class the attribution table calls harness-side is reported as such."""
+    assert (
+        _classify_root_cause_type("magpie_nonzero_invalid_measurement", "benchmark exited 3 after the last request")
+        == "benchmark_harness"
+    )
+
+
+def test_failure_summary_unexplained_exit_keeps_the_excerpt():
+    """Without evidence of a death the excerpt stays the headline, not a diagnosis."""
+    state = _failed_state(
+        error_class="subprocess_nonzero",
+        error="power validation failed: expected 4 GPUs, sampled 8",
+    )
+    summary = _build_failure_summary(state)
+    assert summary["root_cause_type"] == "unknown"
+    assert "power validation failed" in summary["root_cause"]
 
 
 def test_failure_summary_from_server_init_dead_attempt():

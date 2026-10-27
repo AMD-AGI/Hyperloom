@@ -244,10 +244,10 @@ class BaselineFailureMixin:
         """
         # A process that exited with the same output as last time (modulo numbers)
         # will do so again: stop at two instead of spending a third attempt. The
-        # executor signs only ``subprocess_nonzero``, from the process's whole
-        # output rather than the 2000-character ``error`` tail; other classes carry
-        # a fixed sentence that two unrelated failures share.
-        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        # executor decides which classes are worth signing and signs them from the
+        # process's whole output rather than the 2000-character ``error`` tail, so a
+        # signature is present exactly when it identifies the failure.
+        signature = str(result_payload.get("output_signature") or "")
         repeated = bool(
             signature
             and self.shared_state.baseline_failure_streak >= 1

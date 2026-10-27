@@ -27,10 +27,33 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
+from ...state.failure_evidence import FAILURE_ATTRIBUTION_HARNESS, classify_failure_attribution
 from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)
+
+# Text in which a process says it died. Each marker names the death itself, not
+# the subsystem around it: ranks, collectives and worker ids are printed by every
+# healthy multi-GPU launch, so matching those reports a crash for a run that only
+# exited nonzero.
+_WORKER_DEATH_MARKERS = (
+    "nccl error",
+    "nccl warn",
+    "nccl timeout",
+    "unhandled system error",
+    "watchdog caught",
+    "worker crashed",
+    "worker died",
+    "worker exited",
+    "worker process died",
+    "killed by signal",
+    "terminated by signal",
+    "segmentation fault",
+    "sigsegv",
+    "sigabrt",
+    "core dumped",
+)
 
 
 def _count_server_boot_failures(session_dir: Path | None) -> int:
@@ -79,7 +102,15 @@ def _partition_benign_lines(text: str) -> tuple[list[str], list[str]]:
 
 
 def _classify_root_cause_type(error_class: str, error_text: str) -> str:
-    """Map a baseline attempt's ``error_class`` + message to a coarse enum."""
+    """Map a baseline attempt's ``error_class`` + message to a coarse enum.
+
+    Every branch names what the attempt left evidence of. ``subprocess_nonzero``
+    is the producer's name for an exit it did not recognise, and a line that
+    merely mentions a worker or NCCL is startup chatter, so neither is a crash:
+    without evidence of a process dying the answer is ``unknown``, which leaves
+    the excerpt as the headline rather than replacing it with a diagnosis the
+    run then acts on.
+    """
     from .baseline import _KV_CACHE_OOM_MARKERS
 
     blob = f"{error_class} {error_text}".lower()
@@ -97,8 +128,10 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
         or "engine process failed" in blob
     ):
         return "engine_core_init"
-    if error_class == "subprocess_nonzero" or "nccl" in blob or "worker" in blob:
+    if any(marker in blob for marker in _WORKER_DEATH_MARKERS):
         return "worker_crash"
+    if classify_failure_attribution(error_class=error_class) == FAILURE_ATTRIBUTION_HARNESS:
+        return "benchmark_harness"
     return "unknown"
 
 
