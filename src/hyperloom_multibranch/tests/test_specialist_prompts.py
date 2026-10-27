@@ -34,7 +34,7 @@ from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.contracts.notebook.records import WarmReplay
 from hyperloom_multibranch.notebook.knowledge.warm_start import PATCH_REFERENCE, ReplayReference
 from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
-from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE, render_replay
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE, MENU_TITLE, UNFINISHED_TITLE, render_replay
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -79,6 +79,13 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert prompt.index("notebook_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
         role_prompt(" \n")
+
+
+def test_the_role_reads_the_briefs_direction_menu_before_claiming_and_chooses_as_before_without_one():
+    prompt = " ".join(role_prompt(WORKLOAD).split())
+
+    assert f'When the brief lists "{MENU_TITLE.split(" (")[0]}", read it before you claim' in prompt
+    assert "A brief without that list belongs to a branch the menu leaves out to compare against" in prompt
 
 
 def test_the_role_profiles_through_a_profile_test_and_tracelens():
