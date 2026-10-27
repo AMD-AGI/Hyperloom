@@ -299,7 +299,8 @@ def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_file
     assert "its gain was measured on image sha256:old" in shown and "left out: patch fused.patch" in shown
     assert "whose gain the brief or notebook_replay says was measured on another image" in prompt
     assert 'Each "left out: patch" entry' in prompt
-    assert "first check your synced worktree" in prompt and "port its intent to your head" in prompt
+    assert "read its text with notebook_replay and reference set to that path" in prompt
+    assert "then check your synced worktree" in prompt and "port its intent to your head" in prompt
     assert "never replay it as is" in prompt
 
 
