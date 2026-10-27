@@ -372,9 +372,9 @@ a setting that needs to be set before torch's compiler stack is touched, it
 checks for that at import time and raises if it's already too late, rather
 than silently measuring (or shipping) a setting that never took effect.
 
-Point `--framework-path` at a Git checkout tracking only
-`hyperloom_optimize.py`, initially an identity function. In the frozen benchmark
-directory, declare `optimization_scope.json`:
+Point `--framework-path` at a directory holding `hyperloom_optimize.py`, initially
+an identity function. It does not need to be a Git checkout. In the frozen
+benchmark directory, declare `optimization_scope.json`:
 
 ```json
 {"schema_version": 1, "file": "/absolute/workspace/optimization/hyperloom_optimize.py"}
@@ -400,9 +400,11 @@ caches need writable scratch space. The policy limits accepted model changes;
 it does not turn an agent's shell into a single-file filesystem sandbox.
 
 On CLOSE, export produces `deployment/hyperloom_optimize.py` and bookkeeping in
-`reports/deployment.json` (`kind: single_file`). Export requires a clean
-checkout containing only the tracked module and verifies accepted source
-snapshots. Copy just the Python module beside the original script to use it in
+`reports/deployment.json` (`kind: single_file`). The module is verified against
+the source snapshots recorded at each KEEP, so it is refused if it differs from
+what was benchmarked, if no snapshot covers it, or if it imports a file beside
+itself -- only the one module ships. The file does not need to live in a git
+repository. Copy just the Python module beside the original script to use it in
 the original runtime; no Hyperloom installation is needed. Runtime validation
 remains the responsibility of that script.
 
