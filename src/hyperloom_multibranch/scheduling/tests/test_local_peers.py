@@ -8,6 +8,7 @@ image lacks the framework's package."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -62,6 +63,7 @@ from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayou
 from hyperloom_multibranch.scheduling import local_peers as local_peers_module
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
+    AGENTX_TRACE_SEC,
     InferenceXCheckout,
     LocalCards,
     MeasurementHost,
@@ -97,6 +99,7 @@ from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom.sandbox.e2b import E2BSandboxProvider
 from hyperloom.sandbox.socket import Role as SandboxRole, SandboxInfo
 from hyperloom_multibranch.toolbox import hosted_toolbox
+from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolbox, HostedToolboxInputs
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
@@ -109,6 +112,10 @@ AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 LOCAL = LocalCards((0, 1, 2, 3))
 HOST = MeasurementHost(LOCAL, IMAGE, "a" * 40, InferenceXCheckout("b" * 40, "/opt/InferenceX"))
+AGENTX_CHECKOUT = InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e")
+#: What the single-lineage child took to measure the GLM-5.3 TP4 AgentX baseline that a session's toolbox killed at an
+#: hour, the limit of every test then.
+SINGLE_LINEAGE_AGENTX_BASELINE_SEC = 88 * 60
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 DEV_SANDBOX_TOOLS = {f"dev_sandbox_{verb}" for verb in ("lease", "run", "start", "read", "release")}
 
@@ -457,13 +464,13 @@ async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
     workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
-    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+    host = replace(HOST, inferencex=AGENTX_CHECKOUT)
     specs: list[SpecContext] = []
     build = local_hosted.build_local_toolbox
 
-    def signed(*args: object) -> LocalHostedToolbox:
+    def signed(*args: object, **options: object) -> LocalHostedToolbox:
         specs.append(args[-1])
-        return build(*args)
+        return build(*args, **options)
 
     monkeypatch.setattr(local_hosted, "build_local_toolbox", signed)
 
@@ -500,7 +507,7 @@ async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the
     model = tmp_path / "models" / "DeepSeek-V3"
     model.mkdir(parents=True)
     workload = replace(AGENTX, model=str(model), ep=8)
-    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+    host = replace(HOST, inferencex=AGENTX_CHECKOUT)
 
     async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:
         benchmark = yaml.safe_load((built.layout.toolbox / "benchmark.yaml").read_text())["benchmark"]
@@ -510,6 +517,42 @@ async def test_an_agentx_session_on_a_model_directory_serves_it_at_its_ep_in_the
         args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))
         configure_benchmark(args)
         assert (str(args.model), args.ep, args.docker_image) == (str(model), 8, IMAGE.ref)
+
+
+def _options_given(monkeypatch: pytest.MonkeyPatch, module: object, builder: str) -> list[object]:
+    """The options every toolbox ``builder`` of ``module`` builds from here on is given, its default when none is; it
+    still builds it."""
+
+    given: list[object] = []
+    build = getattr(module, builder)
+    default = inspect.signature(build).parameters["options"].default
+
+    def recorded(*args: object, options: object = default) -> object:
+        given.append(options)
+        return build(*args, options=options)
+
+    monkeypatch.setattr(module, builder, recorded)
+    return given
+
+
+async def test_an_agentx_test_may_outlast_its_trace_window_and_an_inferencex_test_keeps_the_default_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "GLM-5.3"
+    model.mkdir(parents=True)
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    given = _options_given(monkeypatch, local_hosted, "build_local_toolbox")
+
+    async with _peers(
+        tmp_path / "agentx", monkeypatch, replace(AGENTX, model=str(model)), replace(HOST, inferencex=AGENTX_CHECKOUT)
+    ):
+        pass
+    async with _peers(tmp_path / "inferencex", monkeypatch, WORKLOAD):
+        pass
+
+    [agentx, inferencex] = given
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
+    assert inferencex.timeout_sec == DEFAULT_TEST_TIMEOUT_SEC
 
 
 def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(
@@ -632,10 +675,9 @@ class _IdleService(E2BSandboxProvider):
         return []
 
 
-async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_toolbox_directory_on_no_local_card(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    asked: list[tuple[Path, int]] = []
+def _service_sandboxes(monkeypatch: pytest.MonkeyPatch, asked: list[tuple[Path, int]]) -> HostedSandboxes:
+    """The host's idle sandbox service as a session's backend, which records in ``asked`` the toolbox directory and TP
+    it is asked for inputs of and refuses to read this machine's cards."""
 
     def inputs(session_dir: Path, tp: int) -> HostedToolboxInputs:
         asked.append((session_dir, tp))
@@ -655,8 +697,15 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
 
     monkeypatch.setattr(local_peers_module, "machine_cards", no_cards)
     monkeypatch.setattr(hosted_toolbox, "E2BSandboxProvider", _IdleService)
+    return HostedSandboxes(inputs)
+
+
+async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_toolbox_directory_on_no_local_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[Path, int]] = []
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
-    host = replace(HOST, backend=HostedSandboxes(inputs))
+    host = replace(HOST, backend=_service_sandboxes(monkeypatch, asked))
     async with _peers(tmp_path, monkeypatch, WORKLOAD, host) as built:
         toolbox, layout = built.peers.toolbox, built.layout
         assert isinstance(toolbox, HostedToolbox)
@@ -664,6 +713,21 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert toolbox.trace_root == layout.toolbox and toolbox.blobs is built.setup.blobs
         assert built.peers.base_image_digest == IMAGE.digest
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+
+
+async def test_an_agentx_test_in_the_services_sandboxes_may_outlast_its_trace_window_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = tmp_path / "models" / "GLM-5.3"
+    model.mkdir(parents=True)
+    given = _options_given(monkeypatch, hosted_toolbox, "build_hosted_toolbox")
+    host = MeasurementHost(_service_sandboxes(monkeypatch, []), IMAGE, "a" * 40, AGENTX_CHECKOUT)
+
+    async with _peers(tmp_path / "workspace", monkeypatch, replace(AGENTX, model=str(model)), host):
+        pass
+
+    [agentx] = given
+    assert agentx.timeout_sec > max(AGENTX_TRACE_SEC, SINGLE_LINEAGE_AGENTX_BASELINE_SEC)
 
 
 def _agent_clients(monkeypatch: pytest.MonkeyPatch) -> list[GateClient | None]:
@@ -703,7 +767,7 @@ async def test_an_agent_of_an_agentx_session_gets_no_client(tmp_path: Path, monk
     (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
     workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
-    host = replace(HOST, inferencex=InferenceXCheckout("c" * 40, "/opt/InferenceX-agentx/inferencex-e2e"))
+    host = replace(HOST, inferencex=AGENTX_CHECKOUT)
     clients = _agent_clients(monkeypatch)
 
     async with _peers(tmp_path / "workspace", monkeypatch, workload, host) as built:

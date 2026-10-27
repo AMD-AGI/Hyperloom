@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hyperloom_multibranch.scheduling.local_peers import measurement_host, peers_on
+from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, measurement_host, peers_on
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -53,10 +53,11 @@ class HostedSandboxes:
     def toolbox(
         self, setup: PeerSetup, notebook: LocalNotebook, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
-        from hyperloom_multibranch.toolbox.hosted_toolbox import build_hosted_toolbox
+        from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, build_hosted_toolbox
 
         inputs = self.inputs(setup.layout.toolbox, setup.workload.tp)
-        return build_hosted_toolbox(inputs, notebook, acceptance, spec)
+        options = HostedOptions(timeout_sec=attempt_timeout_sec(setup.workload))
+        return build_hosted_toolbox(inputs, notebook, acceptance, spec, options=options)
 
 
 def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFactory:

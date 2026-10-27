@@ -27,6 +27,9 @@ them and which reads the repository for a replay's branch head. :func:`load_peer
 the image holds the framework package those worktrees branch off and resolves that CLI first, and refuses when either
 cannot be had, so the command line fails before it creates anything.
 
+On either backend a test of an AgentX workload may run for its trace window and the boot and warmup around it
+(:func:`attempt_timeout_sec`).
+
 The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
 the functions that use them: importing this module, the command line or the session loads none of it.
 """
@@ -100,6 +103,13 @@ CLAIM_TTL_SECONDS = 1800.0
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
+#: How long Magpie's canonical AgentX run replays its trace under measurement: the ``duration`` of every canonical
+#: recipe point (``Magpie.modes.benchmark.agentx`` at the Magpie commit Hyperloom pins); Magpie exports no name for it.
+AGENTX_TRACE_SEC = 3600
+#: What an AgentX test spends outside its trace window: the server's boot (3 to 11 minutes measured for GLM-5.3 at
+#: TP4), the replay client's cold-cache warmup before the window opens (close to 18 minutes measured) and the drain
+#: after it. An hour holds twice the half hour measured; a hung server ends on the toolbox's boot and silence limits.
+AGENTX_OUTSIDE_TRACE_SEC = 3600
 
 
 @dataclass(frozen=True)
@@ -153,11 +163,12 @@ class LocalCards:
     def toolbox(
         self, setup: PeerSetup, notebook: LocalNotebook, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
-        from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
+        from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
 
         layout = setup.layout
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
-        return build_local_toolbox(session, notebook, acceptance, spec)
+        options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload))
+        return build_local_toolbox(session, notebook, acceptance, spec, options=options)
 
 
 @dataclass(frozen=True)
@@ -192,6 +203,18 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
         "TARGET_GPU_TYPE": workload.gpu_type,
         "KERNEL_OPT_BACKEND_ORDER": workload.kernel_optimizer.value,
     }
+
+
+def attempt_timeout_sec(workload: Workload) -> int:
+    """How long one attempt of a test of ``workload`` may run on either backend: the toolbox's default for an
+    InferenceX workload, and for an AgentX one the trace window Magpie replays (:data:`AGENTX_TRACE_SEC`) plus what
+    the test spends outside it (:data:`AGENTX_OUTSIDE_TRACE_SEC`)."""
+
+    from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC
+
+    if workload.inferencex is not None:
+        return DEFAULT_TEST_TIMEOUT_SEC
+    return AGENTX_TRACE_SEC + AGENTX_OUTSIDE_TRACE_SEC
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
