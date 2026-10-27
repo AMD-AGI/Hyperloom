@@ -30,7 +30,6 @@ from hyperloom_multibranch.notebook.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
     CANDIDATE_COMPONENT,
     FRONTIER_LOG_FORMAT,
-    FRONTIER_V1,
     FRONTIER_V1_LABEL,
     MERGED_COMPONENT,
     MERGED_GAIN_COMPONENT,
@@ -48,7 +47,6 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     FrontierPolicy,
     FrontierScoring,
     Readings,
-    ScoringContext,
     StallBar,
     StopRule,
     drawn_for_probation,
@@ -59,6 +57,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     score_at,
     score_progress,
     stall_evidence,
+    trend_estimate,
     trend_start,
 )
 from hyperloom_multibranch.notebook.rsi.history import DEFAULT_STALL_TESTS
@@ -200,11 +199,10 @@ def test_the_trend_reaches_back_to_the_branchs_last_four_ended_explore_tests() -
     # b03 kept testing and stalled: its last four results all fall inside the window.
     b03 = branch("b03", [(61 * minute, 1.11)], ended_times=tuple(when * minute for when in (137, 144, 153, 159)))
     window = FrontierPolicy(METRIC, window_seconds=37 * minute)
-    context = ScoringContext(TASK, (), window)
 
     assert trend_start(b09, 467 * minute, window.window_seconds) == 361 * minute
-    assert FRONTIER_V1.estimate(b09, 467 * minute, context, Readings()).components["trend_pct"] == pytest.approx(12.40)
-    assert FRONTIER_V1.estimate(b03, 163 * minute, context, Readings()).components["trend_pct"] == 0.0
+    assert trend_estimate(b09, 467 * minute, window, Readings()).components["trend_pct"] == pytest.approx(12.40)
+    assert trend_estimate(b03, 163 * minute, window, Readings()).components["trend_pct"] == 0.0
     assert trend_start(branch("old", []), 467 * minute, window.window_seconds) == 430 * minute
 
 
@@ -303,12 +301,11 @@ def test_a_near_miss_among_the_last_tests_holds_the_branch(snapshot: NotebookSna
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
-    context = ScoringContext(TASK, (), POLICY)
     late = WINDOW_SECONDS + 1.0
 
-    assert score_at(branch("s9", []), 60.0, context).basis is FrontierBasis.NEW
-    assert score_at(branch("s9", []), late, context).basis is FrontierBasis.TREND
-    assert score_at(branch("s9", [], judged_times=()), late, context).basis is FrontierBasis.NEW
+    assert score_at(branch("s9", []), 60.0, POLICY).basis is FrontierBasis.NEW
+    assert score_at(branch("s9", []), late, POLICY).basis is FrontierBasis.TREND
+    assert score_at(branch("s9", [], judged_times=()), late, POLICY).basis is FrontierBasis.NEW
 
 
 def test_a_candidate_waiting_for_its_confirm_lifts_the_score_to_its_gain_in_points_of_the_baseline(
@@ -476,20 +473,19 @@ async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path:
 
 
 def test_the_envelope_floors_a_young_branchs_own_trend_lifts_it_to_a_pending_gain_and_caps_it() -> None:
-    context = ScoringContext(TASK, (), POLICY)
     young, settled = branch("s9", []), branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
 
-    floored = enveloped(Estimate(-1.0), young, 60.0, context, Readings())
-    observed = enveloped(Estimate(0.2, basis=FrontierBasis.OBSERVING), young, 60.0, context, Readings())
-    capped = enveloped(Estimate(9.0), settled, 60.0, context, Readings(headroom_pct=2.0, pending_pct=1.0))
-    lifted = enveloped(Estimate(0.2), settled, 60.0, context, Readings(pending_pct=1.0))
+    floored = enveloped(Estimate(-1.0), young, 60.0, POLICY, Readings())
+    observed = enveloped(Estimate(0.2, basis=FrontierBasis.OBSERVING), young, 60.0, POLICY, Readings())
+    capped = enveloped(Estimate(9.0), settled, 60.0, POLICY, Readings(headroom_pct=2.0, pending_pct=1.0))
+    lifted = enveloped(Estimate(0.2), settled, 60.0, POLICY, Readings(pending_pct=1.0))
 
     assert (floored.expected_gain_pct, floored.basis) == (POLICY.new_branch_floor_pct, FrontierBasis.NEW)
     assert (observed.expected_gain_pct, observed.basis) == (0.2, FrontierBasis.OBSERVING)
     assert (capped.expected_gain_pct, capped.basis) == (2.0, FrontierBasis.HEADROOM)
     assert capped.components == {"pending_pct": 1.0, "headroom_pct": 2.0}
     assert (lifted.expected_gain_pct, lifted.basis) == (1.0, FrontierBasis.PENDING)
-    assert score_at(settled, 60.0, context).scorer == FRONTIER_V1_LABEL
+    assert score_at(settled, 60.0, POLICY).scorer == FRONTIER_V1_LABEL
 
 
 async def test_a_round_that_scored_nothing_writes_no_line(tmp_path: Path) -> None:

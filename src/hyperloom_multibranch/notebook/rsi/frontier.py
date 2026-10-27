@@ -5,7 +5,7 @@
 
 :class:`FrontierScoring` is a ``ProgressQuery`` over the notebook's: the same rows, each running specialist branch's
 ``frontier`` filled with ``FrontierScore(expected_gain_pct, components, basis, scorer)``. A score has two layers.
-:data:`FRONTIER_V1`, the formula below, gives the core :class:`Estimate`. The envelope, :func:`enveloped`, then holds
+:func:`trend_estimate`, the formula below, gives the core :class:`Estimate`. The envelope, :func:`enveloped`, then holds
 it to the same guarantees: a branch scored on its own short record keeps ``new_branch_floor_pct`` until
 :data:`SETTLED_TESTS` of its explore tests succeeded and were judged, as the judge's grace counts them, so a flat
 start does not stop it before it has tried a few directions; a repair branch that young scores at least the gain of
@@ -26,7 +26,7 @@ and the Amdahl ceiling cap it; and it is never negative.
 * ``pending_pct``: the gain of the branch's best candidate waiting for its confirm, in points over the baseline.
 
 ``frontier-v1`` expects the trend, and a branch under observation keeps at least ``observation_floor_pct``.
-``basis`` names which part of either layer the score rests on, and ``scorer`` the scorer.
+``basis`` names which part of either layer the score rests on, and ``scorer`` the formula, :data:`FRONTIER_V1_LABEL`.
 The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here until then.
 :func:`score_at` scores a branch as an archived tree has it, so the live scoring and a replay score alike.
 
@@ -77,7 +77,6 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     tree_from_snapshot,
 )
 from hyperloom_multibranch.notebook.rsi.history import HORIZON_TESTS, stall_odds
-from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
 
 log = logging.getLogger(__name__)
@@ -188,18 +187,6 @@ def largest_ceiling_pct(shares: OpShares | None) -> float | None:
 
 
 @dataclass(frozen=True)
-class ScoringContext:
-    """What a branch is scored against: its session's ``task``, the archived ``history``, the ``policy``, and ``tree``,
-    the session's own search tree as it stood then, for a scorer that sets a branch beside its siblings; ``None`` where
-    the caller built none."""
-
-    task: TaskConditions
-    history: tuple[SearchTree, ...]
-    policy: FrontierPolicy
-    tree: SearchTree | None = None
-
-
-@dataclass(frozen=True)
 class Readings:
     """What the scoring reads about a branch besides its tree: whether it is ``observing`` and its two bounds.
 
@@ -251,43 +238,30 @@ def trend_start(branch: TreeBranch, t_s: float, window_seconds: float) -> float:
     return min(start, ended[-WINDOW_TESTS]) if len(ended) >= WINDOW_TESTS else start
 
 
-@dataclass(frozen=True)
-class FrontierV1:
-    """Today's formula: the branch's trend, and at least ``observation_floor_pct`` while a kernel-layer direction it
-    tested lately may still pay off."""
+def trend_estimate(branch: TreeBranch, t_s: float, policy: FrontierPolicy, readings: Readings) -> Estimate:
+    """``frontier-v1``'s estimate: the branch's trend, and at least ``observation_floor_pct`` while a kernel-layer
+    direction it tested lately may still pay off."""
 
-    @property
-    def label(self) -> str:
-        return FRONTIER_V1_LABEL
-
-    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
-        policy = context.policy
-        trend = branch.gain_at(t_s) - branch.gain_at(trend_start(branch, t_s, policy.window_seconds))
-        tests = len(branch.spent_times)
-        components = {
-            "trend_pct": trend,
-            "tests": float(tests),
-            "gpu_hours": branch.gpu_seconds / HOUR,
-            "observing": float(readings.observing),
-        }
-        expected, basis = trend, FrontierBasis.TREND
-        if readings.observing and expected < policy.observation_floor_pct:
-            expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
-        return Estimate(expected, components, basis)
-
-
-#: The built-in formula, :class:`FrontierV1`.
-FRONTIER_V1 = FrontierV1()
+    trend = branch.gain_at(t_s) - branch.gain_at(trend_start(branch, t_s, policy.window_seconds))
+    components = {
+        "trend_pct": trend,
+        "tests": float(len(branch.spent_times)),
+        "gpu_hours": branch.gpu_seconds / HOUR,
+        "observing": float(readings.observing),
+    }
+    expected, basis = trend, FrontierBasis.TREND
+    if readings.observing and expected < policy.observation_floor_pct:
+        expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
+    return Estimate(expected, components, basis)
 
 
 def enveloped(
-    estimate: Estimate, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings
+    estimate: Estimate, branch: TreeBranch, t_s: float, policy: FrontierPolicy, readings: Readings
 ) -> FrontierScore:
     """``estimate`` held to the envelope. ``basis`` names the envelope's part where it changed the score: the
     new-branch floor of a young branch scored on its own trend, the blocked gain a young repair branch repairs, the
     gain of a candidate waiting for its confirm, or the headroom or the Amdahl ceiling that capped it."""
 
-    policy = context.policy
     expected, basis = estimate.expected_gain_pct, estimate.basis
     components = dict(estimate.components)
     young = is_young(branch, t_s, policy)
@@ -312,13 +286,13 @@ def enveloped(
     return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
 
 
-def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:
+def score_at(branch: TreeBranch, t_s: float, policy: FrontierPolicy, readings: Readings = Readings()) -> FrontierScore:
     """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock: ``frontier-v1``'s estimate held
     to the envelope. The scoring reads the ``readings`` off the notebook; a replay reads them, and the branch as of
     ``t_s``, off an archived tree."""
 
-    estimate = FRONTIER_V1.estimate(branch, t_s, context, readings)
-    return replace(enveloped(estimate, branch, t_s, context, readings), scorer=FRONTIER_V1_LABEL)
+    estimate = trend_estimate(branch, t_s, policy, readings)
+    return replace(enveloped(estimate, branch, t_s, policy, readings), scorer=FRONTIER_V1_LABEL)
 
 
 @dataclass(frozen=True)
@@ -438,15 +412,16 @@ def probation_event(
 
 
 def score_branch(
-    snapshot: NotebookSnapshot, row: BranchProgress, context: ScoringContext, stall: StallBar | None = None
+    snapshot: NotebookSnapshot,
+    row: BranchProgress,
+    tree: SearchTree,
+    policy: FrontierPolicy,
+    stall: StallBar | None = None,
 ) -> FrontierScore:
-    """The frontier score of one running specialist branch of ``context.tree``, the session's own search tree; with
+    """The frontier score of one running specialist branch of ``tree``, the session's own search tree; with
     ``stall``, its stall evidence beside it."""
 
-    if context.tree is None:
-        raise ValueError("a running branch is scored on its session's search tree")
-    policy = context.policy
-    branch = next(item for item in context.tree.branches if item.name == row.branch)
+    branch = next(item for item in tree.branches if item.name == row.branch)
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
     readings = Readings(
         observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
@@ -456,7 +431,7 @@ def score_branch(
         repairing_pct=_repairing_pct(snapshot, row, policy.metric),
     )
     t_s = snapshot.taken_at - session_start(snapshot)
-    score = score_at(branch, t_s, context, readings)
+    score = score_at(branch, t_s, policy, readings)
     if stall is None:
         return score
     evidence = stall_evidence(snapshot, row, policy.metric, stall, is_young(branch, t_s, policy))
@@ -501,13 +476,13 @@ def score_progress(
         tree = tree_from_snapshot(snapshot, policy.metric)
     except (NotRecorded, ValueError):
         return snapshot.progress
-    context = ScoringContext(tree.task, history, paced(policy, tree.longest_root_test_seconds), tree)
+    paced_policy = paced(policy, tree.longest_root_test_seconds)
     stop = rule or StopRule()
     bar = stop.stall_tests if stop.stall_tests is not None else stall_odds(history, tree.task, session=tree).stall_tests
     stall = StallBar(stop, bar)
     steered = {branch.name for branch in tree.branches if branch.steered}
     return tuple(
-        replace(row, frontier=score_branch(snapshot, row, context, stall))
+        replace(row, frontier=score_branch(snapshot, row, tree, paced_policy, stall))
         if row.running and row.branch in steered
         else row
         for row in snapshot.progress
@@ -586,7 +561,6 @@ __all__ = [
     "CANDIDATE_COMPONENT",
     "EVIDENCE_COMPONENTS",
     "FRONTIER_LOG_FORMAT",
-    "FRONTIER_V1",
     "FRONTIER_V1_LABEL",
     "HEADROOM_COMPONENT",
     "MERGED_COMPONENT",
@@ -610,9 +584,7 @@ __all__ = [
     "Estimate",
     "FrontierPolicy",
     "FrontierScoring",
-    "FrontierV1",
     "Readings",
-    "ScoringContext",
     "StallBar",
     "StopRule",
     "drawn_for_probation",
@@ -627,5 +599,6 @@ __all__ = [
     "score_branch",
     "score_progress",
     "stall_evidence",
+    "trend_estimate",
     "trend_start",
 ]
