@@ -364,6 +364,36 @@ def _export_gate_stop_reason(state) -> str:
     return "export_never_landed"
 
 
+def export_gate_summary_line(state) -> str:
+    """One summary line saying whether the declared ahead-of-time export landed.
+
+    A landed export can still show a negative headline gain, measured against an eager
+    path this workload cannot ship, so the gain figure alone misreads. Empty unless
+    ``aoti.enabled``, and empty on an unreadable declaration -- the gate itself already
+    fails closed on that, and a summary line is not where to surface it.
+    """
+    try:
+        config = aoti_config()
+    except ValueError:
+        return ""
+    if config is None or not config.enabled:
+        return ""
+    if not getattr(state, "export_landed", False):
+        attempts = int(getattr(state, "export_attempts", 0) or 0)
+        return (
+            f"  aoti_export          : ⚠ NEVER LANDED after {attempts} integrate round(s) — "
+            f"no shippable artifact was produced, whatever else this run kept"
+        )
+    gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+    tail = (
+        "the artifact is faster than the eager path it replaces"
+        if gain > 0
+        else "it is still behind the eager path, which this workload does not ship; "
+        "optimizing the export is what further budget buys"
+    )
+    return f"  aoti_export          : landed — {tail}"
+
+
 def _explain_stop_reason(stop_reason, state=None):
     """Return a human-readable explanation for a terminal ``stop_reason``."""
     reason = str(stop_reason or "").strip()

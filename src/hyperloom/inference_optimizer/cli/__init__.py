@@ -454,6 +454,10 @@ def _emit_launch_info(
 # Exit code for "another optimizer already owns this session".
 SESSION_BUSY_EXIT_CODE = 3
 
+# argparse destination for ``--max-hours``; read via getattr on several paths that run
+# before the budget is settled, where absence is meaningful.
+MAX_HOURS_ARG = "max_hours"
+
 
 def _acquire_session_lock_or_exit(session_dir: Path) -> SessionLock:
     """Take the single-optimizer session lock or exit ``SESSION_BUSY_EXIT_CODE``."""
@@ -1125,7 +1129,7 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     # ``--max-hours`` carries no argparse default, so absence reads as ``None``
     # here: this runs before either path settles the budget. An explicit value
     # is a deliberate choice even when it equals the default, and gets no note.
-    if getattr(args, "max_hours", None) is None:
+    if getattr(args, MAX_HOURS_ARG, None) is None:
         print(
             f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
@@ -1209,39 +1213,25 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 def _check_export_gate_budget(args: argparse.Namespace, phase_budget_pct: dict[str, float]) -> None:
     """Warn when the export gate cannot afford two patch specialists.
 
-    Under ``aoti.enabled`` nothing is scored until the export lands, so the run depends
-    entirely on patch specialists, which have a 60-min floor
-    (``specialists.profile.wall_budget_base_min``). Two is the minimum that allows one
-    failure and one fix. Advisory only: the default ``--max-hours`` affords none, and a
-    short deliberate run is the operator's call to make.
+    The judgment lives in ``machine_state.export_gate_budget_shortfall`` -- it is phase
+    budget policy, not CLI concern. Advisory only: the default ``--max-hours`` affords
+    none, and a short deliberate run is the operator's call to make.
     """
-    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
-    from hyperloom.orchestrator.phases.machine_state import DEFAULT_PHASE_BUDGET_PCT, PHASE_FRAMEWORK_AGENT
-    from hyperloom.orchestrator.specialists.profile import MODE_PATCH, wall_budget_base_min
-
-    try:
-        config = aoti_config()
-    except ValueError:
-        return
-    if config is None or not config.enabled:
-        return
+    from hyperloom.orchestrator.phases.machine_state import export_gate_budget_shortfall
 
     # --extend-hours lands in session state, not args, so fold it in here or a resumed
     # run is judged on the leg it started with.
-    hours = float(getattr(args, "max_hours", 0.0) or 0.0) + float(getattr(args, "extend_hours", 0.0) or 0.0)
-    pct = phase_budget_pct.get(PHASE_FRAMEWORK_AGENT, DEFAULT_PHASE_BUDGET_PCT.get(PHASE_FRAMEWORK_AGENT, 0.0))
-    framework_min = hours * 60.0 * float(pct)
-    specialist_min = wall_budget_base_min({"mode": MODE_PATCH})
-    if specialist_min <= 0 or framework_min // specialist_min >= 2:
+    hours = float(getattr(args, MAX_HOURS_ARG, 0.0) or 0.0) + float(getattr(args, "extend_hours", 0.0) or 0.0)
+    short = export_gate_budget_shortfall(hours, phase_budget_pct)
+    if short is None:
         return
-    needed_pct = min((2.0 * specialist_min) / (hours * 60.0), 1.0) if hours > 0 else 1.0
     print(
         f"Preflight: WARNING — aoti.enabled is declared, so nothing is scored until the export "
-        f"lands. FRAMEWORK_AGENT has {framework_min:.0f} min ({hours:g}h x {pct:.2f}) and a patch "
-        f"specialist needs {specialist_min:.0f} min, so this run affords "
-        f"{int(framework_min // specialist_min)}. Two is the minimum that allows one failure and "
-        f"one fix: --phase-budget-framework-pct {needed_pct:.2f} at this budget, or raise "
-        f"--max-hours.",
+        f"lands. FRAMEWORK_AGENT has {short['framework_min']:.0f} min ({hours:g}h x "
+        f"{short['pct']:.2f}) and a patch specialist needs {short['specialist_min']:.0f} min, so "
+        f"this run affords {int(short['affords'])}. Two is the minimum that allows one failure "
+        f"and one fix: --phase-budget-framework-pct {short['needed_pct']:.2f} at this budget, or "
+        f"raise --max-hours.",
         file=sys.stderr,
     )
 
@@ -1645,7 +1635,7 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     """
     lines: list[str] = []
     persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
-    if getattr(args, "max_hours", None) is None and persisted_minutes > 0:
+    if getattr(args, MAX_HOURS_ARG, None) is None and persisted_minutes > 0:
         args.max_hours = persisted_minutes / 60.0
         lines.append(f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted)")
 
