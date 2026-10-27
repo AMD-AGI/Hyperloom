@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 
 import pytest
 
+from hyperloom.orchestrator.state.kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from hyperloom.orchestrator.state.shared_state import (
     ActionAttempt,
-    _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
     inject_stack_base_params,

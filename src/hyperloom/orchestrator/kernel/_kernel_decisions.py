@@ -30,6 +30,7 @@ from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
+    _MAX_INTEGRATE_E2E_ATTEMPTS,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
@@ -106,7 +107,7 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         return None
     env_flag = _text(getattr(patch, "env_flag", "")).strip()
     fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
-    micro_speedup = to_float(getattr(patch, "micro_speedup", 0.0)) or 0.0
+    micro_speedup = patch.micro_speedup
     queue = state.pending_kernel_integrations
     # The lane owns its own task_key / kernel_id namespace so its integration_ids and kernel-rejection identities
     # stay distinct; the prefix is a state key only -- no consumer reads it (they gate on the ``source`` field), so
@@ -324,9 +325,7 @@ def _record_integration_keep(result: dict[str, Any], pending_record) -> None:
         pending_record["validation_tier"] = validation_tier
 
 
-def _reject_integration(
-    state, entry: dict[str, Any], *, reason: str, keep_threshold_pct: float, pending_record
-) -> None:
+def _reject_integration(state, entry: dict[str, Any], *, reason: str, pending_record) -> None:
     """Record a patch's rejection against its attempt entry, the rejection ledger and its queued record."""
     rejected = {
         "key": entry["key"],
@@ -338,7 +337,6 @@ def _reject_integration(
         "attempt_count": entry["attempt_count"],
         "fault_count": entry["fault_count"],
         "best_gain_pct": entry["best_gain_pct"],
-        "keep_threshold_pct": keep_threshold_pct,
         "last_decision": entry["last_decision"],
         "last_error_class": entry["last_error_class"],
         "reason": reason,
@@ -359,17 +357,8 @@ def _reject_integration(
         pending_record.update(status="rejected", rejected_at=_now_iso(), rejected_reason=reason)
 
 
-def record_kernel_integrate_result(
-    state,
-    result: dict[str, Any],
-    *,
-    max_attempts: int = 3,
-    keep_threshold_pct: float = 1.0,
-    max_fault_attempts: int | None = None,
-) -> dict[str, Any] | None:
+def record_kernel_integrate_result(state, result: dict[str, Any]) -> dict[str, Any] | None:
     """Persist one integrate E2E result and reject exhausted patch attempts."""
-    if max_fault_attempts is None:
-        max_fault_attempts = _MAX_INTEGRATE_FAULT_ATTEMPTS
     if not isinstance(result, dict):
         return None
     result, pending_record = _bind_result_to_pending(state, result)
@@ -439,22 +428,22 @@ def record_kernel_integrate_result(
 
     # Integration fault: never measured fairly.
     if is_fault:
-        if fault_count < max_fault_attempts:
+        if fault_count < _MAX_INTEGRATE_FAULT_ATTEMPTS:
             entry["retryable"] = True
             state.kernel_integrate_attempts[key] = entry
             return entry
-        reason = f"fault_attempts_exhausted_{max_fault_attempts}"
+        reason = f"fault_attempts_exhausted_{_MAX_INTEGRATE_FAULT_ATTEMPTS}"
     else:
         # Gate verdict path: a genuine REVERT, or too many non-fault attempts without a KEEP.
-        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= max_attempts
+        should_reject = result.get("decision") == "REVERT" or verdict_attempt_count >= _MAX_INTEGRATE_E2E_ATTEMPTS
         if not should_reject:
             return entry
         reason = (
-            "revert_decision" if result.get("decision") == "REVERT" else f"max_e2e_attempts_{max_attempts}_without_keep"
+            "revert_decision"
+            if result.get("decision") == "REVERT"
+            else f"max_e2e_attempts_{_MAX_INTEGRATE_E2E_ATTEMPTS}_without_keep"
         )
-    _reject_integration(
-        state, entry, reason=reason, keep_threshold_pct=keep_threshold_pct, pending_record=pending_record
-    )
+    _reject_integration(state, entry, reason=reason, pending_record=pending_record)
     return entry
 
 

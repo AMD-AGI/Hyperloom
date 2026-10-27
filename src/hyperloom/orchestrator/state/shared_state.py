@@ -47,7 +47,7 @@ from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 
-from . import kernel_decision_settings as _kernel_decision_settings
+from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from .failure_evidence import tail_excerpt
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
@@ -57,12 +57,6 @@ log = logging.getLogger(__name__)
 
 # Upper bound on retained crash timestamps (trailing-window rate needs only the recent tail).
 _CRASH_TIMESTAMP_CAP: int = 200
-
-# Compatibility aliases kept on shared_state for existing callers/tests.
-_DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-_MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
-resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
@@ -1624,14 +1618,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         err_class = str(result.get("error_class") or "").strip()
         return err_class in _INTEGRATE_FAULT_ERROR_CLASSES
 
-    def record_kernel_integrate_result(
-        self,
-        result: dict[str, Any],
-        *,
-        max_attempts: int = 3,
-        keep_threshold_pct: float = 1.0,
-        max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    ) -> dict[str, Any] | None:
+    def record_kernel_integrate_result(self, result: dict[str, Any]) -> dict[str, Any] | None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`.
 
         Also the one seam every integrate settlement passes through, so the
@@ -1640,13 +1627,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """
         from ..kernel import _kernel_decisions as _m
 
-        entry = _m.record_kernel_integrate_result(
-            self,
-            result,
-            max_attempts=max_attempts,
-            keep_threshold_pct=keep_threshold_pct,
-            max_fault_attempts=max_fault_attempts,
-        )
+        entry = _m.record_kernel_integrate_result(self, result)
         self._record_integrate_verdict_on_timeline(entry)
         return entry
 
