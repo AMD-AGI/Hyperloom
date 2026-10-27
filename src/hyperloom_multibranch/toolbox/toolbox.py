@@ -54,6 +54,7 @@ from hyperloom_multibranch.toolbox.analysis import (
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
+from hyperloom_multibranch.toolbox.hosted_executor import landed_agentx_baseline
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.pending_builds import (
     BuildDriver,
@@ -458,6 +459,16 @@ class RealToolbox:
         return self.submit_tool(
             root_profile_request(self.trace_root, commit_id, trace_dir, point_config), job_id=job_id
         )
+
+    async def read_prelude_baseline(self, run_dir: Path, point_config: Path, *, request_id: str) -> TestResult:
+        """The PRELUDE child's baseline run that landed in ``run_dir``, read as the measured round of a test of the
+        point config ``point_config`` is (:func:`~.hosted_executor.landed_agentx_baseline`), as ``request_id``.
+
+        For the scheduler, which takes it as the AgentX baseline in place of root tests. It reads the files only: no
+        card guard watched that run and no signed bundle backs it.
+        """
+
+        return await asyncio.to_thread(landed_agentx_baseline, run_dir, point_config, request_id)
 
     def tool_status(self, job_id: str) -> JobStatus:
         if self._tools is None:

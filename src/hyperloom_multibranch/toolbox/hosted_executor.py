@@ -47,7 +47,7 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
-from hyperloom.measure.agentx_requests import read_round_classes
+from hyperloom.measure.agentx_requests import read_request_classes, read_round_classes
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
@@ -83,7 +83,13 @@ from hyperloom_multibranch.toolbox.short_prompt_cap import CheckTimes, landed_pr
 from hyperloom_multibranch.toolbox.short_prompts import ReferenceStore, consistency_of, record_reference, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
-__all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR", "TEST_SILENCE_TIMEOUT_SEC"]
+__all__ = [
+    "DEFAULT_TEST_TIMEOUT_SEC",
+    "HostedExecutor",
+    "OUTPUTS_DIR",
+    "TEST_SILENCE_TIMEOUT_SEC",
+    "landed_agentx_baseline",
+]
 
 DEFAULT_TEST_TIMEOUT_SEC = 3600
 #: How long a round may go without server-log growth or benchmark output once the server is ready before it is reaped
@@ -715,22 +721,48 @@ def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int 
     for item in rounds:
         if item.phase not in ("warmup", _MEASURE):
             continue
-        report = _report_of(item.output_dir)
-        if report is None:
-            continue
-        measurement = extract_benchmark_measurement(report, workspace=Path(item.output_dir))
-        if not measurement.get("valid_measurement"):
-            continue
-        completed = measurement.get("completed_requests")
-        requested = measurement.get("requested_requests")
-        failed = requested - completed if isinstance(requested, int) and isinstance(completed, int) else None
-        values.append(
-            RoundValue(
-                item.phase,
-                concurrencies[item.point] if item.point < len(concurrencies) else None,
-                _metrics_of(measurement),
-                completed_requests=completed if isinstance(completed, int) else None,
-                failed_requests=max(0, failed) if failed is not None else None,
-            )
-        )
+        concurrency = concurrencies[item.point] if item.point < len(concurrencies) else None
+        value = _round_value(item.phase, Path(item.output_dir), concurrency)
+        if value is not None:
+            values.append(value)
     return tuple(values)
+
+
+def _round_value(phase: str, round_dir: Path, concurrency: int | None) -> RoundValue | None:
+    """The value of the round that landed in ``round_dir``; ``None`` when its report is missing or invalid."""
+    report = _report_of(round_dir)
+    if report is None:
+        return None
+    measurement = extract_benchmark_measurement(report, workspace=round_dir)
+    if not measurement.get("valid_measurement"):
+        return None
+    completed = measurement.get("completed_requests")
+    requested = measurement.get("requested_requests")
+    failed = requested - completed if isinstance(requested, int) and isinstance(completed, int) else None
+    return RoundValue(
+        phase,
+        concurrency,
+        _metrics_of(measurement),
+        completed_requests=completed if isinstance(completed, int) else None,
+        failed_requests=max(0, failed) if failed is not None else None,
+    )
+
+
+def landed_agentx_baseline(round_dir: Path, point: Path, request_id: str) -> TestResult:
+    """The AgentX baseline round that landed in ``round_dir`` outside any test, read as a test's measured round is.
+
+    ``point`` is the point config it ran. A round without a valid report did not measure, and one served with the
+    prefix cache off is refused as a test's baseline is (main's #1884). Nothing signs it, so it carries no sandbox or
+    manifest. Blocks: the per-request export holds a line for every request.
+    """
+    concurrency = _concurrency_of(point)
+    value = _round_value(_MEASURE, round_dir, concurrency)
+    if value is None:
+        reason = f"no valid {_REPORT} below {round_dir}"
+        return TestResult(request_id, Validity.MEASUREMENT_FAILED, FailureClass.INFRA, failure_reason=reason)
+    refusal = baseline_prefix_cache_refusal(point, round_dir)
+    if refusal:
+        reason = f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {refusal}"
+        return TestResult(request_id, Validity.CANDIDATE_FAILED, FailureClass.CANDIDATE, failure_reason=reason)
+    classes = read_request_classes(round_dir, round_dir, 0, concurrency)
+    return TestResult(request_id, Validity.SUCCEEDED, rounds=(value,), request_classes=(classes,))
