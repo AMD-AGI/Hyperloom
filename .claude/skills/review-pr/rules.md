@@ -6,9 +6,10 @@ index below to pick the rules the diff at hand can actually break, then read onl
 Every rule here was clustered from real review history on this repository. `Seen in` cites the
 PR the rule was learned from.
 
-Severity is `blocking` under one of the three kinds SKILL.md's output contract names: the current
-behaviour is wrong, something that had to move in the same PR did not (title, description,
-docstring), or the diff breaks a rule `AGENTS.md` states outright. Everything else is `advisory`:
+Severity is `blocking` under one of the four kinds SKILL.md's output contract names: the current
+behaviour is wrong, the premise does not reproduce or the named failure survives the change,
+something that had to move in the same PR did not (title, description, docstring), or the diff
+breaks a rule `AGENTS.md` states outright. Everything else is `advisory`:
 it is adjudicated in `verdicts.txt` like any other rule and then **not published**, because a
 review that ships it has stopped being two parts. An advisory `FIRE` is a note for the reviewer
 answering a later question from the author, not a line on the card.
@@ -28,6 +29,10 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | The diff... | Read |
 |---|---|
 | changes any non-test file under `src/` | X1 X3 D12 X8 |
+| gives a measurement or a causal claim as the reason for the change: a function over a ceiling, a run truncated by a cap or timeout, a named session's duration or termination reason, a percentage or baseline entry | E1 |
+| names a concrete failure it addresses: an error string, a session id, an RSI problem, `Fixes #N` | E2 E4 |
+| is typed `refactor`, or gives simplification, complexity or structure as the reason | E1 E3 |
+| adds a guard, validation or abort where a bad value was detected, or a gate that absorbs an existing cap, budget or counter's consequences | E4 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 V8 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
@@ -116,14 +121,66 @@ file-shaped row would miss.
 **Evidence:** `$WORK/diff.txt` for the deleted inference and the new default; `$WORK/files.txt` to see whether the protocol, gate or schema moved with it.
 **Report as:** `C5 <file>:<line> -- <field> defaults silently when absent; an out-of-tree producer gets <wrong behaviour>`
 
+---
+
+## E -- Premise and efficacy
+
+C asks whether the change reaches every consumer. E asks the two questions on either side of it: was
+the reason for the change true, and does the change end the failure it names. Both are answered
+against the merge base and the failure itself, never against the description -- a PR whose premise or
+whose effect goes unchecked is the one shape a review can pass in full while the problem it was
+opened for stays live.
+
+### E1 -- Verify the premise on the merge base before judging the fix
+
+**Severity:** blocking
+**Fires when:** `body.txt` or `title.txt` gives a measurement or a causal claim as the reason for the change: a function over a complexity, length or parameter ceiling; a run truncated by a cap, budget or timeout; a named session's duration or termination reason; a percentage, count or baseline entry.
+**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged. Complexity and size go through `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` or the `ruff --select C901|PLR0913 --isolated` invocations D12 and D14 name, read against the thresholds in `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against `scripts/code_metrics_baseline.txt`; an author's figure from another tool is not the repo's gate. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
+**Seen in:** PR #2009 -- `_validate_restore_record` was refactored to "bring it under the ceiling" while ruff C901 at the merge base measured 8 against a threshold of 20, with no entry in `code_metrics_baseline.txt`; the card said outright "I did not independently recompute the CC numbers" and reported no finding. PR #2046 -- five functions were split for the same reason; `load_controller_publication` measured 18 at base, and the PR landed at net 0 production lines once the premise was checked. PR #1981 -- the cap was raised because a round was said to hit it, while the three profile attempts in the named session ran about 128 s each and ended `orchestrator_cancelled` against a 7200 s cap; the PR was closed.
+**Not a finding when:** the premise reproduces, or it rests on state no artifact retained and the body says so -- then the figure is `[unverified]` and E2 decides on the mechanism instead.
+**Evidence:** the tool invocation and its output at `base.txt`, quoted with the threshold it is read against; `$WORK/body.txt` for the claim.
+**Report as:** `E1 -- the body gives <claim> as the reason; at <base sha> <tool> measures <actual> against <threshold> -- the premise does not hold`
+
+### E2 -- A fix must end the failure it names, and the review proves which branch does it
+
+**Severity:** blocking
+**Fires when:** the body names a concrete failure -- an error string, a session, an RSI problem, an issue -- and claims this diff addresses it.
+**The rule:** reconstruct what that failure requires, independently of the description, then trace which branch the new code takes under exactly those conditions and say what the outcome becomes. The description's account of the mechanism is the thing under test, not the evidence for it. Where the trace shows the failure recurring, the change may still be worth landing for what it does improve, but it does not close the problem and the body may not say it does. The original failure's own output -- the pip stderr, the traceback, the log line -- is what pins the conditions; when the body quotes none and none survives in an artifact, that gap is itself the finding, because every later step rests on a guess.
+**Seen in:** PR #2102 -- the retry spec was rebuilt from the installed version so it could no longer be vacuously satisfied, which the review verified; the symptom needs the *retry* to exit 0, which happens either when pip really installed ray (same branch, same spec, unchanged) or when ray already satisfied the floor, and then the pinned install's failure came from `click<8.3.0` or the environment and the new retry is `click<8.3.0` in that same environment. The host could not write to a root-owned `/opt/venv`; the PR was closed. PR #1982 -- the guard aborted a grid variant at the last line while the proposals were admitted several layers upstream, which is where it moved.
+**Not a finding when:** the trace shows the failure ending, or the body already states that the change improves the diagnostic rather than repairing the case and does not claim to close the problem.
+**Evidence:** the reconstructed conditions, the branch the head takes under them, and the resulting outcome -- all three on the card; `$WORK/base.txt` for what the old code did with the same input.
+**Report as:** `E2 -- the body files this against <failure>; under <conditions> the head takes <branch> and still <outcome> -- <problem> is not closed by this diff`
+
+### E3 -- A refactor accounts for the mechanism it removed, in net lines
+
+**Severity:** blocking
+**Fires when:** `title.txt` or a commit subject is typed `refactor`, or the body gives simplification, complexity or structure as the reason, and `numstat.txt` shows the diff adding more production lines than it deletes.
+**The rule:** count `src/` paths outside a `tests/` directory from `numstat.txt`; added minus deleted is the number, and it goes on the card beside the mechanism the change removed. A refactor that grows production code has to name what it took away -- a branch, a state, a copy, a layer -- and a new helper, a new module or a named unit around existing code is not that. `AGENTS.md` *Simplify by removing a mechanism* is the bullet. The comparison that settles it is the delete-first alternative: what the same goal costs when the duplicated or dead code goes first, which is frequently negative where the PR is positive.
+**Seen in:** no single PR -- a window of thirteen. The seven refactors a card cleared with no finding landed at net +395 (#2010), +260 (#2014), +116 (#2016), +109 (#2018), +27 (#2012), +24 (#2007) and +13 (#2009) production lines; the six a human sent back over the same weeks landed at net -184 (#2019), -134 (#2020), -94 (#1961), -73 (#1992), -43 (#1998) and -26 (#1964). Same authors, same kind of change; the variable was whether anyone counted. #2046 went from +40 lines and 7 new functions to +0 once the count was asked for.
+**Not a finding when:** the body states the net figure and the mechanism removed, and the growth is a stated one-off -- a split that deletes a duplicated copy at a second site in the same diff, or a staged first half whose follow-up the body names.
+**Evidence:** `$WORK/numstat.txt`, summed over `src/` paths outside `tests/`; `$WORK/body.txt` for the mechanism the PR claims to remove.
+**Report as:** `E3 -- refactor adds <N> net production lines and removes no mechanism; <alternative> reaches the same state at <M>`
+
+### E4 -- Fix where the input is admitted, not where it finally breaks
+
+**Severity:** blocking
+**Fires when:** the diff adds a guard, a validation or an abort to the place a bad value was detected, and that place is a consumer rather than the boundary the value entered through.
+**The rule:** name the link in the call chain the guard sits on, then name the first boundary upstream that could have refused the same input. Where that boundary exists and the diff leaves it open, every other consumer of the same value keeps the defect and the next one fails the same way; the guard is a backstop and the body must say which layer owns the refusal. `AGENTS.md` *Fix upstream, not around it* is the bullet. The question also runs the other way: where a PR adds a gate to absorb the consequences of an existing value, that value's own definition -- its unit, its scope, its reset point -- is checked before the gate is accepted, because a gate over a broken quantity is the same defect one layer out.
+**Seen in:** PR #1982 -- `_grid_runner` aborted variants whose `AITER_CONFIG` file was missing, six lines at the last moment, while the proposals carrying those paths were admitted in the specialist dispatch; the fix moved to `specialists/patch_safety.py` and `run_grid` kept the check as a backstop. PR #2090 -- the PR added a `optimize_caps_spent` fact to close a cycle gracefully, while `phase_cap_seconds` computed a single-cycle share from `PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES` and compared it against `phase_cumulative_seconds`, which sums every entry and never resets; the cap itself was the defect and the PR became its deletion.
+**Not a finding when:** the consumer is the boundary (the value enters there), or the upstream owner is named in the body with the follow-up that moves the refusal.
+**Evidence:** the call chain from where the value enters to where the diff guards it; the upstream module in the head tree that already parses or admits it.
+**Report as:** `E4 <file>:<line> -- guards <value> at <consumer> while <boundary> admits it; <other consumer> keeps the defect`
+
+---
+
 ## S -- Silent failure and fail-open defaults
 
 ### S1 -- No swallowed failure, and no error return indistinguishable from a valid negative
 
 **Severity:** blocking
-**Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch.
-**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. `AGENTS.md` already bans new broad catches; this rule is about the narrow ones that still swallow.
-**Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success.
+**Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch; a statement moves across a `try`, `except` or `with` boundary; a cleanup, rollback or undo function the diff adds discards the result of a subprocess, file or network call; or the diff fixes a defect that reached production unnoticed.
+**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. `AGENTS.md` already bans new broad catches; this rule is about the narrow ones that still swallow. Read it in both directions: a statement leaving a `try` body stops being caught, which is a behaviour change however pure the refactor claims to be, and a guard the diff deletes or copies is judged like one it adds. The last trigger is the one a fix hides: ask why the defect this PR repairs ran in production without an error, and where the answer is a default, a wide annotation or a discarded return that converted it to silence, that swallow is part of the defect and stays blocking until the diff closes it or the body names who will.
+**Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success. PR #2010 -- a refactor declaring no observable change moved `state.save` out of the `try`, so a KEEP that had been marked `dispatch_failed` and drained now raised and stopped the drain. PR #2122 -- `uncommit_promoted_overlays` returned `None` and dropped the exit code of its `git reset`, so a rollback whose reset never happened still reported `ok=True`. PR #2169 -- `_record_run` took `task: Any` and resolved the id through `getattr(task, "task_id", "") or ""` before returning on a falsy one, so a tuple passed where a `Task` belonged produced no error, no log and no row, for as long as the bug had been in the tree.
 **Not a finding when:** the suppressed call is genuinely advisory (best-effort telemetry, cache warm) and the caller has an independent signal for the same condition, or the handler logs and re-raises.
 **Evidence:** `$WORK/diff.txt` -- the guarded region, the position of the log, and the caller's use of the return value.
 **Report as:** `S1 <file>:<line> -- <failure> is swallowed; <caller> cannot distinguish it from <valid negative>`
@@ -638,15 +695,25 @@ sibling modules, check whether the copies have diverged -- divergence at the tim
 proves the next schema change will miss one site. Relocated constants must equal the
 literals they replaced, and the untouched path must be shown byte-identical afterwards. A
 rule that exists in two languages needs a parity test exercising the real other side, not a
-re-spelled copy of it.
+re-spelled copy of it. The copy this rule starts from is one the tree already had twice; the
+other direction matters as much -- a normaliser, validator, parser or predicate the diff adds
+is searched for by the field names it handles and by its own shape before it is accepted, and
+a second implementation of a rule that already has an owner is `AGENTS.md` *Clean design*'s
+"a second copy of a behaviour is a bug" whether or not the two have diverged yet. The same
+goes for a guard carried along by a move and landing in three places at once.
 **Seen in:** PR #1368 -- the new `_trace_reader.stream_events` was byte-identical to the
 pre-`c6cbccbff` implementation and so reverted that fix, measured ~5x slower on a 32MB trace
 (0.28s to 1.46s); PR #1341's copied `_attach_grid_launch_evidence` body had already diverged
-on `warm_reuse`.
+on `warm_reuse`. PR #2012 -- `Gap/Pitfall/Lesson.from_dict` normalised on read what
+`local_store.put_recipe` already normalised on write, so one rule acquired two owners.
+PR #2009 -- the added `_is_sha256` was at least the sixth "64 lowercase hex" check in the
+tree. PR #2018 -- the same `isinstance(rc, dict)` guard arrived in three copies in one new
+module, with a single production writer that always writes a dict.
 **Not a finding when:** the diff shows the moved block unchanged against the current head
 version, or the divergence is intentional and named in the body.
 **Evidence:** `$WORK/diff.txt`, `$WORK/base.txt` -- compare the added block against the old
-home at the merge base.
+home at the merge base; for an added helper, a tree-wide grep on the field names it reads and
+on its distinctive literals, which is what finds the owner it duplicates.
 **Report as:** `D4: <file>:<line> copies the pre-<sha> version of <symbol>, reverting <fix>
 -- <measured cost>`
 
@@ -1159,17 +1226,25 @@ killed session had left on `forge/controller/dead-1`.
 **Severity:** blocking
 **Fires when:** always. This rule governs every review, and its correction half fires whenever
 the body or a commit message states a causal claim.
-**The rule:** the root cause is stated in one sentence and the diff is checked against it.
-Accept that the symptom is real, then ask whether the change removes the cause or only narrows
-the failure window -- a description listing several mitigations rather than one causal change
-is the tell. Causal claims in the body and commit messages are verified against the data flow:
-if the consumer named does not read that value, or the described failure cannot occur in this
-system's execution model, the text must be corrected, because a wrong stated motivation
-distorts the cost/benefit of the change for every future maintainer. `AGENTS.md` tells the
-author to treat review feedback as a hypothesis; this is the reviewer-side obligation.
+**The rule:** the root cause is stated in one sentence and the diff is checked against it. Do
+not accept the symptom on the body's word either -- E1 reproduces the premise, and a symptom
+that never occurred makes every question below it moot. Then ask whether the change removes the
+cause or only narrows the failure window -- a description listing several mitigations rather
+than one causal change is the tell. Causal claims in the body and commit messages are verified
+against the data flow: if the consumer named does not read that value, or the described failure
+cannot occur in this system's execution model, the text must be corrected, because a wrong
+stated motivation distorts the cost/benefit of the change for every future maintainer.
+`AGENTS.md` tells the author to treat review feedback as a hypothesis; this is the
+reviewer-side obligation. This rule is adjudicated on its own evidence whatever else the review
+has already found: a mechanical finding -- a line-ending rewrite, `mergeable: CONFLICTING`, a
+stale number -- is cheap to prove and ends no review, and a card carrying one while V3 reads
+`CLEAR` for lack of looking is the shape this sentence exists to stop.
 **Seen in:** PR #1258 -- the false `no_promote` was real but the cause was a cross-system
 comparison, not the guard the PR added; PR #1097's body attributed the KB hardware dimension
-to `detect_gfx_arch()` when it comes from `kb_hardware_slug(gpu_type, ...)`.
+to `detect_gfx_arch()` when it comes from `kb_hardware_slug(gpu_type, ...)`. PR #1982 and
+PR #1981 -- two cards each, and every one of the four reported only the CRLF rewrite or the
+description's wording while the first was guarding the wrong layer (E4) and the second rested
+on a cap no run had reached (E1); both were redirected or closed by a human afterwards.
 **Not a finding when:** the body's stated cause matches the data flow, even if the fix is
 narrower than you would have written -- narrowness on its own is taste. It stops being taste
 when the narrow fix leaves the cause in place and adds a second way to resolve something the
@@ -1287,10 +1362,20 @@ suddenly needed `resume_from`, precision cases still calling the half that no lo
 ladder cases that now had to start from an empty environment. A `git grep -l` on `_resolve_workload_knobs`
 reaches two of those three in under a second; the topology-gate file names that symbol nowhere and is reached
 only by grepping `_run_optimize`, the entry point the moved call sits inside.
+Where the symbol moves module or disappears, the grep runs on the *merge* tree, not on this branch: a PR that
+landed on `main` after this one forked can add a file importing the old name, which conflicts semantically while
+`merge-tree` stays textually clean. `merge-tree` reporting no conflict is not the same claim as the merge still
+importing.
 **Not a finding when:** the symbol is new in this PR and has no callers outside it, or the enumeration was run
 and the card states its scope.
 **Evidence:** `git grep -ln '<symbol>' -- src` against `$WORK/files.txt` -- any file in the first list and not
 the second is a caller the diff did not visit. Run it once per reshaped symbol and once for the function a moved
-call now sits inside: a test driving the entry point names neither half of a split.
+call now sits inside: a test driving the entry point names neither half of a split. For a moved or deleted
+symbol, run it again against the merge:
+`git merge-tree $(git merge-base origin/main HEAD) HEAD origin/main` writes the merged tree, and
+`git grep -l '<symbol>' <tree-sha>` is the list that matters.
 **Report as:** `V8 -- <symbol> changed shape; <file>:<line> still calls the old one` / `V8 -- callers were not
-enumerated: <N> files reference <symbol>, <M> of them untouched by this PR`
+enumerated: <N> files reference <symbol>, <M> of them untouched by this PR` / `V8 -- <symbol> moved to <module>;
+<file>:<line>, added to main by #<N>, still imports it from <old module>`
+**CI:** PR #2132 moved `IntegrateRecoveryIncomplete` out of `loop/writeback.py` with a clean `merge-tree`, while
+#2130 had just added a test importing it from there; collection failed on every shard of `main` until #2149.

@@ -17,17 +17,24 @@ Non-blocking observations are deleted, not softened. Not "note", not "FYI", not 
 but", not "for reference", not a postscript under the conclusion. If the only way to keep an
 observation is to relabel it, it fails the bar and goes.
 
-The bar is one question: **if this is not changed, is the current behaviour wrong?**
+The bar is two questions: **if this is not changed, is the current behaviour wrong?** and **was the
+reason for the change true, and does the change end the failure it names?**
 
-Blocking means one of three things, and the repo treats them as equal:
+Blocking means one of four things, and the repo treats them as equal:
 
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
+| Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head — rules E1-E4 |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names the bullet it breaks plus, where that bullet is about ownership, the module in this repo that already owns the concern |
 
-The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
+The second kind is the one a correct diff passes: right line by line, tested, accurately described,
+and still resting on a measurement that does not reproduce or leaving the reported failure
+happening. E1-E4 each name the tool to re-run or the branch to trace; one that names neither is
+taste and goes like any other.
+
+The fourth kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
 "consider extracting a helper" are reviewer taste and are deleted like anything else. What
 survives is the case where the repo has already decided — a detour around a path that exists, or
 a concern implemented outside the module that owns it — and the decision is written down where
@@ -66,8 +73,9 @@ bash .claude/skills/review-pr/fetch.sh <PR>
 ```
 
 Keep the `$WORK` it prints. Read `diff.txt`, `body.txt` and `comments.txt` before going on. When
-`comments.txt` holds an earlier card for this PR, settle its findings first and still review the whole
-diff: follow [`references/re-review.md`](references/re-review.md) beside the steps below.
+`comments.txt` holds an earlier card for this PR, or a human's blocking objection the author has not
+answered in code, settle those first and still review the whole diff:
+follow [`references/re-review.md`](references/re-review.md) beside the steps below.
 
 | file | what it is for |
 |---|---|
@@ -88,19 +96,21 @@ diff: follow [`references/re-review.md`](references/re-review.md) beside the ste
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 75 rules across 10
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 79 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are
 the rules of the earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
 
-Answer all five from the diff, not the description. One line each into `$WORK/answers.txt`,
-prefixed `Q1:` … `Q5:`. An answer that anchors in nothing — no path, symbol or condition — is not
+Answer all six from the diff, not the description. One line each into `$WORK/answers.txt`,
+prefixed `Q1:` … `Q6:`. An answer that anchors in nothing — no path, symbol or condition — is not
 an answer; rewrite it before going on.
 
-- **Q1 — State the root cause in one sentence.** Not the symptom, not a list of mitigations. A body
-  listing three improvements instead of one causal change is the tell that nobody found the cause.
+- **Q1 — State the root cause in one sentence, and say what pins it.** Not the symptom, not a list
+  of mitigations. What pins it is evidence outside the description — failing output, a session
+  artifact, a measurement re-run at `base.txt`; sourced to the body alone it is `[unverified]` and
+  E1 decides what that costs. A body listing three improvements is the tell nobody found the cause.
 - **Q2 — Name the route.** Which module, which function, which call path now behaves differently,
   and why there rather than at the layer above or below.
 - **Q3 — What does this make observable to an operator?** A behaviour, an interface, a default, a
@@ -110,7 +120,11 @@ an answer; rewrite it before going on.
   member, field, keyword argument or return shape: the membership tests, the call sites, the
   readers of the persisted document, the prompt that names it. Grep, do not guess.
 - **Q5 — What would it take for this change to be wrong?** Name the input, configuration, phase or
-  race that would make it produce a wrong answer. "Nothing" is not an answer.
+  race that would make it produce a wrong answer. "Nothing" is not an answer, and neither is a
+  differential run that never built the shapes whose early return the diff moved (E1).
+- **Q6 — If this lands, does the failure it names stop happening?** Reconstruct what that failure
+  takes, trace the branch the head runs under those conditions, say what the outcome becomes. Where
+  it recurs the diff may still be worth landing, but it closes nothing — that is E2.
 
 ## Step 3 — Core-file risk
 
@@ -133,10 +147,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 `NONE -- <reason naming what it does touch>` line.
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
-Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
-lint, passes collection, and fails only hours into a session when that phase is entered.
-Grep the class name, not just the symbol.
+Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — a `Coordinator`
+attribute rename passes imports, lint and collection and fails hours into a session. Grep the class
+name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -198,10 +211,9 @@ Then two questions, both answered in full rather than assented to.
 
 Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
 build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
-say which of the diff's parts it does not contain. A part that survives that comparison only
-because it is already written is the answer this question exists to catch. Anything found here is
-a `Contract violation` candidate and carries the `AGENTS.md` bullet and the owner module with it,
-or it is taste and stops here.
+say which of the diff's parts it does not contain. A part that survives only because it is already
+written is what this question exists to catch; where the diff is a refactor it settles under E3 on
+the net line count, otherwise it carries an `AGENTS.md` bullet and an owner module, or stops here.
 
 Append a `BLIND:` line: **"Is there any correctness risk, resource hazard, or behavioural edge
 case in this diff that none of Steps 1-5 caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
@@ -342,7 +354,7 @@ When a human reviewer catches something this skill missed:
    correct and the rule must stay silent.
 4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
 
-**Nothing new goes in this file.** SKILL.md is budgeted at 350 lines and holds only what every
+**Nothing new goes in this file.** SKILL.md is budgeted at 365 lines and holds only what every
 review needs. Past that length a skill stops being read in full, and an unread instruction is worth
 less than no instruction because it looks like coverage. Conditional content goes in `rules.md` and
 reaches the reviewer through the index; lookup tables go in `references/` and are opened at the step
