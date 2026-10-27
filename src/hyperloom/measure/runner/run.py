@@ -276,6 +276,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
             inferencex_path=inferencex,
             visible_devices=ctx.environ.get(ROCR_VISIBLE_DEVICES_ENV),
             farm=farm,
+            path=ctx.environ.get("PATH"),
         )
         points = [
             rewrite_config(point.yaml, ctx.work / f"point_{index}.yaml", placement)

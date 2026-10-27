@@ -31,7 +31,7 @@ benchmark:
 """
 
 
-def _rewrite(tmp_path, farm=None, visible="0,1", sheet=SHEET):
+def _rewrite(tmp_path, farm=None, visible="0,1", sheet=SHEET, path=None):
     out = tmp_path / "point.yaml"
     rewrite_config(
         sheet,
@@ -42,9 +42,39 @@ def _rewrite(tmp_path, farm=None, visible="0,1", sheet=SHEET):
             inferencex_path=tmp_path / "ix",
             visible_devices=visible,
             farm=farm,
+            path=path,
         ),
     )
     return yaml.safe_load(out.read_text())["benchmark"]
+
+
+HOST_PATH_SHEET = """
+benchmark:
+  framework: sglang
+  envs:
+    TP: 1
+    PATH: /root/.local/bin:/usr/local/bin:/usr/bin
+"""
+
+
+def test_the_servers_path_is_the_sandboxes_not_the_hosts_that_rendered_the_sheet(tmp_path):
+    # A sheet rendered on the application host carried the host's PATH, so the hosted server started with
+    # /usr/bin/python3, which has no sglang; the image's interpreter is first on the sandbox's own PATH.
+    bench = _rewrite(tmp_path, sheet=HOST_PATH_SHEET, path="/opt/venv/bin:/usr/bin")
+
+    assert bench["envs"]["PATH"] == "/opt/venv/bin:/usr/bin"
+
+
+def test_a_sheet_that_names_no_path_is_given_none(tmp_path):
+    bench = _rewrite(tmp_path, path="/opt/venv/bin:/usr/bin")
+
+    assert "PATH" not in bench["envs"]
+
+
+def test_without_the_sandboxes_path_the_sheets_path_stays(tmp_path):
+    bench = _rewrite(tmp_path, sheet=HOST_PATH_SHEET)
+
+    assert bench["envs"]["PATH"] == "/root/.local/bin:/usr/local/bin:/usr/bin"
 
 
 def test_the_yaml_is_made_this_sandboxes(tmp_path):

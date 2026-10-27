@@ -20,6 +20,7 @@ __all__ = ["Placement", "rewrite_config"]
 
 
 _UTF8 = "utf-8"
+_PATH = "PATH"
 
 
 def _without_device_masks(cfg: dict[str, Any], scratch: Path) -> dict[str, Any]:
@@ -36,21 +37,27 @@ def _without_device_masks(cfg: dict[str, Any], scratch: Path) -> dict[str, Any]:
 @dataclass(frozen=True)
 class Placement:
     """What this sandbox puts into a sheet's YAML: the placed attachments, the pid directory, the InferenceX checkout,
-    the device mask and the rebuilt framework, if any."""
+    the device mask, the rebuilt framework, if any, and this sandbox's ``PATH``.
+
+    ``path`` replaces the ``PATH`` a sheet's server variables name. The sheet was rendered on the host, which put its
+    own ``PATH`` there (the render's rule: the machine's ``PATH`` wins over the shipped one); a hosted runner is another
+    machine, whose image may keep its interpreter elsewhere, so the server must start with the sandbox's ``PATH``.
+    """
 
     placed: dict[str, Path]
     pid_dir: Path
     inferencex_path: Path
     visible_devices: str | None
     farm: Farm | None
+    path: str | None = None
 
 
 def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path:
     """Write the rewritten YAML to ``out_path``.
 
-    Attachment placeholders name the placed files, the device mask is this sandbox's, the server's pid files go to
-    ``pid_dir``, the benchmark client comes from the runner's own InferenceX checkout, and the rebuilt framework, when
-    there is one, is first on the server's import path.
+    Attachment placeholders name the placed files, the device mask is this sandbox's, a ``PATH`` the server variables
+    name is this sandbox's, the server's pid files go to ``pid_dir``, the benchmark client comes from the runner's own
+    InferenceX checkout, and the rebuilt framework, when there is one, is first on the server's import path.
     """
     config = yaml.safe_load(substitute(yaml_text, placement.placed)) or {}
     config = _without_device_masks(config, out_path.with_name(out_path.name + ".mask"))
@@ -58,6 +65,8 @@ def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path
     envs = bench.setdefault("envs", {})
     if placement.visible_devices:
         envs[ROCR_VISIBLE_DEVICES_ENV] = placement.visible_devices
+    if placement.path and _PATH in envs:
+        envs[_PATH] = placement.path
     if isinstance(bench.get("server_lifecycle"), dict):
         bench["server_lifecycle"]["pid_dir"] = str(placement.pid_dir)
     bench["inferencex_path"] = str(placement.inferencex_path)
