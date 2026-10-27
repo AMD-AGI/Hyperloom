@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
 

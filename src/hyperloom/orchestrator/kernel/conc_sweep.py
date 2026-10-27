@@ -1327,10 +1327,7 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = resolve_session_model_path(
-        state_model_path=str(getattr(state, "model_path", "") or ""),
-        for_serving=True,
-    )
+    resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
     # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
     # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.

@@ -28,7 +28,7 @@ from hyperloom.common.llm_config import (
     get_async_openai_client,
 )
 from hyperloom.common.coerce import to_int
-from hyperloom.common.jsonio import extract_first_json_with_key
+from hyperloom.common.jsonio import extract_last_json_matching
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     NoIntentEmitted,
@@ -148,7 +148,7 @@ _BARE_JSON_RE = re.compile(r"(\{[^{}]*\"review_verdicts\"[\s\S]*\})", re.DOTALL)
 
 def _extract_review_json(text: str) -> dict[str, Any] | None:
     """Pull the Critic's own ``{\"review_verdicts\": ...}`` object out of a reply."""
-    return extract_first_json_with_key(text, "review_verdicts", _BARE_JSON_RE, last=True)
+    return extract_last_json_matching(text, "review_verdicts", _BARE_JSON_RE)
 
 
 def _is_truncated_finish(finish: str | None) -> bool:

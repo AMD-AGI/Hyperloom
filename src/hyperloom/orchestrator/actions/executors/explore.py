@@ -444,7 +444,7 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
     raw_adjusted = evidence.get("engine_adjusted_settings")
     for name in settings_the_engine_rewrote(config, raw_adjusted if isinstance(raw_adjusted, Mapping) else None):
         config.pop(name, None)
-    raw_env = evidence.get("observed_server_env")
+    raw_env = evidence.get("requested_server_env")
     # Same shape as a variant's extra_envs, so the two compare directly.
     env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, Mapping) else {}
     return config, env
@@ -837,7 +837,6 @@ class _ExploreRound:
             model_path=resolve_session_model_path(
                 params=params,
                 state_model_path=str(getattr(self.ss, "model_path", "") or ""),
-                for_serving=True,
             ),
             gpu_type=str(params.get("gpu_type") or "").strip().lower()
             or os.environ.get("GPU_TYPE", "").strip().lower(),
