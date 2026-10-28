@@ -73,6 +73,10 @@ from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
+from hyperloom.inference_optimizer.speculative_capability import (
+    CAPABILITY_UNSUPPORTED,
+    refuse_unrunnable_speculative_stack,
+)
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
@@ -969,7 +973,7 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
         _variant_tag(run, at),
         reason,
     )
-    _abort_variant(at, _VariantFailure("capability_unsupported", reason))
+    _abort_variant(at, _VariantFailure(CAPABILITY_UNSUPPORTED, reason))
 
 
 async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
@@ -1754,7 +1758,7 @@ def _attach_grid_launch_evidence(
         if idx >= len(grid):
             break
         if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
-            "capability_unsupported",
+            CAPABILITY_UNSUPPORTED,
             "yaml_build_error",
             _WARMUP_YAML_BUILD_ERROR,
             SPECULATIVE_DECODING_PINNED,
@@ -2020,6 +2024,7 @@ def _build_variant_yaml(
     if _rt_override:
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
+    refuse_unrunnable_speculative_stack(combined, framework=str(bench.get("framework") or ""))
 
     _pin_xdit_tool_path(envs, bench.get("framework"))
 

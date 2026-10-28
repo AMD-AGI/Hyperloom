@@ -21,6 +21,7 @@ from ._grid_base import (
     GridVariant,
 )
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.speculative_capability import CAPABILITY_UNSUPPORTED, speculative_capability_reason
 
 log = logging.getLogger(__name__)
 
@@ -346,6 +347,23 @@ def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) 
     return None
 
 
+def _speculative_capability_reason(
+    variant: "GridVariant", *, serving: ServingStack, base_server_args: str
+) -> str | None:
+    """Why the pinned stack has no kernel for the draft this variant composes: read over the composed arguments,
+    since the keys that decide it live inside ``--speculative-config``. ``None`` when the stack has a kernel.
+    """
+    return speculative_capability_reason(
+        compose_server_args(
+            base_extra_args=base_server_args,
+            variant_extra_args=variant.extra_server_args,
+            remove_args=variant.remove_args,
+            args_mode=variant.args_mode,
+        ),
+        framework=serving.framework,
+    )
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
@@ -379,6 +397,11 @@ def apply_compatibility_filter(
                     "reason": skip_reason,
                 }
             )
+            continue
+        # A draft the pinned stack ships no kernel for: not applicable to this stack, not a measurement to spend.
+        skip_reason = _speculative_capability_reason(v, serving=serving, base_server_args=base_server_args)
+        if skip_reason:
+            dropped.append({"name": v.name, "source": CAPABILITY_UNSUPPORTED, "reason": skip_reason})
             continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
