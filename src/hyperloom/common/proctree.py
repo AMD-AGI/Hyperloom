@@ -25,7 +25,11 @@ _POLL_SEC: float = 0.05
 
 _PROC = Path("/proc")
 
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
+
 __all__ = [
+    "REAP_MARK_ENV",
     "TERM_GRACE_SEC",
     "ProcessId",
     "Tree",

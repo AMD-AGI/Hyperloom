@@ -61,8 +61,7 @@ from hyperloom.common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids
-from ..actions.executors._subprocess_kill import REAP_MARK_ENV
+from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -371,6 +370,39 @@ def _local_tree_pgid(proc: Any) -> int | None:
     return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
+#: Prints the pids whose environment holds the entry in ``$1``; exits 3 when ``grep`` cannot read NUL-separated input.
+_LIST_MARKED_SCRIPT = (
+    'grep -qzxF -- x /dev/null; [ "$?" -eq 1 ] || exit 3; '
+    'for p in /proc/[0-9]*; do grep -qzxF -- "$1" "$p/environ" 2>/dev/null && echo "${p#/proc/}"; done; exit 0'
+)
+#: Bounds that scan; walking a few thousand /proc entries takes well under a second.
+_MARK_SCAN_TIMEOUT_SEC: float = 30.0
+
+
+def _marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
+    """The pids carrying ``mark``, read as ``run_as``: the app's uid cannot read a demoted child's environ.
+
+    The scan runs as a shell under that account, because it cannot import Hyperloom from the app's tree.
+    """
+    try:
+        cp = subprocess.run(
+            run_as.command(["sh", "-c", _LIST_MARKED_SCRIPT, "sh", f"{REAP_MARK_ENV}={mark}"]),
+            capture_output=True,
+            text=True,
+            timeout=_MARK_SCAN_TIMEOUT_SEC,
+            check=False,
+            env={"PATH": os.defpath},
+            cwd="/",
+            **run_as.popen_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("specialist reap: cannot list marked processes as %s: %s", run_as.user, exc)
+        return []
+    if cp.returncode != 0:
+        log.warning("specialist reap: listing marked processes as %s exited %d", run_as.user, cp.returncode)
+    return [int(pid) for pid in cp.stdout.split() if pid.isdigit()]
+
+
 @dataclass(frozen=True)
 class SpecialistSpawn:
     """One specialist subprocess to spawn and reap.
@@ -637,7 +669,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
-                self._reap_marked(reap_mark)
+                await asyncio.to_thread(self._reap_marked, reap_mark, run_as)
                 if log_fh is not None:
                     log_fh.close()
                 try:
@@ -706,13 +738,11 @@ class SpecialistSubprocessDispatcher:
         )
 
     @staticmethod
-    def _reap_marked(mark: str) -> None:
+    def _reap_marked(mark: str, run_as: RunAs | None) -> None:
         """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
-        if not mark:
-            return
-        pids = marked_pids(REAP_MARK_ENV, mark)
-        if pids:
-            kill_tree(collect_tree(pids))
+        pids = marked_pids(REAP_MARK_ENV, mark) if run_as is None else _marked_pids_as(run_as, mark)
+        if pids and not kill_tree(collect_tree(pids)):
+            log.warning("specialist reap: marked processes %s outlived SIGKILL", pids)
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""

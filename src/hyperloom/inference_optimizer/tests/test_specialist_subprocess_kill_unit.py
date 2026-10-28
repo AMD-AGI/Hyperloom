@@ -152,11 +152,25 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
             await asyncio.gather(run, return_exceptions=True)
 
 
+class _SameUidRunAs:
+    """A demoted launch whose account is the test's own uid, so no privilege is needed to run it."""
+
+    user = "specialist"
+
+    def command(self, cmd):
+        return list(cmd)
+
+    def popen_kwargs(self):
+        return {}
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
-async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path):
-    """A heartbeat loop detached before the CLI exits does not outlive the specialist."""
+@pytest.mark.parametrize("demoted", [False, True], ids=["app_user", "demoted"])
+async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path, demoted):
+    """A heartbeat loop detached before the CLI exits does not outlive the specialist; another run's loop does."""
     import os
+    import signal
     import time
     from hyperloom.common.proctree import running
 
@@ -171,6 +185,8 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path):
     real_popen = ss.subprocess.Popen
 
     def spawn(cmd, *args, **kwargs):
+        if cmd != ["unused"]:
+            return real_popen(cmd, *args, **kwargs)
         child = real_popen(
             [sys.executable, "-c", child_code],
             env=kwargs["env"],
@@ -183,11 +199,21 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path):
         return child
 
     monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    if demoted:
+        monkeypatch.setattr(ss, "resolve_launch_user", lambda lease: _SameUidRunAs())
+        monkeypatch.setattr(ss, "prepare_demote", lambda *args: {})
+        # The app's uid cannot read a demoted child's environ.
+        monkeypatch.setattr(ss, "marked_pids", lambda key, value: [])
     dispatcher = SpecialistSubprocessDispatcher(
         ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
     )
     monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
     monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    bystander = real_popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        env={**os.environ, "HYPERLOOM_REAP_MARK": "another-run"},
+        start_new_session=True,
+    )
     heartbeat_pid = 0
     try:
         result = await dispatcher.run(
@@ -205,11 +231,14 @@ async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path):
         while not pid_path.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         heartbeat_pid = int(pid_path.read_text())
+        assert result.exit_code == 0
+        assert running(heartbeat_pid) is False
+        assert running(bystander.pid) is True
     finally:
         if heartbeat_pid and running(heartbeat_pid):
-            os.kill(heartbeat_pid, 9)
-    assert result.exit_code == 0
-    assert running(heartbeat_pid) is False
+            os.kill(heartbeat_pid, signal.SIGKILL)
+        bystander.kill()
+        bystander.wait(timeout=5)
 
 
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
