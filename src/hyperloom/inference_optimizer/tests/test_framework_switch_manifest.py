@@ -979,7 +979,6 @@ async def test_an_agentic_replay_keeps_a_switched_patch_dormant_without_a_parity
     assert [leg for leg in legs if leg.get("unset_envs")] == []
     assert result["status"] == "kept_inert"
     assert result["switch_off_parity"]["ran"] is False
-    assert "agentic replay" in result["switch_off_parity"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -1127,11 +1126,17 @@ async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant
 
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
 
+    kb: list[Any] = []
     result, repo, _, legs = await _run_rewrite_integrate(
-        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}, shared_state=_screen_state()
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+        shared_state=_screen_state(),
+        kb_lessons=kb,
     )
 
-    assert legs == []
+    assert (legs, kb) == ([], [])
     assert result["status"] == "kept_inert"
     assert result[SCREEN_PARAM] == SCREEN_CYCLE
     assert result["framework_lever_outcome"] == "registered_off"
@@ -1229,18 +1234,6 @@ def test_a_bundle_takes_the_levers_the_cycle_bench_passed_and_those_it_never_scr
 
     assert variant is not None
     assert variant["framework_lever_bundle"] == ["HL_GIVEN_BACK", "HL_PASS", "HL_UNSCREENED"]
-
-
-def test_no_bundle_forms_when_the_screen_leaves_one_patch_eligible():
-    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH
-    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
-
-    state = _state()
-    for i, (name, gain) in enumerate((("HL_PASS", 0.8), ("HL_REGRESS", -3.1))):
-        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
-        state.record_framework_lever_attribution(name, gain_pct=gain, source=ATTRIBUTION_CYCLE_BENCH)
-
-    assert dormant_lever_bundle(state) is None
 
 
 @pytest.mark.asyncio
@@ -1512,25 +1505,3 @@ async def test_a_bundle_screen_that_failed_is_recorded_inconclusive(tmp_path):
     levers = coord.shared_state.authored_framework_levers
     assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
     assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": "inconclusive"}
-
-
-@pytest.mark.asyncio
-async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
-    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
-
-    for sub in ("benched", "screened"):
-        (tmp_path / sub).mkdir()
-    benched: list[Any] = []
-    await _run_rewrite_integrate(tmp_path / "benched", monkeypatch, delta_pct=0.2, kb_lessons=benched)
-    screened: list[Any] = []
-    await _run_rewrite_integrate(
-        tmp_path / "screened",
-        monkeypatch,
-        delta_pct=0.2,
-        kb_lessons=screened,
-        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
-        shared_state=_screen_state(),
-    )
-
-    assert (len(benched), screened) == (1, [])

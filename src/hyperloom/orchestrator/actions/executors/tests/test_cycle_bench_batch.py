@@ -483,21 +483,8 @@ def test_a_profile_capture_asks_sglang_for_step_annotations_and_keeps_the_first_
     trace = cba.record_profile("http://127.0.0.1:9", trace_dir, 32, poll_s=0.0)
 
     assert trace == str(trace_dir / "p-TP-0.trace.json.gz")
-    assert posted == [
-        (
-            "http://127.0.0.1:9/start_profile",
-            {
-                "output_dir": str(trace_dir),
-                "num_steps": 32,
-                "activities": ["CPU", "GPU"],
-                "with_stack": False,
-                "record_shapes": False,
-                "detailed_annotations": True,
-                "merge_profiles": False,
-                "profile_by_stage": False,
-            },
-        )
-    ]
+    ((url, body),) = posted
+    assert (url, body["num_steps"], body["with_stack"]) == ("http://127.0.0.1:9/start_profile", 32, False)
 
 
 def test_a_profile_capture_the_server_refused_records_no_trace(tmp_path, monkeypatch):

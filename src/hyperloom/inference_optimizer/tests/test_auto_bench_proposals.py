@@ -284,17 +284,19 @@ async def test_a_reference_batch_whose_task_succeeded_on_a_failed_result_is_enqu
     assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s2-a1"]
 
 
-async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch):
+@pytest.mark.parametrize("switch", ["1", ""])
+async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch, switch):
     from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 
-    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
 
     referenced = _agentx_phase()
     referenced._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
     closed = _agentx_phase()
     closed._coord.shared_state.cycle_screen_refused = "the switched-off tree moved"
     queued = SimpleNamespace(kind="explore", params={CYCLE_ARMS_PARAM: []}, requires_lanes=())
-    for fp in (referenced, closed, _phase(), _agentx_phase(frozen=True), _agentx_phase(queued=[queued])):
+    switched_off = [] if switch else [_agentx_phase()]
+    for fp in (*switched_off, referenced, closed, _phase(), _agentx_phase(frozen=True), _agentx_phase(queued=[queued])):
         assert await fp.enqueue_cycle_batch() is False
         assert _explores(fp) == []
 
@@ -324,14 +326,6 @@ async def test_a_batch_carries_at_most_its_arm_limit_oldest_patches_first():
 
     (batch,) = _explores(fp)
     assert [arm["name"] for arm in batch["params"][CYCLE_ARMS_PARAM]] == [f"t-{i}" for i in range(CYCLE_BATCH_MAX_ARMS)]
-
-
-async def test_no_reference_batch_while_the_cycle_bench_is_switched_off(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_CYCLE_BENCH", raising=False)
-    fp = _agentx_phase()
-
-    assert await fp.enqueue_cycle_batch() is False
-    assert _explores(fp) == []
 
 
 _BUNDLE_KEY = "lever-bundle-c0-" + sha1(b"HL_ONE,HL_TWO", usedforsecurity=False).hexdigest()[:12]
