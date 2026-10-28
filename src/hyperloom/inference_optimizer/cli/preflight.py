@@ -619,31 +619,25 @@ def _ray_smoke(python_exe: str, ray_version: str = "") -> subprocess.CompletedPr
 
 
 def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ...]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-        capture_output=True,
-        text=True,
-    )
+    argv = [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs]
+    return subprocess.run(argv, capture_output=True, text=True)
 
 
-def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
-    """Probe-then-install Ray using the interpreter that will import it."""
-    ray_version = os.environ.get("RAY_VERSION", "")
-    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
-    check = _ray_smoke(python_exe, ray_version)
-    if check.returncode == 0:
-        print("Preflight: ray OK")
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "target": "ray",
-            "interpreter": python_exe,
-            "spec": ray_spec,
-            "version_after": check.stdout.strip() or ray_version or _RAY_MIN_VERSION,
-            "message": None,
-        }
-    reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray unusable ({reason}), installing {ray_spec} ...")
+def _ray_result(status: str, python_exe: str, spec: str, version_after: str, message: str | None) -> dict[str, Any]:
+    """The record the Ray step reports, whether it found Ray or had to install it."""
+    return {
+        "status": status,
+        "skip_reason": None,
+        "target": "ray",
+        "interpreter": python_exe,
+        "spec": spec,
+        "version_after": version_after,
+        "message": message,
+    }
+
+
+def _install_ray(python_exe: str, pip_extra: list[str], ray_version: str, ray_spec: str, reason: str) -> dict[str, Any]:
+    """Install Ray for an interpreter whose smoke test refused the Ray it has."""
     specs: tuple[str, ...] = (ray_spec,)
     pinned_detail = ""
     install = _pip_install_ray(python_exe, pip_extra, specs)
@@ -657,25 +651,31 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
     check = _ray_smoke(python_exe, ray_version)
     if check.returncode != 0:
-        reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
+        detail = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         # The floor spec is satisfied by whatever Ray is already installed, so a
         # zero exit from pip does not mean anything was installed: report what
         # the repair really did rather than claiming it completed.
         earlier = f" after {ray_spec} failed to install ({pinned_detail})" if pinned_detail else ""
         raise RuntimeError(
-            f"pip install {' '.join(specs)} succeeded{earlier} but the Ray smoke test still failed: {reason}"
+            f"pip install {' '.join(specs)} succeeded{earlier} but the Ray smoke test still failed: {detail}"
         )
     version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
-    return {
-        "status": "applied",
-        "skip_reason": None,
-        "target": "ray",
-        "interpreter": python_exe,
-        "spec": " ".join(specs),
-        "version_after": version_after,
-        "message": reason,
-    }
+    return _ray_result("applied", python_exe, " ".join(specs), version_after, reason)
+
+
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
+    """Probe-then-install Ray using the interpreter that will import it."""
+    ray_version = os.environ.get("RAY_VERSION", "")
+    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    check = _ray_smoke(python_exe, ray_version)
+    if check.returncode == 0:
+        print("Preflight: ray OK")
+        version_after = check.stdout.strip() or ray_version or _RAY_MIN_VERSION
+        return _ray_result("already_present", python_exe, ray_spec, version_after, None)
+    reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
+    print(f"Preflight: ray unusable ({reason}), installing {ray_spec} ...")
+    return _install_ray(python_exe, pip_extra, ray_version, ray_spec, reason)
 
 
 # InferenceX benchmark_serving client-side deps.
