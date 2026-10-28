@@ -780,7 +780,9 @@ class OneChampionKB:
         }
         return {"canonical_id": canonical_id, "session_id": "earlier", "knowledge": knowledge}
 
-    def write_if_better(self, canonical_id: str, session_id: str, bundle: object, **options: object) -> object:
+    def write_if_better(
+        self, canonical_id: str, session_id: str, bundle: object, profile: object, **options: object
+    ) -> object:
         raise KBStoreError("this Recipe KB takes no write")
 
 
