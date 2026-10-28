@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from kernelforge.kernel_rewrite_controller.task import load_task
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
@@ -103,23 +103,6 @@ class KeepSession:
     record_keep: KeepRecorder
 
 
-def _measured_kernel_saving(patch_dir: Path) -> float:
-    """The share of its kernel's time a publication measured saving, 0 when it recorded no speedup."""
-    try:
-        speedup = float(load_controller_publication(patch_dir).manifest.get("total_speedup") or 0.0)
-    except (ControllerPublicationError, TypeError, ValueError):
-        return 0.0
-    return 1.0 - 1.0 / speedup if speedup > 0.0 else 0.0
-
-
-class _MeasurementOrder(NamedTuple):
-    """Where a publication goes in the E2E queue: larger measured saving first, then task priority, then operator."""
-
-    negated_saving: float
-    priority: int
-    operator_id: str
-
-
 def _measurement_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
     """Order publications by the kernel time each measured saving, the Controller's task priority breaking ties.
 
@@ -129,12 +112,17 @@ def _measurement_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...
     root = Path(patches_root).resolve()
     tasks_root = root.parent.parent / "controller" / "tasks"
 
-    def key(patch_dir: Path) -> _MeasurementOrder:
-        saving = -_measured_kernel_saving(patch_dir)
+    def key(patch_dir: Path) -> tuple[float, int, str]:
+        try:
+            speedup = float(load_controller_publication(patch_dir).manifest.get("total_speedup") or 0.0)
+        except (ControllerPublicationError, TypeError, ValueError):
+            speedup = 0.0
+        # No recorded speedup ranks with a 1.0x one: neither saved any kernel time.
+        speedup = speedup if speedup > 0.0 else 1.0
         parsed = load_task(tasks_root / patch_dir.name, record_state=False)
         if parsed.task is None:
-            return _MeasurementOrder(saving, 2**31 - 1, patch_dir.name)
-        return _MeasurementOrder(saving, parsed.task.priority, parsed.task.operator_id)
+            return -speedup, 2**31 - 1, patch_dir.name
+        return -speedup, parsed.task.priority, parsed.task.operator_id
 
     return tuple(sorted(discover_controller_patch_dirs(root), key=key))
 
