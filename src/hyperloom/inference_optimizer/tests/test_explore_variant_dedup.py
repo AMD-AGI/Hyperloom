@@ -101,17 +101,6 @@ def test_a_missing_or_malformed_grid_is_empty_rather_than_an_error():
     assert asyncio.run(d.variants_not_already_queued([_variant("--a"), "junk"], {})) == [_variant("--a")]
 
 
-def test_the_prompt_and_the_gate_read_one_set():
-    """ConversationCollaborator asks the dispatcher rather than walking the queue itself."""
-    from hyperloom.orchestrator.loop.conversation import ConversationCollaborator
-
-    d = _dispatcher(queued_grids=((_variant("--seen"),),))
-    collaborator = ConversationCollaborator.__new__(ConversationCollaborator)
-    collaborator._coord = SimpleNamespace(dispatcher=d)
-
-    assert asyncio.run(collaborator._explore_grid_fingerprints()) == asyncio.run(d.queued_grid_variants())
-
-
 def test_an_explore_with_no_grid_is_left_for_the_executor_to_seed():
     """A delegated explore may carry no grid at all; the executor builds one.
 

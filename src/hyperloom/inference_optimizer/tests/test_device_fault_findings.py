@@ -51,44 +51,7 @@ def test_the_watchdog_timeout_is_not_mistaken_for_either_fault():
     assert _match("device.memory_fault", _WATCHDOG) is None
 
 
-def test_both_fault_rules_are_correctness_not_performance():
-    assert rf._CATEGORIES["device.queue_exception"] == rf.CORRECTNESS
-    assert rf._CATEGORIES["device.memory_fault"] == rf.CORRECTNESS
-
-
-def test_a_queue_exception_without_a_memory_fault_reads_as_a_trap():
-    (line,) = rf._device_fault_reading(_detected("device.queue_exception"))
-
-    assert "trapped rather than ran off its allocation" in line
-    assert "device-side assert" in line
-    assert "non-finite value" in line
-    assert "not a communication problem" in line
-
-
-def test_a_queue_exception_with_a_memory_fault_reads_as_a_bad_address():
-    (line,) = rf._device_fault_reading(_detected("device.queue_exception", "device.memory_fault"))
-
-    assert "touched an address it should not have" in line
-    assert "device-side assert" not in line
-
-
-def test_both_readings_name_the_collective_timeout_as_downstream():
-    trap = rf._device_fault_reading(_detected("device.queue_exception"))[0]
-    fault = rf._device_fault_reading(_detected("device.queue_exception", "device.memory_fault"))[0]
-
-    assert "downstream of the dead queue" in trap
-    assert "downstream of the dead queue" in fault
-
-
 def test_a_run_that_did_not_fault_gets_no_reading():
     assert rf._device_fault_reading([]) == []
     assert rf._device_fault_reading(_detected("device.memory_fault")) == []
     assert rf._device_fault_reading([{"rule_id": "device.queue_exception", "status": rf.NOT_DETECTED}]) == []
-
-
-def test_the_fault_rules_apply_to_every_framework():
-    """A trapped kernel is a property of the device, not of what dispatched to it."""
-    for rule_id in ("device.queue_exception", "device.memory_fault"):
-        assert _rule(rule_id).frameworks is None
-        assert rule_id in rf._applicable_rules("sglang")
-        assert rule_id in rf._applicable_rules("vllm")

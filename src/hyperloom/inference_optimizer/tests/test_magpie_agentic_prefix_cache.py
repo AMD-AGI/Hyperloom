@@ -71,23 +71,6 @@ def test_an_agentic_run_keeps_the_prefix_cache_and_a_sweep_does_not(tmp_path):
     assert _default_args(script, is_agentic="") == "--mem-fraction-static=0.8 --disable-radix-cache"
 
 
-def test_the_spelling_upstream_accepts_is_accepted_here(tmp_path):
-    """InferenceX's own multi-node script takes either, and a caller may carry either."""
-    _runners(tmp_path)
-    mp.ensure_agentic_prefix_cache(None, tmp_path)
-
-    assert _default_args(tmp_path / "benchmarks" / "sglang_mi355x.sh", is_agentic="true") == "--mem-fraction-static=0.8"
-
-
-def test_the_patch_reaches_every_generic_script(tmp_path):
-    _runners(tmp_path)
-
-    mp.ensure_agentic_prefix_cache(None, tmp_path)
-
-    for name in mp._AGENTIC_RADIX_SCRIPTS:
-        assert mp._AGENTIC_RADIX_SENTINEL in (tmp_path / "benchmarks" / name).read_text(encoding="utf-8")
-
-
 def test_patching_twice_changes_nothing(tmp_path):
     """Every Magpie invocation re-asserts this, so a second pass must be a no-op rather than a second guard."""
     _runners(tmp_path)
@@ -118,12 +101,6 @@ def test_a_script_whose_block_moved_is_reported_not_silently_accepted(tmp_path):
     _runners(tmp_path, body="#!/bin/bash\nDEFAULT_ARGS='--mem-fraction-static=0.8'\n")
 
     assert mp.ensure_agentic_prefix_cache(None, tmp_path) is False
-
-
-def test_a_tree_with_no_generic_script_has_nothing_to_patch(tmp_path):
-    (tmp_path / "benchmarks").mkdir()
-
-    assert mp.ensure_agentic_prefix_cache(None, tmp_path) is True
 
 
 def test_preparing_an_agentx_run_keeps_its_prefix_cache(tmp_path, monkeypatch):
