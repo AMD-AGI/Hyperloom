@@ -40,6 +40,7 @@ __all__ = [
     "kill_tree",
     "marked_pids",
     "proc_identity",
+    "process_uids",
     "running",
     "signal_group",
     "signal_processes",
@@ -80,6 +81,16 @@ def boot_unix() -> float:
         OSError: When ``/proc/uptime`` cannot be read.
     """
     return time.time() - float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
+
+
+def process_uids(pid: int) -> tuple[int, int] | None:
+    """Read ``(real uid, effective uid)`` for one pid from ``/proc/<pid>/status``; ``None`` when it is gone."""
+    try:
+        status = (_PROC / str(pid) / "status").read_text(encoding="utf-8", errors="replace")
+        uids = next(line.split()[1:3] for line in status.splitlines() if line.startswith("Uid:"))
+        return int(uids[0]), int(uids[1])
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
 
 
 def descendants(root_pid: int) -> list[ProcessId]:

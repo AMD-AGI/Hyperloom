@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import CancelledError
@@ -156,12 +157,32 @@ class _SameUidRunAs:
     """A demoted launch whose account is the test's own uid, so no privilege is needed to run it."""
 
     user = "specialist"
+    uid = os.getuid()
 
     def command(self, cmd):
         return list(cmd)
 
     def popen_kwargs(self):
         return {}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+@pytest.mark.skipif(os.getuid() == 0, reason="pid 1 has to belong to another uid")
+def test_demoted_reap_signals_only_pids_the_specialist_account_owns(monkeypatch):
+    """The account can write into the scan's stdout, so a pid it prints is believed only if that account owns it."""
+    from hyperloom.common.proctree import Tree
+
+    own = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    roots: list[list[int]] = []
+    monkeypatch.setattr(ss, "_LIST_MARKED_SCRIPT", f"echo 1; echo {own.pid}")
+    monkeypatch.setattr(ss, "collect_tree", lambda pids: roots.append(list(pids)) or Tree((), (), frozenset()))
+    monkeypatch.setattr(ss, "kill_tree", lambda tree: True)
+    try:
+        SpecialistSubprocessDispatcher._reap_marked("mark", _SameUidRunAs())
+    finally:
+        own.kill()
+        own.wait(timeout=5)
+    assert roots == [[own.pid]]
 
 
 @pytest.mark.asyncio

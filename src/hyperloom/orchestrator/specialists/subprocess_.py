@@ -61,7 +61,7 @@ from hyperloom.common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids
+from hyperloom.common.proctree import REAP_MARK_ENV, collect_tree, kill_tree, marked_pids, process_uids
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -385,7 +385,8 @@ _MARK_SCAN_TIMEOUT_SEC: float = 30.0
 def _marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
     """The pids carrying ``mark``, read as ``run_as``: the app's uid cannot read a demoted child's environ.
 
-    The scan runs as a shell under that account, because it cannot import Hyperloom from the app's tree.
+    The scan runs as a shell under that account, because it cannot import Hyperloom from the app's tree. Any
+    process of that account can write into the scan's stdout, so only pids the account owns are believed.
     """
     try:
         cp = subprocess.run(
@@ -403,7 +404,8 @@ def _marked_pids_as(run_as: RunAs, mark: str) -> list[int]:
         return []
     if cp.returncode != 0:
         log.warning("specialist reap: listing marked processes as %s exited %d", run_as.user, cp.returncode)
-    return [int(pid) for pid in cp.stdout.split() if pid.isdigit()]
+    listed = (int(pid) for pid in cp.stdout.split() if pid.isdigit())
+    return [pid for pid in listed if process_uids(pid) == (run_as.uid, run_as.uid)]
 
 
 @dataclass(frozen=True)
