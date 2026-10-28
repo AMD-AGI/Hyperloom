@@ -630,7 +630,7 @@ including baseline, explore, sweep, and rebench measurements:
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count, and under native AgentX sized to the round's `CONC` (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
 | `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
 
 Session `--max-hours` and cancellation apply independently of benchmark limits.
@@ -974,6 +974,17 @@ below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YAML
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
+
+Canonical replay warms up 11 requests per lane plus one probe before it opens its
+fixed profiling window, so its round grows with the concurrency being measured
+while the window does not. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset
+and a `CONC` pinned, the cap defaults to
+`(11 × CONC + 1) × 10 s × 2 + 3640 s + 300 s + 1800 s` (10 s per warmup request
+measured across the rungs of one 8×MI355X sweep, doubled for the cold warmup,
+plus the `metric_window_s` window, metrics finalisation and boot), and never below
+the stock 7800 s: about 10,200 s at `CONC` 20. A concurrency sweep resolves this
+per rung from the rung's own environment pins, so the rung that measures more
+lanes is granted more time rather than the ladder sharing one grant.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
 fixed-sequence profiling. Configure capture steps, count, delay and interval through

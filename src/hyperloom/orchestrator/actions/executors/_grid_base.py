@@ -144,6 +144,9 @@ class VariantResult:
     server_log_path: str | None = None
     launch_evidence: dict[str, Any] = field(default_factory=dict)
     launch_evidence_path: str | None = None
+    # Hard cap this run was held to, published by whoever granted it; None when no run was granted one.
+    # Readers report this number rather than deriving their own, which would describe a different run.
+    granted_cap_sec: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
@@ -186,4 +189,5 @@ class VariantResult:
             "server_log_path": self.server_log_path,
             "launch_evidence": self.launch_evidence,
             "launch_evidence_path": self.launch_evidence_path,
+            "granted_cap_sec": self.granted_cap_sec,
         }

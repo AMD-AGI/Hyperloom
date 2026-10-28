@@ -12,7 +12,7 @@ import logging
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import subprocess
 import sys
 import threading
@@ -276,17 +276,28 @@ _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
     """Resolve the invocation's silence and hard caps, rejecting invalid overrides.
 
-    An MLPerf agentic run works through a fixed trajectory count rather than a
-    fixed window, so its default hard cap is sized to that count; the stock
-    default reaped a healthy 150-trajectory baseline at 38%. An explicit
+    A grant has to bound the work this invocation was composed to do, so an
+    agentic run's default hard cap is sized to its own workload: an MLPerf run
+    works through a fixed trajectory count rather than a fixed window, and a
+    canonical run warms up one set of requests per lane before it opens its
+    window, so both grow with a size the caller pinned. The stock default reaped
+    a healthy 150-trajectory baseline at 38%, and reaped a canonical CONC 20
+    rung 1.3s after its profiling phase completed. An explicit
     ``INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`` still wins.
     """
-    from hyperloom.common.agentx_workload import is_mlperf_backend, mlperf_benchmark_timeout_sec
+    from hyperloom.common.agentx_workload import (
+        canonical_benchmark_timeout_sec,
+        is_canonical_agentx,
+        is_mlperf_backend,
+        mlperf_benchmark_timeout_sec,
+    )
 
     source = os.environ if env is None else env
     hard_default = 7800.0
     if is_mlperf_backend(source):
         hard_default = max(hard_default, mlperf_benchmark_timeout_sec(source))
+    elif is_canonical_agentx(source):
+        hard_default = max(hard_default, canonical_benchmark_timeout_sec(source))
 
     def positive(name: str, default: float) -> float:
         raw = source.get(name, str(default))
@@ -302,6 +313,26 @@ def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[fl
         positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
         positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", hard_default),
     )
+
+
+def workload_benchmark_timeout_sec(
+    extra_envs: Mapping[str, str] | None = None,
+    unset_envs: Iterable[str] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> float:
+    """Hard cap for one invocation, sized to the workload *it* pins.
+
+    A sweep's rungs share a process environment but not a workload: each pins its
+    own ``CONC`` (and clears what it does not want) in the variant it is launched
+    from, so the cap has to be resolved against that merge rather than once for
+    the grid. Callers that hold a variant pass its pins here; the sizing, the
+    override and the validation stay in :func:`resolve_benchmark_timeouts`.
+    """
+    merged = dict(os.environ if env is None else env)
+    for name in unset_envs or ():
+        merged.pop(name, None)
+    merged.update(extra_envs or {})
+    return resolve_benchmark_timeouts(merged)[1]
 
 
 def sync_agentx_phase_wait(envs: dict[str, Any], timeout_sec: float) -> None:
@@ -1194,4 +1225,5 @@ __all__ = [
     "session_remaining_to_deadline_sec",
     "stamp_server_ready",
     "sync_agentx_phase_wait",
+    "workload_benchmark_timeout_sec",
 ]

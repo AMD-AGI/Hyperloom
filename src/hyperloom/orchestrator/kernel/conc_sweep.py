@@ -48,8 +48,11 @@ from ..actions.executors._grid_runner import (
     run_grid,
     session_grid_bounds,
 )
-from ..actions.executors._grid_runner import variant_conc
-from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors._grid_runner import variant_benchmark_timeout_sec, variant_conc
+from ..actions.executors._subprocess_kill import (
+    resolve_benchmark_timeouts,
+    session_deadline_to_remaining_sec,
+)
 from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
@@ -152,6 +155,7 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
         error="conc_sweep total budget exhausted before this variant ran",
         error_class="budget_exhausted",
         note=variant.note,
+        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -178,6 +182,7 @@ def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Var
         error=stopped.never_started,
         error_class=stopped.error_class,
         note=variant.note,
+        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -190,6 +195,7 @@ def _raised_result(variant: GridVariant, stage: str, exc: Exception) -> VariantR
         status="failed",
         error=f"{stage}: {exc}",
         error_class=type(exc).__name__,
+        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -479,7 +485,8 @@ class _SweepRun:
 
     ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
     far, and a budget stop inside one arm has to refuse the next. ``session_deadline_sec`` is the earlier monotonic
-    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``.
+    sweep/session boundary, named by ``deadline_stop`` and distinct from ``benchmark_timeout_sec``, the cap a rung
+    that pins no workload of its own gets.
     """
 
     state: SharedState
@@ -570,7 +577,10 @@ class _SweepRun:
                 num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
                 start_time=note.start_time,
                 wall_duration_sec=note.wall_duration_sec,
-                granted_cap_sec=self.benchmark_timeout_sec,
+                # The cap the rung was actually held to, as its runner published it: each rung is granted
+                # time sized to its own workload, and a cap derived again here from what the result happens
+                # to carry would describe a run nobody made.
+                granted_cap_sec=result.granted_cap_sec,
                 budget_remaining_sec=note.budget_remaining_sec,
             ),
         )

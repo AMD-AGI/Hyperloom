@@ -54,6 +54,7 @@ from ._subprocess_kill import (
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
     sync_agentx_phase_wait,
+    workload_benchmark_timeout_sec,
 )
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -696,12 +697,30 @@ def _multi_node_warmup_rounds(variant_expected_sec: Any) -> int:
     return 1 if (is_multi_node() and mn_bench_warmup_enabled()) else 0
 
 
+def variant_benchmark_timeout_sec(variant: GridVariant) -> float:
+    """The hard cap one variant's rounds are granted, sized to the workload the whole variant spec composes.
+
+    A variant says what it wants pinned *and* what it wants cleared, and both
+    move the size of the work a round has to get through, so a grant derived
+    from the pins alone would be a grant for some other run. Every caller that
+    has to name a variant's cap -- the slot that enforces it, the rows that
+    publish it -- asks here, so there is one answer per variant.
+    """
+    return workload_benchmark_timeout_sec(variant.extra_envs, variant.unset_envs)
+
+
 class _VariantSlot(NamedTuple):
-    """One variant's place in the grid and the directory its rounds write to."""
+    """One variant's place in the grid, the directory its rounds write to, and the time they are granted.
+
+    The cap belongs to the slot rather than to the grid because the variant's own
+    env pins are what size it: a sweep's rungs differ in the concurrency they
+    measure, so they differ in the work one round has to get through.
+    """
 
     idx: int
     variant: GridVariant
     path: Path
+    benchmark_timeout_sec: float
 
 
 class _VariantFailure(NamedTuple):
@@ -742,7 +761,6 @@ class _GridRun(NamedTuple):
     stop: GridStop
     magpie_python: str
     silence_timeout_sec: float
-    benchmark_timeout_sec: float
     rounds_per_variant: int
     mn_warmup_rounds: int
     mn_reference_envs: dict[str, str]
@@ -811,6 +829,7 @@ def _abort_variant(at: _VariantSlot, failure: _VariantFailure, **fields: Any) ->
             error=failure.recorded if failure.error is None else failure.error,
             error_class=failure.error_class,
             note=at.variant.note,
+            granted_cap_sec=at.benchmark_timeout_sec,
             **fields,
         ),
         halt=failure.halt,
@@ -860,6 +879,7 @@ def _abort_on_round_stop(
             server_log_path=_measurement_server_log_path(attempt.server_log, slot=at.path),
             note=at.variant.note,
             nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
+            granted_cap_sec=at.benchmark_timeout_sec,
         ),
         halt=_Halt.STOP if ends_the_batch else _Halt.ON_FAILURE,
         abandoned=stopped if ends_the_batch else None,
@@ -1060,7 +1080,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     # Held in a local because the abort line below has to name the cap the round was actually granted: the
     # declared one is a hang backstop, and a round killed at the reserved cap logged as a two-hour timeout
     # reads as a variant that hangs rather than a budget that ran out.
-    warmup_cap_sec = run.benchmark_timeout_sec
+    warmup_cap_sec = at.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
             run,
@@ -1225,7 +1245,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             magpie_python=run.magpie_python,
             config_path=rounds.cfg_path,
             output_dir=warm_slot,
-            timeout_sec=run.benchmark_timeout_sec,
+            timeout_sec=at.benchmark_timeout_sec,
             silence_timeout_sec=run.silence_timeout_sec,
             server_already_ready=True,
             cwd=str(run.output_root),
@@ -1251,7 +1271,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
     workspaces_before = snapshot_workspaces(at.path)
     started_unix = time.time()
-    measure_cap_sec = run.benchmark_timeout_sec
+    measure_cap_sec = at.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
             run,
@@ -1495,6 +1515,7 @@ def _booted_server_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantRes
         returncode=outcome.measured.round.proc.returncode,
         nonfatal_warnings=outcome.warnings,
         note="server_lifecycle_boot_only",
+        granted_cap_sec=at.benchmark_timeout_sec,
     )
 
 
@@ -1576,6 +1597,7 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         server_log_path=None,
         note=at.variant.note,
         runtime_sec=round(max(0.0, time.time() - outcome.measured.round.started_unix), 2),
+        granted_cap_sec=at.benchmark_timeout_sec,
     )
     log.info("grid_runner: variant %s tput=%.1f tok/s", at.variant.name, row.output_throughput or 0.0)
     return row
@@ -1614,7 +1636,9 @@ async def run_grid(
 
     ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
-    silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
+    # Silence is a property of the invoking process, so the grid shares one; the hard cap is a property of each
+    # variant's workload, so it is resolved per slot below.
+    silence_timeout_sec = resolve_benchmark_timeouts()[0]
     magpie_python = launch.magpie_python
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -1640,7 +1664,6 @@ async def run_grid(
         stop=stop,
         magpie_python=magpie_python,
         silence_timeout_sec=silence_timeout_sec,
-        benchmark_timeout_sec=benchmark_timeout_sec,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
         mn_reference_envs=_multi_node_reference_envs(),
@@ -1648,7 +1671,12 @@ async def run_grid(
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
-        at = _VariantSlot(i, variant, output_root / f"variant_{i:02d}_{_safe(variant.name)}")
+        at = _VariantSlot(
+            i,
+            variant,
+            output_root / f"variant_{i:02d}_{_safe(variant.name)}",
+            variant_benchmark_timeout_sec(variant),
+        )
         try:
             if _warn_budget_cannot_admit(
                 run, i, rounds_left=run.rounds_per_variant, spent_on="the variants before this one"
@@ -1705,6 +1733,7 @@ def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Vari
         error=stopped.never_started,
         error_class=stopped.error_class,
         note=variant.note,
+        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -1872,6 +1901,7 @@ __all__ = [
     "server_args_env_name",
     "session_grid_bounds",
     "stopped_by_the_run",
+    "variant_benchmark_timeout_sec",
     # Re-exported from the sibling modules to keep the namespace intact.
     "_resolve_probe_python",
     "resolve_skip_spec",
