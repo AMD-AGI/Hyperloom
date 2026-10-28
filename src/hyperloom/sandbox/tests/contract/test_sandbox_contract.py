@@ -222,14 +222,24 @@ def test_idempotency_key_returns_the_same_sandbox(harness) -> None:
     assert other.sandbox_id != one.sandbox_id
 
 
+def _assert_same_node_marks_where_it_landed(metadata: dict[str, str], avoided: set[str]) -> None:
+    """``same-node`` is ``"true"`` exactly when the sandbox landed on a node it was to avoid, and absent otherwise."""
+    if metadata[NODE_NAME_KEY] in avoided:
+        assert metadata[SAME_NODE_KEY] == "true", metadata
+    else:
+        assert SAME_NODE_KEY not in metadata, metadata
+
+
 @pytest.mark.claw_policy
 def test_avoiding_this_node_still_creates_and_marks_same_node(harness) -> None:
+    """Avoiding a node never refuses the create: the platform places the sandbox elsewhere when it can, and on the
+    avoided node (marked ``same-node``) when it cannot, as a single-node platform must."""
     node = (
         harness.provider.create(harness.dev_template, role="dev", timeout_sec=60, metadata={})
         .info()
         .metadata[NODE_NAME_KEY]
     )
     sb = _create(harness, harness.dev_template, "dev", metadata={AVOID_NODES_KEY: f"elsewhere,{node}"})
-    assert sb.info().metadata[SAME_NODE_KEY] == "true"
+    _assert_same_node_marks_where_it_landed(dict(sb.info().metadata), {"elsewhere", node})
     away = _create(harness, harness.dev_template, "dev", metadata={AVOID_NODES_KEY: "elsewhere"})
-    assert SAME_NODE_KEY not in away.info().metadata
+    _assert_same_node_marks_where_it_landed(dict(away.info().metadata), {"elsewhere"})
