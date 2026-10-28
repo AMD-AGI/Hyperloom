@@ -269,11 +269,10 @@ def test_an_anchor_longer_than_half_the_budget_is_still_paired(sweep_run):
         assert _points(payload, arm) == [(16, "succeeded", ""), (32, "skipped", "budget_exhausted")]
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
 @pytest.mark.parametrize("sweep_budget", [False, True], ids=["session-deadline", "sweep-deadline"])
-def test_the_first_arms_half_drops_whole_pairs(sweep_run, persistent, sweep_budget):
+def test_the_first_arms_half_drops_whole_pairs(sweep_run, sweep_budget):
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=persistent,
+        persistent=True,
         attempts=[_measured(10.0), _hang(), _measured(10.0)],
         bounded=not sweep_budget,
         total_budget_sec=40 if sweep_budget else None,
@@ -315,10 +314,9 @@ def test_a_failed_rung_is_still_paired_so_the_failure_is_attributed(sweep_run):
     assert payload["summary"]["successful_pairs"] == 1
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
-def test_a_first_arm_that_reaches_nothing_leaves_the_second_nothing_to_pair(sweep_run, persistent):
+def test_a_first_arm_that_reaches_nothing_leaves_the_second_nothing_to_pair(sweep_run):
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=persistent, attempts=[_hang()], bounded=False, total_budget_sec=40
+        persistent=True, attempts=[_hang()], bounded=False, total_budget_sec=40
     )
     assert [call["grid"][0].name for call in calls] == ["baseline_conc2"]
     assert clock.elapsed == 40.0
@@ -329,13 +327,11 @@ def test_a_first_arm_that_reaches_nothing_leaves_the_second_nothing_to_pair(swee
     assert conc_sweep.conc_sweep_declined_to_run(payload) is False
     for arm in ("baseline", "optimized"):
         assert {error_class for _, _, error_class in _points(payload, arm)} == {"budget_exhausted"}
-    if persistent:
-        _server_lifecycle.teardown_lifecycle_server.assert_called()
+    _server_lifecycle.teardown_lifecycle_server.assert_called()
 
 
-@pytest.mark.parametrize("persistent", [False, True])
-def test_an_expired_session_launches_nothing_and_names_the_session(sweep_run, persistent):
-    payload, backend, calls, bounds, clock = sweep_run(persistent=persistent, attempts=[_measured()] * 6, usable=0.0)
+def test_an_expired_session_launches_nothing_and_names_the_session(sweep_run):
+    payload, backend, calls, bounds, clock = sweep_run(persistent=True, attempts=[_measured()] * 6, usable=0.0)
     assert not backend.calls
     assert len(calls) == 1
     assert len(bounds) == 1

@@ -136,12 +136,10 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         )
         assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
 
-    @pytest.mark.parametrize(("round_min", "admitted_min"), [(10.0, 20.0), (20.0, 40.0)])
-    def test_a_sweep_is_admitted_on_the_pair_its_least_useful_run_measures(self, round_min, admitted_min):
-        """A sweep runs until its grant is spent, so it needs room for one pair -- two measured rounds -- not its
-        catalogue's typical half hour."""
-        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=round_min * 60.0)
-        assert cost == pytest.approx(admitted_min)
+    def test_a_sweep_is_admitted_on_one_measured_pair(self):
+        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
+        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
+        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""

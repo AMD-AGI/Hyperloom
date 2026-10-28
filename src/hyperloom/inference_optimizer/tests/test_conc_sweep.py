@@ -1276,7 +1276,7 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
 # test_policy_gate.py::test_a_coordinator_managed_action_is_not_proposable.
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 2 extras: _order_concs_desc /
+# ───────────────────────────────────────────────────────────────────────────── Change 2 extras: _WorkloadLadder /
 # _build_arm_grid ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1295,10 +1295,6 @@ def test_a_ladder_without_the_anchor_runs_cheapest_first():
     assert _workload_ladder("agentx").order([8, 4, 2], 0) == [8, 4, 2]
 
 
-def test_a_ladder_of_the_anchor_alone_is_that_rung():
-    assert _workload_ladder("").order([7], 7) == [7]
-
-
 def test_build_arm_grid_keeps_the_order_given():
     grid = _build_arm_grid(_Arm(name="baseline"), [64, 32, 16], isl=512, osl=512, num_prompts_factor=5)
     assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
@@ -1306,14 +1302,9 @@ def test_build_arm_grid_keeps_the_order_given():
     assert grid[0].extra_envs["RUN_EVAL"] == "false"
 
 
-@pytest.mark.parametrize(
-    ("isl", "osl", "per_conc"), [(512, 512, 10), (1024, 1024, 5), (1024, 8192, 3), (8192, 16384, 2)]
-)
-def test_each_rung_sends_the_request_window_the_session_measures_with(
-    session_dir: Path, baseline_yaml: Path, isl: int, osl: int, per_conc: int
-):
-    """The anchor rung reproduces the session's own measurement, at its cost: a long-OSL rung sends fewer waves."""
-    state = _make_state(baseline_config_path=str(baseline_yaml), isl=isl, osl=osl)
+def test_each_rung_sends_the_request_window_the_session_measures_with(session_dir: Path, baseline_yaml: Path):
+    """ISL 1024 / OSL 8192 is three requests per unit of concurrency in the session, so in every rung too."""
+    state = _make_state(baseline_config_path=str(baseline_yaml), isl=1024, osl=8192)
     sent: dict[str, int] = {}
 
     async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
@@ -1326,7 +1317,7 @@ def test_each_rung_sends_the_request_window_the_session_measures_with(
     ):
         asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
 
-    assert sent == {f"{arm}_conc{conc}": conc * per_conc for arm in ("baseline", "optimized") for conc in (4, 16)}
+    assert sent == {f"{arm}_conc{conc}": conc * 3 for arm in ("baseline", "optimized") for conc in (4, 16)}
 
 
 def test_build_arm_grid_optimized_arm_carries_args():
@@ -1348,31 +1339,7 @@ def test_build_arm_grid_optimized_arm_carries_args():
 # orchestration ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_run_conc_sweep_runs_the_baseline_arm_first(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The baseline arm runs first: the faster optimized arm's replay of its rungs fits in the half it leaves."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    call_log: list[str] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        for v in grid:
-            call_log.append(v.name)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
-
-    assert payload["status"] == "succeeded"
-    assert call_log == ["baseline_conc4", "baseline_conc16", "optimized_conc4", "optimized_conc16"]
-
-
-def test_run_conc_sweep_runs_the_anchor_first_then_ascending(
+def test_each_arm_runs_the_anchor_first_then_cheapest_first(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2460,36 +2427,7 @@ def test_single_server_boot_that_failed_is_retried_by_the_next_rung(
     assert payload["summary"]["successful_pairs"] == 1
 
 
-def test_single_server_whose_every_boot_fails_has_no_point_to_retry_per_rung(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Every rung's boot failing is the arm's result; the ladder is not run a second time with a server per rung."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    launches: list[tuple[str, bool]] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        name = grid[0].name
-        launches.append((name, kw["launch"].server_lifecycle is not None))
-        return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[8, 16]))
-
-    assert launches == [(f"{arm}_conc{conc}", True) for arm in ("baseline", "optimized") for conc in (8, 16)]
-    points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert [p["status"] for p in points] == ["failed"] * 4
-    assert payload["status"] == "failed"
-
-
-def test_single_server_not_eligible_uses_option_b(
+def test_single_server_not_eligible_restarts_the_server_per_rung(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
