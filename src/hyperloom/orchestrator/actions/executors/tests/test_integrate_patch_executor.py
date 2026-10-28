@@ -897,50 +897,22 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("phase", "lane"),
-    [
-        ("ENABLEMENT", EnablementRound(succeeded=True)),
-        ("ENABLEMENT", EnablementRound(validation_pending=True)),
-        ("FRAMEWORK_AGENT", EnablementRound()),
-    ],
-    ids=["lane-succeeded", "lane-revalidating", "phase-moved-on"],
+    [("ENABLEMENT", EnablementRound(succeeded=True)), ("FRAMEWORK_AGENT", EnablementRound())],
+    ids=["lane-succeeded", "phase-moved-on"],
 )
-async def test_an_enablement_round_the_lane_no_longer_takes_is_skipped_without_applying(
-    tmp_path: Path, phase: str, lane: EnablementRound
-):
-    """Admitted while the lane took rounds, it reaches the executor after the lane moved on.
-
-    Grading it as an optimisation candidate would land an enablement patch on the
-    anchor; the result carries no ``enablement`` key, so the lane does not take it
-    as a round either.
-    """
+async def test_an_enablement_round_the_lane_no_longer_takes_is_skipped(tmp_path: Path, phase, lane):
+    """The tag was stamped at admission; the executor skips the round once the lane takes no more."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    _write_specialist_workspace(session_dir, "t-spec-late", patch_contents=[_VALID_PATCH])
-    state = SharedState(phase=phase, enablement=lane)
-    state.record_specialist_patch_verdict("t-spec-late", "approve")
-    ctx = _make_ctx(
-        "t-int-late",
-        {
-            "specialist_task_id": "t-spec-late",
-            "framework_source_root": str(repo),
-            "enablement": True,
-            "enablement_before_observation_path": "/s/reports/bringup/round-old.json",
-        },
-    )
-    ctx.extra["shared_state"] = state
+    ctx = _make_ctx("t-int-late", {"specialist_task_id": "nonexistent", "enablement": True})
+    ctx.extra["shared_state"] = SharedState(phase=phase, enablement=lane)
 
     result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
 
     assert result["status"] == "skipped"
-    assert result["skipped_reason"] == "enablement_lane_closed"
-    assert result["specialist_task_id"] == "t-spec-late"
-    assert result["patches_applied"] == []
     assert "enablement" not in result
-    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio

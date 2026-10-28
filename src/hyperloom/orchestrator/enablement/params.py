@@ -154,7 +154,7 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
 
 
 def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
-    """What an integrate_patch needs to be graded as this enablement round; the lane's specialist hands it on."""
+    """What an integrate_patch needs to be graded as this enablement round."""
     return {
         "enablement": True,
         # The verdict this round was dispatched on. The prompt builder renders

@@ -27,7 +27,6 @@ from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUST
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
-from hyperloom.orchestrator.enablement.lane import takes_enablement_round
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
@@ -865,8 +864,8 @@ async def test_rearm_ignores_non_enablement(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_launch_probe_that_bought_nothing_leaves_the_lanes_round_alone(tmp_path):
-    """A build's launch probe answers no round: its dead end neither ends the lane's round nor feeds its mandate."""
+async def test_a_failed_integrate_the_lane_did_not_dispatch_leaves_its_round_alone(tmp_path):
+    """Another specialist's dead end neither ends the lane's round nor feeds its mandate."""
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-lane")
     fake.shared_state.enablement.last_specialist_task_id = "spec-lane"
@@ -874,9 +873,9 @@ async def test_a_launch_probe_that_bought_nothing_leaves_the_lanes_round_alone(t
     await fake.enablement_lane.maybe_rearm_enablement(
         {
             "enablement": True,
-            "status": "reverted",
-            "specialist_task_id": "probe-1",
-            "retry_feedback": [{"target": "srt/model.py", "error": "boot failed"}],
+            "status": "apply_failed",
+            "specialist_task_id": "spec-llm",
+            "retry_feedback": [{"target": "srt/model.py", "error": "hunk failed"}],
         }
     )
 
@@ -888,7 +887,7 @@ async def test_a_launch_probe_that_bought_nothing_leaves_the_lanes_round_alone(t
 
 
 @pytest.mark.asyncio
-async def test_an_advance_from_a_launch_probe_ends_the_round(tmp_path):
+async def test_an_advance_the_lane_did_not_dispatch_is_stacked_and_ends_the_round(tmp_path):
     """The wall moved, so the lane's round is aimed at a gap the boot is already past."""
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-lane")
@@ -898,11 +897,13 @@ async def test_an_advance_from_a_launch_probe_ends_the_round(tmp_path):
             "enablement": True,
             "status": "advanced",
             "advanced": True,
-            "specialist_task_id": "probe-1",
+            "specialist_task_id": "spec-llm",
+            "patches_applied": ["/s/runs/specialist/spec-llm/patches/001_deep_gemm.patch"],
             "enablement_launch_log": "RuntimeError: a deeper gap",
         }
     )
 
+    assert fake.shared_state.enablement.kept_patches == ["/s/runs/specialist/spec-llm/patches/001_deep_gemm.patch"]
     assert "a deeper gap" in fake.shared_state.enablement.launch_log
     assert await fake.rounds.held() is None
     assert (await fake.rounds.get("enablement-spec-lane")).outcome == "advanced"
@@ -921,7 +922,7 @@ async def test_an_advance_that_ends_the_round_retires_a_holder_that_never_starte
             "enablement": True,
             "status": "advanced",
             "advanced": True,
-            "specialist_task_id": "probe-1",
+            "specialist_task_id": "spec-llm",
             "enablement_launch_log": "RuntimeError: a deeper gap",
         }
     )
@@ -965,24 +966,6 @@ async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, 
     assert fake.shared_state.baseline_tput == 2245.0
     assert fake.shared_state.enablement.succeeded is ends_lane
     assert (await fake.rounds.held() is None) is ends_lane
-    assert takes_enablement_round(fake.shared_state) is not ends_lane
-
-
-@pytest.mark.parametrize(
-    ("state", "takes"),
-    [
-        ({}, True),
-        ({"enablement_succeeded": True}, False),
-        ({"enablement_validation_pending": True}, False),
-        ({"phase": "FRAMEWORK_AGENT", "baseline_tput": 100.0}, False),
-    ],
-    ids=["open", "succeeded", "revalidating", "phase-moved-on"],
-)
-def test_the_lane_takes_a_round_only_in_enablement_while_it_accepts_rounds(tmp_path, state, takes):
-    """A round is admitted long before it runs; by then the lane may have closed or the phase moved on."""
-    fake = _enqueue_self(tmp_path, **state)
-
-    assert takes_enablement_round(fake.shared_state) is takes
 
 
 @pytest.mark.asyncio

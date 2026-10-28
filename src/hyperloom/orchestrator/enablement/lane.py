@@ -50,11 +50,7 @@ _MOVED_ROUND_OUTCOMES = {"kept": BOOTED, "advanced": ADVANCED}
 
 
 def takes_enablement_round(state: Any) -> bool:
-    """Whether an enablement round may run now: in ENABLEMENT, while the lane accepts rounds.
-
-    Admission happens long before execution, so a round can reach its executor
-    after the lane succeeded, started revalidating, or the phase moved on.
-    """
+    """Whether an enablement round may run now: in ENABLEMENT, while the lane accepts rounds."""
     return (state.phase or "").strip().upper() == PHASE_ENABLEMENT and state.enablement.accepts_rounds
 
 
@@ -422,10 +418,7 @@ class EnablementLane(CoordinatorCollaborator):
         state.enablement.pending = False
 
     async def close_booted(self, *, reason: str) -> None:
-        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
-
-        Once the lane no longer accepts rounds, a round's integrate that reaches its executor afterwards is skipped.
-        """
+        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event."""
         enablement = self.shared_state.enablement
         enablement.succeeded = True
         enablement.validation_pending = False
@@ -526,8 +519,8 @@ class EnablementLane(CoordinatorCollaborator):
           ``enablement.launch_log`` replaced, so the next round targets that gap.
         * anything else — no patch is kept.
 
-        A kept or advanced result moves the lane whether it answers the lane's
-        round or a build's launch probe; a probe's stall leaves it untouched.
+        A kept or advanced patch moves the lane whoever authored it; a stall
+        from a specialist the lane never dispatched leaves it untouched.
 
         Args:
             res: The integrate_patch result dict.
@@ -774,11 +767,11 @@ def _authoring_round_id(holder: str) -> str:
 
 
 async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str) -> bool:
-    """Whether this result bought nothing and answers no round the lane dispatched, as a build's launch probe."""
+    """Whether this result bought nothing for a specialist the lane never dispatched."""
     if not spec_tid or status in _MOVED_ROUND_OUTCOMES or await rounds.get(_authoring_round_id(spec_tid)) is not None:
         return False
     log.info(
-        "ENABLEMENT: integrate %s answers no round the lane dispatched and bought nothing (%s); "
+        "ENABLEMENT: integrate for specialist %s, which the lane did not dispatch, bought nothing (%s); "
         "the lane's round is left to its holder",
         spec_tid,
         status or "unreported",

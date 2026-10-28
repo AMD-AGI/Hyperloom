@@ -212,24 +212,10 @@ def _enforce_critic_gate(
 
 
 def _enablement_lane_closed_skip(params: Mapping[str, Any], shared_state: Any) -> "dict[str, Any] | None":
-    """The neutral skip for an enablement round the lane no longer takes; ``None`` for any other integrate.
-
-    The skip carries no ``enablement`` key: the lane would take a result that
-    does as one of its rounds.
-    """
+    """The skip for an enablement round the lane no longer takes; ``None`` for any other integrate."""
     if not params.get("enablement") or shared_state is None or takes_enablement_round(shared_state):
         return None
-    return {
-        "status": "skipped",
-        "skipped_reason": "enablement_lane_closed",
-        "specialist_task_id": str(params.get("specialist_task_id") or "").strip(),
-        "patches_applied": [],
-        "patches_reverted": [],
-        "reason": (
-            "enablement round reached execution after the lane stopped taking rounds "
-            f"(phase={shared_state.phase!r}); skipped without applying any patch"
-        ),
-    }
+    return {"status": "skipped", "reason": f"enablement lane takes no rounds in phase {shared_state.phase}"}
 
 
 def _gate_failure_reasons(

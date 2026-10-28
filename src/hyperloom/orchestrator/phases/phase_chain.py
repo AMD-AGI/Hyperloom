@@ -37,10 +37,7 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
-# What ENABLEMENT runs only for the enablement lane: ``specialist`` and
-# ``integrate_patch`` as its round, whose specialist the lane dispatches and whose
-# deliverable it submits for review, and ``baseline`` as the revalidation that
-# closes a KEEP.
+# What ENABLEMENT runs only for its lane: the round's specialist and integrate, and the KEEP's revalidation.
 _ENABLEMENT_LANE_ACTIONS = frozenset({"baseline", "specialist", "integrate_patch"})
 
 # Phase transition survival filter: actions that survive across phase boundaries.
@@ -99,8 +96,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 
 
 # Actions a single phase reserves for the Coordinator. COORDINATOR_INTERNAL_ACTIONS
-# cannot say this: PRELUDE exists to propose ``baseline``, and FRAMEWORK_AGENT
-# proposes ``specialist`` and ``integrate_patch``.
+# cannot say this: other phases let the agent propose them.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
     PHASE_ENABLEMENT: _ENABLEMENT_LANE_ACTIONS,
 }
