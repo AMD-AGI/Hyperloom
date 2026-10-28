@@ -46,12 +46,10 @@ def launch(correlation: int) -> dict[str, Any]:
     }
 
 
-def write_trace(path: Path, events: list[dict[str, Any]], *, gzipped: bool | None = None) -> Path:
-    """Write *events* as a capture; gzipped by default when the name says so."""
-    if gzipped is None:
-        gzipped = path.suffix == ".gz" or path.name.endswith(".json.gz")
+def write_trace(path: Path, events: list[dict[str, Any]]) -> Path:
+    """Write *events* as a capture, gzipped when the name says so."""
     payload = json.dumps({"traceEvents": events})
-    if gzipped:
+    if path.suffix == ".gz":
         with gzip.open(path, "wt", encoding="utf-8") as handle:
             handle.write(payload)
     else:
