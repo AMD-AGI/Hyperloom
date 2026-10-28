@@ -4,6 +4,9 @@
 """Autonomous multi-operator coordination for KernelForge rewrite campaigns."""
 
 from kernelforge.kernel_rewrite_controller.contracts import (
+    SERVING_CONTEXT_FILENAME,
+    TRACE_EVIDENCE_FILENAME,
+    WORKLOAD_FILENAME,
     HandoffBundle,
     HandoffContractError,
     KernelRewriteTask,
@@ -75,6 +78,7 @@ __all__ = [
     "OpportunityAnalysisResult",
     "PublicationError",
     "RecoveryResult",
+    "SERVING_CONTEXT_FILENAME",
     "ScheduleResult",
     "ControllerRunError",
     "ControllerRunState",
@@ -88,7 +92,9 @@ __all__ = [
     "TaskPublicationResult",
     "TaskState",
     "TaskStateError",
+    "TRACE_EVIDENCE_FILENAME",
     "TaskStateStore",
+    "WORKLOAD_FILENAME",
     "discover_task_dirs",
     "dispatch_single_task",
     "dispatch_prepared_tasks",
