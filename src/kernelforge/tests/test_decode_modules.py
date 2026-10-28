@@ -64,3 +64,14 @@ def test_the_rendered_table_has_one_column_per_decode_class_and_one_row_per_modu
         f"| moe | 0.030 ms (42.9%) | 0.120 ms (75.0%) | `{_MOE}` |",
         f"| gemm | 0.020 ms (28.6%) | 0.020 ms (12.5%) | `{_GEMM}` |",
     ]
+
+
+def test_one_modules_lines_keep_its_row_in_every_decode_class(tmp_path):
+    trace = write_trace(tmp_path / "t.trace.json", [*_verify_step(1, 0.0), *_verify_step(4, 200.0)])
+
+    assert dm.decode_module_lines(trace, module="allreduce/comm") == [
+        "| module | VERIFY bs=1 | VERIFY bs=4 | top kernel |",
+        "|---|---:|---:|---|",
+        f"| allreduce/comm | 0.010 ms (14.3%) | 0.010 ms (6.2%) | `{_AR}` |",
+    ]
+    assert dm.decode_module_lines(trace, module="indexer/topk") == []

@@ -1367,6 +1367,12 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
+    owned = inp.roofline_evidence.get("owned_module") or {}
+    if owned.get("group"):
+        rows.append(f"- module group: `{owned['group']}` (no other specialist works it while you run)")
+        if owned.get("rows"):
+            rows[-1] += "; its decode time per step:"
+            rows.extend(["", *map(str, owned["rows"])])
     rows.extend(_mandate_run_status(inp))
 
     rows.extend(
@@ -1801,7 +1807,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = inp.roofline_evidence
+    # The owned module group is rendered with the mandate.
+    ev = {key: value for key, value in inp.roofline_evidence.items() if key != "owned_module"}
     if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "

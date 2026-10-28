@@ -237,6 +237,51 @@ async def test_the_module_table_comes_from_the_current_stacks_capture_before_the
     assert params["roofline_evidence"] == {"decode_modules": table}
 
 
+_OWNED_MOE = {
+    "group": "moe",
+    "rows": [
+        "| module | VERIFY bs=2 | top kernel |",
+        "|---|---:|---|",
+        "| moe | 0.060 ms (60.0%) | `mfma_moe1_silu_mul_afp4_wfp4` |",
+    ],
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("switch", "evidence"),
+    [
+        ("1", {"decode_modules": _OPENING_TABLE, "owned_module": _OWNED_MOE}),
+        ("0", {"decode_modules": _OPENING_TABLE}),
+    ],
+)
+async def test_a_specialist_owning_a_module_group_is_warmed_with_that_groups_row(
+    tmp_path, monkeypatch, switch, evidence
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
+    state = SharedState(last_trace_analyze={}, last_profile_trace=str(_verify_capture(tmp_path)))
+    params: dict[str, Any] = {"scope": "freeform", "task_description": "fuse the MoE sort", "module_group": "moe"}
+
+    await _make_coord(tmp_path, state=state).specialist_dispatch.warm_specialist_params(params)
+
+    assert params["roofline_evidence"] == evidence
+
+
+def test_the_mandate_names_the_owned_module_group_with_its_figures():
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import _section_mandate
+
+    rows = _section_mandate(_make_inp({"owned_module": _OWNED_MOE}))
+
+    start = rows.index("- module group: `moe` (no other specialist works it while you run); its decode time per step:")
+    assert rows[start : start + 5] == [rows[start], "", *_OWNED_MOE["rows"]]
+
+
+def test_an_owned_group_alone_is_not_roofline_evidence():
+    assert _section_roofline_evidence(_make_inp({"owned_module": _OWNED_MOE})) == _section_roofline_evidence(
+        _make_inp({})
+    )
+
+
 def test_section_renders_the_decode_modules_ahead_of_the_tracelens_kernels():
     table = ["| module | VERIFY bs=2 | top kernel |", "|---|---:|---|", "| moe | 0.060 ms (60.0%) | `m` |"]
     inp = _make_inp({"decode_modules": table, "hot_kernels_top15": [{"kernel_id": "k1", "name": "topk"}]})

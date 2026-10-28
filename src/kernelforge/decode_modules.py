@@ -99,8 +99,11 @@ def _module_rows(totals: dict[str, float], *, steps: int) -> list[dict[str, Any]
     ]
 
 
-def decode_module_lines(trace: Any) -> list[str]:
-    """The rendered table for a profile's capture (a file or the directory of its ranks); empty when unreadable."""
+def decode_module_lines(trace: Any, *, module: str = "") -> list[str]:
+    """The rendered table for a profile's capture (a file or the directory of its ranks); empty when unreadable.
+
+    A *module* keeps that module's row alone, empty when no decode class has it.
+    """
     capture = resolve_capture(trace)
     if not capture:
         return []
@@ -108,14 +111,20 @@ def decode_module_lines(trace: Any) -> list[str]:
         mtime = Path(capture).stat().st_mtime
     except OSError:
         return []
-    return list(_rendered(capture, mtime))
+    table = _table(capture, mtime)
+    if module:
+        table = {
+            window_class: {**entry, "modules": [row for row in entry["modules"] if row["module"] == module]}
+            for window_class, entry in table.items()
+        }
+    return render_decode_modules(table)
 
 
 @lru_cache(maxsize=4)
-def _rendered(capture: str, mtime: float) -> tuple[str, ...]:
+def _table(capture: str, mtime: float) -> dict[str, dict[str, Any]]:
     """Parsing a capture takes seconds; every specialist of a cycle reads the same one."""
     del mtime
-    return tuple(render_decode_modules(decode_modules(capture)))
+    return decode_modules(capture)
 
 
 def render_decode_modules(table: dict[str, dict[str, Any]] | None) -> list[str]:
@@ -127,6 +136,8 @@ def render_decode_modules(table: dict[str, dict[str, Any]] | None) -> list[str]:
     for window_class in classes:
         for row in table[window_class]["modules"]:
             cells[row["module"]][window_class] = row
+    if not cells:
+        return []
     order = sorted(cells, key=lambda m: sum(r["ms_per_step"] for r in cells[m].values()), reverse=True)
     lines = [f"| module | {' | '.join(classes)} | top kernel |", f"|---|{'---:|' * len(classes)}---|"]
     for module in order:

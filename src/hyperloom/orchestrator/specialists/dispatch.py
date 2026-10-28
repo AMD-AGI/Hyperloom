@@ -26,6 +26,7 @@ from ..policy.gate import (
     validate_freeform_wave_task,
 )
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
+from .in_flight import held_module_group
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
@@ -248,6 +249,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         lines = await asyncio.to_thread(decode_module_lines, source)
         if lines:
             params.setdefault("roofline_evidence", {})["decode_modules"] = lines
+        if group := held_module_group(params):
+            rows = await asyncio.to_thread(decode_module_lines, source, module=group)
+            params.setdefault("roofline_evidence", {})["owned_module"] = {"group": group, "rows": rows}
 
     def _warm_framework_context(self, params: dict[str, Any]) -> None:
         """Warm the runtime framework version and the local framework source roots."""
