@@ -3,7 +3,7 @@
 
 """Contract of the session budget: PRELUDE gets everything, EXPLORE then ends one longest root test and one CLOSE grace
 before the deadline, and the CLOSE grace follows it; a GPU-hour budget leaves FINAL the main flow's share, counted on
-the tests with a result.
+the tests with a result plus the card time the toolbox's leases hold.
 
 The re-declared MB_ constants are compared with their sources by reading the source text;
 those modules are never imported.
@@ -19,10 +19,10 @@ import pytest
 
 import hyperloom
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, Withdrawal
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.notebook.records import LeaseEnd, LeaseStart, LineageEvent, Withdrawal
+from hyperloom_multibranch.contracts.notebook.vocab import LeaseEndReason, LeaseKind, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
+from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, intent, request, result
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_CLOSE_GRACE_FRACTION,
@@ -161,3 +161,24 @@ async def test_the_gpu_seconds_spent_count_every_result_and_no_withdrawn_test(tm
     await toolbox.write_withdrawal(Withdrawal("withdrawn", "branch s1 stopped"))
 
     assert spent_gpu_seconds(await scheduler.progress()) == 690.0
+
+
+async def test_a_closed_lease_s_card_seconds_count_once_beside_the_tests_gpu_seconds(tmp_path: Path) -> None:
+    clock = FakeClock()
+
+    def handle(role: Role) -> LocalNotebook:
+        return LocalNotebook(tmp_path, Writer(role, role.value), clock=clock)
+
+    scheduler, toolbox = handle(Role.SCHEDULER), handle(Role.TOOLBOX)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    await toolbox.write_request(request("measured", intent("s1", "c0")))
+    await toolbox.write_result(result("measured", gpu_seconds=90.0))
+    await toolbox.record_lease_start(LeaseStart("lease-1", "s1", "s1", LeaseKind.DEV, 2, START, gpu_ids=(4, 5)))
+    await toolbox.record_lease_end(LeaseEnd("lease-1", START + 100.0, LeaseEndReason.RELEASED))
+
+    clock.advance(_HOUR)
+    first = spent_gpu_seconds(await scheduler.progress())
+    clock.advance(_HOUR)
+
+    assert first == spent_gpu_seconds(await scheduler.progress()) == pytest.approx(90.0 + 2 * 100.0)

@@ -7,8 +7,9 @@ The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's fr
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
 still pay off, which running branches made much the same change, the events since its last call, how far each
 branch lies behind the integration head, which branches lead it while their commits fail to merge, whether a profile
-of the integration head runs, the GPU hours and LLM tokens the session has used, and what is known of each running
-branch's specialist and which explore tests each branch has queued). The judge answers with one JSON
+of the integration head runs, the GPU hours (tests' and leases' alike) and LLM tokens the session has used, and what
+is known of each running branch's specialist and which explore tests each branch has queued). The judge answers with
+one JSON
 object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
 still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
 never calls a peer; the scheduler applies its decision. The judge may neither stop nor lower the K of a held branch
@@ -112,8 +113,9 @@ class JudgeView:
     and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
     head, in percent of the root's value. ``stranded_leads`` are the branches whose head leads the integration head by
     more than the bar while commits of theirs failed to merge, the largest lead first. ``profile_running`` is whether a profile of the integration head runs.
-    ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
-    a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
+    ``gpu_hours_used`` are the GPU hours of the session's tests that have a result plus the card time any lease holds
+    outside them, an open one up to the reading: the root's baseline is among them, a test withdrawn before its result
+    and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
     EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, ``prelude_gpu_hours_upper_bound`` the PRELUDE
     child's wall time times the workload's TP. ``specialist_llm_usd`` is what the specialists' recorded LLM calls
     cost, ``scheduler_llm_usd`` what the judge's, the patch resolver's and the fix critic's recorded calls cost, and
@@ -342,6 +344,7 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
         "commits": progress.commits,
         "judged_since_commit": progress.judged_since_commit,
         "gpu_seconds": progress.gpu_seconds,
+        "held_card_seconds": progress.held_card_seconds,
         "head_value": dict(progress.head_value),
         "pending_candidates": [_pending_candidate_row(item) for item in progress.pending],
     }

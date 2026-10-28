@@ -21,10 +21,10 @@ profile taken of the integration head after such a merge moving, or a quarantine
 judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, which branches lead it while their
-commits fail to merge, whether a profile of the integration head runs, the GPU hours and the LLM dollars the
-specialists and the scheduler itself spent so far, and what is known of each running branch's specialist (given up,
-stopped because its judging failed, its heartbeat lost
-again and again), which explore tests each branch has queued and which native builds its tests wait for, and decides
+commits fail to merge, whether a profile of the integration head runs, the GPU hours (tests' GPU time plus card
+time any lease holds) and the LLM dollars the specialists and the scheduler itself spent so far, and what is known
+of each running branch's specialist (given up, stopped because its judging failed, its heartbeat lost again and
+again), which explore tests each branch has queued and which native builds its tests wait for, and decides
 what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
@@ -117,10 +117,10 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 @dataclass(frozen=True)
 class ExploreWindow:
     """The commit every gain is measured against, the commit the first branches start from, the roofline ceiling, the
-    clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests may use
-    before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no limit, for
-    either), the upper bound of the GPU seconds the PRELUDE child used, which no limit counts, and the directions the
-    user wrote, one user branch each.
+    clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
+    leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
+    limit, for either), the upper bound of the GPU seconds the PRELUDE child used, which no limit counts, and the
+    directions the user wrote, one user branch each.
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
     the root, or the Recipe KB champion PRELUDE replayed onto it.
@@ -163,10 +163,11 @@ class Steering:
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
-    """The GPU seconds the session's tests used: every test of every branch that has a result, the integration
-    branch's baseline on the root included; a test withdrawn before its result counts none."""
+    """The GPU seconds the session used: its tests' GPU time plus the card time any lease holds outside them, read
+    from the same progress. Every test of every branch that has a result counts, the integration branch's baseline on
+    the root included, and a test withdrawn before its result counts none; an open lease counts up to the reading."""
 
-    return sum(row.gpu_seconds for row in progress)
+    return sum(row.gpu_seconds + row.held_card_seconds for row in progress)
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -273,7 +274,8 @@ class Explorer:
         return SessionStopReason.TIME_EXHAUSTED
 
     async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:
-        """The budget the session used up, if any: the GPU seconds EXPLORE has, then the session's LLM dollars.
+        """The budget the session used up, if any: the GPU seconds EXPLORE has, tests' and leases' alike, then the
+        session's LLM dollars.
         Reads the notebook's own progress: a frontier-scored read appends a round to the frontier log."""
 
         gpu_limited = window.explore_gpu_seconds != math.inf
