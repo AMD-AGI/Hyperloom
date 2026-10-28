@@ -139,18 +139,20 @@ def test_a_child_whose_roofline_captures_all_failed_left_no_profile(tmp_path: Pa
     assert read_prelude(session).profile is None
 
 
-def test_without_a_roofline_snapshot_the_baseline_arm_ceiling_is_read(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("peaks", "ceiling"), [((1.0, ROOFLINE_PEAK, 0.0, None), {GRADED_OUTPUT: ROOFLINE_PEAK}), ((0.0, None), {})]
+)
+def test_the_ceiling_is_the_latest_snapshot_that_has_one(
+    tmp_path: Path, peaks: tuple[float | None, ...], ceiling: dict[str, float]
+) -> None:
     state = {
         "schema_version": MB_LATEST_STATE_SCHEMA_VERSION,
         "stop_reason": COMPLETED_STOP_REASON,
         "baseline_tput": BASELINE_TPUT,
-        "roofline_snapshots": [{"theoretical_peak_tok_per_sec": 0.0}],
-        "baseline_roofline_ceiling": {"theoretical_peak_tok_per_sec": ROOFLINE_PEAK, "ceiling_arm": "baseline"},
+        "roofline_snapshots": [{"theoretical_peak_tok_per_sec": peak} for peak in peaks],
     }
 
-    artifacts = read_prelude(write_child_session(tmp_path / "child", state))
-
-    assert artifacts.roofline_ceiling == {GRADED_OUTPUT: ROOFLINE_PEAK}
+    assert read_prelude(write_child_session(tmp_path / "child", state)).roofline_ceiling == ceiling
 
 
 @pytest.mark.parametrize("stop_reason", ["baseline_arg_error", "time_exhausted_during_prelude", COMPLETED_STOP_REASON])

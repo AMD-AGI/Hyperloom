@@ -160,7 +160,7 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
     return PreludeArtifacts(
         session_dir=session_dir,
         framework_root=_checkout(str(state.get("framework_repo_path") or "")),
-        roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
+        roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots")),
         profile=_latest_profile(session_dir),
         baseline_run=baseline_run,
         baseline_run_refusal=refusal,
@@ -317,14 +317,13 @@ def _number(value: object, what: str) -> float:
     return float(value)
 
 
-def _roofline_ceiling(snapshots: object, baseline_ceiling: object) -> Mapping[str, float]:
-    """The latest snapshot's decode ceiling, else the baseline-arm ceiling, as a bound on output throughput.
+def _roofline_ceiling(snapshots: object) -> Mapping[str, float]:
+    """The decode ceiling of the latest snapshot that has one, as a bound on output throughput; empty when none has.
 
-    The main flow keeps the newest snapshot last, and records the baseline-arm ceiling as the backup for a run whose
-    profiling wrote no snapshot (src/hyperloom/orchestrator/state/shared_state.py ``record_baseline_roofline_ceiling``).
+    The main flow keeps the newest snapshot last.
     """
 
-    for snapshot in (*reversed(_snapshot_list(snapshots)), _mapping(baseline_ceiling, "baseline_roofline_ceiling")):
+    for snapshot in reversed(_snapshot_list(snapshots)):
         peak = snapshot.get(MB_ROOFLINE_PEAK_KEY) if isinstance(snapshot, Mapping) else None
         if isinstance(peak, (int, float)) and not isinstance(peak, bool) and peak > 0:
             return {GRADED_OUTPUT: float(peak)}
