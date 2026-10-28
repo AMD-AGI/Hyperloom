@@ -8,16 +8,11 @@ import pytest
 from hyperloom.common.gain_math import ACCURACY_METRICS, AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.long_context import (
-    LONG_CONTEXT_COMPLETE,
-    LONG_CONTEXT_INCOMPLETE,
-    PROMPT_ERROR,
-    PROMPT_OK,
-    LongContextPrompt,
     LongContextResult,
     LongContextRoot,
-    LongContextTask,
 )
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue
+from hyperloom.contracts.tests.long_context_checks import long_context_check
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
@@ -107,34 +102,7 @@ ROOT = LongContextRoot(SHA, ("b0", "b1", "b2"), 64, 64, 1.0, 0.94, 1.0)
 
 def _long_context(passed, *, root=ROOT, sha=SHA, errored=0, n=64) -> LongContextResult:
     """A check of ``n`` prompts, the first ``passed`` passed and the last ``errored`` not answered."""
-    prompts = tuple(
-        LongContextPrompt(
-            f"p-{index}",
-            TASK,
-            PROMPT_ERROR if index >= n - errored else PROMPT_OK,
-            index < passed,
-            0 if index >= n - errored else 2000,
-            1.0,
-        )
-        for index in range(n)
-    )
-    return LongContextResult(
-        status=LONG_CONTEXT_INCOMPLETE if errored else LONG_CONTEXT_COMPLETE,
-        reason=f"{errored} of {n} prompts were not answered" if errored else "",
-        prompt_set_sha256=sha,
-        length=2048,
-        max_new_tokens=128,
-        concurrency=4,
-        served_context=4096,
-        n=n,
-        passed=passed,
-        score=passed / n,
-        tasks=(LongContextTask(TASK, n, passed, passed / n),),
-        prompts=prompts,
-        seconds=10.0,
-        prefill_tokens=2000 * (n - errored),
-        root=root,
-    )
+    return long_context_check(n, passed, errored=errored, sha=sha, root=root)
 
 
 @pytest.mark.parametrize(

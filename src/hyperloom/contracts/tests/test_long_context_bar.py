@@ -14,20 +14,15 @@ import json
 import pytest
 
 from hyperloom.contracts.long_context import (
-    LONG_CONTEXT_COMPLETE,
-    LONG_CONTEXT_INCOMPLETE,
     NOISE_SHARE,
-    PROMPT_ERROR,
-    PROMPT_OK,
-    LongContextPrompt,
     LongContextResult,
     LongContextRoot,
-    LongContextTask,
     refuses,
     root_reading,
     wilson_interval,
 )
 from hyperloom.contracts.measurement import MeasurementError, TestResult, Validity
+from hyperloom.contracts.tests.long_context_checks import long_context_check
 
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
@@ -35,34 +30,7 @@ TASK = "niah_single"
 
 
 def _check(n: int, passed: int, *, errored: int = 0, sha: str = SHA) -> LongContextResult:
-    """A check of ``n`` prompts, the first ``passed`` of them passed and the last ``errored`` of them not answered."""
-    prompts = tuple(
-        LongContextPrompt(
-            f"p-{index}",
-            TASK,
-            PROMPT_ERROR if index >= n - errored else PROMPT_OK,
-            index < passed,
-            0 if index >= n - errored else 2000,
-            1.0,
-        )
-        for index in range(n)
-    )
-    return LongContextResult(
-        status=LONG_CONTEXT_INCOMPLETE if errored else LONG_CONTEXT_COMPLETE,
-        reason=f"{errored} of {n} prompts were not answered" if errored else "",
-        prompt_set_sha256=sha,
-        length=2048,
-        max_new_tokens=128,
-        concurrency=4,
-        served_context=4096,
-        n=n,
-        passed=passed,
-        score=passed / n,
-        tasks=(LongContextTask(TASK, n, passed, passed / n),),
-        prompts=prompts,
-        seconds=10.0,
-        prefill_tokens=2000 * (n - errored),
-    )
+    return long_context_check(n, passed, errored=errored, sha=sha)
 
 
 def _root(*passed: int, n: int = 64) -> LongContextRoot:
