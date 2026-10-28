@@ -132,3 +132,16 @@ def test_the_rendering_names_what_to_fold_into_and_what_cannot(tmp_path):
 def test_nothing_renders_without_candidates():
     assert fl.render_foldable_launches({}) == []
     assert fl.render_foldable_launches(None) == []
+
+
+def test_a_collective_stage_is_not_a_launch_to_fold(tmp_path):
+    """GLM-5.3: the allreduce's second-stage rmsnorm ranked second in every VERIFY class; its time is the collective's."""
+    events = [
+        step("step[VERIFY bs=2]", 0.0, 2000.0),
+        *_chain(1.0, 20, ("gemm_a", "void aiter::local_device_load_rmsnorm<__hip_bfloat16, 4>", "gemm_b")),
+        *_chain(1000.0, 20, ("gemm_c", "dynamic_per_group_scaled_quant_kernel", "gemm_d")),
+    ]
+
+    named = [r["kernel"] for r in fl.foldable_launches(write_trace(tmp_path / "t.json", events))["VERIFY bs=2"]]
+
+    assert named == ["dynamic_per_group_scaled_quant_kernel"]

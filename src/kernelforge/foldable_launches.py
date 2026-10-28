@@ -96,12 +96,14 @@ def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -
     for name, launches in counts.items():
         per_step = launches / steps
         mean_us = totals[name] / launches
-        if mean_us > MAX_GLUE_US or per_step < MIN_LAUNCHES_PER_STEP:
+        category = categorize_kernel_name(name)
+        # A collective's time is the transfer and the wait for the other ranks, not a launch.
+        if mean_us > MAX_GLUE_US or per_step < MIN_LAUNCHES_PER_STEP or category == "collective":
             continue
         rows.append(
             {
                 "kernel": name,
-                "category": categorize_kernel_name(name),
+                "category": category,
                 "launches_per_step": round(per_step, 1),
                 "us_per_call": round(mean_us, 2),
                 "ms_per_step": round(totals[name] / steps / 1000.0, _REPORTED_PLACES),
