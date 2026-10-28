@@ -113,6 +113,9 @@ class ActionMetadata:
     lease_ttl_sec: int
     description: str
     requires_lanes: tuple[str, ...] = ()
+    #: For an action that runs until its grant runs out: how many of the session's measured benchmark rounds the least
+    #: useful run needs. Once a round is measured, the action is admitted on those rather than its catalogue runtime.
+    admission_rounds: int = 0
 
 
 ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
@@ -141,6 +144,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=30.0,
             lease_ttl_sec=9000,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
+            # One pair: the anchor rung on each arm.
+            admission_rounds=2,
             description=(
                 "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. "
                 "On by default, off under AgentX; force with --enable-conc-sweep / --no-enable-conc-sweep; "
