@@ -303,8 +303,43 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
     )
 )
 
+# Env names the launcher or the server process puts in the environment itself: rank/world topology a distributed
+# launch assigns per process. Nothing a round declares can own one — the launch overwrites it per rank — so a patch
+# reading one is reading the launch's own state, not arming a switch.
+LAUNCH_PROVIDED_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "GROUP_RANK",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "NODE_RANK",
+        "RANK",
+        "ROLE_RANK",
+        "WORLD_SIZE",
+    }
+)
+
+# Prefixes of the same kind: everything a job scheduler or an elastic launch exports around the process it starts.
+LAUNCH_PROVIDED_ENV_PREFIXES: tuple[str, ...] = (
+    "OMPI_",
+    "PMIX_",
+    "PMI_",
+    "SLURM_",
+    "TORCHELASTIC_",
+)
+
 # Env names a per-variant override may never set.
 BLOCKED_VARIANT_ENV_NAMES: frozenset[str] = BLOCKED_UNTRUSTED_ENV_NAMES | BENCHMARK_SECRET_ENV_NAMES
+
+
+def is_launch_provided_env_name(key: object) -> bool:
+    """True when the launch or the server process supplies this name, so no round can arm it."""
+    upper = str(key or "").strip().upper()
+    if upper in LAUNCH_PROVIDED_ENV_NAMES:
+        return True
+    return upper.startswith(LAUNCH_PROVIDED_ENV_PREFIXES)
+
 
 # Credential-shaped name fragments, so an unlisted secret cannot be persisted into a session YAML by name alone.
 _SECRET_NAME_FRAGMENTS: tuple[str, ...] = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
@@ -778,6 +813,8 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "FILE_REFERENCING_ENV_PREFIXES",
+    "LAUNCH_PROVIDED_ENV_NAMES",
+    "LAUNCH_PROVIDED_ENV_PREFIXES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",
@@ -786,6 +823,7 @@ __all__ = [
     "is_allowed_external_env_key",
     "is_allowed_kernel_agent_env_key",
     "is_allowed_variant_env_key",
+    "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",
     "operator_extra_env",
