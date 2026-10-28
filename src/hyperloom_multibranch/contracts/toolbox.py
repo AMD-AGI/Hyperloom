@@ -27,6 +27,7 @@ from typing import Literal, Protocol
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import NodeHealth, TestRecordSink
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 
 
 class ToolboxError(Exception):
@@ -231,6 +232,17 @@ class MeasurementCapacity:
 
 
 @dataclass(frozen=True)
+class LeaseCharge:
+    """What a lease's cards are for and who pays for them: the blackboard records every lease with its ``kind``, a tool
+    job's ``tool``, and the ``branch`` its card time is charged to (the holder's own branch, or the branch that submitted
+    a tool's job)."""
+
+    kind: LeaseKind
+    branch: str
+    tool: str = ""
+
+
+@dataclass(frozen=True)
 class BranchLease:
     """What a branch's sandbox holds from ``RealToolbox.lease_branch_sandbox`` until ``release_branch_sandbox``.
 
@@ -338,6 +350,7 @@ __all__ = [
     "REJECTION_CODES",
     "Backpressure",
     "BranchLease",
+    "LeaseCharge",
     "BuildState",
     "BuildStatus",
     "CancelOutcome",

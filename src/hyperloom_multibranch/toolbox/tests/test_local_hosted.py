@@ -43,7 +43,7 @@ from hyperloom_multibranch.toolbox.local_hosted import (
 )
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
 
@@ -259,7 +259,7 @@ async def test_every_test_of_the_session_reads_private_copies_of_the_tables_the_
 async def test_a_session_that_names_a_rule_pack_gives_its_sandboxes_a_staged_copy_and_one_that_does_not_gives_none(
     tmp_path: Path, reading_pack
 ) -> None:
-    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = lineage_blackboard(tmp_path / "blackboard", ("branch-named", "branch-reference"))
     named = other_pack(tmp_path)
     for pack, session in ((named, tmp_path / "named"), (None, tmp_path / "reference")):
         reading_pack(pack)

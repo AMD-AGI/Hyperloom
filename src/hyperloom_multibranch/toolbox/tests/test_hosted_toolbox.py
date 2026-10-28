@@ -55,8 +55,9 @@ from hyperloom.sandbox.tests.e2b_standin import (
     unavailable_reason,
 )
 from hyperloom_multibranch.contracts.blackboard import Role as BlackboardRole, Writer
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, GrantLimits, LeaseTuning
 from hyperloom_multibranch.toolbox.hosted_toolbox import (
@@ -68,7 +69,7 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import (
     parallel_tests_for,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL
@@ -245,7 +246,7 @@ def _toolbox(
     )
     return build_hosted_toolbox(
         _inputs(service, tmp_path, **changed),
-        LocalBlackboard(tmp_path / "blackboard", Writer(BlackboardRole.TOOLBOX, "toolbox")),
+        lineage_blackboard(tmp_path / "blackboard"),
         AcceptanceSetup(FakeRepo(), PointPlanner(point), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path),
         options=options,
@@ -747,6 +748,32 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
         assert service.running("dev") == []
     finally:
         await toolbox.close()
+
+
+async def test_a_lease_is_recorded_as_its_sandbox_from_the_grant_to_one_return_and_the_close_ends_one_left_open(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, tp=2)
+    reader = LocalBlackboard(tmp_path / "blackboard", Writer(BlackboardRole.SCHEDULER, "scheduler"))
+    try:
+        await toolbox.start()
+        lease = await toolbox.lease_branch_sandbox("b1", 2)
+        await toolbox.lease_branch_sandbox("b02", 2)
+        await toolbox.release_branch_sandbox(lease.lease_id)
+        released = time.time()
+    finally:
+        await toolbox.close()
+
+    released_hold, kept_hold = await reader.card_holds()
+    start = released_hold.start
+    assert (start.holder, start.branch_id, start.kind, start.cards, start.gpu_ids) == ("b1", "b1", LeaseKind.DEV, 2, ())
+    assert start.sandbox_id == lease.sandbox.sandbox_id  # type: ignore[attr-defined]
+    (back,) = set(released_hold.returned.values())
+    assert sorted(released_hold.returned) == [0, 1] and back <= released, "the sandbox's cards go back at once"
+    assert released_hold.end_reason is LeaseEndReason.RELEASED
+    assert kept_hold.end_reason is LeaseEndReason.SESSION_CLOSE and min(kept_hold.returned.values()) >= released
+    (row,) = [row for row in await reader.progress() if row.branch == "b1"]
+    assert row.held_card_seconds == pytest.approx(2 * (back - start.started_at))
 
 
 async def test_a_release_starts_the_test_the_cards_let_run_without_waiting_for_another_test_to_end(

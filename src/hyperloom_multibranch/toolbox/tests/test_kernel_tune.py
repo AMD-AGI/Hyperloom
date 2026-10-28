@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.sandbox.card_occupancy import CardGuard, Holder
+from hyperloom_multibranch.contracts.blackboard.records import CardHold
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.tests.helpers import req
@@ -277,6 +280,27 @@ async def test_a_branch_that_holds_a_sandbox_lease_may_run_the_tool_too_and_both
     rig.forge.release.set()
     await rig.finished(job)
     assert await rig.box.measurement_capacity() == MeasurementCapacity(4, 4, leased_cards=1)
+    dev, tool = await _closed_tool_hold(rig)
+    assert (dev.start.holder, dev.start.branch_id, dev.start.kind, dev.closed) == ("b1", "b1", LeaseKind.DEV, False)
+    assert tool.start.holder.startswith("tool:") and tool.start.holder != "b1"
+    assert (tool.start.branch_id, tool.start.kind, tool.start.tool, tool.start.cards) == (
+        "b1",
+        LeaseKind.TOOL_JOB,
+        KERNEL_TUNE_TOOL,
+        1,
+    ), "the job's card is charged to the branch that submitted it"
+    assert tool.end_reason is LeaseEndReason.RELEASED
+
+
+async def _closed_tool_hold(rig: Rig) -> tuple[CardHold, CardHold]:
+    """The branch's own lease and the tool job's, once the job's card is recorded back."""
+    deadline = time.monotonic() + 10.0
+    while True:
+        holds = await rig.blackboard.card_holds()
+        if len(holds) == 2 and holds[1].closed:
+            return holds[0], holds[1]
+        assert time.monotonic() < deadline, holds
+        await asyncio.sleep(0.02)
 
 
 # --- what the tuner is asked, and what it answers -----------------------------------------------------------------

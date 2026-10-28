@@ -37,7 +37,9 @@ from hyperloom.sandbox.card_occupancy import CardReading, read_listed
 from hyperloom.sandbox.gated_pool import CardsHeld
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.socket import SandboxUnavailable
-from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.records import LeaseStart
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, MeasurementCapacity, RequestRejected
+from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 
 __all__ = [
     "BranchLeases",
@@ -83,6 +85,7 @@ class BranchLeases:
     so a lease and its release may race from any task or thread: a lease's cards go back exactly once. ``on_release`` is
     called after cards went back (on the thread that released, or on the one that waited for them to be freed), so the
     toolbox can start the tests they now let run. ``drain`` says how a released lease's cards are waited on.
+    ``ledger`` records each grant and each return of cards in the blackboard; the toolbox gives it its own.
     """
 
     def __init__(
@@ -108,6 +111,7 @@ class BranchLeases:
         self._held_out: set[int] = set()
         self._stopped = threading.Event()
         self._unread = ""
+        self.ledger = LeaseLedger()
 
     def capacity(self) -> MeasurementCapacity:
         """The provider's cards, less the ones lost for good, with the promised ones counted as leased."""
@@ -140,12 +144,19 @@ class BranchLeases:
             self._check(cards)
 
     async def lease(
-        self, holder: str, cards: int, root: Path | None = None, *, wait_sec: float | None = None
+        self,
+        holder: str,
+        cards: int,
+        root: Path | None = None,
+        *,
+        charge: LeaseCharge,
+        wait_sec: float | None = None,
     ) -> BranchLease:
         """Hold ``cards`` cards and a working directory for ``holder``, waiting for running tests to give cards back.
 
         ``holder`` is the branch whose agent the cards are for, or ``tool:<job id>`` for a tool job; the lease says it as
-        its ``branch_id``. ``root`` is the directory the lease works in, made if it is not there; one of its own below
+        its ``branch_id``. ``charge`` goes into the blackboard's record of the grant, which is written before the lease is
+        returned. ``root`` is the directory the lease works in, made if it is not there; one of its own below
         the area when omitted. ``wait_sec`` bounds the wait for cards (:func:`lease_wait`): ``None`` is
         :data:`LEASE_WAIT_SECONDS`, ``0`` takes only cards that are free now.
 
@@ -154,6 +165,8 @@ class BranchLeases:
                 fewer than one test's cards would be left, ``invalid_request`` for fewer than one card or a
                 ``wait_sec`` that is negative or not a number.
             SandboxUnavailable: When the cards were not free within the wait or the toolbox closed.
+            RequestRejected, SandboxUnavailable: When the blackboard did not record the grant (see
+                :class:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger`); the cards go back.
         """
 
         wait = lease_wait(wait_sec, LEASE_WAIT_SECONDS)
@@ -161,7 +174,19 @@ class BranchLeases:
         gpu_ids: tuple[int, ...] = ()
         try:
             gpu_ids = await self._take(cards, wait)
-            return self._grant(holder, gpu_ids, root)
+            lease = self._grant(holder, gpu_ids, root)
+            start = LeaseStart(
+                lease_id=lease.lease_id,
+                holder=holder,
+                branch_id=charge.branch,
+                kind=charge.kind,
+                cards=cards,
+                started_at=self.ledger.clock(),
+                tool=charge.tool,
+                gpu_ids=gpu_ids,
+            )
+            await self._recorded(start)
+            return lease
         except BaseException:
             self._forget(holder, gpu_ids)
             raise
@@ -178,7 +203,7 @@ class BranchLeases:
             del self._promised[lease.branch_id]
             self._held_out.update(lease.gpu_ids)
         busy = self._busy(lease.gpu_ids)
-        self._give_back([card for card in lease.gpu_ids if card not in busy])
+        self._give_back(lease_id, [card for card in lease.gpu_ids if card not in busy])
         if busy:
             name = f"hl-lease-drain-{lease_id}"
             threading.Thread(target=self._drain, args=(lease_id, busy), name=name, daemon=True).start()
@@ -237,6 +262,16 @@ class BranchLeases:
         reason = "the toolbox is closing" if self._closed else f"not freed within {wait:g} s{held}"
         raise SandboxUnavailable(f"no {cards} cards for the branch sandbox lease: {reason}")
 
+    async def _recorded(self, start: LeaseStart) -> None:
+        """Record ``start``; a lease the blackboard did not record is withdrawn, its cards left to the caller."""
+
+        try:
+            await self.ledger.started(start)
+        except BaseException:
+            with self._guard:
+                self._granted.pop(start.lease_id, None)
+            raise
+
     def _grant(self, holder: str, gpu_ids: tuple[int, ...], root: Path | None) -> BranchLease:
         lease_id = f"lease-{uuid.uuid4().hex[:12]}"
         directory = self._area / lease_id if root is None else root
@@ -267,14 +302,16 @@ class BranchLeases:
                 busy.setdefault(holder.card, []).append(f"kernel id {holder.pid} with {holder.vram / _GIB:.1f} GiB")
         return {card: ", ".join(held) for card, held in busy.items()}
 
-    def _give_back(self, cards: Sequence[int]) -> None:
-        """Put ``cards``, held out since their lease's release, back in the pool and tell the toolbox."""
+    def _give_back(self, lease_id: str, cards: Sequence[int]) -> None:
+        """Put ``cards`` of ``lease_id``, held out since its release, back in the pool, record their return and tell
+        the toolbox."""
 
         if not cards:
             return
         with self._guard:
             self._held_out.difference_update(cards)
             self._provider.pool.release(cards)
+        self.ledger.returned(lease_id, cards)
         self.on_release()
 
     def _drain(self, lease_id: str, busy: dict[int, str]) -> None:
@@ -286,7 +323,7 @@ class BranchLeases:
         while busy and not self._stopped.wait(self._recheck_sec if kept_out else min(_DRAIN_STEP_SEC, self._drain_sec)):
             still = self._busy(tuple(busy))
             freed = [card for card in busy if card not in still]
-            self._give_back(freed)
+            self._give_back(lease_id, freed)
             if freed and kept_out:
                 logger.info("cards %s of lease %s are free again and back in the pool", freed, lease_id)
             busy = still

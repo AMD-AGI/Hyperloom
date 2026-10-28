@@ -41,6 +41,15 @@ def test_every_lease_takes_wait_sec_as_a_keyword_that_defaults_to_the_bounded_wa
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is None
 
 
+@pytest.mark.parametrize("lease", _LEASES, ids=lambda lease: lease.__qualname__)
+def test_every_lease_takes_what_it_is_charged_as_as_a_keyword(lease: Callable[..., Any]) -> None:
+    """A lease class is told what to record; the toolbox's entry point records the holder's own dev lease unless told."""
+    parameter = inspect.signature(lease).parameters["charge"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    default = None if lease.__name__ == "lease_branch_sandbox" else inspect.Parameter.empty
+    assert parameter.default is default
+
+
 def _real_without_cards(tmp_path: Path) -> RealToolbox:
     return build(tmp_path).toolbox
 

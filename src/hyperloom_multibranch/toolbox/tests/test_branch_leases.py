@@ -21,14 +21,14 @@ import pytest
 import pytest_asyncio
 
 from hyperloom.measure.tests.hosted_fixtures import point_yaml, runner_template, spec_context
-from hyperloom.sandbox.card_occupancy import CardGuard, Holder, read_holders
+from hyperloom.sandbox.card_occupancy import CardGuard, Holder, read_holders, read_listed
 from hyperloom.sandbox.socket import SandboxUnavailable
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected, WorkloadKind
-from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import branch_leases, local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, lineage_blackboard, req
 from hyperloom_multibranch.toolbox.tests.card_list import INTRUDER, CardList
 from hyperloom_multibranch.toolbox.tests.test_card_placement import (
     FAST,
@@ -41,12 +41,14 @@ from hyperloom_multibranch.toolbox.tests.test_card_placement import (
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
 Make = Callable[..., Any]
+_TOOLBOX = Writer(Role.TOOLBOX, "toolbox")
 
 
 @pytest_asyncio.fixture
 async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """``make(cards=2, tp=1, runner_envs=None, **branches)``: a started local toolbox whose test of branch ``name``
-    behaves as ``branches[name]`` (``SLOW``, ``HANG`` or ``FAST``)."""
+    behaves as ``branches[name]`` (``SLOW``, ``HANG`` or ``FAST``); ``card_memory`` is what a released lease's cards are
+    read for, ``blackboard`` the directory of an earlier toolbox's blackboard to start on (a restart)."""
 
     def fake_runner(name: str, *, gpus: int, python: str, envs: Any) -> Any:
         from dataclasses import replace
@@ -65,6 +67,8 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         runner_envs: dict[str, str] | None = None,
         card_holders: Callable[..., Any] = read_holders,
         card_guard: CardGuard | None = None,
+        card_memory: Callable[..., Any] = read_listed,
+        blackboard: Path | None = None,
         **branches: str,
     ) -> Any:
         session = tmp_path / f"session-{len(made)}"
@@ -75,11 +79,15 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         }
         toolbox = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
-            LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox")),
+            lineage_blackboard(session / "blackboard") if blackboard is None else LocalBlackboard(blackboard, _TOOLBOX),
             AcceptanceSetup(FakeRepo(), _PointPerBranch(points), IMAGE, WorkloadKind.AGENTX),
             spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
-                poll_interval_sec=0.05, runner_envs=runner_envs, card_holders=card_holders, card_guard=card_guard
+                poll_interval_sec=0.05,
+                runner_envs=runner_envs,
+                card_holders=card_holders,
+                card_guard=card_guard,
+                card_memory=card_memory,
             ),
         )
         made.append(toolbox)

@@ -20,8 +20,10 @@ from typing import Protocol
 from hyperloom.measure.archive import DirResultArchive, ResultArchive
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.sandbox.socket import SandboxProvider
-from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, MeasurementCapacity
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext
@@ -51,12 +53,15 @@ class LeaseBook(Protocol):
     """The leases of a toolbox's cards, as the toolbox reads them; both backends' lease classes fit."""
 
     on_release: Callable[[], None]
+    ledger: LeaseLedger
 
     def capacity(self) -> MeasurementCapacity: ...
 
     def tests_at_once(self) -> int: ...
 
-    async def lease(self, holder: str, cards: int, /, *, wait_sec: float | None = None) -> BranchLease: ...
+    async def lease(
+        self, holder: str, cards: int, /, *, charge: LeaseCharge, wait_sec: float | None = None
+    ) -> BranchLease: ...
 
     def close(self) -> None: ...
 
@@ -65,11 +70,14 @@ class LeasedToolbox(RealToolbox):
     """A :class:`RealToolbox` whose measurement cards are what its ``leases`` leave.
 
     ``leases`` is ``None`` for a toolbox that cannot count its cards: its capacity is then unknown, nothing is leased
-    (the interface's own refusal) and tests are bounded only by the queue policy.
+    (the interface's own refusal) and tests are bounded only by the queue policy. Either way the start ends the leases
+    an earlier toolbox left open in the blackboard, and the close those this one still holds
+    (:class:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger`).
     """
 
     leases: LeaseBook | None = None
     _loop: asyncio.AbstractEventLoop | None = None
+    _ledger: LeaseLedger | None = None
 
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The cards the leases count, with the cards leased to branch sandboxes in ``leased_cards``."""
@@ -78,18 +86,28 @@ class LeasedToolbox(RealToolbox):
             return await super().measurement_capacity()
         return self.leases.capacity()
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+    ) -> BranchLease:
         """Take ``cards`` cards for ``branch_id``'s agent, waiting for running tests to give them back."""
 
         if self.leases is None:
-            return await super().lease_branch_sandbox(branch_id, cards, wait_sec=wait_sec)
-        return await self.leases.lease(branch_id, cards, wait_sec=wait_sec)
+            return await super().lease_branch_sandbox(branch_id, cards, wait_sec=wait_sec, charge=charge)
+        charge = charge or LeaseCharge(LeaseKind.DEV, branch_id)
+        return await self.leases.lease(branch_id, cards, charge=charge, wait_sec=wait_sec)
 
     def attach_leases(self, leases: LeaseBook) -> None:
-        """Take ``leases`` as the leases on the toolbox's cards: the tests the cards they give back let run start."""
+        """Take ``leases`` as the leases on the toolbox's cards: the tests the cards they give back let run start, and
+        the blackboard records their grants and returns."""
 
         self.leases = leases
         leases.on_release = self._pump_soon
+        leases.ledger = self._lease_ledger()
+
+    def _lease_ledger(self) -> LeaseLedger:
+        if self._ledger is None:
+            self._ledger = LeaseLedger(self._lease_sink, self._clock)
+        return self._ledger
 
     def _pump_soon(self) -> None:
         """Start what the cards just given back let run, on the toolbox's loop; safe from any thread, and nothing before
@@ -104,7 +122,17 @@ class LeasedToolbox(RealToolbox):
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
+        ledger = self._lease_ledger()
+        ledger.bind(self._loop)
+        await ledger.recover()
         await super().start()
+
+    async def close(self) -> None:
+        """Close as :class:`RealToolbox` does, then end in the blackboard every lease still out, before the backend gives
+        the cards back."""
+
+        await super().close()
+        await self._lease_ledger().close()
 
 
 def capped_policy(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
@@ -177,6 +205,7 @@ def session_stores(
         short_prompt_pool=ShortPromptPool(directory / POOL_FILE),
         sink=blackboard,  # type: ignore[arg-type]
         health=blackboard,  # type: ignore[arg-type]
+        leases=blackboard,
         claims=blackboard,  # type: ignore[arg-type]
         records=blackboard,  # type: ignore[arg-type]
         builds=builds,

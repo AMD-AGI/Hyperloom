@@ -34,6 +34,8 @@ from hyperloom.sandbox.socket import (
     SandboxUnavailable,
 )
 from hyperloom.sandbox.tests.e2b_standin import ENVD_ENV, StandIn, StandInTemplate, unavailable_reason
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import LeaseCharge
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, BranchLease, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.hosted_leases import (
     LEASE_PURPOSE,
@@ -151,7 +153,7 @@ async def _until(condition: Callable[[], bool], what: str, seconds: float = 15.0
 
 async def test_the_lease_is_a_dev_sandbox_of_the_sessions_cards(make: Make) -> None:
     hosted = make(tp=4)
-    lease = await hosted.leases.lease("b02", 4)
+    lease = await hosted.leases.lease("b02", 4, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert isinstance(lease, BranchLease)
     assert (lease.branch_id, lease.gpu_ids, lease.root, dict(lease.env)) == ("b02", (0, 1, 2, 3), Path("/app/work"), {})
     assert lease.template == _BY_CARDS[4] and lease.remaining_cards == 4
@@ -168,7 +170,7 @@ def test_the_default_working_directory_of_a_lease_is_the_one_under_the_envd_file
 
 
 async def test_the_lease_hands_over_a_sandbox_that_runs_commands_and_holds_files(make: Make) -> None:
-    lease = await make().leases.lease("b02", 2)
+    lease = await make().leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert lease.sandbox.run("echo hello").stdout == "hello\n"
     lease.sandbox.write_file(f"{lease.root}/note.txt", b"data")
     assert lease.sandbox.read_file(f"{lease.root}/note.txt") == b"data"
@@ -181,7 +183,7 @@ async def test_the_lease_hands_over_a_sandbox_that_runs_commands_and_holds_files
 async def test_a_lease_has_the_sessions_cards_and_nothing_is_created_for_another_number(make: Make, asked: int) -> None:
     hosted = make(tp=2)
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b02", asked)
+        await hosted.leases.lease("b02", asked, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert refused.value.code == "invalid_request" and "invalid_request" in REJECTION_CODES
     assert hosted.provider.creates == [] and hosted.running() == []
     assert hosted.leases.capacity().leased_cards == 0
@@ -193,7 +195,7 @@ async def test_a_lease_has_the_sessions_cards_and_nothing_is_created_for_another
 async def test_a_lease_counts_as_leased_cards_and_release_gives_them_back_and_ends_the_sandbox(make: Make) -> None:
     hosted = make(gpus=8, tp=2)
     assert hosted.leases.tests_at_once() == 4
-    lease = await hosted.leases.lease("b02", 2)
+    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert hosted.leases.capacity() == MeasurementCapacity(8, 8, leased_cards=2)
     assert lease.remaining_cards == 6 and hosted.leases.tests_at_once() == 3
     await hosted.leases.release(lease.lease_id)
@@ -202,12 +204,14 @@ async def test_a_lease_counts_as_leased_cards_and_release_gives_them_back_and_en
         lease.sandbox.info()
     await hosted.leases.release(lease.lease_id)
     await hosted.leases.release("a lease that never was")
-    assert (await hosted.leases.lease("b02", 2)).sandbox.sandbox_id != lease.sandbox.sandbox_id
+    assert (
+        await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    ).sandbox.sandbox_id != lease.sandbox.sandbox_id
 
 
 async def test_two_releases_at_once_end_the_sandbox_once(make: Make) -> None:
     hosted = make()
-    lease = await hosted.leases.lease("b02", 2)
+    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     ended: list[str] = []
     kill = lease.sandbox.kill
 
@@ -223,9 +227,9 @@ async def test_two_releases_at_once_end_the_sandbox_once(make: Make) -> None:
 
 async def test_a_branch_that_holds_a_lease_cannot_take_a_second(make: Make) -> None:
     hosted = make(gpus=8)
-    await hosted.leases.lease("b02", 2)
+    await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b02", 2)
+        await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert refused.value.code == "lease_exists" and "lease_exists" in REJECTION_CODES
     assert len(hosted.running()) == 1 and hosted.leases.capacity().leased_cards == 2
 
@@ -234,37 +238,39 @@ async def test_a_lease_that_would_leave_less_than_one_test_needs_is_refused_befo
     make: Make,
 ) -> None:
     hosted = make(gpus=4, tp=2)
-    first = await hosted.leases.lease("b02", 2)
+    first = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b03", 2)
+        await hosted.leases.lease("b03", 2, charge=LeaseCharge(LeaseKind.DEV, "b03"))
     assert refused.value.code == "lease_leaves_no_measurement" and "lease_leaves_no_measurement" in REJECTION_CODES
     assert len(hosted.provider.creates) == 1 and hosted.leases.capacity().leased_cards == 2
     await hosted.leases.release(first.lease_id)
-    assert (await hosted.leases.lease("b03", 2)).remaining_cards == 2
+    assert (await hosted.leases.lease("b03", 2, charge=LeaseCharge(LeaseKind.DEV, "b03"))).remaining_cards == 2
 
 
 async def test_a_lease_that_would_leave_no_sandbox_for_a_test_is_refused(make: Make) -> None:
     hosted = make(gpus=8, tp=1, sandboxes=1)
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b02", 1)
+        await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert refused.value.code == "lease_leaves_no_measurement" and hosted.provider.creates == []
     hosted = make(gpus=8, tp=1, sandboxes=3)
-    await hosted.leases.lease("b02", 1)
+    await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert hosted.leases.tests_at_once() == 2
-    await hosted.leases.lease("b03", 1)
+    await hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03"))
     assert hosted.leases.tests_at_once() == 1
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b04", 1)
+        await hosted.leases.lease("b04", 1, charge=LeaseCharge(LeaseKind.DEV, "b04"))
     assert refused.value.code == "lease_leaves_no_measurement"
 
 
 async def test_the_sandbox_lives_no_longer_than_the_grants_runtime(make: Make) -> None:
     hosted = make(tuning=LeaseTuning(lifetime_sec=10_000, first_backoff_sec=0.02))
-    lease = await hosted.leases.lease("b02", 2)
+    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     box = hosted.standin.plane.lookup(lease.sandbox.sandbox_id)
     assert box is not None and box.timeout_sec == 600
     hosted = make(tuning=LeaseTuning(lifetime_sec=120, first_backoff_sec=0.02))
-    box = hosted.standin.plane.lookup((await hosted.leases.lease("b02", 2)).sandbox.sandbox_id)
+    box = hosted.standin.plane.lookup(
+        (await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))).sandbox.sandbox_id
+    )
     assert box is not None and box.timeout_sec == 120
 
 
@@ -273,14 +279,14 @@ async def test_the_toolbox_is_told_whenever_cards_come_back(make: Make) -> None:
     told: list[str] = []
     hosted.leases.on_release = lambda: told.append("back")
     with pytest.raises(RequestRejected):
-        await hosted.leases.lease("b02", 1)
+        await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert told == [], "a refusal held nothing"
     with pytest.raises(SandboxDenied):
-        await hosted.leases.lease("b02", 2)
+        await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert told == ["back"], "the promise of a lease that failed was given back"
     ok = make(gpus=8, tp=2)
     ok.leases.on_release = lambda: told.append("released")
-    lease = await ok.leases.lease("b02", 2)
+    lease = await ok.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert told == ["back"]
     await ok.leases.release(lease.lease_id)
     await ok.leases.release(lease.lease_id)
@@ -295,12 +301,12 @@ async def test_the_toolbox_is_told_whenever_cards_come_back(make: Make) -> None:
 async def test_a_create_the_quota_refuses_is_repeated_with_one_idempotency_key(make: Make) -> None:
     hosted = make()
     hosted.standin.plane.fail_next("create", 429, times=3, message=_QUOTA)
-    lease = await hosted.leases.lease("b02", 2)
+    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert (
         len(hosted.provider.creates) == 4 and len({meta[IDEMPOTENCY_KEY] for _, meta in hosted.provider.creates}) == 1
     )
     assert hosted.running() == [lease.sandbox.sandbox_id]
-    other = await hosted.leases.lease("b03", 2)
+    other = await hosted.leases.lease("b03", 2, charge=LeaseCharge(LeaseKind.DEV, "b03"))
     assert hosted.provider.creates[-1][1][IDEMPOTENCY_KEY] != hosted.provider.creates[0][1][IDEMPOTENCY_KEY]
     assert other.sandbox.sandbox_id != lease.sandbox.sandbox_id
 
@@ -309,8 +315,8 @@ async def test_a_lease_waits_for_the_quota_while_its_cards_stay_promised_and_pro
     make: Make,
 ) -> None:
     hosted = make(gpus=8, tp=1, quota=1)
-    first = await hosted.leases.lease("b02", 1)
-    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1))
+    first = await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")))
     await _until(lambda: len(hosted.provider.creates) >= 3, "the second create to be refused and repeated")
     assert not waiting.done() and hosted.leases.capacity().leased_cards == 2, "the waiting lease promised its card"
     await hosted.leases.release(first.lease_id)
@@ -322,13 +328,13 @@ async def test_a_lease_that_the_quota_does_not_clear_for_ends_as_unavailable_and
     make: Make,
 ) -> None:
     hosted = make(gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=0.3, first_backoff_sec=0.02, max_backoff_sec=0.05))
-    first = await hosted.leases.lease("b02", 1)
+    first = await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     with pytest.raises(SandboxUnavailable, match="no room in the grant") as failed:
-        await asyncio.wait_for(hosted.leases.lease("b03", 1), 10)
+        await asyncio.wait_for(hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")), 10)
     assert not isinstance(failed.value, SandboxQuotaExceeded)
     assert hosted.leases.capacity().leased_cards == 1
     await hosted.leases.release(first.lease_id)
-    assert (await hosted.leases.lease("b03", 1)).branch_id == "b03"
+    assert (await hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03"))).branch_id == "b03"
 
 
 # -- how long a lease waits ------------------------------------------------------------------------------------------
@@ -339,21 +345,23 @@ _SLOW_BACKOFF = LeaseTuning(wait_sec=60.0, first_backoff_sec=5.0, max_backoff_se
 
 async def test_a_lease_that_waits_for_nothing_is_refused_at_once_by_a_full_quota(make: Make) -> None:
     hosted = make(gpus=8, tp=1, quota=1, tuning=_SLOW_BACKOFF)
-    first = await hosted.leases.lease("b02", 1)
+    first = await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     started = time.monotonic()
     with pytest.raises(SandboxUnavailable, match="no room in the grant within 0 s") as failed:
-        await asyncio.wait_for(hosted.leases.lease("b03", 1, wait_sec=0), 20)
+        await asyncio.wait_for(hosted.leases.lease("b03", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b03")), 20)
     assert time.monotonic() - started < 3, "a lease that waits for nothing waited out the quota"
     assert not isinstance(failed.value, SandboxQuotaExceeded)
     assert len(hosted.provider.creates) == 2 and hosted.provider.refused == 1, "one create, refused once, not repeated"
     assert hosted.leases.capacity().leased_cards == 1, "the refused lease gave its promise back"
     await hosted.leases.release(first.lease_id)
-    assert (await hosted.leases.lease("b03", 1, wait_sec=0)).branch_id == "b03"
+    assert (
+        await hosted.leases.lease("b03", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b03"))
+    ).branch_id == "b03"
 
 
 async def test_a_lease_that_waits_for_nothing_still_gives_the_sandbox_time_to_come_up(make: Make) -> None:
     hosted = make(tuning=LeaseTuning(wait_sec=20.0, first_backoff_sec=0.02, max_backoff_sec=0.05))
-    lease = await hosted.leases.lease("b02", 2, wait_sec=0)
+    lease = await hosted.leases.lease("b02", 2, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert hosted.running() == [lease.sandbox.sandbox_id]
     assert hosted.provider.waits and min(hosted.provider.waits) >= 19.0, "the create was given the tuning's time"
 
@@ -362,10 +370,12 @@ async def test_a_positive_wait_bounds_how_long_a_lease_waits_out_the_quota(make:
     hosted = make(
         gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=60.0, first_backoff_sec=0.02, max_backoff_sec=0.05)
     )
-    await hosted.leases.lease("b02", 1)
+    await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     started = time.monotonic()
     with pytest.raises(SandboxUnavailable, match="no room in the grant within 0.3 s"):
-        await asyncio.wait_for(hosted.leases.lease("b03", 1, wait_sec=0.3), 20)
+        await asyncio.wait_for(
+            hosted.leases.lease("b03", 1, wait_sec=0.3, charge=LeaseCharge(LeaseKind.DEV, "b03")), 20
+        )
     waited = time.monotonic() - started
     assert 0.2 <= waited < 10, f"waited {waited:.2f} s for a wait of 0.3 s"
     assert hosted.provider.refused >= 2, "the quota was retried while the wait lasted"
@@ -374,8 +384,10 @@ async def test_a_positive_wait_bounds_how_long_a_lease_waits_out_the_quota(make:
 
 async def test_a_wait_longer_than_the_tuning_waits_that_long_for_the_quota(make: Make) -> None:
     hosted = make(gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=0.3, first_backoff_sec=0.02, max_backoff_sec=0.05))
-    first = await hosted.leases.lease("b02", 1)
-    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1, wait_sec=30))
+    first = await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    waiting = asyncio.ensure_future(
+        hosted.leases.lease("b03", 1, wait_sec=30, charge=LeaseCharge(LeaseKind.DEV, "b03"))
+    )
     await _until(lambda: hosted.provider.refused >= 3, "the second create to be refused and repeated")
     await asyncio.sleep(0.5)  # longer than the tuning's own wait, which would have ended it
     assert not waiting.done()
@@ -389,7 +401,7 @@ async def test_a_wait_that_is_not_a_number_of_seconds_is_refused_before_anything
 ) -> None:
     hosted = make()
     with pytest.raises(RequestRejected) as refused:
-        await hosted.leases.lease("b02", 2, wait_sec=wait)
+        await hosted.leases.lease("b02", 2, wait_sec=wait, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert refused.value.code == "invalid_request" and "wait_sec" in refused.value.reason
     assert hosted.provider.creates == [] and hosted.leases.capacity().leased_cards == 0
 
@@ -400,16 +412,16 @@ async def test_a_wait_that_is_not_a_number_of_seconds_is_refused_before_anything
 async def test_a_create_the_service_refuses_gives_the_promise_back(make: Make) -> None:
     hosted = make(templates={2: "not-a-template"})
     with pytest.raises(SandboxDenied):
-        await hosted.leases.lease("b02", 2)
+        await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     assert hosted.leases.capacity().leased_cards == 0 and hosted.running() == []
     with pytest.raises(SandboxDenied):
-        await hosted.leases.lease("b02", 2)
+        await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
 
 
 async def test_a_lease_cancelled_while_it_waits_for_the_quota_gives_its_promise_back(make: Make) -> None:
     hosted = make(gpus=8, tp=1, quota=1)
-    await hosted.leases.lease("b02", 1)
-    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1))
+    await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")))
     await _until(lambda: hosted.leases.capacity().leased_cards == 2, "the second lease to promise its card")
     waiting.cancel()
     await asyncio.gather(waiting, return_exceptions=True)
@@ -419,7 +431,7 @@ async def test_a_lease_cancelled_while_it_waits_for_the_quota_gives_its_promise_
 async def test_a_lease_cancelled_while_the_sandbox_is_being_made_ends_the_sandbox_that_comes_up(make: Make) -> None:
     hosted = make()
     hosted.standin.plane.create_delay_sec = 1.0
-    waiting = asyncio.ensure_future(hosted.leases.lease("b02", 2))
+    waiting = asyncio.ensure_future(hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02")))
     await _until(lambda: hosted.standin.plane.starting() == 1, "the service to start the sandbox")
     waiting.cancel()
     await asyncio.gather(waiting, return_exceptions=True)
@@ -432,7 +444,7 @@ async def test_a_lease_cancelled_while_the_sandbox_is_being_made_ends_the_sandbo
 async def test_a_sandbox_that_comes_up_after_the_toolbox_closed_is_ended_and_not_leased(make: Make) -> None:
     hosted = make()
     hosted.standin.plane.create_delay_sec = 0.8
-    waiting = asyncio.ensure_future(hosted.leases.lease("b02", 2))
+    waiting = asyncio.ensure_future(hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02")))
     await _until(lambda: hosted.standin.plane.starting() == 1, "the service to start the sandbox")
     await asyncio.to_thread(hosted.leases.close)
     with pytest.raises(SandboxUnavailable, match="closing"):
@@ -443,7 +455,7 @@ async def test_a_sandbox_that_comes_up_after_the_toolbox_closed_is_ended_and_not
 
 async def test_a_release_the_service_cannot_carry_out_still_gives_the_cards_back(make: Make) -> None:
     hosted = make(retry=RetryPolicy(budget_sec=0.2, first_delay_sec=0.02, max_delay_sec=0.05))
-    lease = await hosted.leases.lease("b02", 2)
+    lease = await hosted.leases.lease("b02", 2, charge=LeaseCharge(LeaseKind.DEV, "b02"))
     hosted.standin.plane.fail_next("kill", 500, times=50)
     await hosted.leases.release(lease.lease_id)
     assert hosted.leases.capacity().leased_cards == 0
@@ -454,7 +466,10 @@ async def test_close_ends_every_lease_and_the_sandboxes_of_this_run_no_lease_hol
     make: Make,
 ) -> None:
     hosted = make(gpus=8, tp=1)
-    a, b = await hosted.leases.lease("b02", 1), await hosted.leases.lease("b03", 1)
+    a, b = (
+        await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02")),
+        await hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")),
+    )
     ours = {PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-1", BRANCH_ID_KEY: "gone"}
     stray = hosted.provider.create(_BY_CARDS[1], role="dev", timeout_sec=60, metadata=ours)
     others = [
@@ -466,13 +481,13 @@ async def test_close_ends_every_lease_and_the_sandboxes_of_this_run_no_lease_hol
     assert {a.sandbox.sandbox_id, b.sandbox.sandbox_id, stray.sandbox_id}.isdisjoint(hosted.running())
     assert hosted.leases.capacity().leased_cards == 0
     with pytest.raises(SandboxUnavailable, match="closing"):
-        await hosted.leases.lease("b04", 1)
+        await hosted.leases.lease("b04", 1, charge=LeaseCharge(LeaseKind.DEV, "b04"))
 
 
 async def test_a_lease_still_waiting_when_the_toolbox_closes_is_refused(make: Make) -> None:
     hosted = make(gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=60.0, first_backoff_sec=5.0, max_backoff_sec=5.0))
-    await hosted.leases.lease("b02", 1)
-    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1))
+    await hosted.leases.lease("b02", 1, charge=LeaseCharge(LeaseKind.DEV, "b02"))
+    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1, charge=LeaseCharge(LeaseKind.DEV, "b03")))
     await _until(lambda: hosted.provider.refused == 1, "the second create to be refused")
     await asyncio.sleep(0.3)  # the lease is now asleep for its first backoff, five seconds
     started = time.monotonic()

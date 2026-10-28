@@ -32,6 +32,7 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     ClaimLost,
     ClaimService,
     ConflictingWrite,
+    LeaseSink,
     RecordSearch,
     UnknownRequest,
 )
@@ -39,6 +40,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, Clai
 from hyperloom_multibranch.contracts.toolbox import (
     BranchLease,
     CancelOutcome,
+    LeaseCharge,
     MeasurementCapacity,
     NodeHealth,
     QueueState,
@@ -104,7 +106,8 @@ class ToolboxStores:
     claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
     ``builds`` drives the native build store; without one no test waits for a build. ``short_prompt_pool`` keeps the
     short-prompt answers of every test per recipe (``short_prompt_pool``); without one no test's check is pooled and each
-    test is judged on its own server's answers alone.
+    test is judged on its own server's answers alone. ``leases`` keeps the leases of cards outside the tests; without it
+    no lease is recorded.
     """
 
     log: SubmissionLog
@@ -114,6 +117,7 @@ class ToolboxStores:
     records: RecordSearch | None = None
     builds: BuildDriver | None = None
     short_prompt_pool: ShortPromptPool | None = None
+    leases: LeaseSink | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,7 @@ class RealToolbox:
         tuning: ToolboxTuning = ToolboxTuning(),
     ) -> None:
         self._log, self._sink, self._claims, self._records = stores.log, stores.sink, stores.claims, stores.records
+        self._lease_sink = stores.leases
         self._executor = executor
         self._queue = WorkQueue(tuning.policy or QueuePolicy())
         self._quarantine = Quarantine(stores.health)
@@ -281,8 +286,13 @@ class RealToolbox:
 
         return MeasurementCapacity.unknown()
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+    ) -> BranchLease:
         """Hold ``cards`` of the toolbox's cards and a working directory of their own for ``branch_id``'s agent.
+
+        ``branch_id`` is the holder: a branch, or ``tool:<job id>`` for a tool's job. The blackboard records the grant
+        and each return of cards as ``charge`` says; ``None`` is a ``dev`` lease charged to the holder.
 
         The cards leave the measurement pool until :meth:`release_branch_sandbox` or :meth:`close`; see
         :class:`~hyperloom_multibranch.contracts.toolbox.BranchLease`. A toolbox whose backend has no cards of its own

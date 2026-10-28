@@ -49,7 +49,8 @@ from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC, RoundWatch, run_with_session_kill
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
 from hyperloom.sandbox.socket import SandboxUnavailable
-from hyperloom_multibranch.contracts.toolbox import BranchLease, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.tune_inputs import (
@@ -311,7 +312,7 @@ class KernelTuneTool:
         params = request.params
         plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params, self._configs)
         plan = replace(plan, own_jit=await asyncio.to_thread(own_jit_dir, self._configs, workdir))
-        lease = await self._lease(workdir)
+        lease = await self._lease(request.branch, workdir)
         try:
             tables = await self._tune_all(plan, lease, workdir, int(params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)))
         finally:
@@ -319,9 +320,12 @@ class KernelTuneTool:
         rebuild = await asyncio.to_thread(rebuild_warning, tables, self._configs)
         return _output(plan, lease, tables, str(params.get(TEST_PARAM, "")), rebuild)
 
-    async def _lease(self, workdir: Path) -> BranchLease:
+    async def _lease(self, branch: str, workdir: Path) -> BranchLease:
+        """The job's card, held by ``tool:<job id>`` and charged to ``branch``, the branch that submitted the job."""
+
         try:
-            return await self._leases.lease(f"{HOLDER_PREFIX}{workdir.name}", _CARDS, workdir)
+            charge = LeaseCharge(LeaseKind.TOOL_JOB, branch, KERNEL_TUNE_TOOL)
+            return await self._leases.lease(f"{HOLDER_PREFIX}{workdir.name}", _CARDS, workdir, charge=charge)
         except RequestRejected as exc:
             raise ToolFailure(f"{exc.code}: {exc.reason}") from None
         except SandboxUnavailable as exc:

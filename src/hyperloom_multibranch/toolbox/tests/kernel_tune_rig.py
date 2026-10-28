@@ -31,12 +31,11 @@ from hyperloom.measure.tests.hosted_fixtures import runner_template, spec_contex
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import RoundWatch
 from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, read_holders
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
-from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
+from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req, lineage_blackboard
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import ENV, HEADER, SHARED, install
 from hyperloom_multibranch.toolbox.tests.test_card_placement import _PointPerBranch
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -293,7 +292,7 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         session = tmp_path / f"session-{len(made)}"
         session.mkdir()
         configs = install(tmp_path / f"image-{len(made)}")
-        blackboard = LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+        blackboard = lineage_blackboard(session / "blackboard")
         box = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
             blackboard,

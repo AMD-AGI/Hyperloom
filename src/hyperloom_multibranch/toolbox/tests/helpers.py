@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,7 +26,9 @@ from hyperloom.contracts.measurement import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
@@ -240,3 +244,24 @@ class BackendSpy:
 
     def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
         return getattr(self._backend, name)
+
+
+#: The branches the toolbox tests lease cards for: a lease is recorded in the blackboard only for a branch its lineage opened.
+LEASING_BRANCHES = ("agent", "b1", "b2", "b02", "b03", "branch-1")
+
+
+def lineage_blackboard(
+    root: Path, branches: tuple[str, ...] = LEASING_BRANCHES, clock: Callable[[], float] = time.time
+) -> LocalBlackboard:
+    """The toolbox's handle on a blackboard in ``root`` whose lineage opened ``branches`` from the root, as the scheduler
+    does before a branch runs; callable from a running event loop."""
+
+    async def seed() -> None:
+        scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+        await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+        for branch in branches:
+            await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit="c0"))
+
+    with ThreadPoolExecutor(1) as seeding:
+        seeding.submit(asyncio.run, seed()).result()
+    return LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock)

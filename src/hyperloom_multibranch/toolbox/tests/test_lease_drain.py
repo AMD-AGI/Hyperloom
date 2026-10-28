@@ -19,6 +19,8 @@ from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, Holder
 from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.socket import SandboxUnavailable
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import LeaseCharge
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 
 _GIB = 1 << 30
@@ -87,7 +89,7 @@ def _until(condition: Callable[[], bool], timeout: float = 5.0) -> bool:
 async def test_cards_nothing_is_listed_on_go_back_at_once(tmp_path: Path) -> None:
     listing = Listing()
     leases, released = _leases(tmp_path, listing)
-    lease = await leases.lease("b1", 2, wait_sec=0)
+    lease = await leases.lease("b1", 2, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
 
     leases.release(lease.lease_id)
 
@@ -98,7 +100,7 @@ async def test_cards_nothing_is_listed_on_go_back_at_once(tmp_path: Path) -> Non
 async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_out_until_it_is(tmp_path: Path) -> None:
     listing = Listing()
     leases, released = _leases(tmp_path, listing)
-    lease = await leases.lease("b1", 2, wait_sec=0)
+    lease = await leases.lease("b1", 2, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     busy, free = lease.gpu_ids
     listing.vram[busy] = 238 * _GIB  # the agent's server ended; the driver has not freed its memory yet
 
@@ -109,7 +111,7 @@ async def test_a_card_whose_memory_is_freed_within_the_drain_time_is_not_handed_
     assert leases.capacity().leased_cards == 1
     with pytest.raises(SandboxUnavailable):
         leases._provider.pool.acquire(4, 0.0)
-    other = await leases.lease("b2", 2, wait_sec=0)
+    other = await leases.lease("b2", 2, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b2"))
     assert busy not in other.gpu_ids
     leases.release(other.lease_id)
     listing.free(busy)
@@ -123,7 +125,7 @@ async def test_a_card_still_holding_memory_after_the_drain_time_is_kept_out_with
     caplog.set_level(logging.INFO, logger=_LOGGER)
     listing = Listing()
     leases, _ = _leases(tmp_path, listing)
-    lease = await leases.lease("b1", 1, wait_sec=0)
+    lease = await leases.lease("b1", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     (card,) = lease.gpu_ids
     listing.vram[card] = 12 * _GIB
 
@@ -150,7 +152,7 @@ async def test_cards_go_back_at_once_when_the_kernels_list_cannot_be_read_and_th
     listing.unavailable = "no AMD GPU driver is loaded"
     leases, _ = _leases(tmp_path, listing)
     for holder in ("b1", "b2"):
-        lease = await leases.lease(holder, 1, wait_sec=0)
+        lease = await leases.lease(holder, 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, holder))
         leases.release(lease.lease_id)
 
     assert leases.held_out() == frozenset() and len(leases._provider.pool.free_cards()) == 4
@@ -161,7 +163,7 @@ async def test_cards_go_back_at_once_when_the_kernels_list_cannot_be_read_and_th
 async def test_closing_the_leases_stops_reading_a_card_that_is_kept_out(tmp_path: Path) -> None:
     listing = Listing()
     leases, _ = _leases(tmp_path, listing)
-    lease = await leases.lease("b1", 1, wait_sec=0)
+    lease = await leases.lease("b1", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     listing.vram[lease.gpu_ids[0]] = _GIB
 
     leases.release(lease.lease_id)
@@ -180,7 +182,7 @@ async def test_a_card_a_released_lease_still_drains_is_never_read_as_held_by_an_
     listing = Listing()
     pool = GatedPool(range(4), CardGuard.ENFORCE, read=listing)  # the pool reads the same kernel list
     leases, _ = _leases(tmp_path, listing, pool)
-    lease = await leases.lease("b1", 1, wait_sec=0)
+    lease = await leases.lease("b1", 1, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, "b1"))
     (busy,) = lease.gpu_ids
     listing.vram[busy] = 238 * _GIB
 

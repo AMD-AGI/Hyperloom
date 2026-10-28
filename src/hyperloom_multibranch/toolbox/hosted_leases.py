@@ -40,8 +40,10 @@ from hyperloom.sandbox.socket import (
     SandboxQuotaExceeded,
     SandboxUnavailable,
 )
-from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.records import LeaseStart
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, lease_wait, refuse_unfit_cards
+from hyperloom_multibranch.toolbox.lease_ledger import LeaseLedger
 
 __all__ = ["DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning"]
 
@@ -144,6 +146,7 @@ class HostedBranchLeases:
     All state is guarded by one lock, so a lease and its release may race from any task or thread: a lease's sandbox
     is ended exactly once and its cards go back once. ``on_release`` is called, on the thread that gave them back,
     after cards went back (a release, a lease that failed, a close), so the toolbox can start the tests they now let run.
+    ``ledger`` records each lease's sandbox in the blackboard when it is granted and when it ends.
     """
 
     def __init__(
@@ -163,6 +166,7 @@ class HostedBranchLeases:
         self._granted: dict[str, HostedBranchLease] = {}
         self._closed = False
         self.on_release: Callable[[], None] = _nothing
+        self.ledger = LeaseLedger()
 
     def capacity(self) -> MeasurementCapacity:
         """The grant's GPUs, with the cards promised to leases counted as leased."""
@@ -179,8 +183,14 @@ class HostedBranchLeases:
             by_sandboxes = self._grant.max_sandboxes - len(self._promised)
         return max(1, min(by_cards, by_sandboxes))
 
-    async def lease(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> HostedBranchLease:
+    async def lease(
+        self, branch_id: str, cards: int, *, charge: LeaseCharge, wait_sec: float | None = None
+    ) -> HostedBranchLease:
         """Create ``branch_id``'s ``dev`` sandbox, waiting while the grant has no room for it.
+
+        ``branch_id`` is the holder: a branch, or ``tool:<job id>``. ``charge`` goes into the blackboard's record of the
+        grant, written before the lease is returned; a grant the blackboard did not record ends the sandbox and raises as
+        :meth:`~hyperloom_multibranch.toolbox.lease_ledger.LeaseLedger.started` does.
 
         ``wait_sec`` bounds that wait (:func:`~hyperloom_multibranch.toolbox.branch_leases.lease_wait`): ``None`` is
         :attr:`LeaseTuning.wait_sec`, ``0`` does not wait out a refusal of the quota. It does not bound the time a
@@ -202,7 +212,9 @@ class HostedBranchLeases:
         made: Sandbox | None = None
         try:
             made = await self._create(branch_id, wait)
-            return self._grant_lease(branch_id, made)
+            lease = self._grant_lease(branch_id, made)
+            await self._recorded(lease, charge)
+            return lease
         except BaseException:
             self._forget(branch_id)
             if made is not None:
@@ -220,6 +232,7 @@ class HostedBranchLeases:
             await asyncio.shield(asyncio.to_thread(_end, lease.sandbox))
         finally:
             self._forget(lease.branch_id)
+            self.ledger.returned(lease_id)
 
     def close(self) -> None:
         """End every lease's sandbox and refuse the waiting ones; blocks, so call it from a thread.
@@ -274,6 +287,26 @@ class HostedBranchLeases:
         with self._guard:
             self._promised.pop(branch_id, None)
         self.on_release()
+
+    async def _recorded(self, lease: HostedBranchLease, charge: LeaseCharge) -> None:
+        """Record ``lease``'s grant; a lease the blackboard did not record is withdrawn, its sandbox left to the caller."""
+
+        start = LeaseStart(
+            lease_id=lease.lease_id,
+            holder=lease.branch_id,
+            branch_id=charge.branch,
+            kind=charge.kind,
+            cards=len(lease.gpu_ids),
+            started_at=self.ledger.clock(),
+            tool=charge.tool,
+            sandbox_id=lease.sandbox.sandbox_id,
+        )
+        try:
+            await self.ledger.started(start)
+        except BaseException:
+            with self._guard:
+                self._granted.pop(lease.lease_id, None)
+            raise
 
     def _grant_lease(self, branch_id: str, sandbox: Sandbox) -> HostedBranchLease:
         with self._guard:
