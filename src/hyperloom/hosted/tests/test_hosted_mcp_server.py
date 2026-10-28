@@ -580,6 +580,19 @@ def test_the_cursor_moves_only_once_the_reply_was_sent(noted: McpServer, feed: F
     noted.register("hold", schema={"type": "object"}, handler=hold, scopes={"specialist"})
     token = _primed(noted)
     feed.items.append("one")
+    finished = threading.Event()
+    answer = noted.handle_post
+
+    def watch(principal: Any, presented: str, body: bytes) -> Any:
+        reply = answer(principal, presented, body)
+
+        def drop() -> None:
+            reply.drop()
+            finished.set()
+
+        return dataclasses.replace(reply, drop=drop)
+
+    noted.handle_post = watch  # type: ignore[method-assign]
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hold"}}).encode()
     head = f"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Hyperloom-Token: {token}\r\nContent-Length: {len(body)}\r\n\r\n"
     gone = socket.create_connection(("127.0.0.1", noted.port), timeout=10)
@@ -588,9 +601,7 @@ def test_the_cursor_moves_only_once_the_reply_was_sent(noted: McpServer, feed: F
     gone.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     gone.close()
     release.set()
-    deadline = time.monotonic() + 10
-    while ("hold", "0") not in feed.seen and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert finished.wait(10)
     assert ("hold", "0") in feed.seen
     assert _blocks(Client(noted).call(token, "whoami")[2])[1:] == ["one"]
     assert len(_blocks(Client(noted).call(token, "whoami")[2])) == 1
