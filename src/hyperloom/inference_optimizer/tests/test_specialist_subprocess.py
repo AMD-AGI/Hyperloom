@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -750,10 +751,8 @@ def _cli(code: str) -> subprocess.Popen:
 
 
 def _end(proc: subprocess.Popen) -> None:
-    try:
+    with contextlib.suppress(ProcessLookupError):
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
     proc.wait(timeout=5)
 
 
