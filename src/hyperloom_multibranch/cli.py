@@ -117,11 +117,11 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     arm_grant_stop,
     campaign_spec,
     grant_deadline,
-    grant_parallel_tests,
     record_session,
     recorded_session,
     reported_stop_reason,
     run_argv,
+    toolbox_grant,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling.layout import create_session
@@ -718,8 +718,11 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 
 
 def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
+    # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
+    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
+
     spec = campaign_spec(host)
-    tests_that_fit = partial(grant_parallel_tests, host.grant_limits)
+    tests_that_fit = partial(parallel_tests_for, toolbox_grant(host.grant_limits))
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     return settings_from(_parsed_run(argv), tests_that_fit)
 

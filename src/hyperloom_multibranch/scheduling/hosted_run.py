@@ -35,10 +35,11 @@ from typing import Any
 
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
-from hyperloom.hosted.host_info import GrantLimits, HostInfo
-from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS
+from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
+from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
 EXIT_FILE = "exit.json"
@@ -103,15 +104,26 @@ def _multibranch_section(section: object) -> dict[str, Any]:
     return section
 
 
-def grant_parallel_tests(limits: GrantLimits | None, tp: int) -> int:
-    """How many tests of ``tp`` cards the grant runs at once: its GPUs over TP, the sandbox pool's default when it
-    states no GPUs. Raises ValueError when a grant's GPUs cannot run one test."""
+def toolbox_grant(limits: HostGrantLimits | None) -> GrantLimits | None:
+    """The grant ``limits`` as the hosted toolbox reads it, ``None`` when the host gave none.
 
-    if limits is None or limits.max_gpus is None:
-        return DEFAULT_MAX_PARALLEL_TESTS
-    if limits.max_gpus < tp:
-        raise ValueError(f"a grant of {limits.max_gpus} GPUs cannot run a test of TP={tp}")
-    return limits.max_gpus // tp
+    Raises:
+        HostedRefused: When the grant states only some of its totals: the toolbox needs all of them or none.
+        ValueError: When a total is below what one test needs.
+    """
+
+    if limits is None:
+        return None
+    totals = {
+        "max_sandboxes": limits.max_sandboxes,
+        "max_gpus": limits.max_gpus,
+        "gpu_hours": limits.gpu_hours,
+        "max_runtime_sec": limits.max_runtime_sec,
+    }
+    unstated = [name for name, total in totals.items() if total is None]
+    if unstated:
+        raise HostedRefused(f"{Var.GRANT_LIMITS} states no {', '.join(unstated)}; a hosted session needs all or none")
+    return GrantLimits(**totals)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
@@ -216,10 +228,10 @@ __all__ = [
     "arm_grant_stop",
     "campaign_spec",
     "grant_deadline",
-    "grant_parallel_tests",
     "record_session",
     "recorded_session",
     "reported_stop_reason",
     "run_argv",
+    "toolbox_grant",
     "write_final_exit",
 ]
