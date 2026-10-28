@@ -136,6 +136,15 @@ def _round_entry_extras(
     return extras
 
 
+def _module_table_source(state: Any) -> str:
+    """The current stack's cycle-bench capture when it parses into a table, else the opening profile's capture."""
+    held = getattr(state, "last_attribution_trace", None) or {}
+    current = held.get("stack_len") == len(getattr(state, "optimization_stack", None) or [])
+    if held.get("trace") and current and decode_module_lines(held["trace"]):
+        return str(held["trace"])
+    return str(getattr(state, "last_profile_trace", "") or "")
+
+
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
@@ -235,7 +244,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "executive_summary": executive_summary,
                 "hot_kernels_top15": list(last_ta.get("hot_kernels_top15") or [])[:8],
             }
-        lines = await asyncio.to_thread(decode_module_lines, getattr(self.shared_state, "last_profile_trace", ""))
+        source = await asyncio.to_thread(_module_table_source, self.shared_state)
+        lines = await asyncio.to_thread(decode_module_lines, source)
         if lines:
             params.setdefault("roofline_evidence", {})["decode_modules"] = lines
 

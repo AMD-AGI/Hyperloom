@@ -194,6 +194,49 @@ async def test_warm_specialist_params_reads_the_decode_modules_off_the_raw_captu
     }
 
 
+def _kept_stack_capture(tmp_path: Path) -> Path:
+    from kernelforge.tests.trace_fixtures import kernel, step, write_trace
+
+    events = [step("step[VERIFY bs=4]", 0.0, 100.0), kernel("cross_device_reduce_1stage", 1.0, 50.0)]
+    (tmp_path / "attribution").mkdir()
+    return write_trace(tmp_path / "attribution" / "p-TP-0.trace.json.gz", events)
+
+
+_OPENING_TABLE = [
+    "| module | VERIFY bs=2 | top kernel |",
+    "|---|---:|---|",
+    "| moe | 0.060 ms (60.0%) | `mfma_moe1_silu_mul_afp4_wfp4` |",
+    "| gemm | 0.040 ms (40.0%) | `ck_gemm_a8w8_blockscale_b_preshuffle` |",
+]
+_KEPT_TABLE = [
+    "| module | VERIFY bs=4 | top kernel |",
+    "|---|---:|---|",
+    "| allreduce/comm | 0.050 ms (100.0%) | `cross_device_reduce_1stage` |",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("held_stack_len", "readable", "table"),
+    [(1, True, _KEPT_TABLE), (0, True, _OPENING_TABLE), (1, False, _OPENING_TABLE)],
+)
+async def test_the_module_table_comes_from_the_current_stacks_capture_before_the_opening_profile(
+    tmp_path, held_stack_len, readable, table
+):
+    capture = str(_kept_stack_capture(tmp_path)) if readable else str(tmp_path / "missing.trace.json.gz")
+    state = SharedState(
+        last_trace_analyze={},
+        last_profile_trace=str(_verify_capture(tmp_path)),
+        optimization_stack=[{"kind": "config"}],
+        last_attribution_trace={"stack_len": held_stack_len, "trace": capture},
+    )
+    params: dict[str, Any] = {"domain": "framework_rewrite_specialist"}
+
+    await _make_coord(tmp_path, state=state).specialist_dispatch.warm_specialist_params(params)
+
+    assert params["roofline_evidence"] == {"decode_modules": table}
+
+
 def test_section_renders_the_decode_modules_ahead_of_the_tracelens_kernels():
     table = ["| module | VERIFY bs=2 | top kernel |", "|---|---:|---|", "| moe | 0.060 ms (60.0%) | `m` |"]
     inp = _make_inp({"decode_modules": table, "hot_kernels_top15": [{"kernel_id": "k1", "name": "topk"}]})

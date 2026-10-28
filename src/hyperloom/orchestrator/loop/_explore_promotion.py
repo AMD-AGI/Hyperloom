@@ -134,6 +134,11 @@ class ExplorePromotionMixin:
         """Write a cycle batch's verdict onto every lever its arms switched on, and keep its base2 as the reference."""
         if result.get("parity_broken"):
             await self._close_cycle_screen(str(result.get("reason") or "the switched-off tree moved"))
+        # The base's capture describes the stack whether or not the batch's timing holds.
+        capture = ((result.get("arms") or {}).get("base") or {}).get("attribution_trace")
+        if capture:
+            stack_len = len(self.shared_state.optimization_stack or [])
+            self.shared_state.last_attribution_trace = {"stack_len": stack_len, "trace": str(capture)}
         if not result.get("valid"):
             self._release_unscreened_levers(result)
             return

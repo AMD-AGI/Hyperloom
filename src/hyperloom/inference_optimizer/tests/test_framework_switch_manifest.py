@@ -1381,7 +1381,7 @@ async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switch
     assert coord.shared_state.gain_gated_action_count == 0
 
 
-async def _promote_cycle_batch(tmp_path, result: dict):
+async def _promote_cycle_batch(tmp_path, result: dict, *, held: dict | None = None):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
     from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
@@ -1395,6 +1395,7 @@ async def _promote_cycle_batch(tmp_path, result: dict):
     coord = make_coordinator(tmp_path)
     coord.shared_state.optimization_stack = [{"kind": "config"}]
     coord.shared_state.cycle_reference = {"stack_len": 1, "cycle_ms": {"1": 9.0}}
+    coord.shared_state.last_attribution_trace = dict(held or {})
     coord.shared_state.record_authored_framework_levers(
         [_entry_parsed("HL_A")], default_on=False, specialist_task_id="t"
     )
@@ -1415,6 +1416,32 @@ async def test_a_valid_cycle_batch_leaves_its_base2_as_the_next_batchs_reference
 
     assert state.cycle_reference == {"stack_len": 1, "cycle_ms": {"1": 10.0, "2": 20.0}}
     assert state.cycle_screen_refused == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base", "held"),
+    [
+        (
+            {"cycle_ms": {1: 10.1}, "attribution_trace": "/o/base/attribution/p-TP-0.trace.json.gz"},
+            {"stack_len": 1, "trace": "/o/base/attribution/p-TP-0.trace.json.gz"},
+        ),
+        ({"cycle_ms": {1: 10.1}, "attribution_trace": ""}, {"stack_len": 0, "trace": "/o/old.trace.json.gz"}),
+    ],
+)
+async def test_a_cycle_batch_keeps_its_base_capture_as_the_current_stacks_module_source(tmp_path, base, held):
+    """Bases that disagree void the timing, not the capture of the stack the base ran."""
+    result = {
+        "valid": False,
+        "parity_broken": False,
+        "reason": "bases disagree",
+        "verdicts": {},
+        "arms": {"base": base},
+    }
+
+    state = await _promote_cycle_batch(tmp_path, result, held={"stack_len": 0, "trace": "/o/old.trace.json.gz"})
+
+    assert state.last_attribution_trace == held
 
 
 @pytest.mark.asyncio
