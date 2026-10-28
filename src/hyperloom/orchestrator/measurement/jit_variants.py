@@ -110,7 +110,7 @@ def variant_counts(cache_root: str | Path | None) -> list[dict[str, Any]]:
                 "variants": count,
                 "varying": positions[:3],
                 # One constant carrying most of the spread is a runtime quantity reaching a constexpr, not a table.
-                "single_constant_leak": bool(count >= MIN_VARIANTS and widest >= count * LEAK_VALUE_SHARE),
+                "single_constant_leak": widest >= count * LEAK_VALUE_SHARE,
             }
         )
     rows.sort(key=lambda row: row["variants"], reverse=True)

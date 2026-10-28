@@ -38,8 +38,6 @@ def pick_server_port() -> int:
             the sampled candidates could be bound.
     """
     candidates = range(_LOWEST_SERVER_PORT, _ephemeral_range_start())
-    if not candidates:
-        raise OSError(f"no server port below the ephemeral range starting at {candidates.stop}")
     for port in random.sample(candidates, min(_BIND_ATTEMPTS, len(candidates))):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

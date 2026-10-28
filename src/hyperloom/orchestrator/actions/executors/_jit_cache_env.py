@@ -5,15 +5,12 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import yaml
 
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
-
-log = logging.getLogger(__name__)
 
 
 def benchmark_framework(config_path: Path) -> str:
@@ -39,11 +36,7 @@ def apply_session_jit_cache(env: dict[str, str], *, framework: str, session_dir:
         if env.get(name):
             continue
         path = root / name.lower()
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.warning("jit_cache: %s left at its image default, %s is not writable: %s", name, path, exc)
-            continue
+        path.mkdir(parents=True, exist_ok=True)
         env[name] = str(path)
 
 

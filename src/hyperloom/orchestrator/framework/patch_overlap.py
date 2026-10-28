@@ -95,8 +95,6 @@ def overlapping_measured(
         return []
     hits: list[dict[str, Any]] = []
     for entry in measured or []:
-        if not isinstance(entry, dict):
-            continue
         ratio = overlap_ratio(keys, entry.get("line_keys") or [])
         if ratio >= min_ratio:
             hits.append({**{k: v for k, v in entry.items() if k != "line_keys"}, "overlap_ratio": round(ratio, 3)})
@@ -104,9 +102,8 @@ def overlapping_measured(
     return hits
 
 
-def identity_entry(task_id: str, params: Any) -> dict[str, Any] | None:
+def identity_entry(task_id: str, params: dict[str, Any]) -> dict[str, Any] | None:
     """The overlap entry for a queued integrate round, read off the ``patch_identity`` its params carry."""
-    params = params if isinstance(params, dict) else {}
     identity = params.get("patch_identity")
     line_keys = identity.get("line_keys") if isinstance(identity, dict) else None
     if not line_keys:
@@ -117,9 +114,8 @@ def identity_entry(task_id: str, params: Any) -> dict[str, Any] | None:
 def queued_identities(proposals: Iterable[Any], tasks: Iterable[Any]) -> list[dict[str, Any]]:
     """Overlap entries for every integrate round awaiting review (*proposals*) or queued/running (*tasks*)."""
     entries = [
-        identity_entry(str((p.payload.get("params") or {}).get("specialist_task_id") or ""), p.payload.get("params"))
-        for p in proposals
-        if p.action_name == "integrate_patch"
+        identity_entry(str(params.get("specialist_task_id") or ""), params)
+        for params in (p.payload.get("params") or {} for p in proposals if p.action_name == "integrate_patch")
     ]
     entries += [identity_entry(t.task_id, t.params) for t in tasks if t.kind == "integrate_patch"]
     return [entry for entry in entries if entry is not None]
