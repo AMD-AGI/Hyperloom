@@ -1110,6 +1110,7 @@ def workflow_predicate_inputs(
     now_unix: float | None = None,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
+    prelude_work_in_flight: bool = False,
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1123,6 +1124,7 @@ def workflow_predicate_inputs(
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
+        inputs["pending_work"] = {"prelude_work_in_flight": bool(prelude_work_in_flight)}
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
         inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
@@ -1376,6 +1378,7 @@ def compute_next_phase(
     now_unix: float | None = None,
     enablement_in_flight: bool = False,
     kernel_work_in_flight: bool = False,
+    prelude_work_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
     inputs = workflow_predicate_inputs(
@@ -1384,6 +1387,7 @@ def compute_next_phase(
         now_unix=now_unix,
         enablement_in_flight=enablement_in_flight,
         kernel_work_in_flight=kernel_work_in_flight,
+        prelude_work_in_flight=prelude_work_in_flight,
     )
     return replay_next_phase(inputs)
 
@@ -1469,6 +1473,7 @@ def _prelude_transition(
 ) -> tuple[str, str, dict[str, Any]] | None:
     """The transition PRELUDE takes once its baseline round has settled."""
     baseline = dict(inputs.get("baseline") or {})
+    pending = dict(inputs.get("pending_work") or {})
     streak = int(baseline.get("failure_streak") or 0)
     if streak >= 3:
         return _transition_result(
@@ -1477,7 +1482,7 @@ def _prelude_transition(
             {"terminal": True, "baseline_failure_streak": streak},
             inputs,
         )
-    shortfall = _cold_anchor_shortfall(baseline)
+    shortfall = _cold_anchor_shortfall(baseline, pending)
     if shortfall is not None:
         return _transition_result(PHASE_CLOSE, "prelude_cold_anchor_low_budget", shortfall, inputs)
     if bool(flags.get("enablement_enabled")) and streak >= 1:
@@ -1503,7 +1508,7 @@ def _prelude_transition(
             },
             inputs,
         )
-    reserve_line = _prelude_budget_line(baseline)
+    reserve_line = _prelude_budget_line(baseline, pending)
     if reserve_line is not None:
         return _transition_result(PHASE_CLOSE, "prelude_budget_exhausted", reserve_line, inputs)
     return None

@@ -38,9 +38,20 @@ def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
+def _prelude_work_pending(baseline: dict[str, Any], pending: dict[str, Any]) -> bool:
+    """Whether PRELUDE is still waiting on work of its own.
+
+    Either a task of a PRELUDE-owned kind is queued or running -- a retried ``baseline``
+    among them -- or a warm replay has left the queue without its outcome being booked yet.
+    The phase's terminal exits below are read off an idle phase, and a transition carrying
+    ``terminal`` cancels whatever is in flight, so neither is an idle phase's evidence.
+    """
+    return bool(pending.get("prelude_work_in_flight")) or str(baseline.get("warm_replay_status") or "") == _IN_FLIGHT
+
+
+def _cold_anchor_shortfall(baseline: dict[str, Any], pending: dict[str, Any]) -> dict[str, Any] | None:
     """The evidence that retrying a dropped measure round no longer fits the session's budget."""
-    if not bool(baseline.get("measure_round_dropped")):
+    if not bool(baseline.get("measure_round_dropped")) or _prelude_work_pending(baseline, pending):
         return None
     usable = to_float(baseline.get("session_usable_sec"))
     runtime = optional_positive_float(baseline.get("runtime_sec"))
@@ -57,7 +68,7 @@ def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
     return {"terminal": True, "baseline_anchor": "cold", "retry_round_sec": round(retry, 1), **viability}
 
 
-def _prelude_budget_line(baseline: dict[str, Any]) -> dict[str, Any] | None:
+def _prelude_budget_line(baseline: dict[str, Any], pending: dict[str, Any]) -> dict[str, Any] | None:
     """The evidence that PRELUDE is out of its own budget with no baseline and nothing left to dispatch.
 
     A failed baseline is retried only on a proposal from the Orchestration agent, so once the phase
@@ -68,7 +79,7 @@ def _prelude_budget_line(baseline: dict[str, Any]) -> dict[str, Any] | None:
     so the line is read only once the phase is waiting on nothing of its own.
     """
     streak = int(baseline.get("failure_streak") or 0)
-    if streak < 1 or str(baseline.get("warm_replay_status") or "") == _IN_FLIGHT:
+    if streak < 1 or _prelude_work_pending(baseline, pending):
         return None
     affordable = to_float(baseline.get("analysis_affordable_sec"))
     if affordable is None or affordable > 0.0:

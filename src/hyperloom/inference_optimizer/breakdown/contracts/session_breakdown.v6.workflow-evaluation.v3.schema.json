@@ -1115,7 +1115,7 @@
                 "$ref": "#/$defs/prelude_inputs"
               },
               "pending_work": {
-                "type": "null"
+                "$ref": "#/$defs/prelude_pending"
               },
               "budget": {
                 "type": "null"
@@ -1404,6 +1404,18 @@
             "number",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "prelude_pending": {
+      "type": "object",
+      "required": [
+        "prelude_work_in_flight"
+      ],
+      "properties": {
+        "prelude_work_in_flight": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

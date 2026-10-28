@@ -271,6 +271,22 @@ def test_a_round_still_in_flight_is_not_an_idle_prelude():
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
 
+def test_a_plain_baseline_retry_in_flight_is_not_an_idle_prelude():
+    """A retried ``baseline`` is PRELUDE's own work too: closing on it would cancel the task."""
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
+    flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+    assert phase_state.compute_next_phase(state, flags=flags, prelude_work_in_flight=True) is None
+
+    # The fact travels with the decision, so a replay of it refuses the terminal as well.
+    inputs = phase_state.workflow_predicate_inputs(state, flags=flags, prelude_work_in_flight=True)
+    assert inputs["pending_work"] == {"prelude_work_in_flight": True}
+    assert phase_state.replay_next_phase(inputs) is None
+
+    out = phase_state.compute_next_phase(state, flags=flags)
+    assert out is not None and out[1] == "prelude_budget_exhausted"
+
+
 def test_an_unbounded_prelude_never_reaches_the_budget_line():
     """Without a clock there is no reserve to cross, so a failed baseline keeps its retries."""
     state = _prelude_state(max_minutes=0, usable_sec=None, baseline_failure_streak=2)
@@ -397,6 +413,20 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert is_valid_stop_reason(reason)
+
+    def test_a_retry_already_in_flight_is_waited_for(self):
+        """The marker stays up until a round lands, so the shortfall must not cancel the round itself."""
+        state = _prelude_state(
+            **_COLD_ANCHOR_WORKLOAD,
+            baseline_measure_round_dropped=True,
+            usable_sec=1200.0,
+        )
+        flags = phase_state.PhaseFlags(kernel_enabled=True)
+
+        assert phase_state.compute_next_phase(state, flags=flags, prelude_work_in_flight=True) is None
+
+        out = phase_state.compute_next_phase(state, flags=flags)
+        assert out is not None and out[1] == "prelude_cold_anchor_low_budget"
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""
