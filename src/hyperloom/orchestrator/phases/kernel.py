@@ -3909,22 +3909,23 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
-    async def release_finished_roofline_gate(self) -> None:
-        """Drop an in-flight marker that names a roofline which already finished."""
+    async def release_finished_roofline_gate(self) -> str:
+        """Drop an in-flight marker that names a roofline which already finished; the state it ended in, or ``""``."""
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
-            return
+            return ""
         try:
             task = await self.tasks.get(pending)
         except TaskNotFound:
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
-            return
+            return ""
         self.shared_state.auto_roofline_pending_task_id = ""
         log.info(
             "watermark-roofline: released in-flight gate held by finished task=%s",
             pending,
         )
+        return str(getattr(task, "state", "") or "")
 
     async def maybe_enqueue_watermark_roofline(
         self,

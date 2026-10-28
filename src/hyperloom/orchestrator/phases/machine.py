@@ -439,8 +439,11 @@ class MachinePhase(CoordinatorCollaborator):
         """
         phase = str(self.shared_state.phase or "").upper()
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
-            # Both phases hold their exit for this marker.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+            # Both phases hold their exit for this marker. A cancelled initial analysis never ran, so PRELUDE asks again.
+            ended = await self._coord.phase_kernel.release_finished_roofline_gate()
+            state = self.shared_state
+            if ended == "cancelled" and phase == _phase_state.PHASE_PRELUDE and not state.roofline_attempts:
+                await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
         # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
         await self._coord.phase_sweep.resume_unsettled_sweep()
 
