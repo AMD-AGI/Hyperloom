@@ -76,13 +76,55 @@ def test_the_estimate_is_the_builds_plus_the_margin() -> None:
     assert rebuild_watchdog_sec(1) > 300, "longer than sglang's default watchdog"
 
 
-@pytest.mark.parametrize(("args", "agentx"), [(f"{_FLAG} 120", False), (f"{_FLAG}=120", False), (f"{_FLAG} 120", True)])
-def test_a_launch_that_sets_the_watchdog_keeps_its_own(image, tmp_path: Path, args: str, agentx: bool) -> None:
-    point = _point(tmp_path, "point.yaml", agentx=agentx, args=args, **_tuned(tmp_path))
+def _watchdog(point: Path, agentx: bool) -> str:
+    bench = _bench(point)
+    if agentx:
+        return " ".join(bench["agentx"]["launch_overrides"]["append_args"])
+    return bench["envs"]["EXTRA_SGLANG_ARGS"]
+
+
+#: Every way a launch carries the flag: AgentX's argument list, the plain launch's argument string, and ``=``.
+_CARRIERS = [(False, " "), (False, "="), (True, " "), (True, "=")]
+
+
+@pytest.mark.parametrize(("agentx", "sep"), _CARRIERS)
+def test_a_present_watchdog_below_the_estimate_is_raised_to_it(
+    image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agentx: bool, sep: str
+) -> None:
+    """The AgentX default (1800 s) is shorter than rebuilding three modules (2100 s): the default must not cut the
+    rebuild."""
+    monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: frozenset({"m1", "m2", "m3"}))
+    point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}1800 --mem 0.8", **_tuned(tmp_path))
+
+    note = raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+
+    assert rebuild_watchdog_sec(3) == 2100
+    assert _watchdog(point, agentx) == f"--tp 4 {_FLAG}{sep}2100 --mem 0.8"
+    assert note is not None and "raised to 2100s" in note
+
+
+@pytest.mark.parametrize(("agentx", "sep"), _CARRIERS)
+@pytest.mark.parametrize("present", ["4000", "1500", "fast"])
+def test_a_present_watchdog_at_or_above_the_estimate_is_kept(
+    image, tmp_path: Path, agentx: bool, sep: str, present: str
+) -> None:
+    """A candidate's 4000 s and a value equal to the estimate stay; a value that is not a number is not rewritten."""
+    assert rebuild_watchdog_sec(2) == 1500
+    point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}{present}", **_tuned(tmp_path))
     before = point.read_text(encoding=_UTF8)
 
     assert raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path) is None
     assert point.read_text(encoding=_UTF8) == before
+
+
+@pytest.mark.parametrize("agentx", [False, True])
+def test_the_last_of_two_watchdogs_is_the_one_raised(image, tmp_path: Path, agentx: bool) -> None:
+    """sglang's parser takes the last value, so that is the one compared and raised."""
+    point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"{_FLAG} 4000 {_FLAG} 120", **_tuned(tmp_path))
+
+    raise_rebuild_watchdog(_call(tmp_path, point), None, {}, tmp_path)
+
+    assert _watchdog(point, agentx) == f"{_FLAG} 4000 {_FLAG} 1500"
 
 
 def test_a_test_whose_tables_are_the_images_keeps_sglangs_watchdog(image, tmp_path: Path) -> None:
