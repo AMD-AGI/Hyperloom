@@ -32,13 +32,9 @@ from ..base import (
     validation_of,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
-
-# ``geak.rebench.final_status`` values with the same meaning, but settled: the
-# rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
-# are deliberately absent — those ARE verdicts, so the candidate was judged.
-_GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
 
 _GEAK_DROPPED_FACT = (
     "GEAK candidate (self-reported {gain}) was DROPPED without revalidation (status={status}, {reason})."
@@ -120,7 +116,7 @@ def _settled_failure(rebench: dict[str, Any], action_path: list[Any]) -> bool:
             that failed stamps ``failed`` and nothing retracts it when the 2a
             fallback then promotes the candidate for real.
     """
-    if str(rebench.get("final_status") or "") not in _GEAK_DROPPED_RESULT_STATUSES:
+    if str(rebench.get("final_status") or "") not in REBENCH_FAILED_STATUSES:
         return False
     return not any(str(step).split(":", 1)[0] == "geak_e2e" for step in action_path)
 
@@ -232,7 +228,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("final_output_throughput", final_tput),
             ("throughput_unit", framework_registry.throughput_unit(fw)),
             ("validated_gain_pct", gain_v),
-            ("revalidation_pending", bool(candidate.get("revalidation_pending")) or None),
             ("geak_candidate", candidate or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),

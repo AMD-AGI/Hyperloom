@@ -13,17 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, first_str, to_unix, to_mapping
+from hyperloom.common.coerce import first_str, to_unix, to_mapping
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
-from ..recorder.baseline_event import anchoring_eval_from_timeline
+from ..recorder.baseline_event import anchoring_baseline_action, anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ..variant_funnel import variants_from_timeline
 from ._common import (
     _first,
-    _optional_bool,
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
@@ -349,12 +348,6 @@ _BASELINE_OUTCOME_FIELDS = (
     "e2el_mean_ms",
 )
 
-#: Action statuses whose figure the session went on to use. ``degraded`` is a
-#: baseline that stands on its cold warmup round because the budget would not
-#: hold the hot pass: knowingly depressed, but it is the number every later gain
-#: in the session was read against, so it is the number to publish.
-_ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
-
 
 def _graded_axes(recorded: Any) -> dict[str, Any]:
     """Publish the graded axes a recorder projected, absent ones as explicit nulls.
@@ -378,16 +371,6 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
 def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
-    Two dispatches reach the baseline executor and land an action on a
-    ``baseline`` event: the genuine baseline and ``replay_warm_recipe``. The
-    kernel lane's throughput-only probes -- integrate re-baseline, stack
-    validation, shape capture -- go through the same executor but record into
-    the kernel event that asked for them, so they are not here at all. Only
-    the genuine baseline anchors the session, so the selection reads the
-    action's own ``establishes_quality_ref`` -- the flag the executor set from
-    the dispatch kind and ``quality_ref_exempt`` -- rather than re-deciding
-    from the kind.
-
     Args:
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
 
@@ -395,33 +378,17 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
         dict[str, Any]: The four baseline figures, each ``None`` when the
             timeline holds no anchoring measurement.
     """
-    anchors: list[tuple[str, dict[str, Any], str]] = []
-    for event in timeline:
-        if not isinstance(event, dict) or str(event.get("type") or "") != "baseline":
-            continue
-        for action in dict_rows(to_mapping(event.get("ext")).get("actions")):
-            if not _optional_bool(to_mapping(action.get("request")).get("establishes_quality_ref")):
-                continue
-            if str(action.get("status") or "").strip().lower() not in _ANCHORING_BASELINE_STATUSES:
-                continue
-            # A baseline re-measured after an enablement fix re-anchors the
-            # session, so the latest anchor wins. Ordered on the action's own
-            # stamps because the actions array is keyed by task id and carries
-            # no chronology of its own.
-            anchors.append(
-                (str(action.get("end_time") or action.get("start_time") or ""), action, str(event.get("id") or ""))
-            )
-    if not anchors:
+    anchor = anchoring_baseline_action(timeline)
+    if anchor is None:
         return {
             **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
             "perf": _graded_axes(None),
             "submission_valid": None,
             "submission_invalid_reasons": [],
         }
-    anchors.sort(key=lambda row: row[0])
-    if anchors[-1][2]:
-        source_ids.append(anchors[-1][2])
-    measurement = to_mapping(anchors[-1][1].get("measurement"))
+    if anchor.event_id:
+        source_ids.append(anchor.event_id)
+    measurement = to_mapping(anchor.action.get("measurement"))
     submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},

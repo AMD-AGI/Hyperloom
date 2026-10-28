@@ -28,7 +28,7 @@ from typing import Any
 from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
 
 from .construct import event_header
-from .event_fields import bool_or_none as _bool_or_none, failure_row as _failure_row, now_iso_seconds as _now
+from .event_fields import bool_or_none as _bool_or_none, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink
@@ -66,10 +66,8 @@ MATCH_MISS = "miss"
 
 # The lookup's own outcome, and only that. Every finding -- a hit, a
 # ``seed_only``, a miss -- is a lookup that ran and answered, so all three are
-# ``succeeded`` and the finding is read off ``match_status``. ``failed`` is a
-# lookup that raised before it answered.
+# ``succeeded`` and the finding is read off ``match_status``.
 STATUS_SUCCEEDED = "succeeded"
-STATUS_FAILED = "failed"
 
 #: Match statuses that mean the event should carry a ``matched`` block.
 MATCHED_STATUSES = frozenset({MATCH_HIT, MATCH_SEED_ONLY})
@@ -190,8 +188,8 @@ class WarmStartEventRecorder:
     def claims(self, session_dir: Any) -> bool:
         """Whether this recorder is the one a read in ``session_dir`` belongs to.
 
-        A lookup killed before settling leaves its window open, so the session
-        it was opened in is checked rather than assumed: a stale window
+        A lookup that raised before settling leaves its window open, so the
+        session it was opened in is checked rather than assumed: a stale window
         must not attribute a later session's reads to an anchor that never
         finished.
         """
@@ -225,30 +223,22 @@ class WarmStartEventRecorder:
     def finish(self, *, match_status: str, matched: Mapping[str, Any] | None = None) -> None:
         """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        A miss is ``succeeded``: the KB was asked and it answered.
+        A miss is ``succeeded``: the KB was asked and it answered. A lookup
+        that raised never reaches here and leaves its event open.
         """
-        payload: dict[str, Any] = {"match_status": str(match_status or "").strip().lower()}
-        if matched:
-            payload["matched"] = dict(matched)
-        self._close(STATUS_SUCCEEDED, payload)
-
-    def finish_crashed(self, exc: BaseException) -> None:
-        """Close a lookup that raised instead of answering.
-
-        Distinguishes "the lookup blew up" from "the session was killed
-        mid-lookup", which both read as a dangling ``running`` event. The reads
-        served before the raise stay on the event and say how far it got.
-        """
-        self._close(STATUS_FAILED, {"failure": _failure_row(stage=EVENT_TYPE, exc=exc)})
-
-    def _close(self, status: str, payload: Mapping[str, Any]) -> None:
-        """Write the lookup's terminal fragment and close its event."""
         if self._closed:
             return
         self._closed = True
         self._release()
         end_time = _now()
-        self._sink.record(SECTION_EVENT, {"status": status, **payload, "end_time": end_time})
+        payload: dict[str, Any] = {
+            "status": STATUS_SUCCEEDED,
+            "match_status": str(match_status or "").strip().lower(),
+            "end_time": end_time,
+        }
+        if matched:
+            payload["matched"] = dict(matched)
+        self._sink.record(SECTION_EVENT, payload)
 
         from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
@@ -260,7 +250,7 @@ class WarmStartEventRecorder:
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
-                status=derived or status,
+                status=derived or STATUS_SUCCEEDED,
                 ext=ext,
                 end_time=end_time,
             )
@@ -421,7 +411,6 @@ __all__ = [
     "PRODUCER",
     "SECTION_EVENT",
     "SECTION_READ",
-    "STATUS_FAILED",
     "STATUS_SUCCEEDED",
     "WarmStartEventRecorder",
     "assemble_warm_start_ext",
