@@ -63,6 +63,7 @@ from ..actions.executors._workload_envs import (
     LaunchLayer,
     MaterializeOptions,
     default_baseline_config,
+    num_prompts_per_conc,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.inference_optimizer.roofline_ceiling import (
@@ -134,9 +135,6 @@ def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
     """The ladder a mode sweeps when the operator names none."""
     return list(_workload_ladder(benchmark_mode).default_concs)
 
-
-# Multiplier applied to each CONC for NUM_PROMPTS.
-DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
@@ -444,7 +442,7 @@ def _build_arm_grid(
     """Build a single-arm grid in the order of ``concs``."""
     out: list[GridVariant] = []
     for conc in concs:
-        num_prompts = max(int(conc) * int(num_prompts_factor), int(conc))
+        num_prompts = int(conc) * int(num_prompts_factor)
         envs = dict(arm.envs)
         envs.update(
             {
@@ -560,8 +558,6 @@ class _SweepRun:
     osl: int
     concs: list[int]
     workload: _WorkloadLadder
-    anchor_conc: int
-    num_prompts_factor: int
     optimized: _Arm
     baseline: _Arm
     benchmark_timeout_sec: float
@@ -604,8 +600,14 @@ class _SweepRun:
         return None
 
     @property
+    def num_prompts_factor(self) -> int:
+        """A synthetic rung sends the request window the session measured its anchor with, so the anchor rung costs and
+        measures what the session's did. An agentic rung's window is its trajectory set; it never reads NUM_PROMPTS."""
+        return num_prompts_per_conc(self.isl, self.osl)
+
+    @property
     def ladder(self) -> list[int]:
-        return self.workload.order(self.concs, self.anchor_conc)
+        return self.workload.order(self.concs, int(self.state.conc or 0))
 
     def arm_grid(self, arm: _Arm) -> list[GridVariant]:
         return _build_arm_grid(arm, self.ladder, isl=self.isl, osl=self.osl, num_prompts_factor=self.num_prompts_factor)
@@ -1391,8 +1393,6 @@ async def run_conc_sweep(
         osl=osl,
         concs=concs,
         workload=workload,
-        anchor_conc=int(getattr(state, "conc", 0) or 0),
-        num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
         optimized=optimized,
         baseline=_Arm(name="baseline"),
         benchmark_timeout_sec=benchmark_timeout_sec,
@@ -1410,7 +1410,6 @@ async def run_conc_sweep(
 __all__ = [
     "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
-    "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
     "SCHEMA_VERSION",
     "_build_arm_grid",

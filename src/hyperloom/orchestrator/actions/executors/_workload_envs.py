@@ -1085,6 +1085,16 @@ def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
     return tuple(needed)
 
 
+def num_prompts_per_conc(isl: int, osl: int) -> int:
+    """Requests a benchmark round sends per unit of concurrency: fewer waves the longer each sequence runs."""
+    seq_cost = isl + osl
+    if seq_cost <= 1024:
+        return 10
+    if seq_cost <= 4096:
+        return 5
+    return 3 if seq_cost <= 16384 else 2
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1133,18 +1143,8 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # Profile mode: force-override NUM_PROMPTS to reach the steady-state
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
-        else:
-            seq_cost = isl_val + osl_val
-            if seq_cost <= 1024:
-                factor = 10
-            elif seq_cost <= 4096:
-                factor = 5
-            elif seq_cost <= 16384:
-                factor = 3
-            else:
-                factor = 2
-            if "NUM_PROMPTS" not in envs:
-                envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        elif "NUM_PROMPTS" not in envs:
+            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(

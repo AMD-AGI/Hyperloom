@@ -654,7 +654,8 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     for kwargs, bench in calls:
         assert bench["benchmark_script"] == "sglang_custom.sh"
         assert bench["runner_type"] == "mi355x"
-        assert int(bench["envs"]["NUM_PROMPTS"]) == 320
+        # ISL + OSL of 9216 sends three requests per unit of concurrency, as the session's own rounds do.
+        assert int(bench["envs"]["NUM_PROMPTS"]) == 192
         assert bench["envs"]["RUN_EVAL"] == "false"
         assert kwargs["launch"].server_lifecycle is None
 
@@ -1303,6 +1304,29 @@ def test_build_arm_grid_keeps_the_order_given():
     assert [v.name for v in grid] == ["baseline_conc64", "baseline_conc32", "baseline_conc16"]
     assert grid[0].extra_envs["CONC"] == "64"
     assert grid[0].extra_envs["RUN_EVAL"] == "false"
+
+
+@pytest.mark.parametrize(
+    ("isl", "osl", "per_conc"), [(512, 512, 10), (1024, 1024, 5), (1024, 8192, 3), (8192, 16384, 2)]
+)
+def test_each_rung_sends_the_request_window_the_session_measures_with(
+    session_dir: Path, baseline_yaml: Path, isl: int, osl: int, per_conc: int
+):
+    """The anchor rung reproduces the session's own measurement, at its cost: a long-OSL rung sends fewer waves."""
+    state = _make_state(baseline_config_path=str(baseline_yaml), isl=isl, osl=osl)
+    sent: dict[str, int] = {}
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        sent.update({v.name: int(v.extra_envs["NUM_PROMPTS"]) for v in grid})
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
+    ):
+        asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert sent == {f"{arm}_conc{conc}": conc * per_conc for arm in ("baseline", "optimized") for conc in (4, 16)}
 
 
 def test_build_arm_grid_optimized_arm_carries_args():

@@ -187,7 +187,8 @@ def test_the_first_arms_later_rungs_run_on_half_the_deadline(sweep_run, persiste
 
 
 def test_a_long_top_rung_no_longer_takes_the_whole_budget(sweep_run):
-    """#2254: OSL 8192 at CONC 16, 2869s granted, 413s boot. The anchor runs first, the cheaper rungs next, and the
+    """#2254: OSL 8192 at CONC 16, 2869s granted, a 413s boot and a 655s anchor benchmark. The anchor rung sends the
+    session's request window, so it costs what the session measured; it runs first, the cheaper rung next, and the
     top rung -- longer than the whole budget -- is cut at the baseline's half, so the optimized arm pairs both."""
     recorder = MagicMock()
     payload, backend, calls, bounds, clock = sweep_run(
