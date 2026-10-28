@@ -20,49 +20,6 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
-- **`analysis_route=non-llm` runs TraceLens without a model** *(breaking change: the only other route value is
-  `agent`)*. `HYPERLOOM_TRACE_ANALYSIS_ROUTE` and the `analysis_route` payload key take `agent` or `non-llm`; any
-  other value fails with `invalid_analysis_route` before anything starts. The `non-llm` route runs the TraceLens perf
-  report, maps it to `analysis.json` and shares the gates, kernel candidates and reports with `agent`, so it needs a
-  TraceLens checkout. Unlike `agent` it writes no `category_data/`, so it adds no collective candidates; it also
-  writes no prose, keeps full kernel names, and reports `analysis.json` as the report path, so the run report has no
-  Executive Summary. TraceLens trace-quality findings appear in `trace_health_warnings` as
-  `trace_quality_poor`; they trigger no retry and hide no kernels. The `--use-llm-orchestrator` and
-  `--no-llm-orchestrator` options of `tracelens_analysis` and `KERNEL_AGENT_USE_LLM_ORCHESTRATOR` are replaced by
-  `--route {agent,non-llm}`; the agent argv always carries `--route agent`. Trace analyses record `tracelens` as the
-  tool on both routes. On both routes the trace certificate `<trace_dir>.selfcert.json` no longer carries
-  `parse.aggregation_scope`, `min_repeats_met_bypass_window`, `has_steady_state_semantics`,
-  `annotations.annotation_window_count`, `groups`, `selected_group`, `steady_window` or
-  `steady_window_contains_prefill`, and `verdict.usable_by` is `["tracelens"]` or empty. The roofline event drops
-  `trace_quality.aggregation_scope`, and its `usable_by` no longer lists the removed route. The agent route changes as
-  follows:
-  - Its `bypass_graph_under_recorded` warning is now `graph_under_recorded`.
-  - `current_step` is `run_trace_analysis`, where it was `run_tracelens_sdk_orchestrator`.
-  - The "produced N hot kernels (source=...)" and "no compute optimization tasks" log lines are gone.
-  - `analysis_meta.steady_state.aggregation_scope` and `analysis_meta.steady_state.source` are removed, and
-    `tracelens_route_hint` is no longer in the install event.
-  - When render, load or inject raises after the skill, the failed status file no longer lists
-    `tracelens_agent_report`, `tracelens_cmd_prefix` and `tracelens_agent_sdk_error`; they remain in the CLI log.
-
-- **PrimaTune hot kernels carry operand shapes on both routes.** The predictor request's `hot_kernels[].args` is the
-  hot-kernel row's shapes with dtype, joined with `, ` (for example `(4096,4096) bf16, (4096,11008) bf16`), and
-  `time_us` and `call_count` come from the same row. On the agent route `args` used to be empty.
-
-- **The diffusion latency roofline is removed and `custom` has no roofline ceiling** *(breaking change: the sidecar,
-  its flags and its snapshot fields are removed)*. xDiT and `custom` runs no longer write `diffusion_roofline.json`,
-  and `tracelens_analysis` no longer takes `--num-denoise-steps`, `HYPERLOOM_NUM_DENOISE_STEPS`, `--model-path` or
-  `--precision`. xDiT keeps its img/s ceiling and within % when `XDIT_NUM_STEPS` is set and the DiT geometry or the
-  checkpoint size is readable; otherwise within % is empty, where it used to fall back to a millisecond floor.
-  `custom` gets no ceiling, so its within % and gap are empty; it could previously be compared against an LLM tok/s
-  ceiling. The roofline snapshot
-  drops `e2e_mean_ms` and `roofline_ideal_ms`, and `roofline_progress` drops `ceiling_kind`, `latency_ceiling_ms`,
-  `achieved_latency_ms`, `latency_ceiling_available` and `current_best_pct_of_latency_ceiling`; read
-  `ceiling_available` instead. `custom` and xDiT snapshots no longer carry `roofline_provenance` or
-  `perfmodel_breakdown`, and PrimaTune's xDiT roofline block loses `hbm_bw_gbps`, `peak_achievable_tflops` and the
-  op counts, which came from the LLM decode model. The report's ceiling line reads "Roofline ceiling" in the run's
-  unit, and its explanation names the memory or compute bound, where it always said HBM; the explanation is omitted
-  when the run has no ceiling.
-
 - **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the

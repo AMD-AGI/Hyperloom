@@ -2392,6 +2392,41 @@ def test_the_non_llm_route_writes_the_same_artifacts_and_gates_on_the_report_sha
     assert Path(result["artifact_paths"]["tracelens_summary"]).is_file()
 
 
+def test_the_failed_status_keeps_the_skill_artifacts_when_a_later_step_raises(tmp_path, capsys):
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.md"
+    report.write_text("# report\n", encoding="utf-8")
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    async def skill_writes_report(*_a, **_kw):
+        return tlr.TraceLensSkillRunResult(
+            output_dir=tmp_path,
+            report_path=report,
+            runner="agent",
+            artifact_paths={"tracelens_agent_report": str(report)},
+        )
+
+    def render_fails(_report):
+        raise RuntimeError("render failed")
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "run_tracelens_skill", skill_writes_report),
+        patch.object(tla, "render_analysis_json", render_fails),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=["--route", "agent"])
+
+    result = json.loads(capsys.readouterr().out)
+    status = json.loads(Path(result["status_path"]).read_text(encoding="utf-8"))
+    assert (status["state"], status["artifact_paths"]["tracelens_agent_report"]) == ("failed", str(report))
+
+
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
     """Write a CUDA-graph capture sidecar in its production shape."""
     path.parent.mkdir(parents=True, exist_ok=True)

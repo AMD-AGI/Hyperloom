@@ -32,6 +32,7 @@ from hyperloom.inference_optimizer.framework_paths import (
 from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
+    TraceLensSkillRunResult,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
     extract_exposed_comm_pct_from_analysis_md,
@@ -345,24 +346,19 @@ def _record_gate_suppression(gates: _ReportGates, warnings: list[dict[str, Any]]
 
 
 class RouteOutcome(NamedTuple):
-    """What a route hands the shared tail: its report, how it ran, the candidates it kept and its artifacts."""
+    """What a route hands the shared tail: its report, how it ran and the candidates it kept."""
 
     report_path: Path
     orchestrator_mode: str
     raw_candidates: list[dict[str, Any]]
-    artifact_paths: dict[str, str]
 
 
-def _run_agent_route(
-    request: TraceLensSkillRequest,
-    args: argparse.Namespace,
-    raw_trace_path: Path,
-    warnings: list[dict[str, Any]],
-    log_path: Path,
-) -> RouteOutcome:
-    """Run the TraceLens skill under a model; gate on its ``analysis.md``, read candidates from its ``analysis.json``."""
+def _run_agent_skill(
+    request: TraceLensSkillRequest, args: argparse.Namespace, log_path: Path
+) -> TraceLensSkillRunResult:
+    """Run the TraceLens skill under a model."""
     with _trajectory_scope(args):
-        skill_result = asyncio.run(
+        return asyncio.run(
             run_tracelens_skill(
                 request,
                 budget_minutes=args.budget_minutes,
@@ -370,6 +366,16 @@ def _run_agent_route(
                 log=lambda msg: append_log(log_path, msg),
             )
         )
+
+
+def _agent_route_outcome(
+    skill_result: TraceLensSkillRunResult,
+    args: argparse.Namespace,
+    raw_trace_path: Path,
+    warnings: list[dict[str, Any]],
+    log_path: Path,
+) -> RouteOutcome:
+    """Gate on the skill's ``analysis.md``, read candidates from its ``analysis.json``."""
     report_path = skill_result.report_path
     shares = WorkloadShares(
         idle_pct=extract_idle_pct_from_analysis_md(report_path),
@@ -393,7 +399,6 @@ def _run_agent_route(
         report_path=report_path,
         orchestrator_mode=skill_result.runner,
         raw_candidates=raw_candidates,
-        artifact_paths=skill_result.artifact_paths,
     )
 
 
@@ -425,7 +430,6 @@ def _run_non_llm_route(
         report_path=report_path,
         orchestrator_mode=AnalysisRoute.NON_LLM.value,
         raw_candidates=raw_candidates,
-        artifact_paths={},
     )
 
 
@@ -987,7 +991,7 @@ def main() -> int:
                 capture_folder=capture_folder,
             )
             if route is AnalysisRoute.AGENT:
-                outcome = _run_agent_route(
+                skill_result = _run_agent_skill(
                     TraceLensSkillRequest(
                         skill_path=skill,
                         output_dir=tracelens_dir,
@@ -996,15 +1000,14 @@ def main() -> int:
                         capture_folder=capture_folder,
                     ),
                     args,
-                    raw_trace_path,
-                    trace_health_warnings,
                     log_path,
                 )
+                artifacts.update(skill_result.artifact_paths)
+                outcome = _agent_route_outcome(skill_result, args, raw_trace_path, trace_health_warnings, log_path)
             else:
                 outcome = _run_non_llm_route(
                     run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
                 )
-            artifacts.update(outcome.artifact_paths)
             route_report_path = outcome.report_path
             orchestrator_mode = outcome.orchestrator_mode
             route_candidates = []

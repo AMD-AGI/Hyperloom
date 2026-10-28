@@ -168,9 +168,9 @@ def test_written_report_matches_schema_and_reader_inputs(tmp_path):
     analysis = pra.analyze_perf_report(_write_run_yaml(tmp_path, {"traceEvents": _TRACE_EVENTS}))
 
     report = json.loads(analysis.report_path.read_text(encoding="utf-8"))
-    assert set(report) == AnalysisReport.__required_keys__ | {"executive_summary", "top_operations"}
-    assert set(report["report_info"]) == ReportInfo.__required_keys__
-    assert set(report["compute_optimizations"][0]) == ComputeTask.__required_keys__
+    assert set(report) == set(AnalysisReport.__annotations__) - {"appendix"}
+    assert set(report["report_info"]) == set(ReportInfo.__annotations__) - {"warnings"}
+    assert set(report["compute_optimizations"][0]) == set(ComputeTask.__annotations__) - {"phase"}
     assert analysis.shares == WorkloadShares(idle_pct=25.0, compute_pct=75.0, exposed_communication_pct=0.0)
     summary = extract_workload_summary(analysis.report_path)
     assert (summary["compute_pct"], summary["idle_pct"], summary["comm_pct"]) == (75.0, 25.0, 0.0)
