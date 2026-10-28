@@ -341,3 +341,34 @@ def test_a_second_attempt_waits_out_an_unresolved_first(monkeypatch):
         threading.Event().wait(0.05)
     ray_runtime.quiet_ray_init(num_gpus=1)
     assert order[1:] == ["shutdown", "init"], order
+
+
+def test_sigterm_still_reaches_the_python_handler_after_ray_init(monkeypatch):
+    """Ray's driver core natively replaces SIGTERM during ``ray.init``; the session's stop handler must survive it."""
+    import ctypes
+    import os
+    import signal
+    import time
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.signal.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    libc.signal.restype = ctypes.c_void_p
+    sig_ign = ctypes.c_void_p(1)
+
+    def _init(**_kw):
+        libc.signal(signal.SIGTERM, sig_ign)
+
+    fake_ray = _make_fake_ray([])
+    fake_ray.init = _init
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    received: list[int] = []
+    previous = signal.signal(signal.SIGTERM, lambda signum, _frame: received.append(signum))
+    try:
+        ray_runtime.quiet_ray_init(num_gpus=1)
+        os.kill(os.getpid(), signal.SIGTERM)
+        deadline = time.monotonic() + 2.0
+        while not received and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert received == [signal.SIGTERM]
