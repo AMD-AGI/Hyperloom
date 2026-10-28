@@ -25,7 +25,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     record_campaign_baseline,
     untracked_paths,
 )
-from kernelforge.loop.editable_repo import acquire_repo_lock, release_repo_lock
+from kernelforge.tools import acquire_repo_lock, release_repo_lock
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "baseline-test",

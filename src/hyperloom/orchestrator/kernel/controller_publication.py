@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.kernel_rewrite_controller import operator_directory_name
 
 PUBLICATION_SCHEMA_VERSION = 2
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")

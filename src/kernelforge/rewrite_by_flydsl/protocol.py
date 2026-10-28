@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import keyword
 import re
-from kernelforge.loop.path_ownership import ATTEMPT_ROOT_DIR, is_producer_owned_path
+from kernelforge.loop.api import ATTEMPT_ROOT_DIR, RESULT_SENTINEL, is_producer_owned_path
 
 REWRITE_PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
@@ -30,9 +30,6 @@ DRIVER_PREPARATION_SUPPORTED = True
 #: Whether the framework apply-back stage can be declined, leaving the
 #: standalone kernel as the whole deliverable.
 APPLYBACK_OPTIONAL = True
-
-# The outer rewrite exposes the same result sentinel as forge-loop so callers consume one backend-neutral contract.
-RESULT_SENTINEL = "__FORGE_RESULT__"
 
 ARTIFACT_KIND_FRAMEWORK_APPLYBACK = "framework_applyback"
 

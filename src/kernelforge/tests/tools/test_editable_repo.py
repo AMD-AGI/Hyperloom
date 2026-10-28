@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop import editable_repo
-from kernelforge.loop.editable_repo import (
+from kernelforge.tools import editable_repo
+from kernelforge.tools.editable_repo import (
     acquire_repo_lock,
     editable_roots,
     needs_inplace,
