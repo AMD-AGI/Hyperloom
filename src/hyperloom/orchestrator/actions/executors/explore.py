@@ -1766,7 +1766,7 @@ class ExploreExecutor:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         if _cycle_bench.CYCLE_ARMS_PARAM in params:
-            return await _run_cycle_batch(params, extra.get("shared_state") or extra.get("state"), output_root)
+            return await _run_cycle_batch(params, extra.get("shared_state"), output_root)
         try:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:
