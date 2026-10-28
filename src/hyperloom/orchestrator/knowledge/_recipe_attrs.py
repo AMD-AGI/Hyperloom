@@ -146,11 +146,8 @@ def _best_config(current_best: Mapping[str, Any], optimization_stack: Sequence[A
         if key in current_best:
             config[key] = current_best[key]
     last = optimization_stack[-1] if optimization_stack else None
-    stack_args = (
-        str(last.get("candidate_extra_server_args") or last.get("extra_server_args") or "").strip()
-        if isinstance(last, dict)
-        else ""
-    )
+    # The last layer's extra_server_args is the cumulative stack; its candidate_extra_server_args is only its delta.
+    stack_args = str(last.get("extra_server_args") or "").strip() if isinstance(last, dict) else ""
     if stack_args:
         config["extra_server_args"] = stack_args
     return config

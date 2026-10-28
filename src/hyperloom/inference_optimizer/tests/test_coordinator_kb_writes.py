@@ -560,6 +560,36 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
+def test_persisted_best_config_carries_the_full_stack_not_the_last_layer_delta(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+    mtp = '--speculative-config {"method":"mtp","num_speculative_tokens":1} --max-model-len 13312'
+
+    assert coord.writeback.lift_to_current_best(
+        "explore", 1400.0, {"name": "mtp", "candidate_extra_server_args": mtp, "extra_server_args": mtp}
+    )
+    assert coord.writeback.lift_to_current_best(
+        "explore",
+        1480.0,
+        {
+            "name": "async-sched",
+            "candidate_extra_server_args": "--async-scheduling",
+            "extra_server_args": f"{mtp} --async-scheduling",
+        },
+    )
+    assert coord.writeback.validate(1480.0, {"output_throughput": 1480.0})
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    args = row["best_config"]["extra_server_args"]
+    assert row["best_throughput"] == 1480.0
+    assert '--speculative-config {"method":"mtp","num_speculative_tokens":1}' in args
+    assert "--max-model-len 13312" in args
+    assert "--async-scheduling" in args
+
+
 # sessions[] entry must carry throughput_before/after, a date, and stack actions.
 def test_session_entry_carries_throughput_date_and_actions(
     tmp_path: Path,
