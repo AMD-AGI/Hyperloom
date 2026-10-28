@@ -255,7 +255,7 @@ def test_child_command_uses_only_options_the_main_flow_declares(tmp_path: Path) 
     assert {arg for arg in argv[4:] if arg.startswith("--")} <= _optimize_options()
     for flag in ("--no-framework-agent", "--no-kernel", "--no-enable-conc-sweep", "--no-warm-replay"):
         assert flag in argv
-    for flag in ("--no-research-scout", "--degraded-kb"):
+    for flag in ("--no-research-scout", "--no-static-recon", "--degraded-kb"):
         assert flag in argv
     assert argv[argv.index("--enablement") + 1] == "off"
     assert argv[argv.index("--max-hours") + 1] == "1.500000"

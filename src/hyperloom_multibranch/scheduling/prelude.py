@@ -120,6 +120,7 @@ PRELUDE_FLAGS = (
     "off",
     "--no-warm-replay",
     "--no-research-scout",
+    "--no-static-recon",
     "--degraded-kb",
 )
 PRELUDE_BRANCH = "prelude"
