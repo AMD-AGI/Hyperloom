@@ -164,6 +164,7 @@ def _prelude_state(
     baseline_post_ready_runtime_sec: float = 0.0,
     baseline_warm_runtime_sec: float = 0.0,
     baseline_measure_round_dropped: bool = False,
+    baseline_failure_streak: int = 0,
     auto_roofline_pending_task_id: str = "",
 ) -> SharedState:
     """A PRELUDE-phase state with an explicit clock, as the budget policy reads it."""
@@ -171,6 +172,7 @@ def _prelude_state(
         auto_roofline_pending_task_id=auto_roofline_pending_task_id,
         phase="PRELUDE",
         max_minutes=max_minutes,
+        baseline_failure_streak=baseline_failure_streak,
         phase_elapsed_totals={"PRELUDE": spent_sec},
         phase_started_unix=0.0,
         phase_budget_pct={},
@@ -231,6 +233,52 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
     assert evidence["terminal"] is True
     assert is_valid_stop_reason(reason)
     assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
+
+
+def test_the_prelude_allowance_never_reads_as_a_debt():
+    """Past the reserve the phase can buy nothing; the figure says zero seconds, not minus an hour."""
+    # A 12h session reserves 21600 s for optimization, and 14718.5 s of clock is left.
+    state = _prelude_state(max_minutes=720, usable_sec=14_718.5)
+    affordable, evidence = phase_state.prelude_can_afford(state, expected_cost_sec=300.0)
+    assert affordable is False
+    assert evidence["affordable_sec"] == pytest.approx(0.0)
+
+
+def test_a_prelude_that_can_buy_nothing_closes_instead_of_idling():
+    """The phase that ticked for 4.1h: nothing it may spend, no arm of its own, and a clock that is not zero."""
+    state = _prelude_state(
+        max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2
+    )
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    assert out is not None
+    next_phase, reason, evidence = out
+    assert (next_phase, reason) == ("CLOSE", "prelude_budget_exhausted")
+    assert evidence["terminal"] is True
+    assert evidence["prelude_affordable_sec"] == pytest.approx(0.0)
+    assert evidence["session_usable_sec"] == pytest.approx(14_718.5)
+    assert is_valid_stop_reason(reason)
+    assert phase_state.replay_next_phase(evidence["predicate_inputs"]) == out
+
+
+def test_a_prelude_with_budget_of_its_own_keeps_retrying():
+    """The same failed baseline, before the reserve line: the phase still has rounds it can pay for."""
+    state = _prelude_state(max_minutes=720, spent_sec=6_000.0, usable_sec=30_000.0, baseline_failure_streak=2)
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_round_still_in_flight_is_not_an_idle_prelude():
+    """A warm replay that has not landed is work in progress, not a phase waiting on nothing."""
+    state = _prelude_state(
+        max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2
+    )
+    state.warm_replay_outcome = {"status": "in_flight", "replay_task_id": "abc"}
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_an_unbounded_prelude_never_reaches_the_budget_line():
+    """Without a clock there is no reserve to cross, so a failed baseline keeps its retries."""
+    state = _prelude_state(max_minutes=0, usable_sec=None, baseline_failure_streak=2)
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
 
 def test_a_landed_baseline_outranks_the_exhausted_clock():

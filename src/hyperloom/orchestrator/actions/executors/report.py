@@ -233,6 +233,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "was doing when the clock reached zero — measuring the baseline, bringing up the framework agent, taking "
         "the roofline — is where the time went; the phase record shows which arms ran and what each cost."
     ),
+    "prelude_budget_exhausted": (
+        "Preparation used up everything the session holds outside the reserve kept for optimization, and no "
+        "baseline was ever anchored. With a failed baseline and no arm the machine can buy on its own, staying "
+        "in PRELUDE would have spent the optimization reserve on waiting, so the run stopped with the clock "
+        "still showing time. The phase record shows what preparation spent it on; resume with more budget, or "
+        "with the baseline fault in the failure summary fixed."
+    ),
     "prelude_cold_anchor_low_budget": (
         "The baseline's hot pass was skipped because the clock could not cover it together with one variant to "
         "measure against it, so the only figure available is the cold pass's — depressed by the server boot, the "
