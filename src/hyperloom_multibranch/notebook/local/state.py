@@ -24,6 +24,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BuildNotice,
     Learning,
     LearningRecord,
+    LeaseEnd,
+    LeaseStart,
     LineageEvent,
     LlmUsage,
     LlmUsageRecord,
@@ -37,7 +39,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, DedupStatus, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, DedupStatus, LineageKind, Role
 from hyperloom_multibranch.notebook import codec
 from hyperloom_multibranch.notebook.local.segments import Entry, EntryKind
 
@@ -97,6 +99,8 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.LLM_USAGE: LlmUsage,
     EntryKind.AGENT_MANIFEST: AgentManifestRecord,
     EntryKind.BUILD: BuildNotice,
+    EntryKind.LEASE_START: LeaseStart,
+    EntryKind.LEASE_END: LeaseEnd,
 }
 
 
@@ -117,6 +121,9 @@ class NotebookState:
         self.baselines: list[BaselineRecord] = []
         self.regressions: list[RegressionCase] = []
         self.quarantine: list[QuarantineEvent] = []
+        self.lease_starts: dict[str, LeaseStart] = {}
+        self.lease_ends: list[LeaseEnd] = []
+        self.toolbox_seen_at: float | None = None
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
         self.learnings: list[LearningRecord] = []
         self.llm_usage: list[LlmUsageRecord] = []
@@ -143,6 +150,8 @@ class NotebookState:
                 continue
             handlers[entry.kind](entry, value)
             self.decoded.append((entry, value))
+            if entry.role is Role.TOOLBOX:
+                self.toolbox_seen_at = max(entry.at, self.toolbox_seen_at or entry.at)
 
     def _handlers(self) -> dict[EntryKind, Callable[[Entry, object], None]]:
         """How each kind of entry changes the state."""
@@ -169,6 +178,8 @@ class NotebookState:
             EntryKind.AGENT_MANIFEST: self._agent_manifest,
             # A build notice indexes nothing: the inbox reads it from ``decoded``.
             EntryKind.BUILD: lambda _entry, _notice: None,
+            EntryKind.LEASE_START: lambda _entry, value: self.lease_starts.setdefault(value.lease_id, value),
+            EntryKind.LEASE_END: lambda _entry, value: self.lease_ends.append(value),
         }
 
     def _request(self, entry: Entry, request: TestRequest) -> None:

@@ -21,6 +21,7 @@ from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, Te
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchNode,
     BranchProgress,
+    CardHold,
     Claim,
     CommitNode,
     CommittedCommit,
@@ -45,6 +46,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     BranchDriver,
     CommitOrigin,
     Conclusion,
+    LeaseEndReason,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
@@ -323,8 +325,34 @@ def _pending(
     return tuple(candidate for candidate in found if candidate is not None)
 
 
-def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, ...]:
+def card_holds(state: NotebookState) -> tuple[CardHold, ...]:
+    """Every lease started, in the order they started, with when its cards went back: a card's first return stands,
+    an end naming no card returns every card still out, and the end that brings the last card back gives the reason."""
+
+    returned: dict[str, dict[int, float]] = {lease_id: {} for lease_id in state.lease_starts}
+    reasons: dict[str, LeaseEndReason] = {}
+    for end in state.lease_ends:
+        start = state.lease_starts.get(end.lease_id)
+        if start is None:
+            continue
+        back = returned[end.lease_id]
+        for card in end.gpu_ids or start.card_ids:
+            if card in start.card_ids:
+                back.setdefault(card, end.ended_at)
+        if end.lease_id not in reasons and all(card in back for card in start.card_ids):
+            reasons[end.lease_id] = end.end_reason
+    return tuple(
+        CardHold(start, returned[start.lease_id], reasons.get(start.lease_id)) for start in state.lease_starts.values()
+    )
+
+
+def progress(state: NotebookState, view: LineageView, at: float) -> tuple[BranchProgress, ...]:
+    """Each branch at a glance at ``at``, a lease still open counting its cards up to then."""
+
     records = state.records()
+    held: dict[str, float] = {}
+    for hold in card_holds(state):
+        held[hold.start.branch_id] = held.get(hold.start.branch_id, 0.0) + hold.card_seconds(at)
     found = []
     for branch in view.branches:
         requests = [
@@ -350,6 +378,7 @@ def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, .
                 judged_since_commit=judged_since_commit(records, view, branch.branch),
                 llm_usd=priced_usd(item.usage for item in state.llm_usage if item.usage.branch == branch.branch),
                 pending=_pending(state, records, branch, head),
+                held_card_seconds=held.get(branch.branch, 0.0),
             )
         )
     return tuple(found)
@@ -449,7 +478,7 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         fingerprints=tuple(state.fingerprints),
         records=tuple(state.records()),
         lineage=view,
-        progress=progress(state, view),
+        progress=progress(state, view, taken_at),
         committed=committed(state, view),
         claims=claims,
         intents=dict(state.intents),
@@ -462,10 +491,12 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         llm_usage=tuple(state.llm_usage),
         resolved_patches=tuple(patch for attempt in state.merge_attempts for patch in attempt.resolved_patches),
         agent_manifests=dict(state.agent_manifests),
+        card_holds=card_holds(state),
     )
 
 
 __all__ = [
+    "card_holds",
     "committed",
     "judged_since_commit",
     "lineage_view",

@@ -35,6 +35,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     Inbox,
     JudgementSink,
     LearningStore,
+    LeaseSink,
     LineageSink,
     NodeHealth,
     NotebookError,
@@ -66,6 +67,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     BranchProgress,
     BuildNotice,
+    CardHold,
     Claim,
     ClaimKey,
     CommittedCommit,
@@ -73,6 +75,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     InboxPage,
     Learning,
     LearningRecord,
+    LeaseEnd,
+    LeaseStart,
     LineageEvent,
     LineageView,
     LlmUsage,
@@ -105,6 +109,8 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
     Conclusion,
     DedupStatus,
+    LeaseEndReason,
+    LeaseKind,
     LineageKind,
     MergeOutcome,
     Role,
@@ -327,6 +333,7 @@ def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: st
 class LocalNotebook(
     TestRecordSink,
     NodeHealth,
+    LeaseSink,
     JudgementSink,
     GateRecords,
     LineageSink,
@@ -516,6 +523,45 @@ class LocalNotebook(
 
     async def quarantined(self) -> tuple[QuarantineEvent, ...]:
         return views.quarantined(self._state())
+
+    # --- card leases ----------------------------------------------------------------------------------------------
+
+    async def record_lease_start(self, start: LeaseStart) -> None:
+        self._require(Role.TOOLBOX)
+        state = self._state()
+        if start.branch_id not in {node.branch for node in views.lineage_view(state).branches}:
+            raise ValueError(f"lease {start.lease_id}: the lineage has not opened branch {start.branch_id!r}")
+        if start.lease_id in state.lease_starts:
+            raise ValueError(f"lease {start.lease_id} already started")
+        if start.cards < 1 or (start.gpu_ids and len(set(start.gpu_ids)) != start.cards):
+            raise ValueError(f"lease {start.lease_id} holds {start.cards} cards but names GPUs {start.gpu_ids}")
+        stored = replace(start, kind=LeaseKind(start.kind))
+        if (stored.kind is LeaseKind.TOOL_JOB) != bool(stored.tool):
+            raise ValueError(f"lease {start.lease_id}: a tool's job names its tool, and only a tool's job does")
+        held = ",".join(map(str, start.gpu_ids)) or start.sandbox_id
+        summary = (
+            f"lease {start.lease_id}: {start.cards} cards ({held}) to {start.holder}, charged to {start.branch_id}"
+        )
+        self._append(EntryKind.LEASE_START, stored, branch=start.branch_id, parent="", summary=summary)
+
+    async def record_lease_end(self, end: LeaseEnd) -> None:
+        self._require(Role.TOOLBOX)
+        start = self._state().lease_starts.get(end.lease_id)
+        if start is None:
+            raise ValueError(f"lease {end.lease_id} never started")
+        strangers = sorted(set(end.gpu_ids) - set(start.card_ids))
+        if strangers:
+            raise ValueError(f"lease {end.lease_id} holds no card {strangers}")
+        stored = replace(end, end_reason=LeaseEndReason(end.end_reason))
+        cards = ",".join(map(str, end.gpu_ids)) or "every card still out"
+        summary = f"lease {end.lease_id} gave back {cards}: {stored.end_reason.value}"
+        self._append(EntryKind.LEASE_END, stored, branch=start.branch_id, parent="", summary=summary)
+
+    async def card_holds(self) -> tuple[CardHold, ...]:
+        return views.card_holds(self._state())
+
+    async def toolbox_seen_at(self) -> float | None:
+        return self._state().toolbox_seen_at
 
     # --- judgements and gate records -------------------------------------------------------------------------------
 
@@ -880,7 +926,7 @@ class LocalNotebook(
 
     async def progress(self) -> tuple[BranchProgress, ...]:
         state = self._state()
-        return views.progress(state, views.lineage_view(state))
+        return views.progress(state, views.lineage_view(state), self._clock())
 
     async def lineage(self) -> LineageView:
         return views.lineage_view(self._state())

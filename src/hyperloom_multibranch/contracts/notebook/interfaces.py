@@ -31,6 +31,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     BranchProgress,
     BuildNotice,
+    CardHold,
     Claim,
     ClaimKey,
     CommittedCommit,
@@ -38,6 +39,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     InboxPage,
     Learning,
     LearningRecord,
+    LeaseEnd,
+    LeaseStart,
     LineageEvent,
     LineageView,
     LlmUsage,
@@ -146,6 +149,31 @@ class NodeHealth(Protocol):
 
     async def quarantined(self) -> tuple[QuarantineEvent, ...]:
         """Every node and GPU set taken out of service and not returned since."""
+
+
+class LeaseSink(Protocol):
+    """The toolbox's leases of cards outside the tests, stored in the notebook: the one record of the card time they
+    hold, which counts against the session's GPU budget."""
+
+    async def record_lease_start(self, start: LeaseStart) -> None:
+        """Keep a lease's grant, before the lease is handed out.
+
+        Raises ``ValueError`` for a branch the lineage has not opened, a lease id already started, cards that do not
+        add up, or a tool named for a lease that is not a tool's job, or none for one that is.
+        """
+
+    async def record_lease_end(self, end: LeaseEnd) -> None:
+        """Keep cards of a lease going back to the pool; a card returned again keeps its first return.
+
+        Raises ``ValueError`` for a lease never started or a card that is not the lease's.
+        """
+
+    async def card_holds(self) -> tuple[CardHold, ...]:
+        """Every lease started, open or closed, in the order they started."""
+
+    async def toolbox_seen_at(self) -> float | None:
+        """When the toolbox last wrote to the notebook, ``None`` before it ever did: a restarted toolbox closes the
+        leases its predecessor left open at this time, ``toolbox_lost``."""
 
 
 class JudgementSink(Protocol):
@@ -338,6 +366,7 @@ class RecordSearch(Protocol):
 class Notebook(
     TestRecordSink,
     NodeHealth,
+    LeaseSink,
     JudgementSink,
     GateRecords,
     LineageSink,
@@ -373,6 +402,7 @@ __all__ = [
     "Inbox",
     "JudgementSink",
     "LearningStore",
+    "LeaseSink",
     "LineageSink",
     "NodeHealth",
     "NotRecorded",

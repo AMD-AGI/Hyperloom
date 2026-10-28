@@ -169,6 +169,24 @@ class QuarantineAction(str, Enum):
     LIFT = "lift"
 
 
+class LeaseKind(str, Enum):
+    """What holds a lease's cards outside the tests: an autonomous branch, a dev sandbox, or a tool's job, which names
+    its tool."""
+
+    AUTONOMOUS = "autonomous"
+    DEV = "dev"
+    TOOL_JOB = "tool_job"
+
+
+class LeaseEndReason(str, Enum):
+    """Why a lease's cards went back to the pool: their holder gave them back, the session's close ended the lease, or
+    the toolbox that granted it was lost and a later one closed it."""
+
+    RELEASED = "released"
+    SESSION_CLOSE = "session_close"
+    TOOLBOX_LOST = "toolbox_lost"
+
+
 class LearningKind(str, Enum):
     """What a specialist's learning is: a way to fail, how the system behaves here, how a tool or setting behaves, what
     a hypothesis came to, or something else."""
@@ -229,6 +247,8 @@ __all__ = [
     "FrontierBasis",
     "InboxKind",
     "LearningKind",
+    "LeaseEndReason",
+    "LeaseKind",
     "LineageKind",
     "MergeOutcome",
     "QuarantineAction",

@@ -36,6 +36,8 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     FrontierBasis,
     InboxKind,
     LearningKind,
+    LeaseEndReason,
+    LeaseKind,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
@@ -259,6 +261,59 @@ class QuarantineEvent:
 
 
 @dataclass(frozen=True)
+class LeaseStart:
+    """Cards the toolbox granted outside the tests at ``started_at``, charged to ``branch_id``: the holder's own branch,
+    or the branch that submitted a tool's job. ``holder`` is a branch id or ``tool:<job id>``, and a tool's job names
+    its ``tool``. A local lease's cards are its ``gpu_ids``; a hosted lease is one ``sandbox_id`` of ``cards`` cards."""
+
+    lease_id: str
+    holder: str
+    branch_id: str
+    kind: LeaseKind
+    cards: int
+    started_at: float
+    tool: str = ""
+    gpu_ids: tuple[int, ...] = ()
+    sandbox_id: str = ""
+
+    @property
+    def card_ids(self) -> tuple[int, ...]:
+        """Its cards: the local GPU ids, or a hosted lease's cards numbered from 0."""
+
+        return self.gpu_ids or tuple(range(self.cards))
+
+
+@dataclass(frozen=True)
+class LeaseEnd:
+    """Cards of a lease back in the pool at ``ended_at``: its ``gpu_ids``, or with none every card still out."""
+
+    lease_id: str
+    ended_at: float
+    end_reason: LeaseEndReason
+    gpu_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class CardHold:
+    """A lease as the notebook folds its start and ends: when each of its cards went back, by card, and why the last one
+    did, ``None`` while a card is still out."""
+
+    start: LeaseStart
+    returned: Mapping[int, float] = field(default_factory=dict)
+    end_reason: LeaseEndReason | None = None
+
+    @property
+    def closed(self) -> bool:
+        return all(card in self.returned for card in self.start.card_ids)
+
+    def card_seconds(self, at: float) -> float:
+        """The card time it held by ``at``: each card from the grant to its return, a card still out up to ``at``."""
+
+        started = self.start.started_at
+        return sum(max(0.0, min(self.returned.get(card, at), at) - started) for card in self.start.card_ids)
+
+
+@dataclass(frozen=True)
 class ToolResultPointer:
     """Where an asynchronous tool's result is; the result itself never enters the notebook.
 
@@ -455,7 +510,8 @@ class BranchProgress:
     """One branch at a glance; ``frontier`` is filled by a scoring progress query, such as the RSI's frontier scoring.
 
     ``judged_since_commit`` counts the branch's tests judged since its last commit (since it opened, before any),
-    ``llm_usd`` what its specialist's LLM cost, and ``pending`` its candidates waiting for their confirm.
+    ``llm_usd`` what its specialist's LLM cost, ``pending`` its candidates waiting for their confirm, and
+    ``held_card_seconds`` the card time the leases charged to it held outside the tests, an open one up to the reading.
     """
 
     branch: str
@@ -470,6 +526,7 @@ class BranchProgress:
     judged_since_commit: int = 0
     llm_usd: float = 0.0
     pending: tuple[PendingCandidate, ...] = ()
+    held_card_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -793,10 +850,17 @@ class NotebookSnapshot:
     llm_usage: tuple[LlmUsageRecord, ...] = ()
     resolved_patches: tuple[ResolvedPatch, ...] = ()
     agent_manifests: Mapping[str, AgentManifestRecord] = field(default_factory=dict)
+    card_holds: tuple[CardHold, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:
         return self.baselines[-1] if self.baselines else None
+
+    @property
+    def held_card_hours(self) -> float:
+        """The card time every lease held outside the tests, an open one up to ``taken_at``."""
+
+        return sum(hold.card_seconds(self.taken_at) for hold in self.card_holds) / SECONDS_PER_HOUR
 
     @property
     def gpu_hours(self) -> float:
@@ -850,6 +914,7 @@ __all__ = [
     "BranchNode",
     "BranchProgress",
     "BuildNotice",
+    "CardHold",
     "Claim",
     "ClaimKey",
     "CommitNode",
@@ -861,6 +926,8 @@ __all__ = [
     "InboxPage",
     "Learning",
     "LearningRecord",
+    "LeaseEnd",
+    "LeaseStart",
     "LineageEvent",
     "LineageView",
     "LlmUsage",
