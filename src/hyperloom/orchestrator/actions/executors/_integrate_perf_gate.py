@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -57,14 +58,34 @@ _AGENTIC_PARITY_NOT_BENCHED = (
 
 _PARITY_DEFERRED_TO_CYCLE_BASE = "switch-off parity deferred to the next cycle batch, whose base runs this tree"
 
+#: A quoted identifier in a server error, e.g. ``'Indexer' object has no attribute '_indexer_cos_sin_cache'``.
+_QUOTED_NAME = re.compile(r"'([A-Za-z_][A-Za-z0-9_.]{3,})'")
 
-def _unmeasured_attribution(bench_result: dict[str, Any]) -> str:
+
+def _error_names_added_code(error: str, patches: list[Path]) -> bool:
+    """Whether the bench error quotes a name an applied patch adds: the server crashed in the patch's own code."""
+    names = set(_QUOTED_NAME.findall(error))
+    for patch in patches if names else ():
+        try:
+            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        added = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
+        if any(name in line for line in added for name in names):
+            return True
+    return False
+
+
+def _unmeasured_attribution(bench_result: dict[str, Any], patches: list[Path]) -> str:
     """Why a bench produced no throughput, when the candidate is not to blame; empty when it measured or broke."""
     tput = bench_result.get("output_throughput")
     if isinstance(tput, (int, float)) and tput > 0:
         return ""
+    error = str(bench_result.get("error") or "")
     attribution = classify_failure_attribution(
-        error_class=bench_result.get("error_class"), error_excerpt=str(bench_result.get("error") or "")[-600:]
+        error_class=bench_result.get("error_class"),
+        error_excerpt=error[-600:],
+        explicit=FAILURE_ATTRIBUTION_CANDIDATE if _error_names_added_code(error, patches) else "",
     )
     return "" if attribution == FAILURE_ATTRIBUTION_CANDIDATE else attribution
 
@@ -73,7 +94,7 @@ def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) ->
     """The failed verdict of a bench the run stopped or that measured nothing through no fault of the patch."""
     bench_class = str(bench_result.get("error_class") or "")
     stopped = stopped_by_the_run_class(bench_class)
-    attribution = "" if stopped is not None else _unmeasured_attribution(bench_result)
+    attribution = "" if stopped is not None else _unmeasured_attribution(bench_result, attempt.applied)
     if stopped is not None:
         fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
     elif attribution:
