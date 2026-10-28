@@ -184,7 +184,6 @@ class WorkspaceGuard:
                 self.spec.cwd,
             )
             return
-        self._protected_path_rules()
         root = _git_output(Path(self.spec.cwd).resolve(), "rev-parse", "--show-toplevel").strip()
         if not root:
             raise WorkspaceSafetyError("the workspace guard requires a git worktree")

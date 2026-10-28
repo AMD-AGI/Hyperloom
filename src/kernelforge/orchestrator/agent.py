@@ -214,6 +214,13 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
     return backend, requested_backend
 
 
+def _session_cwd(kernel_path: str, workspace: Path | None, backend: Any) -> str:
+    """Where an implementer session runs: beside the kernel, or at the workspace root for a provider that needs it."""
+    if backend.capabilities.requires_workspace_cwd and workspace is not None and workspace.is_dir():
+        return str(workspace.resolve())
+    return str(Path(kernel_path).parent)
+
+
 def _bullet_list(items: list[str]) -> str:
     """Render orientation hints as a bullet list for a prompt section."""
     return "\n".join(f"  - {item}" for item in items)
@@ -746,15 +753,8 @@ Make your change(s) now.
 
         # One fixed interaction budget per candidate Session.
         turn_cap = config.max_turns
-        cwd = str(Path(kernel_path).parent)
-        run_cwd = cwd
         configured_workspace = Path(config.workspace) if config.workspace else None
-        if (
-            backend.capabilities.requires_workspace_cwd
-            and configured_workspace is not None
-            and configured_workspace.is_dir()
-        ):
-            run_cwd = str(configured_workspace.resolve())
+        run_cwd = _session_cwd(kernel_path, configured_workspace, backend)
 
         gate = None
         system_prompt = base_system_prompt
