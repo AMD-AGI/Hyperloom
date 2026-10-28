@@ -1148,6 +1148,37 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path,
     assert turns == expected
 
 
+async def test_a_tick_queues_the_cycle_batch_it_owes_before_the_dispatcher_pass(tmp_path, monkeypatch):
+    """GLM-5.3: after a resume the first pass dispatched a switched integrate a second before the reference was queued."""
+    import time
+
+    coord = _coordinator(tmp_path, SharedState())
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    calls: list[str] = []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _cycle():
+        calls.append("cycle")
+
+    async def _dispatch():
+        calls.append("dispatch")
+
+    monkeypatch.setattr(coord, "reactor_pass", _noop)
+    monkeypatch.setattr(coord.reconciler, "run", _noop)
+    monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(coord.phase_framework, "on_stack_adopted", _cycle)
+    monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _dispatch)
+    monkeypatch.setattr(coord.enablement_lane, "pump_enablement_safely", _noop)
+    coord.phase_machine.pump_table = {"FRAMEWORK_AGENT": _noop}
+    coord._last_maintenance_ts = time.monotonic()
+
+    await coord._tick_once()
+
+    assert calls == ["cycle", "dispatch"]
+
+
 @pytest.mark.parametrize(("only", "expected"), [(True, 240 * 60), (False, 10 * 60)])
 async def test_only_mode_custom_specialist_runs_to_the_phase_end_without_an_extension(tmp_path, only, expected):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)

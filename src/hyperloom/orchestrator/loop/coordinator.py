@@ -695,6 +695,8 @@ class Coordinator:
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
+            # A cycle batch the phase owes (a resumed or moved stack) is queued before this pass can hand off its lanes.
+            await self.phase_framework.on_stack_adopted()
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
             phase = (self.shared_state.phase or "").strip().upper()
