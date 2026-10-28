@@ -20,7 +20,7 @@ from kernelforge.agent_backends.base import (
 from hyperloom.common.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
-from kernelforge.cli import lanes as cli_lanes
+from kernelforge.loop.bootstrap import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.tools import aiter_cache

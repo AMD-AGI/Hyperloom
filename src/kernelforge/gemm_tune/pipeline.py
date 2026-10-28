@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``kernelforge gemm-tune`` command group."""
+"""One GEMM tuning run, and the preview of which tuners it would run, with no command line attached."""
 
 from __future__ import annotations
 
@@ -15,18 +15,29 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
-import click
-
-from kernelforge.option_groups import option_group
-
 from . import __version__
 from .dense_shapes import MGrid
 from .router import RoutingEvidence, RoutingTarget
 
 if TYPE_CHECKING:
+    from .model_analyzer import ModelProfile
+    from .report import TuneReport
+    from .router import TunerSpec
     from .tuners.base import TuneContext, TuneResult
 
 log = logging.getLogger("kernelforge.gemm_tune")
+
+
+class TuneError(Exception):
+    """A tuning run refused before it started; the message says why."""
+
+
+class TuneFailed(Exception):
+    """A tuning run that ended in failure; ``result`` is the failure it recorded in ``result.json``."""
+
+    def __init__(self, result: dict) -> None:
+        super().__init__(str(result.get("error", "")))
+        self.result = result
 
 
 def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
@@ -273,14 +284,11 @@ def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
 
 
 def _exit_failed(output_dir: Path, *, error: str, error_class: str) -> NoReturn:
-    """Record a failed run where every consumer looks for it, then leave.
+    """Record a failed run in ``result.json``, then leave with it as :class:`TuneFailed`.
 
-    Both the on-disk ``result.json`` and the sentinel-wrapped stdout copy are
-    written, because a caller reading one and not the other would otherwise see
-    a run that never reported at all.
+    The caller publishes the same failure on its own channel too, because a consumer reading one and not the other
+    would otherwise see a run that never reported at all.
     """
-    from .utils import emit_result_json
-
     report_dict = {
         "status": "failed",
         "micro_decision": "failed",
@@ -289,8 +297,7 @@ def _exit_failed(output_dir: Path, *, error: str, error_class: str) -> NoReturn:
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
-    emit_result_json(report_dict)
-    raise SystemExit(2)
+    raise TuneFailed(report_dict)
 
 
 # Named once because both commands declare them and the path check names them back.
@@ -554,11 +561,6 @@ def _write_artifact_manifest(report: Any, results: list, output_dir: Path, **pro
     log.info("Tuning artifact manifest written to %s", manifest_path)
 
 
-@click.group("gemm-tune")
-def gemm_tune():
-    """Deterministic GEMM tuning for AMD GPUs."""
-
-
 @dataclass(frozen=True)
 class ServingWorkload:
     """The serving deployment the token coverage is computed for."""
@@ -656,118 +658,47 @@ class TuneRequest:
         )
 
 
-@gemm_tune.command()
-@option_group(
-    "request",
-    TuneRequest,
-    click.option("--model-path", required=True, help="Path to model directory (must contain config.json)"),
-    option_group(
-        "target",
-        RoutingTarget,
-        click.option(
-            "--framework",
-            required=True,
-            type=click.Choice(["sglang", "vllm", "vllm-aiter"]),
-            help="Target framework (vllm-aiter = vllm with VLLM_ROCM_USE_AITER=1)",
-        ),
-        click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq"),
-        click.option(
-            "--quant-type",
-            default="auto",
-            help="Quant type: auto, none, per_token, blockscale, bpreshuffle, awq, gptq, fp4, mxfp4",
-        ),
-        click.option(
-            "--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ..."
-        ),
-    ),
-    option_group(
-        "workload",
-        ServingWorkload,
-        click.option("--tp", default=1, type=int, help="Tensor parallel degree"),
-        click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)"),
-        click.option("--tokens", default="", help="Comma-separated explicit token list (overrides auto)"),
-        click.option(
-            "--m-grid",
-            default=MGrid.BUCKET.value,
-            type=click.Choice([g.value for g in MGrid]),
-            help="Decode and demand M: aiter's multiple-of-16 bucket up to 256 (bucket), or exact batch sizes (exact)",
-        ),
-    ),
-    click.option("--mp", default=1, type=int, help="Number of GPUs for parallel tuning"),
-    click.option("--output-dir", required=True, type=click.Path(), help="Output directory for all artifacts"),
-    option_group(
-        "bench",
-        BenchSettings,
-        click.option("--iters", default=80, type=int, help="Benchmark iterations per config"),
-        click.option("--warmup", default=20, type=int, help="Warmup iterations"),
-        click.option("--min-improvement-pct", default=3.0, type=float, help="Min improvement threshold (%%)"),
-    ),
-    option_group(
-        "timeouts",
-        TuneTimeouts,
-        click.option(
-            "--timeout",
-            default=10800,
-            type=int,
-            help="Per-tuner timeout in seconds (default 3h; first run includes JIT compilation)",
-        ),
-        click.option("--global-timeout", default=0, type=int, help="Global timeout for entire session (0=unlimited)"),
-    ),
-    click.option(
-        "--thorough",
-        is_flag=True,
-        help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
-    ),
-    option_group(
-        "choice",
-        TunerChoice,
-        click.option("--tuner", default="", help="Force a specific tuner (skip routing)"),
-        click.option(
-            "--max-tuners",
-            default=0,
-            type=int,
-            help="Run at most this many of the routed tuners, in priority order. 0 means uncapped.",
-        ),
-    ),
-    option_group(
-        "sources",
-        ShapeSources,
-        click.option(OPT_UNTUNED_CSV, default="", help="Input untuned CSV for dense aiter tuners"),
-        click.option(
-            "--moe-untuned-csv",
-            default="",
-            help="Input untuned CSV for the MoE tuner, keyed on the tuple aiter dispatched at run time",
-        ),
-        click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom"),
-        click.option(
-            OPT_SHAPES_MANIFEST,
-            default="",
-            help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
-        ),
-        click.option(
-            OPT_DEMAND,
-            "demand_json",
-            default="",
-            help="demand.json from a serving log (kernelforge gemm-tune evidence); the highest-priority shape source",
-        ),
-        click.option("--tunableop-input", default="", help="PyTorch TunableOp shape file"),
-        click.option("--kernel-signature-log", default="", help="Server log for 1-stage ASM detection"),
-    ),
-    option_group(
-        "gpus",
-        GpuSelection,
-        click.option("--gpu-ids", default="", help="Comma-separated GPU IDs to use"),
-        click.option("--skip-gpu-check", is_flag=True, help="Skip rocm-smi preflight check"),
-    ),
-    click.option("--kb-current-lib", default="", help="Current backend lib_version recorded as artifact provenance"),
-    click.option("--verbose", "-v", is_flag=True, help="Verbose logging"),
-)
-def run(request: TuneRequest):
-    """Run GEMM tuning for the specified model and framework."""
+def _preflight(request: TuneRequest, output_path: Path) -> None:
+    """Refuse the run before any tuning when aiter cannot serve it; record the GPU check unless told not to."""
+    if not request.gpus.skip_gpu_check:
+        _write_gpu_check(output_path)
+
+    preflight_hard = _aiter_preflight_problems(output_path)
+    if preflight_hard:
+        raise TuneError("aiter preflight failed: " + "; ".join(preflight_hard))
+
+
+def _model_profile(request: TuneRequest, output_path: Path) -> ModelProfile:
+    """The model's GEMM-relevant shape; a model that cannot be analysed ends the run as :class:`TuneFailed`."""
     from .model_analyzer import analyze_model
-    from .router import resolve_gpu_type
+
+    try:
+        return analyze_model(request.model_path)
+    except Exception as exc:  # isolation boundary: third-party model analysis, recorded as the run's failure
+        log.exception("Model analysis failed: %s", exc)
+        _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
+
+
+def _token_coverage(request: TuneRequest, output_path: Path) -> list[int]:
+    """The token counts the tuned configs must cover: the explicit list, or the serving concurrency's coverage."""
     from .shapes import compute_token_coverage
-    from .utils import emit_result_json
+
+    try:
+        explicit_tokens = _explicit_token_list(request.workload.tokens)
+    except ValueError as exc:
+        _exit_failed(output_path, error=f"Invalid --tokens value: {exc}", error_class="invalid_tokens")
+    token_list = compute_token_coverage(conc=request.workload.conc, explicit_tokens=explicit_tokens)
+    log.info("Token coverage: %s", token_list)
+    return token_list
+
+
+def run_tuning(request: TuneRequest) -> TuneReport:
+    """Tune GEMMs for the requested model and framework, and return the report ``result.json`` holds.
+
+    Raises :class:`TuneError` for a run refused before it starts and :class:`TuneFailed` for one that failed after
+    recording why.
+    """
+    from .router import resolve_gpu_type
     from .report import build_report, write_report
 
     output_path = Path(request.output_dir)
@@ -778,31 +709,15 @@ def run(request: TuneRequest):
     try:
         target = dataclasses.replace(request.target, gpu_type=resolve_gpu_type(request.target.gpu_type))
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise TuneError(str(exc)) from exc
     sources = _with_serving_log_demand(_usable_sources(request.sources, output_path), output_path)
 
     log.info("kernelforge gemm-tune starting (artifact layout v%s)", __version__)
     log.info("Model: %s, Framework: %s, Precision: %s", request.model_path, target.framework, target.precision)
 
-    if not request.gpus.skip_gpu_check:
-        _write_gpu_check(output_path)
-
-    preflight_hard = _aiter_preflight_problems(output_path)
-    if preflight_hard:
-        raise click.ClickException("aiter preflight failed: " + "; ".join(preflight_hard))
-
-    try:
-        profile = analyze_model(request.model_path)
-    except Exception as exc:  # outermost CLI command: third-party model analysis, re-raised as SystemExit
-        log.exception("Model analysis failed: %s", exc)
-        _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
-
-    try:
-        explicit_tokens = _explicit_token_list(request.workload.tokens)
-    except ValueError as exc:
-        _exit_failed(output_path, error=f"Invalid --tokens value: {exc}", error_class="invalid_tokens")
-    token_list = compute_token_coverage(conc=request.workload.conc, explicit_tokens=explicit_tokens)
-    log.info("Token coverage: %s", token_list)
+    _preflight(request, output_path)
+    profile = _model_profile(request, output_path)
+    token_list = _token_coverage(request, output_path)
 
     demand_report = _load_demand_report(sources.demand_json)
     tuner_specs = _route(profile, target, sources, demand_report)
@@ -839,42 +754,7 @@ def run(request: TuneRequest):
             shape_manifest_path=sources.shapes_manifest or None,
             tuner_lib_version=request.kb_current_lib,
         )
-
-    emit_result_json(report.to_dict())
-    raise SystemExit(1 if report.status == "failed" else 0)
-
-
-@gemm_tune.command()
-@click.argument("logs", nargs=-1, required=True)
-@click.option("--out", default="", help="Write demand.json here (default: stdout summary only)")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
-def evidence(logs: tuple[str, ...], out: str, verbose: bool):
-    """Parse serving log(s) into a tuning demand list and an apply verdict."""
-    import logging as _logging
-
-    from .evidence import parse_log_file, write_demand
-
-    _logging.basicConfig(level=_logging.DEBUG if verbose else _logging.INFO)
-
-    merged: dict[str, Any] = {}
-    for path in logs:
-        report = parse_log_file(path)
-        av = report["apply_verdict"]
-        click.echo(f"=== {path}")
-        click.echo(f"  apply: hit={av['hit']} miss={av['miss']} verdict={av['verdict']}")
-        click.echo(f"  merged_tables={len(report['merged_tables'])}")
-        for d in report["demands"]:
-            ms = sorted({int(k["M"]) for k in d["keys"] if k.get("M") is not None})
-            click.echo(
-                f"  DEMAND {d['table']} tuner={d['tuner']} "
-                f"miss={d['miss_count']} distinct_keys={d['distinct_keys']} "
-                f"distinct_M={len(ms)}"
-            )
-        merged = report  # last log wins when --out is a single file
-    if out:
-        write_demand(merged, Path(out))
-        click.echo(f"demand written to {out}")
-    raise SystemExit(0)
+    return report
 
 
 @dataclass(frozen=True)
@@ -889,30 +769,17 @@ class RoutingInputs:
     tunableop_input: str
 
 
-@gemm_tune.command()
-@click.option("--model-path", required=True, help="Path to model directory")
-@option_group(
-    "target",
-    RoutingTarget,
-    click.option("--framework", required=True, type=click.Choice(["sglang", "vllm", "vllm-aiter"])),
-    click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq"),
-    click.option("--quant-type", default="auto"),
-    click.option(
-        "--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ..."
-    ),
-)
-@option_group(
-    "inputs",
-    RoutingInputs,
-    click.option("--kernel-signature-log", default=""),
-    click.option(OPT_UNTUNED_CSV, default=""),
-    click.option("--shapes-json", default=""),
-    click.option(OPT_SHAPES_MANIFEST, default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1)"),
-    click.option(OPT_DEMAND, "demand_json", default="", help="demand.json from `evidence`"),
-    click.option("--tunableop-input", default=""),
-)
-def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
-    """Show which tuners would run without executing them."""
+@dataclass(frozen=True)
+class TunePlan:
+    """Which tuners a run would start, for the model and the resolved target they were routed on."""
+
+    profile: ModelProfile
+    target: RoutingTarget
+    tuner_specs: list[TunerSpec]
+
+
+def plan_tuning(model_path: str, target: RoutingTarget, inputs: RoutingInputs) -> TunePlan:
+    """Route the tuners a run would start, without executing them; raises :class:`TuneError` for an unknown GPU."""
     import tempfile
 
     from .model_analyzer import analyze_model
@@ -922,34 +789,14 @@ def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
     try:
         target = dataclasses.replace(target, gpu_type=resolve_gpu_type(target.gpu_type))
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise TuneError(str(exc)) from exc
 
-    # Same derivation as `run`, or the preview answers a different question than the thing it previews: a serving log
-    # that unblocks TunableOp there would show it skipped here.
+    # Same derivation as `run_tuning`, or the preview answers a different question than the thing it previews: a
+    # serving log that unblocks TunableOp there would show it skipped here.
     with tempfile.TemporaryDirectory(prefix="forge-plan-") as scratch:
         inputs = _with_serving_log_demand(inputs, Path(scratch))
         tuner_specs = _route(profile, target, inputs, _load_demand_report(inputs.demand_json))
-
-    click.echo(f"Model: {model_path}")
-    click.echo(f"  Architecture: {profile.architecture}")
-    click.echo(f"  MoE: {profile.is_moe} (experts={profile.num_experts}, topk={profile.num_experts_per_tok})")
-    click.echo(
-        f"  Hidden: {profile.hidden_size}, Inter: {profile.intermediate_size}, MoE Inter: {profile.moe_intermediate_size}"
-    )
-    click.echo(f"  Quant: {profile.quant_method or 'none'} ({profile.quant_bits}-bit)")
-    click.echo(
-        f"\nFramework: {target.framework}, Precision: {target.precision}, "
-        f"Quant Type: {target.quant_type}, GPU Type: {target.gpu_type}"
-    )
-    click.echo(f"\nTuners ({len(tuner_specs)}):")
-
-    for spec in tuner_specs:
-        if not spec.should_run:
-            click.echo(f"  [SKIP] {spec.name}: {spec.skip_reason}")
-        elif spec.fallback:
-            click.echo(f"  [FALLBACK] {spec.name}: runs only if no earlier tuner produces a candidate")
-        else:
-            click.echo(f"  [RUN]  {spec.name}")
+    return TunePlan(profile=profile, target=target, tuner_specs=tuner_specs)
 
 
 def _tuner_registry() -> dict:

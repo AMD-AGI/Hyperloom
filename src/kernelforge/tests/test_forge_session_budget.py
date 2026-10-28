@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.cli.session_budget import (
+from kernelforge.loop.bootstrap.session_budget import (
     FORGE_SESSION_BUDGET_MAX_MINUTES,
     FORGE_SESSION_BUDGET_MIN_MINUTES,
     _forge_session_timeout_sec,

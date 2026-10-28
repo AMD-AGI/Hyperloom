@@ -11,7 +11,6 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pytest
 from click.testing import CliRunner
 from kernelforge.agent_backends.base import (
@@ -27,7 +26,8 @@ from kernelforge.fusion.discover import DiscoveryRetry, DiscoverySession
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module
 from kernelforge.fusion import agent_selection
-from kernelforge.fusion import command as cli_module
+from kernelforge.fusion import discovery_stage
+from kernelforge.fusion import pipeline as cli_module
 from kernelforge.fusion import harness_authoring
 from kernelforge.fusion.author import (
     AUTHOR_RC_SAFETY,
@@ -36,10 +36,11 @@ from kernelforge.fusion.author import (
     run_author,
 )
 from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
-from kernelforge.fusion.command import _framework_repo_root, _package_root
+from kernelforge.fusion.locate import _framework_repo_root, _package_root
 from kernelforge.fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
-from kernelforge.fusion.command import run as main
+from kernelforge.cli.forge_fuse_command import forge_fuse as main
 from kernelforge.fusion.emit import FusionFiles, export_artifacts
+from kernelforge.fusion.errors import FuseUsageError
 from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
 from kernelforge.fusion.locate import resolve_framework_source_file
 
@@ -299,7 +300,7 @@ def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monk
 
 
 def test_invalid_sandbox_mode_is_rejected(clean_agent_env):
-    with pytest.raises(click.UsageError, match="unsupported agent sandbox mode"):
+    with pytest.raises(FuseUsageError, match="unsupported agent sandbox mode"):
         agent_selection._resolve_agent_sandbox_mode("unconfined")
 
 
@@ -948,7 +949,7 @@ class TestAgentTimeoutSetting:
     def test_unusable_override_fails_loudly(self, monkeypatch, value):
         """A silently ignored budget would leave the two-hour default in place."""
         monkeypatch.setenv("FORGE_FUSION_AGENT_TIMEOUT_SEC", value)
-        with pytest.raises(click.UsageError, match="FORGE_FUSION_AGENT_TIMEOUT_SEC"):
+        with pytest.raises(FuseUsageError, match="FORGE_FUSION_AGENT_TIMEOUT_SEC"):
             agent_selection._agent_timeout_sec()
 
 
@@ -1247,7 +1248,7 @@ class TestCliDryRun:
 
     def test_discovery_targets_the_framework_root_it_was_given(self, tmp_path, monkeypatch):
         """``--framework-root`` pins WHICH install is being optimized."""
-        from kernelforge.fusion import command as cli_module
+        from kernelforge.fusion import pipeline as cli_module
 
         seen: dict[str, object] = {}
 
@@ -1255,17 +1256,17 @@ class TestCliDryRun:
             seen["target"] = target
             return []
 
-        monkeypatch.setattr(cli_module, "discover_recipes", spy)
+        monkeypatch.setattr(discovery_stage, "discover_recipes", spy)
         backend = SimpleNamespace(
             name="codex",
             runtime=SimpleNamespace(model="gpt-test", sandbox_mode="workspace-write"),
         )
         monkeypatch.setattr(cli_module, "_create_agent_backend", lambda *_args: backend)
-        monkeypatch.setattr(cli_module, "registered_agent_llm_fn", lambda *_a, **_k: lambda _p: "[]")
+        monkeypatch.setattr(discovery_stage, "registered_agent_llm_fn", lambda *_a, **_k: lambda _p: "[]")
         source = tmp_path / "toylm.py"
         source.write_text("def forward(x):\n    return x\n", encoding="utf-8")
         monkeypatch.setattr(
-            cli_module, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
+            discovery_stage, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
         )
         trace = tmp_path / "decode.trace.json"
         _write_trace(trace, _launch_bound_events())
@@ -1302,7 +1303,7 @@ class TestCliDryRun:
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
-        from kernelforge.fusion import command as cli_module
+        from kernelforge.fusion import pipeline as cli_module
         from kernelforge.fusion.llm_failure import API_ERROR, LlmUnavailableError
 
         def dead_agent(_backend, *_args):
@@ -1322,9 +1323,9 @@ class TestCliDryRun:
             runtime=SimpleNamespace(model="gpt-test", sandbox_mode="workspace-write"),
         )
         monkeypatch.setattr(cli_module, "_create_agent_backend", lambda *_args: backend)
-        monkeypatch.setattr(cli_module, "registered_agent_llm_fn", dead_agent)
+        monkeypatch.setattr(discovery_stage, "registered_agent_llm_fn", dead_agent)
         monkeypatch.setattr(
-            cli_module, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
+            discovery_stage, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
         )
         trace = tmp_path / "decode.trace.json"
         _write_trace(trace, _launch_bound_events())
@@ -1414,7 +1415,7 @@ class TestCliDryRun:
         )
         monkeypatch.setattr(cli_module, "_create_agent_backend", fake_create)
         monkeypatch.setattr(
-            cli_module,
+            discovery_stage,
             "resolve_framework_source_file",
             lambda *_args, **_kwargs: (str(source), "path convention"),
         )

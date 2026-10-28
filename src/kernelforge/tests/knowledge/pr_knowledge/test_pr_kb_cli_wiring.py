@@ -10,9 +10,10 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
-from kernelforge.cli.relay import SearchActorBuildContext
+from kernelforge.loop.bootstrap import run as forge_loop_run
+from kernelforge.loop.bootstrap.relay import SearchActorBuildContext
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
-from kernelforge.cli.pr_references import (
+from kernelforge.loop.bootstrap.pr_references import (
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -76,11 +77,11 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
-    source = inspect.getsource(forge_loop.callback)
-    implementer = source[
-        source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
+    implementer = inspect.getsource(forge_loop_run._implementer_setup)
+    search = inspect.getsource(forge_loop_run._search)
+    analysis = search[
+        search.index("analysis_service = make_analysis_agent_service(") : search.index('print("  Analysis Agent: "')
     ]
-    analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
     # Each Agent profile builds its own planning chain and supervisor; only its implementer receives the setup.
     actor_source = inspect.getsource(SearchActorBuildContext.build)
     orchestration = actor_source[
@@ -260,9 +261,9 @@ def test_the_event_append_cannot_abort_the_campaign():
 
 
 def test_result_is_emitted_before_provenance_is_written():
-    source = inspect.getsource(forge_loop.callback)
-    result = source.rindex("result = _build_result")
-    emitted = source.index("click.echo(format_forge_loop_result(result))", result)
+    source = inspect.getsource(forge_loop_run._publish)
+    result = source.index("result = reporter.build_result(")
+    emitted = source.index("run.publish_result(result)", result)
     provenance = source.index("_write_pr_provenance(", emitted)
 
     assert emitted < provenance

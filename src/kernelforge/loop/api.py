@@ -3,8 +3,9 @@
 
 """The forge-loop interface: what code outside the loop and its orchestrator may use.
 
-Other workflows and Hyperloom run forge-loop as a subprocess and read the result it publishes, and reuse a few pieces
-the loop owns. They reach all of it through this module, never through the loop's internals.
+Other workflows and Hyperloom run forge-loop as a subprocess and read the result it publishes, or run it in process
+with :func:`run_forge_loop`, and reuse a few pieces the loop owns. They reach all of it through this module, never
+through the loop's internals.
 """
 
 from __future__ import annotations
@@ -16,6 +17,14 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+from kernelforge.loop.bootstrap.errors import (
+    ForgeLoopError,
+    ForgeLoopUsageError,
+    InvalidOptionValue,
+    TaskPreparationFailed,
+)
+from kernelforge.loop.bootstrap.request import ForgeLoopRequest
+from kernelforge.loop.bootstrap.run import run_forge_loop
 from kernelforge.loop.gate_settings import GateMeasurement
 from kernelforge.loop.path_ownership import (
     ATTEMPT_ROOT_DIR,
@@ -68,16 +77,22 @@ def parse_forge_loop_result(output: str) -> dict[str, Any] | None:
 __all__ = [
     "ATTEMPT_ROOT_DIR",
     "BestResultPublisher",
+    "ForgeLoopError",
+    "ForgeLoopRequest",
+    "ForgeLoopUsageError",
+    "InvalidOptionValue",
     "GateMeasurement",
     "ImplementerSetup",
     "ImplementerTask",
     "PRODUCER_PATH_PATTERNS",
     "RESULT_SENTINEL",
     "SessionOptions",
+    "TaskPreparationFailed",
     "format_forge_loop_result",
     "forge_loop_command",
     "is_producer_owned_path",
     "make_agent_fn",
     "parse_forge_loop_result",
+    "run_forge_loop",
     "runtime_gitignore_globs",
 ]

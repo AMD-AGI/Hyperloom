@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.cli import _normalize_inline_shapes_json, _safe_is_file
+from kernelforge.gemm_tune.pipeline import _normalize_inline_shapes_json, _safe_is_file
 from kernelforge.gemm_tune.evidence import padded_m
 from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
 from kernelforge.gemm_tune.tuners._aiter_dense_common import (

@@ -10,8 +10,8 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.gemm_tune import cli as cli_mod
-from kernelforge.gemm_tune.cli import gemm_tune
+from kernelforge.gemm_tune import pipeline as cli_mod
+from kernelforge.cli.gemm_tune_command import gemm_tune
 from kernelforge.gemm_tune.dense_shapes import MGrid
 from kernelforge.gemm_tune.tuners.base import TuneResult
 

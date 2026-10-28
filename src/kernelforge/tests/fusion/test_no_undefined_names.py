@@ -12,7 +12,7 @@ from pathlib import Path
 
 import kernelforge.fusion.agent_selection
 import kernelforge.fusion.author
-import kernelforge.fusion.command
+import kernelforge.fusion.pipeline
 import kernelforge.fusion.compile_pass_claim
 import kernelforge.fusion.discover
 import kernelforge.fusion.emit
@@ -25,7 +25,7 @@ import kernelforge.fusion.validate
 MODULES = (
     kernelforge.fusion.agent_selection,
     kernelforge.fusion.author,
-    kernelforge.fusion.command,
+    kernelforge.fusion.pipeline,
     kernelforge.fusion.compile_pass_claim,
     kernelforge.fusion.discover,
     kernelforge.fusion.emit,
