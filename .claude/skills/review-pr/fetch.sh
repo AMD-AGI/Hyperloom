@@ -171,22 +171,27 @@ gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' 
 PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
 # jq writes CRLF on some platforms; a login carrying CR matches no author and makes the
 # permission URL below unparseable, which empties comments.txt without failing the fetch.
-jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u | while IFS= read -r login; do
+# The loop reads a file rather than a pipe: in a pipeline it runs in a subshell, where `die`
+# exits that subshell only, leaving the fetch to finish with a short trusted.json and status 0.
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u > "$raw/logins.txt"
+: > "$raw/trusted.txt"
+while IFS= read -r login; do
   if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
-    echo "$login"
+    printf '%s\n' "$login" >> "$raw/trusted.txt"
     continue
   fi
   # A 404 is the valid negative: not a collaborator. Any other failure -- a rate limit, a network
   # drop -- must not read as one, or comments.txt silently loses entries the review is required
   # to settle, which is the shape the CR strip above already cost once.
-  perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>"$raw/perm.err")
-  if [ $? -ne 0 ] && ! grep -q 'HTTP 404' "$raw/perm.err"; then
+  if perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>"$raw/perm.err"); then
+    case "$perm" in
+      admin | write) printf '%s\n' "$login" >> "$raw/trusted.txt" ;;
+    esac
+  elif ! grep -q 'HTTP 404' "$raw/perm.err"; then
     die "cannot resolve $login's permission: $(tr -d '\r' < "$raw/perm.err" | tail -1)"
   fi
-  case "$perm" in
-    admin | write) echo "$login" ;;
-  esac
-done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
+done < "$raw/logins.txt"
+jq -Rsc 'split("\n") | map(select(length > 0))' < "$raw/trusted.txt" > "$raw/trusted.json"
 
 jq -nr --slurpfile t "$raw/trusted.json" '
   def trusted: select(.user.login | IN($t[0][]));
