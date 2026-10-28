@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -51,12 +53,12 @@ class TestDiffusionCeilingGate:
         assert fr.is_scriptable("custom") is True
 
 
-def _write_reports_for(tmp_path, framework):
+def _write_reports_for(tmp_path, framework, *, trace_name="trace.json", trace_bytes=b"{}", **extra_args):
     """Drive ``write_reports`` far enough to reach the diffusion-sidecar gate."""
     from argparse import Namespace
 
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
+    trace = tmp_path / trace_name
+    trace.write_bytes(trace_bytes)
     run_dir = tmp_path / "run"
     tracelens_dir = run_dir / "tracelens"
     tracelens_dir.mkdir(parents=True, exist_ok=True)
@@ -68,6 +70,7 @@ def _write_reports_for(tmp_path, framework):
         framework=framework,
         target_platform="MI300X",
         dry_run=False,
+        **extra_args,
     )
     return analysis_reports.write_reports(
         run_dir,
@@ -111,6 +114,43 @@ class TestTheGateIsWiredIn:
     def test_a_serving_framework_gets_no_sidecar_at_all(self, tmp_path, monkeypatch):
         _stub_trace_derived_report(monkeypatch)
         assert "diffusion_roofline" not in _write_reports_for(tmp_path, "sglang")
+
+    def test_a_truncated_gzip_trace_skips_the_sidecar_and_keeps_the_report(self, tmp_path, monkeypatch, capsys):
+        _stub_trace_derived_report(monkeypatch)
+        packed = gzip.compress(json.dumps({"traceEvents": _BYPASS_TRACE_EVENTS}).encode("utf-8"))
+
+        artifacts = _write_reports_for(
+            tmp_path, "custom", trace_name="trace.json.gz", trace_bytes=packed[: len(packed) // 2]
+        )
+
+        printed = capsys.readouterr().out.splitlines()
+        assert sorted(artifacts) == [
+            "kernel_candidates",
+            "kernel_roofline",
+            "trace_input_manifest",
+            "trace_report_path",
+            "tracelens_report_json",
+            "tracelens_summary",
+        ]
+        assert [line for line in printed if line.startswith("[diffusion_roofline]")] == [
+            "[diffusion_roofline] skipped: EOFError: Compressed file ended before the end-of-stream marker was reached"
+        ]
+
+    def test_an_unreadable_denoiser_config_is_recorded_on_the_sidecar(self, tmp_path, monkeypatch, caplog):
+        _stub_trace_derived_report(monkeypatch)
+        model = tmp_path / "model"
+        (model / "transformer").mkdir(parents=True)
+        (model / "transformer" / "config.json").write_text(
+            json.dumps({"_class_name": "FluxTransformer2DModel", "hidden_size": "3072x"}), encoding="utf-8"
+        )
+
+        with caplog.at_level(logging.WARNING, logger=analysis_reports.log.name):
+            artifacts = _write_reports_for(tmp_path, "xdit", model_path=str(model), precision="bf16")
+
+        emitted = json.loads(Path(artifacts["diffusion_roofline"]).read_text(encoding="utf-8"))
+        assert emitted["analytic_ceiling_error"] == "ValueError: invalid literal for int() with base 10: '3072x'"
+        (record,) = [r for r in caplog.records if r.getMessage().startswith("diffusion analytic ceiling failed: ")]
+        assert type(record.exc_info[1]) is ValueError
 
 
 class TestThroughputUnit:

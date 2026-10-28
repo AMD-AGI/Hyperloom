@@ -9,12 +9,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -61,37 +63,24 @@ class _StubTaskRegistry:
     def __init__(self):
         self._tasks: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
+    async def create_or_return_existing(self, spec):
         from hyperloom.orchestrator.state.task_registry import Task
 
-        self.last_lease_ttl_sec = lease_ttl_sec
-        existing = self._tasks.get(idempotency_key)
+        self.last_lease_ttl_sec = spec.lease_ttl_sec
+        existing = self._tasks.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
         task = Task(
-            task_id=task_id or _uuid.uuid4().hex,
-            kind=kind,
+            task_id=spec.task_id or _uuid.uuid4().hex,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
-            requires_lanes=list(requires_lanes) if requires_lanes else [],
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
+            requires_lanes=list(spec.requires_lanes) if spec.requires_lanes else [],
         )
-        self._tasks[idempotency_key] = task
+        self._tasks[spec.idempotency_key] = task
         return task, False
 
 
@@ -149,7 +138,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -166,8 +155,7 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
     seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
     seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
@@ -188,8 +176,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -786,7 +773,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
@@ -950,7 +937,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
@@ -1266,6 +1253,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:

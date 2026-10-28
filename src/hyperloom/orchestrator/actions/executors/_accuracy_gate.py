@@ -508,6 +508,27 @@ def parse_eval_results(
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
 
 
+def post_ready_sec_without_eval(round_result: dict[str, Any]) -> Any:
+    """A round's post-ready time less its accuracy eval, which a hot pass rendered with RUN_EVAL off does not run.
+
+    The eval time is lm-eval's own clock, so it comes off only when the post-ready interval strictly encloses it.
+    """
+    post_ready = round_result.get("post_ready_runtime_sec")
+    eval_sec = _evaluation_seconds(round_result.get("accuracy_source"))
+    if isinstance(post_ready, (int, float)) and eval_sec is not None and eval_sec < post_ready:
+        return post_ready - eval_sec
+    return post_ready
+
+
+def _evaluation_seconds(results_file: Any) -> float | None:
+    """lm-eval's recorded wall-clock in ``results_file``, or ``None`` when there is no finite positive one."""
+    try:
+        seconds = float(json.loads(Path(results_file).read_text(encoding="utf-8")).get("total_evaluation_time_seconds"))
+    except (TypeError, ValueError, OSError, AttributeError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds > 0.0 else None
+
+
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
     """Read the generation-pathology probe sidecar, when the probe tripped."""
     try:

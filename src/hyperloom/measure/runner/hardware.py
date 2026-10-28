@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.gpu_identity import (
-    AMD_GPU_DISPATCH_IDENTITIES,
+    AMD_GPU_BOARDS,
     gfx_arch_for_gpu_type,
     gpu_type_for_device_id,
     normalise_device_id,
@@ -216,7 +216,7 @@ def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
     only when neither can say is the market name compared, as a substring.
     """
     wanted = gpu_type.replace(" ", "").lower()
-    if wanted in AMD_GPU_DISPATCH_IDENTITIES:
+    if wanted in AMD_GPU_BOARDS:
         board = gpu_type_for_device_id(gpu.device_id)
         if board is not None:
             return board != wanted

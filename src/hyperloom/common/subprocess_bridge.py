@@ -15,12 +15,6 @@ class RuntimeAdapterError(RuntimeError):
     """Base class for subprocess-bridge runtime adapter errors."""
 
 
-def read_json(path: str | Path) -> Any:
-    """Read a UTF-8 JSON file, returning ``None`` for a blank file."""
-    text = Path(path).read_text(encoding="utf-8")
-    return json.loads(text) if text.strip() else None
-
-
 def emit_json(obj: Any, out: str | None) -> None:
     """Serialise ``obj`` to JSON, writing to stdout and optionally a file."""
     serialised = json.dumps(obj, ensure_ascii=False, indent=2)
@@ -31,4 +25,4 @@ def emit_json(obj: Any, out: str | None) -> None:
     sys.stdout.flush()
 
 
-__all__ = ["RuntimeAdapterError", "read_json", "emit_json"]
+__all__ = ["RuntimeAdapterError", "emit_json"]

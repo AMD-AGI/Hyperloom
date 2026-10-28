@@ -8,13 +8,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.coerce import to_float, to_int, to_mapping
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from ..variant_funnel import VARIANT_COUNTS, variants_from_timeline
 from .base import (
     RenderedSection,
-    as_dict,
     events_of,
     outcome_of,
     session_of,
@@ -90,7 +89,7 @@ def _gain_attribution_lines(
         describing the method used to derive them.
     """
     validation = validation_of(breakdown)
-    summary = as_dict(as_dict(validation.get("attribution")).get("by_source"))
+    summary = to_mapping(to_mapping(validation.get("attribution")).get("by_source"))
     canonical_sources = {
         source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
@@ -108,7 +107,7 @@ def _gain_attribution_lines(
         # split is the ledger's own arithmetic, labelled ``stack_ledger``.
         return lines, "stack_ledger"
 
-    final = as_dict(outcome_of(breakdown).get("final"))
+    final = to_mapping(outcome_of(breakdown).get("final"))
     path = final.get("action_path") or []
     gain_v = to_float(final.get("gain_pct"))
     # No validated per-source split. We must NOT claim a KEEP or "100% via"
@@ -183,11 +182,11 @@ def _variant_funnel(breakdown: dict[str, Any]) -> dict[str, Any]:
             session recorded none.
     """
     outcome = outcome_of(breakdown)
-    recorded = as_dict(outcome.get("variants")) or variants_from_timeline(timeline_of(breakdown))
+    recorded = to_mapping(outcome.get("variants")) or variants_from_timeline(timeline_of(breakdown))
     funnel: dict[str, Any] = {name: to_int(recorded.get(name), 0) for name in VARIANT_COUNTS}
     funnel["keep_rate_pct"] = to_float(recorded.get("keep_rate_pct"))
     funnel["final_stack"] = to_int(validation_of(breakdown).get("adoption_count"))
-    funnel["validated_gain_pct"] = to_float(as_dict(outcome.get("final")).get("gain_pct"))
+    funnel["validated_gain_pct"] = to_float(to_mapping(outcome.get("final")).get("gain_pct"))
     return funnel
 
 
@@ -269,7 +268,9 @@ def _settled_pair(breakdown: dict[str, Any], axis: str, gain: float) -> tuple[fl
     anchor; a pair that does not reproduce the gain is not the one that produced it.
     """
     stacks = events_of(breakdown, "stack")
-    settled = as_dict(as_dict(as_dict(stacks[-1].get("ext")).get("validations")).get("settled")) if stacks else {}
+    settled = (
+        to_mapping(to_mapping(to_mapping(stacks[-1].get("ext")).get("validations")).get("settled")) if stacks else {}
+    )
     before = to_float(settled.get("baseline_tput"))
     after = to_float(settled.get("validated_tput"))
     if settled.get("graded_objective") != axis or not (before and after):
@@ -279,7 +280,7 @@ def _settled_pair(breakdown: dict[str, Any], axis: str, gain: float) -> tuple[fl
 
 def _graded_axis_headline(breakdown: dict[str, Any], gain: float) -> str:
     """The headline on the interactivity axis the gain was measured on; ``""`` when it is not one."""
-    axis = as_dict(outcome_of(breakdown).get("final")).get("graded_on")
+    axis = to_mapping(outcome_of(breakdown).get("final")).get("graded_on")
     if axis not in INTVTY_OBJECTIVES:
         return ""
     sign = "+" if gain > 0 else ""
@@ -295,9 +296,9 @@ def _headline(breakdown: dict[str, Any]) -> str:
 
     fw = task_config_of(breakdown).get("framework_name")
     outcome = outcome_of(breakdown)
-    b = to_float(as_dict(outcome.get("baseline")).get("output_throughput"))
-    f = to_float(as_dict(outcome.get("final")).get("output_throughput"))
-    g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
+    b = to_float(to_mapping(outcome.get("baseline")).get("output_throughput"))
+    f = to_float(to_mapping(outcome.get("final")).get("output_throughput"))
+    g = to_float(to_mapping(outcome.get("final")).get("gain_pct"))
     if g is not None and (axis_line := _graded_axis_headline(breakdown, g)):
         return axis_line
     if b and f and g is not None:
@@ -340,7 +341,7 @@ def build_global_facts(
         stop_reason=stop_reason_of(breakdown),
         elapsed_minutes=total if total is not None else to_float(session.get("elapsed_minutes")),
         elapsed_is_total=total is not None,
-        graded_on=str(as_dict(outcome_of(breakdown).get("final")).get("graded_on") or ""),
+        graded_on=str(to_mapping(outcome_of(breakdown).get("final")).get("graded_on") or ""),
         stop_target=stop_target_text(workload.get("objective")),
         workload_summary=_workload_summary(workload),
         gain_attribution_lines=attribution_lines,

@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     make_kernel_recorder,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit, KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -49,7 +49,7 @@ def _visited_kernel(*, macro_cycle: int) -> None:
             kernel_id="k001",
         )
     )
-    recorder.finish(tput_after=1000.0)
+    recorder.finish(KernelExit(tput_after=1000.0))
 
 
 def _state(*, macro_cycle: int) -> SharedState:

@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 
 from ..bus.message_bus import Message
+from ..kernel import kernel_decisions
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ def remembered_outcome(router: Any, request: KernelRequest) -> KernelRequestOutc
         return KernelRequestOutcome(cached, "shared_state_cache", True)
     if request.kind != "integrate":
         return None
-    rejected = router.shared_state.find_rejected_kernel_patch(request.payload)
+    rejected = kernel_decisions.find_rejected_kernel_patch(router.shared_state, request.payload)
     if rejected is None:
         return None
     result = {
@@ -202,7 +203,7 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
     lanes, ttl = router._coord.dispatcher.registry_lanes_ttl(action)
     handler_lease = None
     if lanes:
-        handler_lease = await router.locks.try_acquire_many(
+        handler_lease = await router.locks.acquire_many(
             lanes,
             holder_id=request.message.msg_id,
             task_id=request.message.msg_id,

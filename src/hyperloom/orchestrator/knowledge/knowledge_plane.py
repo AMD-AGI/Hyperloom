@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from .config import KnowledgeConfig
@@ -37,16 +37,11 @@ class KnowledgePlane:
         kb_disabled: bool = False,
     ) -> "KnowledgePlane":
         """Construct a plane from injected clients and config."""
-        resolved = config or KnowledgeConfig.from_env()
-        resolved = replace(
-            resolved,
-            pr_monitor_enabled=bool(pr_monitor is not None and pr_monitor.enabled),
-        )
         return cls(
             pr_monitor=pr_monitor,
             pr_monitor_mcp_url=(pr_monitor_mcp_url or "").strip(),
             recipe_kb=recipe_kb,
-            config=resolved,
+            config=config or KnowledgeConfig.from_env(),
             kb_disabled=kb_disabled,
         )
 

@@ -94,7 +94,7 @@ class _StubBackend:
     def ensure(self, **_kw: Any) -> None:
         return None
 
-    def restart_local_head(self, log_path: Any = None) -> None:
+    def restart_local_head(self) -> None:
         self.restarts += 1
         self.fake.has_serving_slot = True
 
@@ -223,9 +223,11 @@ def test_serving_lease_round_runs_after_the_repair(monkeypatch, single_node):
     fake = _FakeRay(has_serving_slot=False)
     backend = _install(monkeypatch, fake)
     made: list[tuple[float, bool]] = []
-    monkeypatch.setattr(rs, "make_serving_actor", lambda n, *, serving_slot: made.append((n, serving_slot)) or object())
+    monkeypatch.setattr(
+        rs, "make_serving_actor", lambda n, *, serving_slot, **_kw: made.append((n, serving_slot)) or object()
+    )
 
-    rs.ServingLease(num_gpus=2, serving_slot=True).ensure()
+    rs.ServingLease(num_gpus=2).ensure()
 
     assert backend.restarts == 1
     assert made == [(2.0, True)]
@@ -403,11 +405,10 @@ def test_actor_creation_happens_under_the_startup_lock(monkeypatch, single_node,
         return _Actor()
 
     monkeypatch.setattr(rs, "make_serving_actor", _make)
-    monkeypatch.setattr(rs, "make_gpu_specialist_actor", _make)
     if lease_kind == "serving":
-        rs.ServingLease(num_gpus=1, serving_slot=True).ensure()
+        rs.ServingLease(num_gpus=1).ensure()
     else:
-        rs.GpuSpecialistLease(num_gpus=1).start_async(["true"])
+        rs.GpuSpecialistLease(num_gpus=1).start_async(rs.ActorLaunch(["true"]))
     assert held == [True]
 
 
@@ -445,12 +446,12 @@ def test_visible_ray_daemons_reads_proc(monkeypatch, tmp_path):
 def test_head_this_process_already_submitted_an_actor_to_keeps_the_error(monkeypatch, single_node):
     """Actor creation is asynchronous: a just-submitted specialist may not show in the cluster's view yet."""
     _install(monkeypatch, _FakeRay(has_serving_slot=False))
-    monkeypatch.setattr(rs, "make_gpu_specialist_actor", lambda *_a, **_kw: _StartableActor())
-    rs.GpuSpecialistLease(num_gpus=1).start_async(["true"])
+    monkeypatch.setattr(rs, "make_serving_actor", lambda *_a, **_kw: _StartableActor())
+    rs.GpuSpecialistLease(num_gpus=1).start_async(rs.ActorLaunch(["true"]))
     backend = rb.get_ray_backend()
 
     with pytest.raises(rs.RayMissingServingSlotError, match="submitted 1 lease actor"):
-        rs.ServingLease(num_gpus=1, serving_slot=True).ensure()
+        rs.ServingLease(num_gpus=1).ensure()
     assert backend.restarts == 0
 
 

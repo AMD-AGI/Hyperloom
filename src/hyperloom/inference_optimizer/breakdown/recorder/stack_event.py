@@ -20,27 +20,27 @@ chain at every boundary.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_list as _as_list,
-    float_or_none as _float_or_none,
-    graded_axes as _graded_axes,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+from hyperloom.common.perf_metric import GradedComparison
+
+from .event_fields import graded_axes as _graded_axes, now_iso_seconds as _now
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import EventSink, make_sink
+from .event_rows import fold_header, rows_for_event, sort_rows, wire_rows
+from .event_sink import bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
 
 # Every section a stack event assembles from. Named from the leaf module the
 # assembler shares, so this writer reads its parts without an import cycle.
 from .sections import STACK_EVENT_SECTIONS
-
-log = logging.getLogger(__name__)
 
 EVENT_TYPE = "stack"
 EVENT_KIND = "stack"
@@ -132,21 +132,7 @@ def source_for(action: str) -> str:
     return _SOURCE_BY_ACTION.get(str(action or "").strip(), SOURCE_UNATTRIBUTED)
 
 
-def _sink() -> EventSink | None:
-    """The sink rows are written through; ``None`` when no session is bound.
-
-    The rows themselves are written best-effort by the sink, so nothing below
-    guards its own writes: a spool that cannot be written drops the row there
-    and the ledger carries on.
-    """
-    from ...session.session_binding import bound_session_or_none
-
-    if bound_session_or_none() is None:
-        return None
-    return make_sink(stack_event_id(), producer=PRODUCER)
-
-
-def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "") -> int | None:
+def _open(*, baseline_tput: Any = None, objective: str = "") -> int | None:
     """Put the ledger on the timeline, once, however many callers ask.
 
     ``None`` means the shell write failed; the fragments land either way and
@@ -161,11 +147,11 @@ def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "
     if shell:
         # Onto the fragment too: assembly rebuilds ``ext`` from fragments and
         # never re-reads the shell.
-        sink = _sink()
+        sink = bound_sink(stack_event_id(), producer=PRODUCER)
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, start_time or _now()),
+        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
         ext=shell,
@@ -176,25 +162,23 @@ def record_adoption(
     *,
     stack_index: int,
     entry: Mapping[str, Any],
-    throughput_before: Any,
-    throughput_after: Any,
+    graded: GradedComparison,
     baseline_tput: Any,
-    objective: str = "",
-    degrade_reason: str = "",
 ) -> None:
     """Record one adoption at the moment it is accepted onto the stack. Never raises.
 
     Called from the sole ``optimization_stack`` append, where every fact below
-    is in scope: ``throughput_before`` in particular is the figure the lift just
+    is in scope: ``graded.reference`` in particular is the figure the lift just
     refused to accept the winner without beating, and this same call overwrites
     the anchor.
     """
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
+    objective = graded.objective
     _open(baseline_tput=baseline_tput, objective=objective)
-    before = _float_or_none(throughput_before)
-    after = _float_or_none(throughput_after)
+    before = _float_or_none(graded.reference)
+    after = _float_or_none(graded.candidate)
     base = _float_or_none(baseline_tput)
     action = str(entry.get("action") or "")
     row: dict[str, Any] = {
@@ -217,7 +201,7 @@ def record_adoption(
         "provenance": _text_or_none(entry.get("provenance")),
         "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
         "objective": str(objective or ""),
-        "degrade_reason": str(degrade_reason or ""),
+        "degrade_reason": str(graded.degrade_reason or ""),
         "throughput_before": before,
         "throughput_after": after,
         "baseline_tput": base,
@@ -242,23 +226,20 @@ def record_adoption(
     )
 
 
-def record_validation(
-    *,
-    stack_len: int,
-    baseline_tput: Any,
-    validated_tput: Any,
-    validated_gain_pct: Any,
-    source: str = "",
-    measurement_basis: str = "",
-    graded_objective: str = "",
-    measurement: Mapping[str, Any] | None = None,
-    ts: str = "",
-    ttft_mean_ms: Any = None,
-    e2el_mean_ms: Any = None,
-    ttft_e2el_source: str = "",
-    server_launch_flags: str = "",
-    workspace: Any = None,
-) -> None:
+@dataclass(frozen=True)
+class StackValidation:
+    """One session validation of the whole stack against the session baseline."""
+
+    stack_len: int
+    graded: GradedComparison
+    validated_gain_pct: Any
+    measurement: Mapping[str, Any] | None = None
+    source: str = ""
+    measurement_basis: str = ""
+    ts: str = ""
+
+
+def record_validation(validation: StackValidation) -> None:
     """Record one session validation of the stack as a whole. Never raises.
 
     This is the ledger's only independent check on itself: a figure measured on
@@ -269,45 +250,47 @@ def record_validation(
     ``stack_len`` keys the row, so a later validation at one length supersedes
     the earlier. ``measurement_basis`` is ``e2e_rebench`` for a full-stack
     revalidation or ``e2e_decision_round`` for the round a variant was graded
-    on. ``graded_objective`` names the axis the figure was measured on, so an
+    on. ``graded.objective`` names the axis the figure was measured on, so an
     intvty-graded gain is not later read as an output gain; the caller only
     records a comparison it found comparable, so this is always the axis the
     session was configured for. ``measurement`` is projected to its graded
     axes and recorded beside the gain they produced, because a later
     revalidation moves the cumulative figure without re-promoting the recipe,
     so reading the axes off ``current_best`` at export can pair this gain with
-    a different measurement. The latency pair and ``server_launch_flags`` are
-    carried here because the run that produced ``validated_tput`` resolves them
-    and they cannot be recovered afterwards.
+    a different measurement. The latency pair and the resolved server launch
+    flags are read off it here because the run that produced
+    ``graded.candidate`` resolves them and they cannot be recovered afterwards.
     """
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
-    _open(baseline_tput=baseline_tput)
+    graded = validation.graded
+    measured = _as_dict(validation.measurement)
+    _open(baseline_tput=graded.reference)
     sink.record(
         SECTION_VALIDATION,
         {
-            "stack_len": int(stack_len or 0),
-            "ts": str(ts or "") or _now(),
-            "baseline_tput": _float_or_none(baseline_tput),
-            "validated_tput": _float_or_none(validated_tput),
-            "validated_gain_pct": _float_or_none(validated_gain_pct),
-            "source": str(source or ""),
-            "measurement_basis": str(measurement_basis or ""),
-            "graded_objective": str(graded_objective or ""),
-            "perf": _graded_axes(measurement),
-            "ttft_mean_ms": _float_or_none(ttft_mean_ms),
-            "e2el_mean_ms": _float_or_none(e2el_mean_ms),
-            "ttft_e2el_source": str(ttft_e2el_source or ""),
-            "server_launch_flags": str(server_launch_flags or ""),
-            "workspace": _text_or_none(workspace),
+            "stack_len": int(validation.stack_len or 0),
+            "ts": str(validation.ts or "") or _now(),
+            "baseline_tput": _float_or_none(graded.reference),
+            "validated_tput": _float_or_none(graded.candidate),
+            "validated_gain_pct": _float_or_none(validation.validated_gain_pct),
+            "source": str(validation.source or ""),
+            "measurement_basis": str(validation.measurement_basis or ""),
+            "graded_objective": str(graded.objective or ""),
+            "perf": _graded_axes(validation.measurement),
+            "ttft_mean_ms": _float_or_none(measured.get("ttft_mean_ms")),
+            "e2el_mean_ms": _float_or_none(measured.get("e2el_mean_ms")),
+            "ttft_e2el_source": str(measured.get("ttft_e2el_source") or ""),
+            "server_launch_flags": str(measured.get("resolved_server_launch_flags") or ""),
+            "workspace": _text_or_none(measured.get("workspace")),
         },
         row_type="validation",
-        natural_ids=str(int(stack_len or 0)),
+        natural_ids=str(int(validation.stack_len or 0)),
     )
 
 
-def finish(*, end_time: str = "") -> None:
+def finish() -> None:
     """Close the ledger on the rows recorded against it. Never raises.
 
     Called at close, where the stack stops changing. A run that ended without
@@ -321,11 +304,11 @@ def finish(*, end_time: str = "") -> None:
     from .assembler import event_parts
     from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    sink = _sink()
+    sink = bound_sink(stack_event_id(), producer=PRODUCER)
     if sink is None:
         return
     sequence = _open()
-    closed = str(end_time or "") or _now()
+    closed = _now()
     sink.record(SECTION_EVENT, {"end_time": closed})
 
     try:
@@ -357,8 +340,6 @@ def _pct(value: Any, against: Any, denominator: Any) -> float | None:
     return round((hi - lo) / base * 100.0, 6)
 
 
-#: Every section the stack event assembles from. Duplicated from the assembler
-#: so :func:`finish` can read its own parts without an import cycle.
 def assemble_stack_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -368,7 +349,7 @@ def assemble_stack_ext(
 
     ``parts`` maps section name to rows read back from the spool.
     """
-    header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
+    header = fold_header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
     adoptions = wire_rows(
         sort_rows(
             rows_for_event(parts.get(SECTION_ADOPTION) or [], event), keys=("ts", "stack_entry_id", "stack_index")
@@ -520,15 +501,6 @@ def _status_for(adoptions: Sequence[Mapping[str, Any]], chain_total: float | Non
     return STATUS_SUCCEEDED if chain_total is not None else STATUS_DEGRADED
 
 
-def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header."""
-    header: dict[str, Any] = {}
-    for row in rows:
-        if isinstance(row, Mapping):
-            header.update({k: v for k, v in row.items() if k != "event_id"})
-    return header
-
-
 __all__ = [
     "BACKENDS",
     "CHAIN_TOLERANCE_PCT",
@@ -551,6 +523,7 @@ __all__ = [
     "STATUS_DEGRADED",
     "STATUS_SKIPPED",
     "STATUS_SUCCEEDED",
+    "StackValidation",
     "assemble_stack_ext",
     "finish",
     "record_adoption",

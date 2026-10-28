@@ -61,16 +61,7 @@ def _workspace_with_pre_e2e_result(tmp_path: Path) -> Path:
 def _fmoe_ck_result(csv_path: str, workspace: Path) -> dict:
     return {
         "workspace": str(workspace),
-        "tuners_run": [
-            {
-                "tuner": "fmoe_ck",
-                "status": "ok",
-                "candidate": True,
-                "env_var": "AITER_CONFIG_FMOE_CK",
-                "env_value": csv_path,
-                "best_micro_speedup": 1.4,
-            }
-        ],
+        "candidates": [{"tuner": "fmoe_ck", "env": {"AITER_CONFIG_FMOE_CK": csv_path}, "best_micro_speedup": 1.4}],
     }
 
 

@@ -21,6 +21,7 @@ from kernelforge.option_groups import option_group
 
 from . import __version__
 from .dense_shapes import MGrid
+from .router import RoutingEvidence, RoutingTarget
 
 if TYPE_CHECKING:
     from .tuners.base import TuneContext, TuneResult
@@ -137,7 +138,7 @@ def _coverage_gaps(
                 encoding="utf-8",
             )
         return gaps
-    except Exception:
+    except (OSError, TypeError, ValueError):
         log.debug("could not record coverage gaps", exc_info=True)
         return []
 
@@ -145,8 +146,9 @@ def _coverage_gaps(
 def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
     """Try Tier3 for the strongest otherwise-uncovered gap.
 
-    Never raises and returns only referee-verified improvements. Accepting the
-    profile object keeps attribute access inside this failure boundary.
+    Never raises: returns a referee-verified improvement, a failed result when the
+    attempt crashed, or None. Accepting the profile object keeps attribute access
+    inside this failure boundary.
     """
     if not gaps:
         return None
@@ -201,9 +203,13 @@ def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
             encoding="utf-8",
         )
         return _tier3_result(outcome, decision.gap)
-    except Exception:
+    except Exception as exc:  # isolation boundary: the optional Tier3 generated-tuner attempt
         log.warning("tier3 attempt failed; tuning continues", exc_info=True)
-        return None
+        from .tuners.base import TuneResult
+
+        return TuneResult(
+            tuner_name="tier3_generated", status="failed", error=repr(exc), error_class=type(exc).__name__
+        )
 
 
 def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
@@ -333,12 +339,7 @@ def _route(
     """The tuners routed for this model and these inputs; ``plan`` asks the router exactly what ``run`` does."""
     from .router import select_tuners
 
-    return select_tuners(
-        profile,
-        framework=target.framework,
-        precision=target.precision,
-        quant_type=target.quant_type,
-        gpu_type=target.gpu_type,
+    evidence = RoutingEvidence(
         kernel_signature_log=sources.kernel_signature_log or None,
         has_untuned_csv=bool(sources.untuned_csv),
         # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
@@ -348,6 +349,7 @@ def _route(
         # ...and a stronger *selection* input for the same reason.
         demand_report=demand_report,
     )
+    return select_tuners(profile, target, evidence)
 
 
 def _write_gpu_check(output_dir: Path) -> None:
@@ -545,7 +547,7 @@ def _write_artifact_manifest(report: Any, results: list, output_dir: Path, **pro
         from .artifact_manifest import write_artifact_manifest
 
         manifest_path = write_artifact_manifest(report, results, output_dir, **provenance)
-    except Exception as exc:  # noqa: BLE001 — manifest must never break tuning
+    except (OSError, TypeError, ValueError) as exc:
         log.warning("artifact manifest write failed (non-fatal): %s", exc)
         return
     report.artifacts["tuning_artifact_manifest"] = str(manifest_path)
@@ -555,16 +557,6 @@ def _write_artifact_manifest(report: Any, results: list, output_dir: Path, **pro
 @click.group("gemm-tune")
 def gemm_tune():
     """Deterministic GEMM tuning for AMD GPUs."""
-
-
-@dataclass(frozen=True)
-class RoutingTarget:
-    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
-
-    framework: str
-    precision: str
-    quant_type: str
-    gpu_type: str
 
 
 @dataclass(frozen=True)
@@ -801,8 +793,8 @@ def run(request: TuneRequest):
 
     try:
         profile = analyze_model(request.model_path)
-    except Exception as exc:  # noqa: BLE001 - model analysis is third-party
-        log.error("Model analysis failed: %s", exc)
+    except Exception as exc:  # outermost CLI command: third-party model analysis, re-raised as SystemExit
+        log.exception("Model analysis failed: %s", exc)
         _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
 
     try:

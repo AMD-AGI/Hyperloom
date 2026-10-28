@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.fusion.gpu_arch import canon_arch
+from kernelforge.tools.gpu_arch import canon_arch
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,
@@ -197,7 +197,7 @@ def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
         return True
     try:
         callback()
-    except Exception:  # a probe failure must not end the campaign
+    except Exception:  # isolation boundary: one checkpoint-recovery probe tick
         log.debug("checkpoint recovery probe raised", exc_info=True)
         return False
     return True

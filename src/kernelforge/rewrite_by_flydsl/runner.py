@@ -10,12 +10,12 @@ import hashlib
 import logging
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.tools.git import git
+from kernelforge.tools.git import git, git_checkout_branch, git_head
 from kernelforge.config import Config
-from kernelforge.loop.knowledge_integration import git_checkout_branch
 from kernelforge.knowledge.kb_store.errors import (
     kb_store_secrets,
     sanitize_read_error,
@@ -183,14 +183,6 @@ def _plan_budget(
     return deadline_unix, budget, search_stop_unix
 
 
-def _git_head(workspace: str) -> str:
-    """The workspace's HEAD commit, or "" when it has none that resolves."""
-    result = _git(workspace, "rev-parse", "HEAD")
-    if result.returncode != 0 or not result.stdout.strip():
-        return ""
-    return result.stdout.strip().splitlines()[0]
-
-
 def _with_port_fallbacks(opt: dict, *, best_ms, speedup, port_commit: str) -> dict:
     """The OPTIMIZE result, falling back to the ported kernel's own figures where it reported none."""
     filled = dict(opt)
@@ -280,13 +272,19 @@ class _RewriteKb:
                     stop_at_unix=search_stop_unix,
                 )
             )
-        except Exception as error:  # noqa: BLE001 - KB failure must cold-start
+        except Exception as error:  # noqa: BLE001 - isolation boundary: the run's rewrite KB read; it cold-starts
             if kb_seed is None:
                 Path(spec.flydsl_kernel).unlink(missing_ok=True)
             else:
                 Path(spec.flydsl_kernel).write_bytes(kb_seed)
             read_error = sanitize_read_error(error, secrets=kb_store_secrets(self.target.config))
-            log.warning("rewrite KB read failed, cold start: %s", read_error)
+            # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+            log.warning(
+                "rewrite KB read failed, cold start: %s (%s)\n%s",
+                read_error,
+                type(error).__name__,
+                "".join(traceback.format_tb(error.__traceback__)),
+            )
             return RewriteKbReadResult(read_reason="read_error", read_error=read_error)
 
     def publish_port(self, port, measurement: FlydslMeasurement, port_commit: str) -> dict:
@@ -373,7 +371,7 @@ class _Rewrite:
         )
         # The framework patch must be based on the pristine caller-owned repository, before the standalone FlyDSL
         # seed/PORT commits are introduced.
-        self.base_commit = _git_head(self.workspace)
+        self.base_commit = git_head(self.workspace)
         # A resolvable HEAD is what the agent sessions need, not evidence that the caller wants a framework patch.
         # Asking is what makes one required: a consumer of the standalone kernel has no framework tree for a patch to
         # target, and its run must not be judged on a stage it declined.
@@ -629,7 +627,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
             [run.attempt.relative_root],
             branch=request.optimize.git_branch,
         )
-        port_commit = _git_head(run.workspace)
+        port_commit = git_head(run.workspace)
         measurement = _measure_flydsl_baseline(
             run.spec, run.driver_path, run.preflight, run.search_stop_unix, port.snr_db
         )

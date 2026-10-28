@@ -14,8 +14,8 @@ from typing import Any
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.plugs import progress as _progress
 
 log = _logging.getLogger(__name__)
 
@@ -169,18 +169,15 @@ class MachinePhase(CoordinatorCollaborator):
             "boot_origin": "coordinator_fallback",
         }
         try:
-            from ..knowledge.recipe_kb_t0 import run_t0_anchor
+            from ..knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
 
             run_t0_anchor(
                 client,
                 state,
-                workload=workload,
-                hw=hw,
-                extra_attrs=extra_attrs,
+                T0AnchorRequest(workload=workload, hw=hw, extra_attrs=extra_attrs),
                 session_dir=self.session_dir,
-                save_state=True,
             )
-        except Exception:
+        except Exception:  # isolation boundary: the SDK-path T0 anchor, which leaves warm start empty
             log.exception(
                 "Coordinator T0 fallback: run_t0_anchor raised (workload=%s, hw=%s); warm_start stays empty",
                 workload,
@@ -229,12 +226,6 @@ class MachinePhase(CoordinatorCollaborator):
         """Consume or discard the pending escalate hint, according to what drove this transition."""
         state = self.shared_state
         if "hint" in move.evidence:
-            state.consume_pending_escalate_hint()
-        elif (
-            move.from_phase.strip().upper() == _phase_state.PHASE_SWEEP
-            and str(state.pending_escalate_hint or "").strip() == ESCALATE_HINT_SKIP_TO_CLOSE
-        ):
-            # SWEEP already had an honest closeout, so skip_to_close was suppressed in _global_terminal.
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
             # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
@@ -313,7 +304,7 @@ class MachinePhase(CoordinatorCollaborator):
                 reason=move.reason,
                 evidence=move.evidence,
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the entered phase's hook, kept apart from the transition
             log.exception("Coordinator: _on_phase_entered hook failed")
             # This hook is also what closes the left phase's event, so a raise here is the case where that event never
             # got its exit evidence.
@@ -340,10 +331,12 @@ class MachinePhase(CoordinatorCollaborator):
         # marker, not a START/END interval).
         _phase_state.record_lifecycle_event(
             state,
-            step=move.to_phase,
-            status=_phase_state.LIFECYCLE_STATUS_ENTER,
-            phase=move.to_phase,
-            detail=f"reason={move.reason}" if move.reason else "",
+            _phase_state.LifecycleMark(
+                step=move.to_phase,
+                status=_phase_state.LIFECYCLE_STATUS_ENTER,
+                phase=move.to_phase,
+                detail=f"reason={move.reason}" if move.reason else "",
+            ),
         )
         # The in-memory phase has already moved, so a failed save is raised only after the entry has run.
         save_error: OSError | None = None
@@ -351,6 +344,10 @@ class MachinePhase(CoordinatorCollaborator):
             state.save(self.session_dir)
         except OSError as exc:
             save_error = exc
+            _progress.warn(
+                "state_save_failed", f"state.json could not be written at the {move.to_phase} boundary: {exc}"
+            )
+        _progress.phase_changed(move.from_phase, move.to_phase, state.macro_cycle)
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             move.from_phase or "<unset>",

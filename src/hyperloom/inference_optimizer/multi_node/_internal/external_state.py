@@ -1,4 +1,8 @@
-"""Cluster hand-off: synthesize multi-node state from HYPERLOOM_MN_EXT_* env vars."""
+"""Cluster hand-off: synthesize multi-node state from the platform's topology file or HYPERLOOM_MN_EXT_* env vars.
+
+``TOPOLOGY_HANDOFF_FILE`` (TopologyHandoff v1, see ``topology_file``) is read first; when it is unset the legacy
+variables are read exactly as before.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from typing import Any
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
+from .topology_file import Lookup, handoff_lookup
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +49,9 @@ _MN_BACKENDS = ("infera", "rayjob")
 _DEFAULT_MN_BACKEND = "rayjob"
 
 
-def _handoff_backend(*, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
+def _handoff_backend(get: Lookup, *, ssh_key: str, has_pod_ips: bool, head_ip: str) -> str:
     """Resolve which control plane a handed-over cluster speaks."""
-    explicit = os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip().lower()
+    explicit = get("INFERENCE_OPTIMIZER_MN_BACKEND").strip().lower()
     if explicit in _MN_BACKENDS:
         return explicit
     if ssh_key and has_pod_ips:
@@ -62,9 +67,9 @@ def _handoff_pod_count(pd_mode: str, *, prefill: list[str], decode: list[str], w
     return len(set(used))
 
 
-def _handoff_nodes(pod_ip_count: int) -> int:
+def _handoff_nodes(get: Lookup, pod_ip_count: int) -> int:
     """Resolve the run's node count from the only source allowed to state it."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_NODES", "").strip()
+    raw = get("INFERENCE_OPTIMIZER_NODES").strip()
     if raw:
         try:
             stated = int(raw)
@@ -94,62 +99,80 @@ def _handoff_nodes(pod_ip_count: int) -> int:
     return 1
 
 
-def external_service_url() -> str:
-    """Return the handed-over cluster's benchmark URL, or empty when there is none."""
-    u = os.environ.get("HYPERLOOM_MN_EXT_SERVICE_URL", "").strip()
+def _service_url(get: Lookup) -> str:
+    """The benchmark URL the hand-off states, or empty when it is absent or not http(s)."""
+    u = get("HYPERLOOM_MN_EXT_SERVICE_URL").strip()
     return u if u.startswith(("http://", "https://")) else ""
 
 
+def external_service_url() -> str:
+    """Return the handed-over cluster's benchmark URL, or empty when there is none."""
+    return _service_url(handoff_lookup())
+
+
+def _external_pods(ips: list[str], role: str, ssh_port: int) -> list[dict[str, Any]]:
+    """Build SSH targets for one role, mirroring the pods' own port math."""
+    base = ssh_port + ssh_role_port_offset(role)
+    return [
+        {
+            "podIP": ip,
+            "podId": f"external-{role}-{i}",
+            "role": role,
+            "lwsIndex": i,
+            "sshPort": base + i,
+        }
+        for i, ip in enumerate(ips)
+    ]
+
+
+def _record_pd_split(state: dict[str, Any], pd_mode: str, pn: int, dn: int) -> None:
+    """Record the prefill/decode node split of a disaggregated hand-off in ``state``."""
+    if pd_mode == "disaggregated" and (pn > 0 or dn > 0):
+        state["pd_prefill_nodes"] = pn
+        state["pd_decode_nodes"] = dn
+        state["last_restart_pd_prefill_nodes"] = pn
+        state["last_restart_pd_decode_nodes"] = dn
+        state["last_restart_pd_mode"] = "disaggregated"
+
+
 def build_external_state_from_env() -> dict[str, Any]:
-    """Synthesize multi-node state purely from ``HYPERLOOM_MN_EXT_*`` env vars."""
-    url = external_service_url()
+    """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
+    get = handoff_lookup()
+    url = _service_url(get)
     if not url:
         return {}
 
     def _ips(name: str) -> list[str]:
-        return [x.strip() for x in os.environ.get(name, "").split(",") if x.strip()]
+        return [x.strip() for x in get(name).split(",") if x.strip()]
 
     def _int_env(name: str, default: int) -> int:
         try:
-            return int(os.environ.get(name, "") or default)
+            return int(get(name) or default)
         except ValueError:
             return default
 
-    ssh_key = os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip()
+    ssh_key = get("HYPERLOOM_MN_EXT_SSH_KEY").strip()
     ssh_port = _int_env("HYPERLOOM_MN_EXT_SSH_PORT", DEFAULT_SSH_PORT)
-    known_hosts = os.environ.get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS", "").strip()
+    known_hosts = get("HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS").strip()
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     # From the --pd-mode flag, mirrored into the env by `optimize`.
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-
-    def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
-        """Build SSH targets for one role, mirroring the pods' own port math."""
-        base = ssh_port + ssh_role_port_offset(role)
-        return [
-            {
-                "podIP": ip,
-                "podId": f"external-{role}-{i}",
-                "role": role,
-                "lwsIndex": i,
-                "sshPort": base + i,
-            }
-            for i, ip in enumerate(ips)
-        ]
 
     prefill, decode, worker = (
         _ips("HYPERLOOM_MN_EXT_PREFILL_IPS"),
         _ips("HYPERLOOM_MN_EXT_DECODE_IPS"),
         _ips("HYPERLOOM_MN_EXT_WORKER_IPS"),
     )
-    head_ip = os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip()
+    head_ip = get("HYPERLOOM_MN_EXT_HEAD_IP").strip()
     backend = _handoff_backend(
+        get,
         ssh_key=ssh_key,
         has_pod_ips=bool(prefill or decode or worker),
         head_ip=head_ip,
     )
-    nodes = _handoff_nodes(_handoff_pod_count(pd_mode, prefill=prefill, decode=decode, worker=worker))
+    nodes = _handoff_nodes(get, _handoff_pod_count(pd_mode, prefill=prefill, decode=decode, worker=worker))
     ray_address = f"{head_ip}:6379" if head_ip else ""
-    ray_dash_token = os.environ.get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN", "").strip()
+    ray_dash_token = get("HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN").strip()
 
     pn = _int_env("PD_PREFILL_NODES", 0) or len(prefill)
     dn = _int_env("PD_DECODE_NODES", 0) or len(decode)
@@ -163,11 +186,11 @@ def build_external_state_from_env() -> dict[str, Any]:
         "pd_mode": pd_mode,
         "ssh_port": ssh_port,
         "prefill_pod_ips": prefill,
-        "prefill_pods": _pods(prefill, "prefill"),
+        "prefill_pods": _external_pods(prefill, "prefill", ssh_port),
         "decode_pod_ips": decode,
-        "decode_pods": _pods(decode, "decode"),
+        "decode_pods": _external_pods(decode, "decode", ssh_port),
         "worker_pod_ips": worker,
-        "worker_pods": _pods(worker, "worker"),
+        "worker_pods": _external_pods(worker, "worker", ssh_port),
     }
     if ssh_key:
         state["ssh_key_path"] = ssh_key
@@ -178,23 +201,19 @@ def build_external_state_from_env() -> dict[str, Any]:
         state["ray_address"] = ray_address
     if ray_dash_token:
         state["ray_dashboard_token"] = ray_dash_token
-    if pd_mode == "disaggregated" and (pn > 0 or dn > 0):
-        state["pd_prefill_nodes"] = pn
-        state["pd_decode_nodes"] = dn
-        state["last_restart_pd_prefill_nodes"] = pn
-        state["last_restart_pd_decode_nodes"] = dn
-        state["last_restart_pd_mode"] = "disaggregated"
+    _record_pd_split(state, pd_mode, pn, dn)
     return state
 
 
 def external_has_ssh_control() -> bool:
-    """True when external env supplies SSH key plus at least one GPU pod IP."""
-    if not external_service_url():
+    """True when the hand-off supplies an SSH key plus at least one GPU pod IP."""
+    get = handoff_lookup()
+    if not _service_url(get):
         return False
-    if not os.environ.get("HYPERLOOM_MN_EXT_SSH_KEY", "").strip():
+    if not get("HYPERLOOM_MN_EXT_SSH_KEY").strip():
         return False
     return any(
-        os.environ.get(k, "").strip()
+        get(k).strip()
         for k in (
             "HYPERLOOM_MN_EXT_PREFILL_IPS",
             "HYPERLOOM_MN_EXT_DECODE_IPS",
@@ -209,7 +228,7 @@ def external_has_server_control() -> bool:
         return False
     if external_has_ssh_control():
         return True
-    return bool(os.environ.get("HYPERLOOM_MN_EXT_HEAD_IP", "").strip())
+    return bool(handoff_lookup()("HYPERLOOM_MN_EXT_HEAD_IP").strip())
 
 
 def _read_state_file(path: Path) -> dict[str, Any]:

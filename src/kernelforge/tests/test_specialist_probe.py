@@ -421,7 +421,7 @@ async def _failing_primitive(*, driver_script, case_id, constants, timeout_sec, 
 
 
 async def _crashing_primitive(**_kwargs):
-    raise RuntimeError("hipcc exited 1")
+    raise FileNotFoundError("could not spawn the driver")
 
 
 def _sandbox(tmp_path, **overrides) -> specialist_probe.ProbeSandbox:
@@ -565,7 +565,7 @@ async def test_server_reports_a_crashed_probe(tmp_path, monkeypatch) -> None:
     )
 
     assert result["status"] == specialist_probe.FAILED
-    assert "hipcc exited 1" in result["detail"]
+    assert "could not spawn the driver" in result["detail"]
     assert _ledger(sandbox)[0]["status"] == specialist_probe.FAILED
 
 

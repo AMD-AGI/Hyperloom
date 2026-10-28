@@ -18,14 +18,11 @@ class PRMonitorConfig:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, pr_monitor, or GitHub)."""
+    """A single PR or git ref candidate."""
 
     ref: str
-    repo: str
-    source: str = "explicit"
     title: str = ""
     html_url: str = ""
-    score: float = 0.0
 
     @property
     def slug(self) -> str:
@@ -52,5 +49,3 @@ class CandidateSearchRequest:
     # Title keywords for the pr_monitor search and rerank; empty takes the unranked listing.
     keywords: tuple[str, ...] = ()
     search_modes: tuple[str, ...] = ("pr_monitor", "github")
-    # PR states to include in discovery.
-    pr_states: tuple[str, ...] = ("open",)

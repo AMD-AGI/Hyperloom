@@ -94,15 +94,12 @@ def render_long_horizon_header(
     include_handoffs: bool = False,
 ) -> str:
     """Render the compact long-horizon memory header, or \"\" when state is empty."""
+    # Iteration outcomes feed the history check, the pin hint and the recent attempts.
+    result_events = [e for e in recent_events if e.get("type") == "iteration_result"]
+    has_best = state.best.iteration > 0 or bool(state.best.commit_hash)
     # Render nothing until there is substantive history, so the loop's cold-start prompt (iteration 1, before any
     # result) is unchanged.
-    has_history = (
-        state.best.iteration > 0
-        or bool(state.best.commit_hash)
-        or state.stall.unresolved_stall_iters > 0
-        or any(e.get("type") == "iteration_result" for e in recent_events)
-    )
-    if not has_history:
+    if not (has_best or state.stall.unresolved_stall_iters > 0 or result_events):
         return ""
 
     # Control-state lead: the compact overview the implementer acts on.
@@ -113,7 +110,7 @@ def render_long_horizon_header(
 
     # Only claim a "best" once a real KEEP exists; before that, surface the baseline so the agent still knows the bar
     # to beat.
-    if state.best.iteration > 0 or state.best.commit_hash:
+    if has_best:
         label = "validated KB warm-start" if state.best.source == "warm_start" else f"iter {state.best.iteration}"
         speedup_text = f"{state.best.mean_case_speedup:.6f}x" if state.best.mean_case_speedup is not None else "?"
         best_line = f"Current best: {label}, mean case speedup {speedup_text}, raw mean {_fmt_ms(state.best.wall_ms)}"
@@ -130,9 +127,6 @@ def render_long_horizon_header(
 
     if state.stall.unresolved_stall_iters > 0:
         lead.append(f"Stall: {state.stall.unresolved_stall_iters} iteration(s) without improvement")
-
-    # Iteration outcomes feed both the pin hint below and the recent attempts.
-    result_events = [e for e in recent_events if e.get("type") == "iteration_result"]
 
     # Retrieval map — always kept, so the agent always knows where the full detail lives even if the recent list is
     # trimmed for budget.

@@ -53,6 +53,18 @@ _DEMAND_SHAPE_LIMIT = 64
 _DEMAND_FETCH_LIMIT = _DEMAND_SHAPE_LIMIT * 8
 
 
+def _dense_shapes_missed_on_aiter_tables(report: dict[str, Any]) -> list[dict[str, Any]]:
+    from ..evidence import TABLE_KEY_SCHEMA, demand_shapes
+
+    borrowed: list[dict[str, Any]] = []
+    for other in report.get("demands") or []:
+        if str(other.get("table")) not in TABLE_KEY_SCHEMA:
+            continue  # MoE and anything else that is not a dense GEMM
+        # bucket=False: borrowing another table's misses does not borrow aiter's padded-M retry along with them.
+        borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
+    return borrowed[:_DEMAND_FETCH_LIMIT]
+
+
 def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
     """One untuned record for a row-major ``A[M,K] @ B[N,K]^T``."""
     return f"{op},tn_{n}_{m}_{k}_ld_{k}_{k}_{n}"
@@ -236,7 +248,7 @@ class VllmDenseTunableopTuner(BaseTuner):
         path = self.ctx.demand_json
         if not path:
             return None
-        from ..evidence import TABLE_KEY_SCHEMA, demand_for_tuner, demand_shapes, load_demand
+        from ..evidence import demand_for_tuner, demand_shapes, load_demand
 
         report = load_demand(path)
         if report is None:
@@ -248,23 +260,14 @@ class VllmDenseTunableopTuner(BaseTuner):
         if not shapes:
             # No demand names this tuner, which is the normal case: the runtime logs lookups against aiter's tables,
             # and TunableOp has no table of its own to miss.
-            borrowed: list[dict] = []
-            for other in report.get("demands") or []:
-                table = str(other.get("table") or "")
-                if table not in TABLE_KEY_SCHEMA:
-                    continue  # MoE and anything else that is not a dense GEMM
-                # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
-                # borrow aiter's padded-M retry along with them.
-                borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
-            shapes = borrowed[:_DEMAND_FETCH_LIMIT]
-            if shapes:
-                log.info(
-                    "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
-                    self.name,
-                    len(shapes),
-                )
-        if not shapes:
-            return None
+            shapes = _dense_shapes_missed_on_aiter_tables(report)
+            if not shapes:
+                return None
+            log.info(
+                "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
+                self.name,
+                len(shapes),
+            )
 
         # Per-shape dtype first, ctx.precision only as a fallback for shapes the demand parser recorded without one.
         precision = (self.ctx.precision or "bf16").lower()

@@ -36,10 +36,7 @@ def _default_tp() -> int:
     if masked:
         visible = len([d for d in masked.split(",") if d.strip()])
     if visible < 2:
-        try:
-            visible = torch.cuda.device_count()
-        except Exception:  # noqa: BLE001 - no CUDA context is not fatal here
-            visible = 0
+        visible = torch.cuda.device_count()
     # A collective on one rank measures nothing, so never fall below two.
     return visible if visible > 1 else 2
 
@@ -666,6 +663,37 @@ def _emit_sentinel(payload: dict) -> None:
     sys.stdout.flush()
 
 
+def _check_correctness(args: argparse.Namespace, cases: list[Case], ctx: WorkerCtx) -> int:
+    """Run the correctness matrix and return the exit code."""
+    modes = [args.mode] if args.mode else ["smoke", "stability"]
+    worst_snr = 200.0
+    worst_diff = 0.0
+    all_finite = True
+    for mode in modes:
+        for case in cases:
+            if args.mode is None:
+                checks = (check_case, check_graph_case)
+            else:
+                checks = (check_graph_case,) if case.graph else (check_case,)
+            for fn in checks:
+                res = fn(case, ctx, args.seed, mode)
+                worst_snr = min(worst_snr, res["snr_db"])
+                worst_diff = max(worst_diff, res["max_diff"])
+                all_finite = all_finite and res["finite"]
+
+    worst_snr = _reduce_min(worst_snr, ctx)
+    worst_diff = _reduce_max(worst_diff, ctx)
+    finite_flag = _reduce_min(1.0 if all_finite else 0.0, ctx)
+    passed = bool(finite_flag) and worst_snr >= args.snr_threshold
+
+    if ctx.rank == 0:
+        print(f"SNR: {worst_snr:.2f} dB")
+        print(f"allclose: {passed}")
+        print(f"max_diff: {worst_diff:.6e}")
+    # The parser treats SNR as authoritative, so a failure must also be visible in the exit code.
+    return 0 if passed else 1
+
+
 def worker_main(args: argparse.Namespace) -> int:
     _quick_reduce_guard()
     cases, kv = parse_shape(args.shape)
@@ -689,12 +717,9 @@ def worker_main(args: argparse.Namespace) -> int:
                     )
                 rounds.append(this_round)
             for case in cases:
-                per_case[case.case_id] = statistics.median(
-                    r[case.case_id] for r in rounds
-                )
-            if rank0 and args.repeat > 1:
-                for case in cases:
-                    vals = [r[case.case_id] for r in rounds]
+                vals = [r[case.case_id] for r in rounds]
+                per_case[case.case_id] = statistics.median(vals)
+                if rank0 and args.repeat > 1:
                     spread = 100.0 * (max(vals) - min(vals)) / max(sum(vals) / len(vals), 1e-12)
                     print(
                         f"[forge-ar] in-process spread {case.case_id}: {spread:.2f}%",
@@ -705,23 +730,19 @@ def worker_main(args: argparse.Namespace) -> int:
                 # Profiling only needs the kernels to run; no output contract.
                 return 0
 
-            groups: dict[str, dict] = {}
-            for case in cases:
-                g = groups.setdefault(case.group, {"cases": []})
-                # ``scored`` travels with the case so consumers do not have to re-derive which cases back the score
-                # from a second list that can drift out of step with this one.
-                g["cases"].append({
-                    "case_id": case.case_id,
-                    "median_ms": per_case[case.case_id],
-                    "scored": case.sensitive,
-                })
-
             if rank0:
-                # Mark the cases outside the score.
-                scored_by_id = {c.case_id: c.sensitive for c in cases}
-                for cid, ms in per_case.items():
-                    tag = "" if scored_by_id.get(cid, True) else " unscored"
-                    print(f"case_ms: {cid} {ms:.6f}{tag}")
+                groups: dict[str, dict] = {}
+                for case in cases:
+                    # ``scored`` travels with the case so consumers do not have to re-derive which cases back the score
+                    # from a second list that can drift out of step with this one.
+                    groups.setdefault(case.group, {"cases": []})["cases"].append({
+                        "case_id": case.case_id,
+                        "median_ms": per_case[case.case_id],
+                        "scored": case.sensitive,
+                    })
+                    # Mark the cases outside the score.
+                    tag = "" if case.sensitive else " unscored"
+                    print(f"case_ms: {case.case_id} {per_case[case.case_id]:.6f}{tag}")
                 print(f"mean_ms: {_geomean(list(per_case.values())):.6f}")
                 payload = {
                     "kind": "integrated_bench",
@@ -739,34 +760,7 @@ def worker_main(args: argparse.Namespace) -> int:
                         json.dump(payload, f, indent=2)
             return 0
 
-        # Correctness modes.
-        modes = [args.mode] if args.mode else ["smoke", "stability"]
-        worst_snr = 200.0
-        worst_diff = 0.0
-        all_finite = True
-        for mode in modes:
-            for case in cases:
-                if args.mode is None:
-                    checks = (check_case, check_graph_case)
-                else:
-                    checks = (check_graph_case,) if case.graph else (check_case,)
-                for fn in checks:
-                    res = fn(case, ctx, args.seed, mode)
-                    worst_snr = min(worst_snr, res["snr_db"])
-                    worst_diff = max(worst_diff, res["max_diff"])
-                    all_finite = all_finite and res["finite"]
-
-        worst_snr = _reduce_min(worst_snr, ctx)
-        worst_diff = _reduce_max(worst_diff, ctx)
-        finite_flag = _reduce_min(1.0 if all_finite else 0.0, ctx)
-        passed = bool(finite_flag) and worst_snr >= args.snr_threshold
-
-        if rank0:
-            print(f"SNR: {worst_snr:.2f} dB")
-            print(f"allclose: {passed}")
-            print(f"max_diff: {worst_diff:.6e}")
-        # The parser treats SNR as authoritative, so a failure must also be visible in the exit code.
-        return 0 if passed else 1
+        return _check_correctness(args, cases, ctx)
     finally:
         from aiter.dist.parallel_state import (
             destroy_distributed_environment,

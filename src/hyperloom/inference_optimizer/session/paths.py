@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -52,6 +54,16 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "patches",
     "optimizer_runs",  # launcher stdout / pid logs
 )
+
+#: Files whose presence means a directory holds a session that was started: a fresh session is never created there.
+SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
+
+#: The application-private result archive, created by a hosted run beside the skeleton above (not part of it).
+ARCHIVE_DIRNAME = "archive"
+
+#: Top-level session subdirectories that belong to the application alone: never copied into a sandbox, packaged or
+#: shown to a specialist.  Whatever copies a session directory elsewhere must leave these out.
+PRIVATE_SESSION_SUBDIRS: tuple[str, ...] = (ARCHIVE_DIRNAME,)
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir
 # launched from this workspace.
@@ -122,14 +134,52 @@ def session_dir() -> Path:
     return workspace_root()
 
 
-def make_session_dir(model_name: str | os.PathLike[str] | None = None) -> Path:
-    """Create the session directory + per-session + workspace-shared skeletons."""
+def hosted_session_dir(model_path: str | os.PathLike[str], run_created_at: datetime, run_id: str) -> Path:
+    """The session directory of one hosted run: ``<workspace>/<model>/<UTC creation time>-<sha256(run id)[:8]>``.
+
+    Both parts come from the run, so a restart of the same run lands in the same directory and another run never does.
+    """
+    stamp = run_created_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
+    return workspace_root() / _sanitize_model_basename(model_path) / f"{stamp}-{digest}"
+
+
+def archive_root(session_dir: Path) -> Path:
+    """Where a hosted run archives its results: ``<session_dir>/archive``."""
+    return Path(session_dir) / ARCHIVE_DIRNAME
+
+
+def ensure_archive_root(session_dir: Path) -> Path:
+    """Create :func:`archive_root` with mode 0700, owned by the calling user, and return it.
+
+    An existing directory is tightened to 0700; one owned by another user is refused rather than adopted.
+    """
+    root = archive_root(session_dir)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.stat().st_uid != os.getuid():
+        raise PermissionError(f"{root} is owned by uid {root.stat().st_uid}, not by this user (uid {os.getuid()})")
+    root.chmod(0o700)
+    return root
+
+
+def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target: Path | None = None) -> Path:
+    """Create the session directory + per-session + workspace-shared skeletons.
+
+    With ``target`` the session is created at exactly that path (which must lie below the workspace) instead of at a
+    generated one.
+    """
     ws = workspace_root()
     ws.mkdir(parents=True, exist_ok=True)
     for sub in _WORKSPACE_SKELETON:
         (ws / sub).mkdir(parents=True, exist_ok=True)
 
-    if model_name:
+    if target is not None:
+        sd = Path(target)
+        if not is_path_within(sd, ws):
+            raise ValueError(f"session directory {sd} is not below the workspace {ws}")
+        if any((sd / name).exists() for name in SESSION_FILES):
+            raise ValueError(f"session directory {sd} already holds a session; resume it instead")
+    elif model_name:
         basename = _sanitize_model_basename(model_name)
         sd = ws / basename / f"{utc_now_compact()}-{uuid4().hex[:8]}"
     else:
@@ -232,16 +282,22 @@ def mn_profile_trace_root() -> Path:
 
 
 __all__ = [
+    "ARCHIVE_DIRNAME",
     "AssetRootNotFound",
     "DEFAULT_SESSION_DIR",
     "ENV_CURRENT_SESSION_DIR",
     "ENV_OVERRIDE_ASSET_ROOT",
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
+    "PRIVATE_SESSION_SUBDIRS",
+    "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",
+    "archive_root",
     "asset_system_prompts_dir",
     "db_path_for",
+    "ensure_archive_root",
+    "hosted_session_dir",
     "is_path_within",
     "magpie_dir",
     "make_session_dir",
@@ -252,3 +308,8 @@ __all__ = [
     "session_dir",
     "workspace_root",
 ]
+
+
+def stop_request_path(session_dir: Path) -> Path:
+    """The file whose presence is an operator's request to stop the run: ``<session>/hosted/control/stop.json``."""
+    return Path(session_dir) / "hosted" / "control" / "stop.json"

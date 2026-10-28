@@ -37,6 +37,11 @@ CHECKS = {
         "say on the `# noqa: BLE001` line why the handler may catch every exception (an outermost boundary "
         "that logs it); otherwise catch the exceptions the block can raise",
     ),
+    "broad-unrecorded": (
+        "Broad catch that records nothing",
+        "re-raise, or log the error with its traceback at the outermost boundary or the one-item isolation "
+        "boundary that owns it; otherwise catch the exceptions the block can raise or let them propagate",
+    ),
     "english": ("English only", "English text only (no CJK characters) in files, PR title, body and commits"),
     "test-imports": (
         "Production code imports test code",
@@ -349,7 +354,7 @@ def _now(key: Key, finding: Finding | None, link_base: str) -> str:
 
 def _how_to_fix(outcome: Outcome) -> str:
     pins = outcome.versions
-    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "vulture") if name in pins)
+    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "radon", "vulture") if name in pins)
     lines = [
         "### How to fix\n",
         (

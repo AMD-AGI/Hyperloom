@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -47,7 +48,8 @@ async def _served_capture_workload(
     }
     try:
         benchmark_result = await executor(ctx)
-    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
+    except Exception as exc:  # isolation boundary: one shape-capture serving run, recorded as its capture verdict
+        log.warning("vLLM TunableOp shape capture raised", exc_info=True)
         return {}, _shape_capture_failure(f"vLLM TunableOp shape capture raised {exc!r}", run.capture_dir)
     return (benchmark_result if isinstance(benchmark_result, dict) else {}), None
 
@@ -185,13 +187,20 @@ def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
     }
 
 
+@dataclass(frozen=True)
+class SuppliedShapes:
+    """The GEMM shape inputs a forge run already holds, either of which makes a capture pass unnecessary."""
+
+    shapes_json: str
+    tunableop_input: str
+
+
 def _vllm_block_fp8_profile_capture_required(
     *,
     framework: str,
     precision: str,
     quant_type: str,
-    shapes_json: str,
-    tunableop_input: str,
+    supplied: SuppliedShapes,
     dry_run: bool,
 ) -> bool:
     """Return whether block-FP8 needs a profiled runtime-shape capture pass."""
@@ -199,8 +208,8 @@ def _vllm_block_fp8_profile_capture_required(
         framework != "vllm"
         or not _is_vllm_block_fp8(precision, quant_type)
         or dry_run
-        or shapes_json
-        or tunableop_input
+        or supplied.shapes_json
+        or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
     ):
         return False
@@ -378,16 +387,15 @@ def _vllm_dense_shape_capture_required(
     *,
     framework: str,
     model_path: str,
-    shapes_json: str,
-    tunableop_input: str,
+    supplied: SuppliedShapes,
     dry_run: bool,
 ) -> bool:
     """Return whether Forge needs an automatic TunableOp recording pass."""
     if (
         framework != "vllm"
         or dry_run
-        or shapes_json
-        or tunableop_input
+        or supplied.shapes_json
+        or supplied.tunableop_input
         or not env_bool("HYPERLOOM_GEMM_SHAPE_CAPTURE", True)
     ):
         return False

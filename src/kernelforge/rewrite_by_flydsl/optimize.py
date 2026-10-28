@@ -340,8 +340,8 @@ def _forge_loop_cmd(
     if request.deadline_unix and request.deadline_unix > 0:
         cmd += ["--deadline-unix", str(request.deadline_unix)]
     # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
-    # default from the environment (CLAUDE_MODEL / CODEX_MODEL). ``Config`` exposes the model as ``agent_model`` --
-    # there is no ``config.model``.
+    # default from the environment (CLAUDE_MODEL / CODEX_MODEL / DSH_MODEL). ``Config`` exposes the model as
+    # ``agent_model`` -- there is no ``config.model``.
     if config.agent_model:
         cmd += ["--model", config.agent_model]
     if request.permission_mode:

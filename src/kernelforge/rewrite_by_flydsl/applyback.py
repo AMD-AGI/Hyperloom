@@ -33,7 +33,7 @@ from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_json, atomic_write_text
 from kernelforge.tracker import UsageAccumulator
 
 log = logging.getLogger(__name__)
@@ -117,10 +117,6 @@ class ApplybackResult:
 
 def _git(workspace: str | Path, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(workspace), *args, check=False)
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _infer_framework(spec: RewriteSpec) -> str:
@@ -511,7 +507,7 @@ def _snapshot_failure(
     atomic_write_text(root / "partial.patch", partial.stdout or "")
     atomic_write_text(root / "status.txt", status.stdout or "")
     atomic_write_text(root / "error.txt", error + "\n")
-    _atomic_write_json(root / "progress.json", {"events": progress_log})
+    atomic_write_json(root / "progress.json", {"events": progress_log})
     return str(root)
 
 
@@ -660,14 +656,14 @@ def _publish_patch(
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
             "Framework integration validation is intentionally pending in Hyperloom.\n",
         )
-        _atomic_write_json(
+        atomic_write_json(
             temporary / "benchmark.json",
             {
                 "source_ms": measurement.source_ms,
                 "flydsl_best_ms": measurement.flydsl_ms,
             },
         )
-        _atomic_write_json(temporary / "publication.json", manifest)
+        atomic_write_json(temporary / "publication.json", manifest)
         files_root = temporary / "files"
         files_root.mkdir(parents=True, exist_ok=True)
         for relative in changed_files:
@@ -688,8 +684,8 @@ def _publish_patch(
 
     # The bundle is complete on disk before either pointer becomes readable, so a hard kill can only leave the
     # previous publication or nothing at all.
-    _atomic_write_json(manifest_path, manifest)
-    _atomic_write_json(result_path, manifest)
+    atomic_write_json(manifest_path, manifest)
+    atomic_write_json(result_path, manifest)
     return (
         str(version / "forge.patch"),
         str(manifest_path),
@@ -758,8 +754,8 @@ class _CleanRoomAttempts:
                 return self._integrate(turn, import_plan, attempt)
             except (asyncio.TimeoutError, TimeoutError):
                 error_text = f"apply-back agent timed out after {timeout_sec}s"
-            except Exception as error:  # noqa: BLE001
-                log.warning("apply-back attempt %d failed: %s", attempt, error)
+            except Exception as error:  # isolation boundary: one apply-back attempt
+                log.warning("apply-back attempt %d failed: %s", attempt, error, exc_info=True)
                 error_text = f"{type(error).__name__}: {error}"
             finally:
                 if error_text and worktree_added:

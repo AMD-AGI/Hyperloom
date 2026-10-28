@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contracts shared by the measurement layer and the multi-branch package: test requests, test results and recipes."""
+"""Versioned JSON contracts Hyperloom owns and other systems hand to it, and the contracts the measurement layer and
+the multi-branch package share: test requests, test results and recipes."""
 
 from hyperloom.contracts.measurement import (
     AccuracyValue,

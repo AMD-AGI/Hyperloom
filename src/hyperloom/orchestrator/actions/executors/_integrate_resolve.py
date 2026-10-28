@@ -84,7 +84,7 @@ class ResolveStageMixin:
         """
         from ._multi_node_env import is_multi_node
 
-        shared_state = extra.get("shared_state") or extra.get("state")
+        shared_state = extra.get("shared_state")
         if is_multi_node():
             return {
                 "status": "skipped",

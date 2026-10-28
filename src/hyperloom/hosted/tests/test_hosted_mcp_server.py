@@ -17,7 +17,9 @@ from typing import Any
 
 import pytest
 
+from hyperloom.hosted.host_info import Var, take_host_info
 from hyperloom.hosted.mcp_server import (
+    HOST_KIND,
     CallContext,
     McpServer,
     McpServerConfig,
@@ -281,11 +283,23 @@ def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
     assert token not in repr(server.__dict__.get("_tokens").__dict__)
 
 
-def test_config_from_env_and_validation() -> None:
-    config = McpServerConfig.from_env(
-        {"HYPERLOOM_MCP_HOST": "0.0.0.0", "HYPERLOOM_MCP_PORT": "8123", "HYPERLOOM_MCP_TOKEN": HOST_TOKEN}
-    )
-    assert (config.host, config.port, config.host_token) == ("0.0.0.0", 8123, HOST_TOKEN)
+def test_config_built_from_the_host_info_the_hosted_entry_takes(tmp_path) -> None:
+    (tmp_path / "campaign.json").write_text("{}")
+    environ = {
+        Var.INPUT_FILE: str(tmp_path / "campaign.json"),
+        Var.RUN_ID: "run-1",
+        Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
+        Var.STATE_DIR: str(tmp_path),
+        Var.MCP_PORT: "8765",
+        Var.MCP_TOKEN: HOST_TOKEN,
+    }
+    info = take_host_info(environ)
+    assert Var.MCP_TOKEN not in environ
+    server = McpServer(McpServerConfig(port=info.mcp_port, host_token=info.mcp_token.reveal()), campaign="c")
+    assert server.authenticate(HOST_TOKEN).kind == HOST_KIND
+
+
+def test_config_validation() -> None:
     with pytest.raises(ValueError, match="host token"):
         McpServer(McpServerConfig(host_token="short"), campaign="c")
     with pytest.raises(ValueError, match="campaign"):
@@ -316,6 +330,26 @@ def test_string_results_pass_through_and_tool_errors_are_error_results(server: M
         "content": [{"type": "text", "text": "refused: held by someone"}],
         "isError": True,
     }
+
+
+def test_a_result_that_cannot_be_serialized_is_an_internal_error_with_its_stack(
+    server: McpServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    def cyclic(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        result["self"] = result
+        return result
+
+    server.register("cyclic", schema={"type": "object"}, handler=cyclic, scopes={"host"})
+    with caplog.at_level(logging.WARNING, logger="hyperloom.hosted.mcp_server"):
+        status, _, reply = Client(server).call(HOST_TOKEN, "cyclic")
+
+    assert (status, reply) == (
+        200,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "ValueError: Circular reference detected"}},
+    )
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("request failed: ValueError\n")]
+    assert ", in _call_tool\n" in record.getMessage()
 
 
 def _server_with_beat(beats: list[str], seconds: float = 0.1) -> McpServer:

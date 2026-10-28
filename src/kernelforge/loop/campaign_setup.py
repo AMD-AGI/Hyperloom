@@ -9,8 +9,7 @@ import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from kernelforge.loop.knowledge_integration import git_checkout_branch
-from kernelforge.tools.git import ensure_commit_identity
+from kernelforge.tools.git import ensure_commit_identity, git_checkout_branch
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -48,8 +47,7 @@ def resolve_campaign(
         print(f"  [git] workspace had no commit identity; set {written_identity}")
 
     campaign_inputs_supplied = any(
-        value not in (None, "")
-        for value in (inputs.kernel, inputs.driver, inputs.source_files, inputs.program_md_file, inputs.operator_name)
+        (inputs.kernel, inputs.driver, inputs.source_files, inputs.program_md_file, inputs.operator_name)
     )
     if resume and campaign_store.exists():
         if campaign_inputs_supplied:
@@ -63,7 +61,7 @@ def resolve_campaign(
     pending_retry = not resume and campaign_store.exists() and not state_path.is_file()
     # ``normalize_kernel_backend_name`` already returns the bare backend key, so this is the name the operator
     # asked for, spelled canonically.
-    requested_backend = (inputs.kernel_backend or "").strip() or env_backend_override()
+    requested_backend = inputs.kernel_backend.strip() or env_backend_override()
     resolved_kernel_backend = resolve_kernel_backend_override(requested_backend) if requested_backend else ""
     if resolved_kernel_backend != requested_backend:
         print(
@@ -80,19 +78,18 @@ def resolve_campaign(
         if checkout_message:
             print(f"  [git] {checkout_message}")
 
-    existing_campaign: CampaignConfig | None = campaign_store.load() if pending_retry else None
-    if existing_campaign is not None:
+    existing_campaign: CampaignConfig | None = None
+    base_commit = None
+    if pending_retry:
+        existing_campaign = campaign_store.load()
         validate_pending_campaign_head(str(workspace), existing_campaign.base_commit)
+        inputs = replace(inputs, gpu_type=existing_campaign.gpu_type, producer=existing_campaign.producer)
+        base_commit = existing_campaign.base_commit
 
     provisional_campaign = create_campaign_config(
         str(workspace),
-        replace(
-            inputs,
-            kernel_backend=resolved_kernel_backend,
-            gpu_type=(existing_campaign.gpu_type if existing_campaign is not None else inputs.gpu_type),
-            producer=(existing_campaign.producer if existing_campaign is not None else inputs.producer),
-        ),
-        base_commit=(existing_campaign.base_commit if existing_campaign is not None else None),
+        replace(inputs, kernel_backend=resolved_kernel_backend),
+        base_commit=base_commit,
     )
 
     program_text: str | None = None

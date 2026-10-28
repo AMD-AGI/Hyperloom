@@ -6,16 +6,16 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.gpu_identity import (
+    AMD_GPU_BOARDS,
     AMD_GPU_DEVICE_IDS,
-    AMD_GPU_DISPATCH_IDENTITIES,
     gpu_type_for_device_id,
     normalise_device_id,
 )
 
 
-def test_every_board_with_a_dispatch_identity_has_device_ids_and_the_other_way_round():
-    assert set(AMD_GPU_DEVICE_IDS) == set(AMD_GPU_DISPATCH_IDENTITIES)
-    assert {board for board, ids in AMD_GPU_DEVICE_IDS.items() if not ids} == {"r9700"}
+def test_every_board_has_its_device_ids_listed_and_the_other_way_round():
+    assert set(AMD_GPU_DEVICE_IDS) == set(AMD_GPU_BOARDS)
+    assert {board for board, ids in AMD_GPU_DEVICE_IDS.items() if not ids} == {"r9700", "radeon8060s"}
 
 
 def test_a_device_id_belongs_to_one_board():

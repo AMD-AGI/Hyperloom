@@ -7,11 +7,32 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer, validation_of
 
 #: Below this the residue is float noise from re-serialized throughputs, well
 #: under any measurement's own repeatability.
 _NOISE_PP = 0.01
+
+
+def _share_rows(by_source: dict[str, Any], unattributed: Any, total: Any) -> list[list[Any]]:
+    """Rows of source, claimed gain and share %, with the residue between adopted steps as a row of its own."""
+    claimed = [[source, to_mapping(bucket).get("total_gain_pct")] for source, bucket in by_source.items()]
+    if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
+        claimed.append(["unattributed (between adopted steps)", unattributed])
+    share_total = total
+    if not isinstance(share_total, (int, float)) or not share_total:
+        share_total = sum(float(gain) for _source, gain in claimed if isinstance(gain, (int, float)))
+    return [
+        [
+            source,
+            gain,
+            (float(gain) / float(share_total) * 100.0 if isinstance(gain, (int, float)) and share_total else None),
+        ]
+        for source, gain in claimed
+    ]
 
 
 @register_renderer("attribution")
@@ -32,28 +53,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             per-source split to show.
     """
     validation = validation_of(breakdown)
-    attribution = as_dict(validation.get("attribution"))
-
-    claimed = [
-        [source, as_dict(bucket).get("total_gain_pct")]
-        for source, bucket in as_dict(attribution.get("by_source")).items()
-    ]
+    attribution = to_mapping(validation.get("attribution"))
     total_v = validation.get("validated_total_gain_pct")
-    unattributed = validation.get("unattributed_gain_pct")
-    if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
-        claimed.append(["unattributed (between adopted steps)", unattributed])
-
-    share_total = total_v
-    if not isinstance(share_total, (int, float)) or not share_total:
-        share_total = sum(float(gain) for _source, gain in claimed if isinstance(gain, (int, float)))
-    rows = [
-        [
-            source,
-            gain,
-            (float(gain) / float(share_total) * 100.0 if isinstance(gain, (int, float)) and share_total else None),
-        ]
-        for source, gain in claimed
-    ]
+    rows = _share_rows(to_mapping(attribution.get("by_source")), validation.get("unattributed_gain_pct"), total_v)
 
     facts: list[str] = []
     if total_v is not None:

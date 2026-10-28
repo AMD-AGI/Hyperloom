@@ -39,36 +39,24 @@ PERF_TERMS = (
 _MAX_OR_TERMS = 6
 
 
-def _state_qualifier(states: tuple[str, ...]) -> str:
-    """Map pr_states to a GitHub search state qualifier."""
-    broad = any(s in ("merged", "closed", "all") for s in (states or ("open",)))
-    return "" if broad else "is:open"
-
-
-def _build_query(repo: str, states: tuple[str, ...] = ("open",), *, terms: tuple[str, ...]) -> str:
+def _build_query(repo: str, *, terms: tuple[str, ...]) -> str:
     """Compose a GitHub Search query scoped to ``repo`` that ORs the first ``_MAX_OR_TERMS`` of ``terms``."""
-    parts = [f"repo:{repo}", "is:pr"]
-    state_q = _state_qualifier(states)
-    if state_q:
-        parts.append(state_q)
-    parts.append("(" + " OR ".join(terms[:_MAX_OR_TERMS]) + ")")
-    return " ".join(parts)
+    return f"repo:{repo} is:pr (" + " OR ".join(terms[:_MAX_OR_TERMS]) + ")"
 
 
 def search_perf_prs(
     repo_url: str,
     *,
     limit: int = 5,
-    states: tuple[str, ...] = ("open",),
     terms: tuple[str, ...],
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Return PRs matching ``terms`` via the GitHub Search API (open-only by default)."""
+    """Return PRs in every state matching ``terms`` via the GitHub Search API."""
     try:
         repo = parse_repo_slug(repo_url)
     except ValueError:
         return []
-    query = _build_query(repo, states, terms=terms)
+    query = _build_query(repo, terms=terms)
     url = "https://api.github.com/search/issues?" + urllib.parse.urlencode({"q": query, "per_page": str(limit)})
     req = urllib.request.Request(url, headers=_auth_headers("application/vnd.github+json"))
     try:

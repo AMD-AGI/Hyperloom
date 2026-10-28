@@ -19,13 +19,7 @@ class SessionBreakdownExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Write ``session_breakdown.json`` and return its path + metadata."""
-        session_dir = self._resolve_session_dir(ctx)
-        if session_dir is None:
-            return {
-                "status": "failed",
-                "error": "session_breakdown_executor: could not resolve session_dir",
-            }
-
+        session_dir = Path(ctx.extra["session_dir"])
         params = ctx.task.params or {}
         output_path = params.get("output_path")
 
@@ -49,23 +43,6 @@ class SessionBreakdownExecutor:
             "warnings": warnings,
             "size_bytes": int(target.stat().st_size) if target.exists() else 0,
         }
-
-    @staticmethod
-    def _resolve_session_dir(ctx) -> Path | None:
-        """Same resolution order as :class:`ReportExecutor`."""
-        extra = getattr(ctx, "extra", None) or {}
-        if extra.get("session_dir"):
-            return Path(extra["session_dir"])
-        params = ctx.task.params or {}
-        if params.get("session_dir"):
-            return Path(params["session_dir"])
-        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-        candidate = _sd()
-        # manifest.json (not state.json) so a fresh session yields a partial breakdown.
-        if candidate.exists() and (candidate / "manifest.json").exists():
-            return candidate
-        return None
 
 
 session_breakdown_executor = SessionBreakdownExecutor()

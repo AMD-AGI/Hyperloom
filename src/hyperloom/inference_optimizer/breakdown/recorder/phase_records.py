@@ -9,14 +9,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    clip as _clip,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
 )
+
+from .event_fields import clip as _clip, now_iso_seconds as _now
 
 #: Transition reasons and marker evidence are bounded prose, not logs.
 MAX_REASON_CHARS = 500
@@ -26,10 +27,13 @@ __all__ = [
     "ActionDispatch",
     "ActionSettlement",
     "PhaseCycle",
+    "PhaseDenial",
     "PhaseEntry",
     "PhaseExit",
     "PhaseMarker",
     "PhaseProposal",
+    "ProposalOutcome",
+    "ProposalReview",
     "SpecialistRound",
 ]
 
@@ -128,7 +132,6 @@ class ActionDispatch:
     dispatch_class: str | None = None
     allowed: bool | None = True
     denial_rule: str | None = None
-    dispatched_at: str = ""
     dispatched_unix: float | None = None
 
     def row(self) -> dict[str, Any]:
@@ -139,7 +142,7 @@ class ActionDispatch:
             "phase": self.at.label(),
             "macro_cycle": int(self.at.macro_cycle or 0),
             "tick": int(self.tick or 0),
-            "dispatched_at": str(self.dispatched_at or "") or _now(),
+            "dispatched_at": _now(),
             "dispatched_unix": _float_or_none(self.dispatched_unix),
         }
         if self.dispatch_class is not None:
@@ -160,7 +163,6 @@ class ActionSettlement:
     decision: str = ""
     error_class: Any = None
     workspace: Any = None
-    settled_at: str = ""
     settled_unix: float | None = None
 
     def row(self) -> dict[str, Any]:
@@ -171,7 +173,7 @@ class ActionSettlement:
             "decision": str(self.decision or ""),
             "error_class": _text_or_none(self.error_class),
             "workspace": _text_or_none(self.workspace),
-            "settled_at": str(self.settled_at or "") or _now(),
+            "settled_at": _now(),
             "settled_unix": _float_or_none(self.settled_unix),
         }
 
@@ -248,7 +250,6 @@ class PhaseProposal:
     predicted_gain_pct: Any = None
     candidate_id: Any = None
     variant_name: Any = None
-    proposed_at: str = ""
 
     def row(self) -> dict[str, Any]:
         """The proposal row this proposal persists as."""
@@ -262,5 +263,96 @@ class PhaseProposal:
             "predicted_gain_pct": _float_or_none(self.predicted_gain_pct),
             "candidate_id": _text_or_none(self.candidate_id),
             "variant_name": _text_or_none(self.variant_name),
-            "proposed_at": str(self.proposed_at or "") or _now(),
+            "proposed_at": _now(),
+        }
+
+
+@dataclass(frozen=True)
+class ProposalReview:
+    """The Critic's ruling on one proposal, filed on the proposal's row."""
+
+    proposal_msg_id: str
+    verdict: str
+    effective_verdict: str = ""
+    source: str = ""
+    reasoning: Any = None
+    confidence: Any = None
+    failure_reason_code: Any = None
+    advisory: Mapping[str, Any] | None = None
+    variants: Any = None
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row fields this ruling persists as."""
+        authored = str(self.verdict or "")
+        effective = str(self.effective_verdict or "") or authored
+        advice = self.advisory or {}
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "critic_review": {
+                "verdict": authored,
+                "effective_verdict": effective,
+                # Its own field because the two verdicts alone say that they
+                # differ, not that the envelope validator imposed it.
+                "held_to_rule": effective != authored,
+                "source": str(self.source or ""),
+                "reasoning": _clip(self.reasoning, MAX_REASON_CHARS),
+                "confidence": _float_or_none(self.confidence),
+                "failure_reason_code": _text_or_none(self.failure_reason_code),
+                "required_evidence": [str(item) for item in _as_list(advice.get("required_evidence"))],
+                "risks": [dict(risk) for risk in _as_list(advice.get("risks")) if isinstance(risk, Mapping)],
+                "advice_text": _text_or_none(advice.get("advice_text")),
+                "alternative_action": _text_or_none(advice.get("alternative_action")),
+                "variants": [dict(row) for row in _as_list(self.variants) if isinstance(row, Mapping)],
+                "reviewed_at": _now(),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ProposalOutcome:
+    """What the loop did with one proposal; ``task_id`` names the dispatch it became."""
+
+    proposal_msg_id: str
+    materialized: bool = False
+    denied: bool = False
+    reauthored: bool = False
+    task_id: Any = None
+    patch_verdict_key: Any = None
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row fields this outcome persists as."""
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "outcome": {
+                "materialized": bool(self.materialized),
+                "denied": bool(self.denied),
+                "reauthored": bool(self.reauthored),
+                "task_id": _text_or_none(self.task_id),
+                "patch_verdict_key": _text_or_none(self.patch_verdict_key),
+                "settled_at": _now(),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class PhaseDenial:
+    """One PolicyGate denial, against the phase in scope when it was decided."""
+
+    at: PhaseCycle
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    rule: str
+    hint: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The denial row this denial persists as."""
+        return {
+            "actor": str(self.actor or ""),
+            "proposal_msg_id": _text_or_none(self.proposal_msg_id),
+            "action": str(self.action or ""),
+            "phase": self.at.label(),
+            "rule": str(self.rule or ""),
+            "hint": str(self.hint or ""),
+            "denied_at": _now(),
         }

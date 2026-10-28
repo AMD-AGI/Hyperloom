@@ -104,14 +104,11 @@ def _dense_meta(**over) -> rc.ModelMeta:
     return rc.ModelMeta(**base)
 
 
-_UNSET = object()
-
-
-def _perfmodel(meta=_UNSET, **over):
+def _perfmodel(meta=None, **over):
     kw = dict(gpu_type="mi300x", num_gpus=1, precision_tag="bf16", concurrency=8, isl=128, osl=64)
     kw.update(over)
     return rc.compute_roofline_from_perfmodel(
-        meta=_dense_meta() if meta is _UNSET else meta,
+        meta=meta or _dense_meta(),
         target=rc.ComputeTarget(gpu_type=kw["gpu_type"], num_gpus=kw["num_gpus"], precision_tag=kw["precision_tag"]),
         shape=rc.DecodeShape(isl=kw["isl"], osl=kw["osl"], concurrency=kw["concurrency"]),
     )
@@ -179,7 +176,6 @@ def test_perfmodel_scales_the_hardware_by_the_gpu_count():
 
 
 def test_perfmodel_declines_what_it_cannot_model():
-    assert _perfmodel(None) is None
     assert _perfmodel(_dense_meta(hidden_size=0)) is None
     assert _perfmodel(_dense_meta(num_attention_heads=0)) is None
     assert _perfmodel(_dense_meta(num_layers=0)) is None
@@ -931,11 +927,15 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert act_floor.activation_dtype_bytes == 2.0
 
 
+def _peak_tables(monkeypatch, *, achievable: float, vendor: float) -> None:
+    monkeypatch.setitem(rc.HW_SPECS_ACHIEVABLE, "mi300x", {"peak_tflops": {"bf16": achievable}})
+    monkeypatch.setitem(rc.HW_SPECS, "mi300x", {"peak_tflops": {"bf16": vendor}})
+
+
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
-    # Patch vendor to a *different* positive value (500.0) so swapping the operands of `achievable or vendor` would
-    # change the result.
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
-    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
+    # Vendor is a *different* positive value (500.0) so swapping the achievable-then-vendor order would change the
+    # result.
+    _peak_tables(monkeypatch, achievable=100.0, vendor=500.0)
 
     active = 1_000_000_000
     weight = 9_000_000_000
@@ -960,8 +960,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     assert fallback > 0.0
 
     # Vendor-peak fallback: achievable absent (0.0), vendor-peak covers it.
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
-    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 200.0)
+    _peak_tables(monkeypatch, achievable=0.0, vendor=200.0)
     vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
         rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),
         active_weight_bytes=active,
@@ -971,8 +970,6 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     assert vendor_fallback == pytest.approx((200.0 * 1e12) / (2.0 * active / 2.0))
     assert vendor_fallback > 0.0
 
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
-    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
             rc.ComputeTarget(gpu_type="unknown-gpu", num_gpus=1, precision_tag="bf16"),
@@ -982,7 +979,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
         )
         == 0.0
     )
-    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    _peak_tables(monkeypatch, achievable=100.0, vendor=500.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
             rc.ComputeTarget(gpu_type="mi300x", num_gpus=1, precision_tag="bf16"),

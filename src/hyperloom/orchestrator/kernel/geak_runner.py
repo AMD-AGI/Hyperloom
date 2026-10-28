@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import IO
 
+from hyperloom.common.proctree import signal_group
+
 _TAIL_CHARS = 4000
 
 
@@ -57,7 +59,7 @@ def _resolve_runner() -> str:
     )
 
 
-def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dict:
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int) -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -82,22 +84,15 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dic
         # start_new_session=True -> run_e2e + its vllm/node children share a process group we can signal as a unit.
         proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=env, start_new_session=True)
 
-        def _killpg(sig: int) -> None:
-            try:
-                os.killpg(os.getpgid(proc.pid), sig)
-            except (ProcessLookupError, PermissionError):
-                # Process already exited; nothing to signal.
-                pass
-
         try:
             returncode = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             # SIGTERM lets run_e2e flush result.json, then escalate to SIGKILL.
-            _killpg(signal.SIGTERM)
+            signal_group(proc.pid, signal.SIGTERM, what="geak")
             try:
                 returncode = proc.wait(timeout=flush_grace)
             except subprocess.TimeoutExpired:
-                _killpg(signal.SIGKILL)
+                signal_group(proc.pid, signal.SIGKILL, what="geak")
                 proc.wait()
                 returncode = -1
         stdout_tail = _tail(stdout)
@@ -130,23 +125,17 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dic
 
 
 def main(argv: list[str]) -> int:
-    """CLI: ``python -m hyperloom.orchestrator.kernel.geak_runner <handoff.json> <output_dir> [--timeout-s N]``."""
+    """CLI: ``python -m hyperloom.orchestrator.kernel.geak_runner <handoff.json> <output_dir> --timeout-s N``."""
     import argparse
 
     ap = argparse.ArgumentParser(description="Run GEAK e2e once.")
     ap.add_argument("handoff_json")
     ap.add_argument("output_dir")
-    # Explicit --timeout-s wins; else fall back to GEAK_E2E_TIMEOUT_S, else 12h.
-    ap.add_argument("--timeout-s", type=int, default=None)
+    ap.add_argument("--timeout-s", type=int, required=True)
     args = ap.parse_args(argv)
 
-    if args.timeout_s is not None:
-        timeout_s = args.timeout_s
-    else:
-        timeout_s = int(os.environ.get("GEAK_E2E_TIMEOUT_S", "43200"))  # 12h
-
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
-    out = call_geak(handoff, Path(args.output_dir), timeout_s=timeout_s)
+    out = call_geak(handoff, Path(args.output_dir), timeout_s=args.timeout_s)
     print(
         json.dumps(
             {
@@ -160,6 +149,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     raise SystemExit(main(sys.argv[1:]))

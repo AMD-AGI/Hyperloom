@@ -14,21 +14,17 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.breakdown.recorder.event_fields import as_dict
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.inference_optimizer.breakdown.recorder.recorder_warnings import RECORDING_ERRORS, note_failure
 from hyperloom.inference_optimizer.breakdown.session_package import deliverable
 
+from hyperloom.common.coerce import to_mapping
+
 from .attempts import build_attempt_summary
+from .steps import PATCH_KIND
 from .sufficiency import read_status
 
 log = logging.getLogger(__name__)
-
-#: ``recipe.steps`` kind for a patch, matched without importing the recipe package.
-PATCH_KIND_NAME = "patch"
-
-# --------------------------------------------------------------------------
-
-_ENABLEMENT_LOG_EXCERPT_CHARS = 2000
 
 
 #: Distinguishes "this state never recorded the field" from a recorded ``None``.
@@ -69,11 +65,6 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
 )
 
 
-#: Round-lifecycle counters the durable round ledger owns since the bring-up
-#: round rework. Read for a pre-rework state document, never synthesised.
-_LEGACY_ROUND_COUNTERS: tuple[str, ...] = ("attempts", "stall_streak")
-
-
 #: Reasons that specifically deny a closed dependency set. The status cannot read
 #: "verified" while one stands: pinned components are not a pinned environment,
 #: and a closure captured over the Python layer alone does not cover a build or
@@ -91,59 +82,8 @@ _CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
 
 
 def _eg(state: dict, name: str, default: Any = None) -> Any:
-    """Read an enablement round field from a v4 nested or v3 flat state dict."""
-    nested = state.get("enablement")
-    if isinstance(nested, dict):
-        return nested.get(name, default)
-    return state.get(f"enablement_{name}", default)
-
-
-def _rel(path: Path | None, session_dir: Path) -> str | None:
-    """Express ``path`` relative to ``session_dir`` as a POSIX string.
-
-    Returns ``None`` for ``None``, and falls back to ``str(path)`` when the
-    path is not under the session.
-    """
-    if path is None:
-        return None
-    try:
-        return path.resolve().relative_to(session_dir.resolve()).as_posix()
-    except (ValueError, OSError):
-        return str(path)
-
-
-def _as_int(value: Any, *, default: int = 0) -> int:
-    """Coerce a state counter to int, falling back to ``default``."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _stack_action_summary(action: dict[str, Any]) -> dict[str, Any]:
-    """Project a stack-action dict onto the landed-stack summary."""
-    return {
-        "kind": str(action.get("kind") or ""),
-        "framework": str(action.get("framework") or ""),
-        "capability": str(action.get("capability") or ""),
-        "acquisition_method": str(action.get("acquisition_method") or ""),
-        "repo_url": str(action.get("repo_url") or ""),
-        "ref": str(action.get("ref") or ""),
-        "index_url": str(action.get("index_url") or ""),
-        "reason": str(action.get("reason") or ""),
-    }
-
-
-def _runtime_summary(runtime: dict[str, Any], *, promoted: bool) -> dict[str, Any]:
-    """Project a FrameworkRuntime-shaped dict onto an attempt-runtime row."""
-    versions = runtime.get("installed_versions")
-    return {
-        "venv_root": str(runtime.get("venv_root") or ""),
-        "bin_path": str(runtime.get("bin_path") or ""),
-        "python_path": str(runtime.get("python_path") or ""),
-        "installed_versions": {str(k): str(v) for k, v in versions.items()} if isinstance(versions, dict) else {},
-        "promoted": bool(promoted),
-    }
+    """Read an enablement round field from the nested ``enablement`` state dict."""
+    return to_mapping(state.get("enablement")).get(name, default)
 
 
 def _closure_status(decision: dict[str, Any], enablement: dict[str, Any]) -> str:
@@ -201,7 +141,7 @@ def _recipe_accepted_config(enablement: dict[str, Any], state: dict[str, Any], s
     archived = str(_eg(state, "accepted_config_path", "") or "")
     config_path = archived or str(_eg(state, "probe_config_path", "") or "")
     if config_path:
-        accepted_config["config_path"] = _rel(Path(config_path), session_dir) or config_path
+        accepted_config["config_path"] = relative_posix(Path(config_path), session_dir) or config_path
     return accepted_config
 
 
@@ -280,101 +220,47 @@ def _collect_recipe(
         out["setup_script"] = setup_script
 
 
-def _lane_dispatched(state: dict[str, Any]) -> bool:
-    """Whether the lane ever opened a round, over both state generations.
+def _lane_engaged(state: dict[str, Any]) -> bool:
+    """Whether the section is emitted at all.
 
-    A round does not park its task id in the enablement state, so the
-    evidence that one ran is the specialist it settled onto, the
-    per-round records it kept, and the setup rows a round stamped its own id
-    onto. ``inflight_task_id`` / ``attempts`` are read for a document written
-    before the rework, not as the primary signal -- reading only those would
-    report every current session as never dispatched.
+    The section exists when the lane did something or was explicitly turned off;
+    with ``all`` the default, "armed but never needed" is the case that stays
+    hidden. A round does not park its task id in the enablement state, so the
+    evidence that one ran is the specialist it settled onto, the per-round
+    records it kept, and the setup rows it ran.
 
     ``launch_observation_path`` is deliberately NOT read here. All three of its
     writers (``writeback._record_enablement_eval_trigger`` and the two boot
     failure paths) set it from the *trigger* observation -- the failed launch or
     failed eval that gives the lane something to author against -- and they run
-    before any round is dispatched. Reading it would report ``dispatched: true``
-    for a session whose lane never opened a round, which is a false positive in
-    the one direction this section must not fail.
+    before any round is dispatched. Reading it would emit the section for a
+    session whose lane never opened a round.
     """
-    return bool(
-        _eg(state, "last_specialist_task_id")
-        or _eg(state, "kept_rounds")
-        or any(
-            str(row.get("round_task_id") or "")
-            for row in (_eg(state, "setup_executions") or [])
-            if isinstance(row, dict)
-        )
-        or _eg(state, "inflight_task_id")
-        or _as_int(_eg(state, "attempts")) > 0
-    )
-
-
-def _enablement_lane_status(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the lane's own status keys, or ``None`` when nothing is emitted.
-
-    The section exists when the lane did something or was explicitly turned off;
-    with ``all`` the default, "armed but never needed" is the case that stays
-    hidden.
-    """
-    origin = str(_eg(state, "origin", "") or "")
     # eval_kind is NOT cleared on success, so it can identify an eval-origin
     # enablement even after the run succeeds and origin is reset to "".
-    eval_kind = str(_eg(state, "baseline_eval_kind", "") or "")
+    have_eval = str(_eg(state, "origin", "") or "") == "eval" or bool(_eg(state, "baseline_eval_kind"))
     # A state document carrying no mode is read as the SharedState default,
     # which is the value the lane actually ran under.
     mode = str(state.get("enablement_mode") or "all").strip().lower() or "all"
-    dispatched = _lane_dispatched(state)
-    have_eval = origin == "eval" or bool(eval_kind)
-    engaged = bool(
-        dispatched
-        or have_eval
-        or _eg(state, "kept_patches")
-        or _eg(state, "setup_executions")
-        or _eg(state, "human_review_logged")
+    engaged = have_eval or any(
+        _eg(state, name)
+        for name in (
+            "last_specialist_task_id",
+            "kept_rounds",
+            "kept_patches",
+            "setup_executions",
+            "human_review_logged",
+        )
     )
     provisioned = any(
         _eg(state, name) for name in ("active_runtime", "attempt_runtimes", "build_manifest", "last_build_failure")
     )
-    if not (engaged or mode == "off" or provisioned):
-        return None
-    out: dict[str, Any] = {
-        "mode": mode,
-        "engaged": engaged,
-        "origin": "eval" if have_eval else "boot",
-        "dispatched": dispatched,
-        "succeeded": bool(_eg(state, "succeeded")),
-        "pending": bool(_eg(state, "pending")),
-        "validation_pending": bool(_eg(state, "validation_pending")),
-    }
-    for name in _LEGACY_ROUND_COUNTERS:
-        raw = _eg(state, name)
-        if raw is not None:
-            out[name] = _as_int(raw)
-    return out
-
-
-def _collect_round_identity(out: dict[str, Any], state: dict[str, Any]) -> None:
-    """Emit the task identities and the trigger log of the current round."""
-    for key, value in (
-        ("inflight_task_id", str(_eg(state, "inflight_task_id", "") or "")),
-        ("last_specialist_task_id", str(_eg(state, "last_specialist_task_id", "") or "")),
-        ("revalidation_generation", _as_int(_eg(state, "revalidation_generation"))),
-        ("revalidation_task_id", str(_eg(state, "revalidation_task_id", "") or "")),
-    ):
-        if value:
-            out[key] = value
-    # The boot-origin trigger evidence: without it a launch-failure round shows
-    # no reason for having run at all.
-    launch_log = str(_eg(state, "launch_log", "") or "")
-    if launch_log:
-        out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
+    return engaged or mode == "off" or provisioned
 
 
 def _portable_patch_ref(raw: str, session_dir: Path) -> str:
     """A patch reference that names no directory on the authoring host."""
-    rel = _rel(Path(raw), session_dir)
+    rel = relative_posix(Path(raw), session_dir)
     if not rel:
         return Path(raw).name
     return Path(rel).name if Path(rel).is_absolute() else rel
@@ -388,7 +274,7 @@ def _portable_step(step: dict[str, Any], session_dir: Path) -> dict[str, Any]:
     ``project_roots`` drops the same path for the same reason -- so shipping it
     only tells the consumer about a directory layout that is not theirs.
     """
-    if step.get("kind") != PATCH_KIND_NAME:
+    if step.get("kind") != PATCH_KIND:
         return step
     out = dict(step)
     if out.get("path"):
@@ -405,9 +291,9 @@ def _portable_kept_rounds(rounds: list[Any], session_dir: Path) -> list[dict[str
     paths from this machine into a recipe meant to be replayed on another.
     A round's patches are sourced from the archive by name, so the name is the
     whole linkage and the directory it sat in on this machine is not part of it.
-    Checked explicitly rather than through ``_rel``'s falsy branch: ``_rel``
-    falls back to ``str(path)``, so ``or`` never fires and the absolute path
-    would travel exactly as if nothing had been done.
+    Checked explicitly rather than through an ``or`` fallback:
+    ``relative_posix`` falls back to ``str(path)``, so ``or`` never fires and
+    the absolute path would travel exactly as if nothing had been done.
 
     An artifact travels as its ``rel_target`` where the producer recorded one
     and as the target's own name otherwise; ``target`` verbatim is an install
@@ -451,46 +337,11 @@ def _portable_kept_artifacts(
     ]
 
 
-def _collect_setup_record(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
-    """Emit the setup the lane ran and the session files that record it."""
-    for key, name, project in (
-        ("candidate_refs", "candidate_refs", str),
-        ("setup_commands", "setup_commands", str),
-        ("localization_manifest", "localization_manifest", str),
-    ):
-        raw = _eg(state, name)
-        if isinstance(raw, list) and raw:
-            out[key] = [project(v) for v in raw]
-    human_review = _eg(state, "human_review_logged")
-    if isinstance(human_review, list) and human_review:
-        out["human_review_count"] = len(human_review)
-    accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
-    if accepted_cfg:
-        out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
-    setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
-    # is_file(), not exists(): a directory at that path is not a script a
-    # consumer can source, and emitting it would name a replay input that
-    # cannot be replayed.
-    if setting_script_path.is_file():
-        out["setting_script"] = str(
-            _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
-        )
-
-
 def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
-    """Emit the stack the lane landed: patches, rounds, artifacts and acquisition."""
+    """Emit the rounds and artifacts the lane landed."""
     from .steps import root_ids_by_path
 
-    kept_patches_raw = _eg(state, "kept_patches")
-    if isinstance(kept_patches_raw, list) and kept_patches_raw:
-        # Same portability rule as ``kept_rounds`` below, and for the same
-        # reason: ``_rel`` falls back to ``str(path)``, so ``_rel(p) or p`` would
-        # never fall through and a patch outside the session would travel as an
-        # authoring-host absolute path. It would also put the same
-        # patch in the recipe twice under two different names -- one of them
-        # naming a directory the consumer does not have.
-        out["kept_patches"] = [_portable_patch_ref(str(p), session_dir) for p in kept_patches_raw]
-    # Exported beside the patches, not only fed to the projection: a build linked
+    # Exported, not only fed to the projection: a build linked
     # through a round's durable identity is reachable only from here once the
     # one-shot ``last_specialist_task_id`` has been consumed, which is the normal
     # state by the time a build lands.
@@ -505,100 +356,28 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
             root_ids=root_ids_by_path({"roots": _eg(state, "roots")}),
             framework_root=framework_root,
         )
-    if framework_root:
-        out["framework_root"] = framework_root
-    kept_stack_action_raw = _eg(state, "kept_stack_action")
-    if isinstance(kept_stack_action_raw, dict) and kept_stack_action_raw:
-        out["kept_stack_action"] = _stack_action_summary(kept_stack_action_raw)
 
 
-def _collect_eval_trigger(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
-    """Emit the eval-origin trigger the round was opened against."""
-    out["trigger_kind"] = str(_eg(state, "baseline_eval_kind", "") or "")
-    out["observed_accuracy"] = float(_eg(state, "observed_accuracy", 0.0) or 0.0)
-    out["accuracy_floor"] = float(_eg(state, "accuracy_floor", 0.0) or 0.0)
-    out["observed_task"] = str(_eg(state, "observed_task", "") or "")
-    out["observed_metric"] = str(_eg(state, "observed_metric", "") or "")
-    out["eval_contract_fingerprint"] = str(_eg(state, "eval_contract_fingerprint", "") or "")
-    probe_cfg = str(_eg(state, "probe_config_path", "") or "")
-    if probe_cfg:
-        out["probe_config_path"] = _rel(Path(probe_cfg), session_dir) or probe_cfg
-    evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
-    if evidence:
-        out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
-
-
-def _collect_runtimes(out: dict[str, Any], state: dict[str, Any]) -> None:
-    """Emit the runtimes the lane provisioned, marking the one it promoted."""
-    active_runtime_raw = _eg(state, "active_runtime")
-    have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
-    active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""
-    if have_active:
-        out["active_runtime"] = _runtime_summary(active_runtime_raw, promoted=True)
-    attempt_runtimes_raw = _eg(state, "attempt_runtimes")
-    if isinstance(attempt_runtimes_raw, list) and attempt_runtimes_raw:
-        out["attempt_runtimes"] = [
-            _runtime_summary(r, promoted=(str(r.get("venv_root") or "") == active_root))
-            for r in attempt_runtimes_raw
-            if isinstance(r, dict)
-        ]
-
-
-def _collect_build_attempts(out: dict[str, Any], state: dict[str, Any]) -> None:
-    """Emit the targeted builds the lane ran and how the last one failed.
-
-    ``failure_kind`` moved onto the recorder's attempt row with the round
-    rework; a pre-rework state document still carries it here.
-    """
-    failure_kind = str(_eg(state, "failure_kind", "") or "")
-    if failure_kind:
-        out["failure_kind"] = failure_kind
-    build_manifest_raw = _eg(state, "build_manifest")
-    if isinstance(build_manifest_raw, list) and build_manifest_raw:
-        build_attempts = [
-            build_attempt_summary(e) for e in build_manifest_raw if isinstance(e, dict) and e.get("ok") is not None
-        ]
-        if build_attempts:
-            out["build_attempts"] = build_attempts
-            out["build_attempt_count"] = len(build_attempts)
-    last_build_failure_raw = _eg(state, "last_build_failure")
-    if isinstance(last_build_failure_raw, dict) and last_build_failure_raw:
-        out["last_build_failure"] = {
-            "failure_class": str(last_build_failure_raw.get("failure_class") or ""),
-            "failure_summary": str(last_build_failure_raw.get("failure_summary") or ""),
-        }
-
-
-def collect_enablement(
-    session_dir: Path,
-    state: dict[str, Any],
-    warnings: list[str],
-) -> dict[str, Any]:
+def collect_enablement(session_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
     """Collect the enablement replay contract from the durable round state.
 
     The lane's own account of what it did is recorded at author time; what is
     projected here is the part no author-time site can state -- the ordered
     ``recipe_steps`` a consumer would replay and the ``replay_sufficiency``
     verdict over them, judged against the evidence the session actually
-    captured. The surrounding lane and landed-stack keys are kept because the
-    verdict is computed over the emitted section, not over raw state.
+    captured. The landed-stack keys are kept because the verdict is computed
+    over the emitted section, not over raw state.
     """
-    out = _enablement_lane_status(state)
-    if out is None:
+    if not _lane_engaged(state):
         return {}
-    _collect_round_identity(out, state)
+    out: dict[str, Any] = {}
     _collect_landed_stack(out, state, session_dir=session_dir)
-    _collect_setup_record(out, state, session_dir=session_dir)
-    if out["origin"] == "eval":
-        _collect_eval_trigger(out, state, session_dir=session_dir)
-    _collect_runtimes(out, state)
-    _collect_build_attempts(out, state)
     _collect_recipe(out, state, session_dir=session_dir)
     return out
 
 
-#: The replay contract's own keys, as opposed to the lane status
-#: :func:`collect_enablement` already records row by row. ``replay_sufficiency``
+#: The replay contract's own keys, as opposed to the working inputs
+#: :func:`collect_enablement` judges them over. ``replay_sufficiency``
 #: is the verdict a consumer outside this session reads to decide whether the
 #: recipe can be replayed at all; the rest is the evidence that verdict was
 #: reached over, kept beside it so the decision can be re-derived rather than
@@ -668,10 +447,8 @@ def recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str
     """
     section: dict[str, Any] = {}
     try:
-        state = asdict(enablement) if is_dataclass(enablement) else dict(as_dict(enablement))
-        collected = collect_enablement(
-            Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, []
-        )
+        state = asdict(enablement) if is_dataclass(enablement) else dict(to_mapping(enablement))
+        collected = collect_enablement(Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode})
         section = {key: collected[key] for key in _RECIPE_KEYS if key in collected}
         # The collector emits this unconditionally beside the steps; carrying its
         # own absence forward would hand a consumer a recipe with no verdict.
