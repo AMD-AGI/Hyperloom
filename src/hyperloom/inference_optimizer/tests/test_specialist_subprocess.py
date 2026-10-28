@@ -9,7 +9,9 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -730,6 +732,96 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     )
     assert outcome["stale_heartbeat"] is True, outcome
     assert killed["v"] is True
+
+
+def _silent_log(workspace: Path, *, age_sec: float) -> Path:
+    """A ``process.log`` whose last write was ``age_sec`` ago."""
+    workspace.mkdir()
+    log = workspace / "process.log"
+    log.write_text("event\n", encoding="utf-8")
+    then = time.time() - age_sec
+    os.utime(log, (then, then))
+    return log
+
+
+def _cli(code: str) -> subprocess.Popen:
+    """An agent CLI stand-in in its own session, as the dispatcher launches one."""
+    return subprocess.Popen([sys.executable, "-c", code], start_new_session=True)
+
+
+def _end(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait(timeout=5)
+
+
+async def _reap(proc: subprocess.Popen, workspace: Path, *, deadline_sec: float) -> dict[str, Any]:
+    disp = SpecialistSubprocessDispatcher(
+        config=SpecialistSubprocessConfig(heartbeat_stale_seconds=1.0, poll_interval_seconds=0.1)
+    )
+    return await disp._reap_loop(
+        proc,
+        ReapWatch(workspace=workspace, done_files=()),
+        deadline=Deadline.after(deadline_sec),
+        started=time.monotonic(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_keeps_a_cli_waiting_on_a_tool_it_started_after_its_last_output(tmp_path: Path):
+    """A long tool call leaves process.log silent; the tool the CLI started after that output keeps it alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_silent_cli_whose_children_predate_its_last_output(tmp_path: Path):
+    """A child older than the CLI's last output is not a tool call in flight, so silence still reaps the CLI."""
+    from hyperloom.common.proctree import descendants
+
+    workspace = tmp_path / "ws"
+    proc = _cli("import subprocess; subprocess.run(['sleep', '30'])")
+    try:
+        deadline = time.monotonic() + 5.0
+        while not descendants(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(1.0)
+        _silent_log(workspace, age_sec=0.0)
+        outcome = await _reap(proc, workspace, deadline_sec=10.0)
+    finally:
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_reap_loop_reaps_a_hung_cli_while_something_refreshes_heartbeat_json(tmp_path: Path):
+    """heartbeat.json is writable by the agent, so a loop refreshing it does not keep a hung CLI alive."""
+    workspace = tmp_path / "ws"
+    _silent_log(workspace, age_sec=60.0)
+    heartbeat = workspace / "heartbeat.json"
+    proc = _cli("import time; time.sleep(30)")
+
+    async def _refresh() -> None:
+        while True:
+            heartbeat.write_text('{"status": "running"}\n', encoding="utf-8")
+            await asyncio.sleep(0.1)
+
+    writer = asyncio.create_task(_refresh())
+    try:
+        outcome = await _reap(proc, workspace, deadline_sec=3.0)
+    finally:
+        writer.cancel()
+        await asyncio.gather(writer, return_exceptions=True)
+        _end(proc)
+    assert (outcome["stale_heartbeat"], outcome["timed_out"]) == (True, False)
 
 
 # ── extend_lease moves the live wall-clock deadline ──────────────────────────

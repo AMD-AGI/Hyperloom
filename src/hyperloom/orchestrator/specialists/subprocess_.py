@@ -72,7 +72,7 @@ from .agent_cli_config import (
 )
 from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
-from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths, tool_in_flight
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom.common.git_safety import app_git, worktree_head
@@ -148,9 +148,12 @@ class SpecialistSubprocessConfig:
     poll_interval_seconds: float = 5.0
     """How often the reaper polls done.json / process exit / heartbeat."""
 
-    heartbeat_stale_seconds: float = 300.0
+    heartbeat_stale_seconds: float = 900.0
     """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
+    Longer than the agent CLI's own API request timeout (600 s for Claude
+    Code), after which it logs a retry, so a CLI waiting on its model still
+    writes within it; a CLI waiting on a tool is covered by :func:`tool_in_flight`.
     A process that never creates any of them is reaped after this window.
     After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
@@ -1075,8 +1078,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json, process.log, or the dsh session
-        log; see :func:`specialist_activity_paths`), and the hard
+        activity staleness (process.log or the dsh session log, see
+        :func:`specialist_activity_paths`, unless :func:`tool_in_flight`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1146,11 +1149,13 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if any activity signal changed within the
-            # window. The hard wall-clock cap below still bounds genuinely hung
-            # subprocesses.
+            # Liveness check: alive while the CLI's output changed within the window, or while it waits on a
+            # tool it started after that output. The hard wall-clock cap below still bounds a hung subprocess.
             a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
-            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+            if a_mtime is not None and (
+                max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds
+                or await asyncio.to_thread(tool_in_flight, proc.pid, a_mtime)
+            ):
                 last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:

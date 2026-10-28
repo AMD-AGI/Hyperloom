@@ -32,6 +32,7 @@ __all__ = [
     "REAP_MARK_ENV",
     "TERM_GRACE_SEC",
     "ProcessId",
+    "boot_unix",
     "Tree",
     "collect_tree",
     "descendants",
@@ -70,6 +71,15 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         return int(fields[1]), int(fields[19])
     except (OSError, ValueError, IndexError):
         return None
+
+
+def boot_unix() -> float:
+    """Wall-clock time the host booted: the origin the start times in ``/proc/<pid>/stat`` count clock ticks from.
+
+    Raises:
+        OSError: When ``/proc/uptime`` cannot be read.
+    """
+    return time.time() - float((_PROC / "uptime").read_text(encoding="ascii").split()[0])
 
 
 def descendants(root_pid: int) -> list[ProcessId]:
