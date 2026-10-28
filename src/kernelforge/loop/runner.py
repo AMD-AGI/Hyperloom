@@ -4386,6 +4386,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     end_reason=result.session_end_reason,
                     summarizer=session_sink.get("summarize"),
                     references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+                    skills=tuple(skill.name for skill in getattr(self.config, "external_skills", ())),
                 )
                 has_narrative = bool(outcome)
                 agent_narrative = has_narrative

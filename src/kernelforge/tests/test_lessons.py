@@ -10,6 +10,7 @@ from kernelforge.resources import resource_path
 from kernelforge.loop.lessons import (
     CLAIM_DISPROVED,
     DEFAULT_RECENT_LESSONS,
+    KB_PREFIX,
     NO_FEASIBILITY_CLAIM,
     UNDISPROVEN_CLAIM,
     LessonScope,
@@ -204,6 +205,14 @@ def test_prompt_flags_a_cut_off_session(tmp_path):
 def test_prompt_stays_quiet_for_a_normal_session():
     prompt = build_summary_prompt(iteration=5, end_reason="converged")
     assert "cut off" not in prompt
+
+
+def test_prompt_asks_for_skill_lookups_only_when_the_session_had_skills():
+    plain = build_summary_prompt(iteration=5, end_reason="converged")
+    skilled = build_summary_prompt(iteration=5, end_reason="converged", skills=("flydsl-kernel-optimization",))
+    assert KB_PREFIX not in plain and "`DISPROOF:` lines." in plain
+    assert "flydsl-kernel-optimization" in skilled and f"`{KB_PREFIX} no-match <the question>`" in skilled
+    assert f"`{KB_PREFIX} none`" in skilled and f"and `{KB_PREFIX}` lines." in skilled
 
 
 @pytest.mark.parametrize(

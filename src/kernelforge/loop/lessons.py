@@ -40,6 +40,8 @@ NEGATIVES_PREFIX = "NEGATIVES:"
 
 # The marker for the other kind of closure.
 DISPROOF_PREFIX = "DISPROOF:"
+# One line per lookup in an external skill, so its maintainers see what the skill answered and what it did not.
+KB_PREFIX = "KB:"
 
 # What that line may say to mean "no direction measured worse".
 _NO_NEGATIVES_WORDS = frozenset({"none", "no", "nothing", "n/a", "na"})
@@ -556,8 +558,9 @@ def build_summary_prompt(
     word_budget: int = SUMMARY_WORD_BUDGET,
     pr_references: tuple[str, ...] = (),
     pr_reference_context: str = "",
+    skills: tuple[str, ...] = (),
 ) -> str:
-    """Build the factual-record prompt for the resumed Implementer."""
+    """Build the factual-record prompt for the resumed Implementer; ``skills`` names the external skills it had."""
     cutoff_note = ""
     if is_cutoff(end_reason):
         cutoff_note = (
@@ -585,6 +588,17 @@ def build_summary_prompt(
             f"{details}\n"
         )
 
+    prefixes = [HELD_FIXED_PREFIX, NEGATIVES_PREFIX, DISPROOF_PREFIX] + ([KB_PREFIX] if skills else [])
+    markers = ", ".join(f"`{prefix}`" for prefix in prefixes[:-1]) + f", and `{prefixes[-1]}`"
+    skill_note = ""
+    if skills:
+        skill_note = (
+            f"\nYou had these skills to consult: {', '.join(skills)}. Write one line of its own beginning "
+            f"`{KB_PREFIX}` for each question you looked up in them this iteration: `{KB_PREFIX} matched <page> "
+            f"§<section>` when a page answered it, `{KB_PREFIX} no-match <the question>` when you looked and none "
+            f"did. Write exactly `{KB_PREFIX} none` if you consulted no skill page. The no-match lines tell the "
+            "skill's maintainers what to write next.\n"
+        )
     return f"""\
 Stop working on the kernel. Iteration {iteration} is over and your edits have
 already been handed to the outer loop.
@@ -645,9 +659,9 @@ Cover all of these:
    for is recorded as unanswered: answering for one claim never answers for
    another.
 
-{REACH_CLASSES}{upstream_note}
+{REACH_CLASSES}{upstream_note}{skill_note}
 Use any clear prose or Markdown structure for everything except the
-`{HELD_FIXED_PREFIX}`, `{NEGATIVES_PREFIX}`, and `{DISPROOF_PREFIX}` lines.
+{markers} lines.
 There is no required output format for the rest.
 Aim for under ~{word_budget} words, but preserve every actually attempted
 direction even if that requires more space. Do not describe ideas that were only
@@ -956,6 +970,7 @@ async def summarize_iteration(
     end_reason: str,
     summarizer,
     references: PrReferenceNote = PrReferenceNote(),
+    skills: tuple[str, ...] = (),
 ) -> SummaryOutcome:
     """Ask the just-finished implementer session to write its lesson document."""
     if summarizer is None:
@@ -965,6 +980,7 @@ async def summarize_iteration(
         end_reason=end_reason,
         pr_references=references.labels,
         pr_reference_context=references.context,
+        skills=skills,
     )
     try:
         text = await summarizer(prompt)
