@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -1032,7 +1033,6 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     """A CPU-only trace must fail loudly before TraceLens install / split / SDK runs."""
     import gzip
     import json as _json
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -2001,7 +2001,6 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     """The end-to-end split path must call the real splitter interface, not the broken --input/--platform form."""
     import gzip
     import json as _json
-    from unittest.mock import patch
 
     # Pretend TraceLens root is present so the run reaches the splitter step.
     tl_root = tmp_path / "TraceLens-internal"
@@ -2103,7 +2102,6 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
     import gzip
     import json as _json
     import os as _os
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -2229,7 +2227,6 @@ def _find_splitter_cmd(captured):
 def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
     """Drive tla.main() with a capture *directory* and capture subprocess argvs."""
     import os as _os
-    from unittest.mock import patch
 
     tl_root = tmp_path / "TraceLens-internal"
     skill_dir = tl_root / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator"
@@ -2324,8 +2321,6 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
 
 
 def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts(tmp_path, capsys):
-    from unittest.mock import patch
-
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
@@ -2360,8 +2355,6 @@ def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts
 def test_the_non_llm_route_writes_the_same_artifacts_and_gates_on_the_report_shares(
     tmp_path, capsys, idle_pct, gated, kernel_names
 ):
-    from unittest.mock import patch
-
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
@@ -2393,8 +2386,6 @@ def test_the_non_llm_route_writes_the_same_artifacts_and_gates_on_the_report_sha
 
 
 def test_the_failed_status_keeps_the_skill_artifacts_when_a_later_step_raises(tmp_path, capsys):
-    from unittest.mock import patch
-
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
