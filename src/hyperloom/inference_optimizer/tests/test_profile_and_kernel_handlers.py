@@ -1750,9 +1750,7 @@ def test_atom_disables_cuda_graphs_with_its_own_flag():
 
 def test_server_args_env_name_atom():
     """atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        server_args_env_name,
-    )
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
@@ -1978,7 +1976,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path):
     """FRAMEWORK=atom attempts the normal roofline profile sub-step."""
     from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
@@ -2002,7 +2000,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         requires_lanes=[],
         lease_ttl_sec=0,
     )
-    ctx = SimpleNamespace(task=task, lease=None, extra=None)
+    ctx = SimpleNamespace(task=task, lease=None, extra={"session_dir": str(tmp_path)})
 
     result = await rexec(ctx)
     assert result["status"] == "failed"

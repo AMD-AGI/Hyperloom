@@ -15,6 +15,7 @@ import pytest
 
 from kernelforge.loop import task_preparer
 from kernelforge.loop import task_preflight
+from kernelforge.tools.git import git_head
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
@@ -474,7 +475,7 @@ def test_a_driver_git_ignores_is_prepared_in_place_without_a_commit(tmp_path, mo
     base = tmp_path / "base"
 
     def record_base(workspace):
-        base.write_text(task_preparer._git_head(workspace), encoding="utf-8")
+        base.write_text(git_head(workspace), encoding="utf-8")
 
     result, workspace, driver = _prepare_a_driver_the_agent_repairs(
         tmp_path, monkeypatch, ".forge-driver-0123abcd/driver.py", after_init=record_base
@@ -483,7 +484,7 @@ def test_a_driver_git_ignores_is_prepared_in_place_without_a_commit(tmp_path, mo
     assert result.ok is True, result.message
     assert result.rolled_back is False
     assert driver.read_text(encoding="utf-8") == _REPAIRED_DRIVER
-    assert task_preparer._git_head(workspace) == base.read_text(encoding="utf-8")
+    assert git_head(workspace) == base.read_text(encoding="utf-8")
 
 
 def test_a_staged_driver_whose_commit_does_not_land_still_fails_and_rolls_back(tmp_path, monkeypatch):

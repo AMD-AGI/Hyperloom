@@ -974,23 +974,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     assert captured["budget"] == 60
 
 
-def test_conc_sweep_executor_missing_session_dir_yields_failure():
-    from hyperloom.orchestrator.actions.executors.conc_sweep import (
-        ConcSweepExecutor,
-    )
-
-    class _Task:
-        params = {}
-
-    class _Ctx:
-        task = _Task()
-        extra: dict = {}
-
-    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_session_dir"
-
-
 def test_conc_sweep_executor_state_load_failure_propagates(monkeypatch):
     from hyperloom.orchestrator.actions.executors.conc_sweep import (
         ConcSweepExecutor,

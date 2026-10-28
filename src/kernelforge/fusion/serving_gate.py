@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.io import WriteOptions, atomic_write_json
+from kernelforge.tools.durable_io import atomic_write_json
 
 from .campaign import _safe_artifact_id
 from .emit import FusionFiles, export_artifacts
@@ -199,7 +199,7 @@ def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "")
         "note": getattr(vr, "note", ""),
     }
     with contextlib.suppress(OSError):
-        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload, options=WriteOptions())
+        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload)
 
 
 def _clear_kernel_keep_checkpoint(out: Path) -> None:

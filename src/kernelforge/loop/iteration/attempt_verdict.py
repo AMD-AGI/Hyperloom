@@ -24,7 +24,7 @@ from kernelforge.loop.iteration.iteration_types import (
     _Ruling,
     _decision_label,
 )
-from kernelforge.loop.jit_rebuild import force_jit_rebuild
+from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
 from kernelforge.loop.run_state import make_event
 from kernelforge.loop.iteration.scoring_runtime import _bench_failure_detail, _build_failure_tail
 from kernelforge.tools.process_group import communicate_process_group

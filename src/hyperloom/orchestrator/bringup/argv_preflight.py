@@ -287,7 +287,7 @@ def _resolve_probe_interpreter(framework: str) -> str:
     """Return the interpreter the capability probes use for ``framework``."""
     # Deferred: the resolution ladder lives beside the grid runner, whose
     # package imports the executors this module's callers live in.
-    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_probe_python
+    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
 
     return _resolve_probe_python(framework)
 

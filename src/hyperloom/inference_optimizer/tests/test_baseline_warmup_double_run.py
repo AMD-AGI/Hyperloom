@@ -2349,7 +2349,7 @@ def test_teardown_lifecycle_server_skips_signal_on_pid_reuse(tmp_path, monkeypat
     (pid_dir / "vllm_8888.json").write_text("{}")
 
     signals_sent: list[int] = []
-    monkeypatch.setattr(sl, "_signal_group", lambda pgid, sig: signals_sent.append(sig))
+    monkeypatch.setattr(sl, "signal_group", lambda pgid, sig, **_: signals_sent.append(sig))
     monkeypatch.setattr(sl, "_looks_like_server_process", lambda pid: False)
 
     sl.teardown_lifecycle_server(pid_dir=pid_dir, framework="vllm", port=8888)
@@ -2785,7 +2785,7 @@ _CACHE_CONFIG_ERROR = (
 
 @pytest.mark.parametrize("elapsed", [8.0, 30.0, 31.08, 31.09, 70.74])
 def test_cache_config_validation_is_not_a_worker_crash(elapsed):
-    assert _classify_subprocess_error(elapsed, _CACHE_CONFIG_ERROR, 1) == "fast_exit_arg_error"
+    assert _classify_subprocess_error(elapsed, _CACHE_CONFIG_ERROR) == "fast_exit_arg_error"
 
 
 @pytest.mark.parametrize(
@@ -2800,7 +2800,7 @@ def test_cache_config_validation_is_not_a_worker_crash(elapsed):
     ],
 )
 def test_cache_config_validation_preserves_other_failure_routes(error, expected):
-    assert _classify_subprocess_error(70.74, error, 1) == expected
+    assert _classify_subprocess_error(70.74, error) == expected
 
 
 @pytest.mark.asyncio

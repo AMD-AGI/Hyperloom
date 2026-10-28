@@ -1193,7 +1193,7 @@ def _decline_before_start(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from hyperloom.common.overlay import is_safe_path_entry
         from ..kernel.geak_config import geak_overlay_is_loadable
 
         if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
