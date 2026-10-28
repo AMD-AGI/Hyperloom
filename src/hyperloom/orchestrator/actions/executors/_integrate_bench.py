@@ -303,7 +303,7 @@ class BenchStageMixin:
             str: The observation artifact's path, empty when there was no server log to classify.
         """
         from ...bringup import observe_bringup
-        from .baseline import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
+        from .benchmark_run.bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 
         server_log = str(bench.get("server_log_path") or "").strip()
         if not server_log:

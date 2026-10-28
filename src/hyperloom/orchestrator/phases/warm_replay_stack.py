@@ -12,7 +12,7 @@ from typing import Any
 
 from ..actions.executors._git import _git_head_sha, _run_git_cp
 from ..actions.executors._nogit_patch import _is_git_tree
-from ..actions.executors.baseline import _revert_warm_patch_state
+from ..actions.executors.benchmark_run.warm_patches import _revert_warm_patch_state
 from ..actions.executors._patch_snapshot import _git_commit_kept, _patch_touched_paths, _patch_touched_paths_split
 from ..enablement.runtime.adapters import get_adapter
 from ..source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer

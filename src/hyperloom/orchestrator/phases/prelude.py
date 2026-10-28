@@ -45,7 +45,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
-from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.benchmark_run.warm_patches import revert_warm_kernel_patches
 from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
@@ -864,7 +864,7 @@ class PreludePhase(_WarmKernelPrepMixin, CoordinatorCollaborator):
     @staticmethod
     def _replay_eval_search_root(result: dict) -> Path | None:
         """Directory holding every round of this replay task."""
-        from ..actions.executors.baseline import (
+        from ..actions.executors.benchmark_run.records import (
             _MEASURE_ROUND_DIR,
             _WARMUP_ROUND_DIR,
         )

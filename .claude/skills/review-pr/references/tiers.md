@@ -13,7 +13,7 @@ a failure surfaces, not by file size or churn.
 | 1 | `orchestrator/loop/dispatcher.py` | In-flight table, deadlines, cancellation. Actions never retire, GPU lanes never free, subprocesses leak past session end |
 | 1 | `orchestrator/policy/gate.py` | The single chokepoint every Intent crosses before a side effect. A denied action executes, or everything is denied |
 | 2 | `orchestrator/kernel/request_handlers.py` | `KERNEL_REQUEST_HANDLERS` dispatch table. A renamed kind dead-ends the lane; the agent waits out its budget |
-| 2 | `actions/executors/baseline.py` | The anchor every gain % is measured against |
+| 2 | `actions/executors/baseline.py`, `actions/executors/benchmark_run/` | The anchor every gain % is measured against |
 | 2 | `actions/executors/integrate_patch.py` | Patches live framework trees. A failed revert contaminates every later measurement |
 | 2 | `actions/executors/_workload_envs.py` | Single source of the rendered Magpie YAML; `seal_server_argv` settles the arg string. Divergence invalidates the A/B while both runs look healthy |
 | 2 | `actions/executors/_grid_runner.py` | Shared by explore and sweep |

@@ -13,6 +13,7 @@ import yaml
 
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.actions.executors import baseline as bl
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.bringup import argv_preflight as pf
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.rehearsal import LaunchScenario, ScriptedLaunchBackend
@@ -76,7 +77,7 @@ async def _attempt(session: Path, slot: Path, *, task_id: str, server_args: str)
         encoding="utf-8",
     )
     return await executor._run_single_benchmark(
-        bl.BenchmarkAttempt(
+        BenchmarkAttempt(
             timeout_sec=1800,
             override_result_dir=None,
             resolved_model="scripted/Model",

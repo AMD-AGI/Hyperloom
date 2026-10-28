@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.actions.executors.baseline import _attach_baseline_launch_evidence
+from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _attach_baseline_launch_evidence
 from hyperloom.orchestrator.measurement.runtime_findings import (
     correctness_fix_refusal,
     persist_runtime_findings,
