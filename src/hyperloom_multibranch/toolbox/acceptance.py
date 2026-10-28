@@ -12,6 +12,7 @@ hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPl
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Protocol
@@ -33,7 +34,7 @@ from hyperloom.measure.fake_gain import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
-from hyperloom_multibranch.toolbox.long_context import LongContextSetup
+from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext, launch_served_context
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
 from hyperloom_multibranch.toolbox.short_prompts import (
     ShortPromptSetup,
@@ -195,7 +196,8 @@ class AcceptanceSetup:
     short-prompt consistency check: with it, a test whose change touches attention, the KV cache or prefill (the rule
     pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
     ``long_context`` is the staged prompt set of the long-context check, which runs under the short-prompt check's lever
-    list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none.
+    list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none. A
+    :class:`~.long_context.ServedLongContext` gives each test the model's own set at the context its planned launch serves.
 
     ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
     force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
@@ -215,7 +217,7 @@ class AcceptanceSetup:
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
     supported_kinds: Collection[str] | None = None
     short_prompts: ShortPromptSetup | None = None
-    long_context: LongContextSetup | None = None
+    long_context: LongContextSetup | ServedLongContext | None = None
     explore_accuracy: bool = True
     aiter_builds_missing: str | None = None
 
@@ -291,7 +293,8 @@ class Acceptance:
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)
         accepted = self._with_short_prompts(planned, recipe, candidate, request)
-        return Prepared(self._with_long_context(accepted, recipe, candidate, request), digest)
+        setup = await self._long_context_setup(planned)
+        return Prepared(self._with_long_context(accepted, recipe, candidate, request, setup), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it: on the
@@ -303,9 +306,22 @@ class Acceptance:
             else accepted
         )
 
-    def _with_long_context(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
+    async def _long_context_setup(self, planned: object) -> LongContextSetup | None:
+        """The prompt set a test planned as ``planned`` would run the long-context check with: the named one, or the
+        model's own at the context the planned launch serves (read, and staged, in a worker thread: staging builds the
+        prompts with the model's tokenizer)."""
+        source = self._long_context
+        if not isinstance(source, ServedLongContext):
+            return source
+        if not isinstance(planned, AcceptedMeasurement) or not planned.points:
+            return None
+        return await asyncio.to_thread(lambda: source.at(launch_served_context(planned.points[0])))
+
+    def _with_long_context(
+        self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest, setup: LongContextSetup | None
+    ) -> object:
         """``accepted`` with the long-context check this request runs, when it runs one and ``accepted`` can carry it."""
-        plan = decide_long_context(request, parent, candidate, self._long_context, self._patch_files)
+        plan = decide_long_context(request, parent, candidate, setup, self._patch_files)
         return (
             replace(accepted, long_context=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)

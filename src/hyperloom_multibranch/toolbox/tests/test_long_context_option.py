@@ -156,9 +156,10 @@ async def test_nothing_named_runs_the_check_with_the_models_own_set_under_the_ru
 
     toolbox, _ = await _built(tmp_path)
 
-    assert toolbox._acceptance._long_context == setup
+    assert toolbox._acceptance._long_context.at(None) == setup  # type: ignore[union-attr]
     final = await _planned(toolbox, purpose=Purpose.FINAL)
     assert final is not None and final.trigger == ("purpose final",)
+    assert final.prompt_set == setup.prompt_set, "a launch that states no context gets the set at the model's limit"
     touching = await _planned(toolbox, server_args="--max-num-seqs 256 --attention-backend aiter")
     assert touching is not None and touching.trigger == ("arg --attention-backend aiter",)
     assert await _planned(toolbox) is None, "a plain explore that touches no lever runs none"
@@ -183,12 +184,13 @@ async def test_a_hosted_toolbox_takes_the_environments_set_and_off_turns_it_off(
     for name in ("default", "off"):
         (tmp_path / name).mkdir()
 
-    assert _hosted(tmp_path / "default")._acceptance._long_context == setup, "the model's own set, found staged"
+    default = _hosted(tmp_path / "default")._acceptance._long_context
+    assert default.at(None) == setup, "the model's own set, found staged"  # type: ignore[union-attr]
     monkeypatch.setenv(LONG_CONTEXT_ENV, "off")
     assert _hosted(tmp_path / "off")._acceptance._long_context is None
 
 
-async def test_the_local_builder_stages_the_models_set_when_it_is_missing(
+async def test_the_local_toolbox_stages_the_models_set_when_a_test_first_needs_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache, model = tmp_path / "cache", _model(tmp_path)
@@ -202,5 +204,6 @@ async def test_the_local_builder_stages_the_models_set_when_it_is_missing(
 
     toolbox, _ = await _built(tmp_path)
 
-    setup = toolbox._acceptance._long_context
-    assert setup is not None and setup.length == LENGTH and (cache / "evalsets" / setup.prompt_set).is_dir()
+    assert not (cache / "evalsets").exists(), "nothing is staged before a test says what context its launch serves"
+    plan = await _planned(toolbox, purpose=Purpose.FINAL)
+    assert plan is not None and plan.length == LENGTH and (cache / "evalsets" / plan.prompt_set).is_dir()

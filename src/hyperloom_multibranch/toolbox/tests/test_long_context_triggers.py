@@ -22,6 +22,7 @@ from hyperloom_multibranch.toolbox import short_prompts
 from hyperloom_multibranch.toolbox.long_context import (
     LONG_CONTEXT_ENV,
     LongContextSetup,
+    ServedLongContext,
     decide,
     default_long_context,
     environment_long_context,
@@ -134,15 +135,22 @@ def _staged(model: Path, cache: Path, length: int = LENGTH, seed: int = DEFAULT_
     return LongContextSetup(entry.key, entry.prompts_sha256, length)
 
 
+def _default_at(environ: dict[str, str], model: Path | None = None, served: int | None = None) -> object:
+    """The set the environment gives a test whose launch serves ``served`` tokens (``None``: it states none)."""
+    found = environment_long_context(environ, model)
+    assert isinstance(found, ServedLongContext)
+    return found.at(served)
+
+
 def test_nothing_named_turns_the_check_on_with_the_set_built_for_the_model_at_its_own_limit(tmp_path: Path) -> None:
     model, cache = _model(tmp_path), tmp_path / "cache"
     _staged(model, cache, length=LENGTH + 64)  # a set built for another served context is not the default one
     _staged(model, cache, seed=DEFAULT_SEED + 1)
     default = _staged(model, cache)
 
-    assert environment_long_context(_environ(cache), model) == default
-    assert environment_long_context(_environ(cache, MODEL_PATH=str(model))) == default, "a session's MODEL_PATH"
-    assert environment_long_context(_environ(cache, **{LONG_CONTEXT_ENV: " "}), model) == default
+    assert _default_at(_environ(cache), model) == default
+    assert _default_at(_environ(cache, MODEL_PATH=str(model))) == default, "a session's MODEL_PATH"
+    assert _default_at(_environ(cache, **{LONG_CONTEXT_ENV: " "}), model) == default
 
 
 def test_off_turns_the_check_off_where_it_would_be_on(tmp_path: Path) -> None:

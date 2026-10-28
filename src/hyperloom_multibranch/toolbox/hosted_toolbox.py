@@ -197,7 +197,8 @@ class HostedOptions:
     (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; ``off`` there runs no check.
     Without either the check is on with the session model's own set when this host finds it staged
     (``short_prompts.default_short_prompts``), and off, logged, when it does not. The long-context check is found the
-    same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.default_long_context``.
+    same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.ServedLongContext`` (the model's
+    own set at the context each test's launch serves).
     """
 
     policy: QueuePolicy | None = None

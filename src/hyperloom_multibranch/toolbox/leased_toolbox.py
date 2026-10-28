@@ -24,7 +24,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapa
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.long_context import LongContextSetup
+from hyperloom_multibranch.toolbox.long_context import LongContextSetup, ServedLongContext
 from hyperloom_multibranch.toolbox.short_prompt_pool import POOL_FILE, ShortPromptPool
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
@@ -130,8 +130,15 @@ def with_short_prompts(acceptance: AcceptanceSetup, setup: ShortPromptSetup | No
     return replace(acceptance, short_prompts=setup)
 
 
-def with_long_context(acceptance: AcceptanceSetup, setup: LongContextSetup | None) -> AcceptanceSetup:
-    """``acceptance`` that runs the long-context check with ``setup``, a builder's option; unchanged when it names none.
+def _set_name(setup: LongContextSetup | ServedLongContext) -> str:
+    return setup.prompt_set if isinstance(setup, LongContextSetup) else "of the model at the served context"
+
+
+def with_long_context(
+    acceptance: AcceptanceSetup, setup: LongContextSetup | ServedLongContext | None
+) -> AcceptanceSetup:
+    """``acceptance`` that runs the long-context check with ``setup``, a builder's option or the environment's (the model's
+    own set at the served context, :class:`~.long_context.ServedLongContext`); unchanged when it names none.
 
     Raises:
         ValueError: ``acceptance`` already names another prompt set: the set is named once.
@@ -141,8 +148,8 @@ def with_long_context(acceptance: AcceptanceSetup, setup: LongContextSetup | Non
         return acceptance
     if held is not None:
         raise ValueError(
-            f"the options name the long-context set {setup.prompt_set} and the acceptance setup already names "
-            f"{held.prompt_set}: name it once"
+            f"the options name the long-context set {_set_name(setup)} and the acceptance setup already names "
+            f"{_set_name(held)}: name it once"
         )
     return replace(acceptance, long_context=setup)
 

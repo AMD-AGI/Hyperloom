@@ -21,8 +21,9 @@ toolbox is built, and the runners are told that directory; one that is not stage
 
 The long-context check is on by default the same way: ``LocalOptions.long_context``, or the key named by
 ``HYPERLOOM_LONG_CONTEXT`` (``off`` turns it off), else the set ``python -m hyperloom.measure.long_context.build`` makes for
-the session model at its own context limit, staged here at the build when it is missing
-(``long_context.default_long_context``). It runs under the short-prompt check's triggers, on the test's own server.
+the session model at the context the test's launch serves, staged here when acceptance first plans a test of that context
+and it is missing (``long_context.ServedLongContext``). It runs under the short-prompt check's triggers, on the test's own
+server.
 """
 
 from __future__ import annotations
@@ -264,7 +265,8 @@ class LocalOptions:
     there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
     ``long_context`` is the staged prompt set of the long-context check, named, found and read the same way (``None`` takes
-    the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set).
+    the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set at the context
+    each test's launch serves).
     """
 
     policy: QueuePolicy | None = None

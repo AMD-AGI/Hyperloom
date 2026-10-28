@@ -13,11 +13,15 @@ launch serves (the launch is not widened for it).
 
 *Switched on.* The check is on by default. A builder gives the toolbox the setup: from its options, or from the host
 environment's ``HYPERLOOM_LONG_CONTEXT`` (the key of the staged entry; ``off`` turns the check off) when it names none, and
-without either the set ``measure.long_context.build`` stages for the session model by default (its tokenizer, its own
-context limit and the default seed; :func:`default_long_context`), staged at the build when the builder's runners read this
-host's cache. A launch that serves less context than that set needs makes the check ``incomplete`` with the reason; a set
-built with ``--served-context`` is named by its key. A set that is asked for, or found and not readable, is refused, never
-run without.
+without either the model's own set (:class:`ServedLongContext`): the set ``measure.long_context.build --served-context``
+stages for the session model at the context the test's launch serves (its ``--context-length`` or ``--max-model-len``,
+else its ``MAX_MODEL_LEN``; no more than the model's own limit), with its tokenizer and the default seed
+(:func:`default_long_context`, #142 c3395). The set is keyed by that length, so a launch served at 8192 tokens checks
+retrieval over that window instead of recording every prompt ``not_run``, and a launch at the model's full window (or one
+that states no context) keeps the set at the model's limit. Root and candidate share one launch shape and so one set. It is
+read, and staged where the toolbox's runners read this host's cache, when acceptance first plans a test of that length. A
+named set is used whatever the launch serves; one built longer than the launch serves makes the check ``incomplete`` with
+the reason. A set that is asked for, or found and not readable, is refused, never run without.
 
 *What is recorded.* :func:`long_context_of` reads the landed ``outputs.json``, grades every answer by substring match and
 states scores and outcomes (``LongContextResult``); it never says pass or fail. A prompt that errored or never ran counts as
@@ -28,9 +32,12 @@ test ends; ``hyperloom.contracts.long_context.refuses`` is the bar the rule gate
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+
+import yaml
 
 from hyperloom.contracts.long_context import (
     LONG_CONTEXT_COMPLETE,
@@ -46,11 +53,13 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import load_model_max_position_embeddings
 from hyperloom.measure.long_context.build import DEFAULT_SEED, build_entry, set_length
 from hyperloom.measure.long_context.grade import passes
+from hyperloom.measure.long_context.held import served_by
 from hyperloom.measure.long_context.outputs import OutputsError, OutputsFile, PromptEntry, clean_reason, read_outputs
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
 from hyperloom.measure.long_context.prompts import GENERATOR, PromptSetError
 from hyperloom.measure.long_context.resolve import StagedSet, staged_set
 from hyperloom.measure.long_context.staging import KEY_PREFIX
+from hyperloom.measure.points import launch_carriers
 from hyperloom.measure.short_prompts.build import tokenizer_hashes
 from hyperloom.measure.short_prompts.staging import EVALSETS_DIR, cache_root, entry_key
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
@@ -67,10 +76,12 @@ __all__ = [
     "LONG_CONTEXT_OFF",
     "LongContextNotStaged",
     "LongContextSetup",
+    "ServedLongContext",
     "decide",
     "default_long_context",
     "environment_long_context",
     "first_difference",
+    "launch_served_context",
     "long_context_of",
     "rederive",
     "staged_long_context",
@@ -124,24 +135,29 @@ def _setup_of(asked: str, read: Callable[[], StagedSet]) -> LongContextSetup:
     return LongContextSetup(staged.prompt_set, staged.prompts_sha256, staged.length)
 
 
+def _model_directory(model_dir: Path | None, environ: Mapping[str, str]) -> Path | None:
+    return model_dir or (Path(environ[MODEL_PATH_ENV]) if environ.get(MODEL_PATH_ENV) else None)
+
+
 def default_long_context(
-    model_dir: Path | None, environ: Mapping[str, str], *, stage: bool = False
+    model_dir: Path | None, environ: Mapping[str, str], *, stage: bool = False, served_context: int | None = None
 ) -> LongContextSetup | None:
-    """The set ``measure.long_context.build`` stages for the model in ``model_dir`` (else the directory ``MODEL_PATH`` in
-    ``environ`` names) when it is given no length: the model's tokenizer, its own context limit and the default seed, read in
-    the runner cache ``environ`` names. ``None``, and a log line that says why, when there is no model directory, its
-    tokenizer or context limit cannot be read, or the set is not staged; with ``stage`` (a toolbox whose runners read the
-    same cache) a set that is not staged is staged first, and the check is off with a warning when that fails.
+    """The set ``measure.long_context.build --served-context`` stages for the model in ``model_dir`` (else the directory
+    ``MODEL_PATH`` in ``environ`` names) for a launch that serves ``served_context`` tokens: the model's tokenizer, that
+    context (the model's own limit when it is ``None`` or more) and the default seed, read in the runner cache ``environ``
+    names. ``None``, and a log line that says why, when there is no model directory, its tokenizer cannot be read, neither
+    context is known, or the set is not staged; with ``stage`` (a toolbox whose runners read the same cache) a set that is
+    not staged is staged first, and the check is off with a warning when that fails.
 
     Raises:
         LongContextNotStaged: The set is there and cannot be read: a set that was found is not a check that is off.
     """
-    directory = model_dir or (Path(environ[MODEL_PATH_ENV]) if environ.get(MODEL_PATH_ENV) else None)
+    directory = _model_directory(model_dir, environ)
     if directory is None:
         _LOG.info("long-context check off: no model directory to find its prompt set by")
         return None
     try:
-        length = set_length(load_model_max_position_embeddings(str(directory)), None)
+        length = set_length(load_model_max_position_embeddings(str(directory)), served_context)
         inputs = {"seed": DEFAULT_SEED, "length": length, "tokenizer": tokenizer_hashes(directory)}
     except (PromptSetError, OSError) as exc:
         _LOG.warning("long-context check off: the model's tokenizer or context limit cannot be read: %s", exc)
@@ -168,27 +184,67 @@ def _staged_now(model_dir: Path, environ: Mapping[str, str], key: str, length: i
     return True
 
 
+class ServedLongContext:
+    """The model's own set at the context each test's launch serves: :func:`default_long_context` for that context, read
+    (and with ``stage``, staged) once per context and kept, so every test of one launch shape gets the same set.
+
+    :meth:`at` may run in a worker thread; two tests of one new context stage its set once.
+    """
+
+    def __init__(self, model_dir: Path | None, environ: Mapping[str, str], *, stage: bool = False) -> None:
+        self._model_dir, self._environ, self._stage = model_dir, dict(environ), stage
+        self._sets: dict[int | None, LongContextSetup | None] = {}
+        self._lock = threading.Lock()
+
+    def at(self, served_context: int | None) -> LongContextSetup | None:
+        """The set for a launch that serves ``served_context`` tokens (``None``: it states none), ``None`` for none.
+
+        Raises:
+            LongContextNotStaged: The set is there and cannot be read.
+        """
+        with self._lock:
+            if served_context not in self._sets:
+                self._sets[served_context] = default_long_context(
+                    self._model_dir, self._environ, stage=self._stage, served_context=served_context
+                )
+            return self._sets[served_context]
+
+
+def launch_served_context(point: Path) -> int | None:
+    """The tokens of context the launch of the rendered point at ``point`` serves, read as the runner reads it (its context
+    flag, else its ``MAX_MODEL_LEN``); ``None`` when it states neither or the point cannot be read."""
+    try:
+        config = yaml.safe_load(Path(point).read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    return served_by(*launch_carriers(config)) if isinstance(config, Mapping) else None
+
+
 def environment_long_context(
     environ: Mapping[str, str], model_dir: Path | None = None, *, stage: bool = False
-) -> LongContextSetup | None:
-    """The setup ``HYPERLOOM_LONG_CONTEXT`` names in ``environ``: none for ``off``, the model's own set
-    (:func:`default_long_context`) when it names none (a blank value names none).
+) -> LongContextSetup | ServedLongContext | None:
+    """The setup ``HYPERLOOM_LONG_CONTEXT`` names in ``environ``: none for ``off``, the model's own set at the context each
+    test's launch serves (:class:`ServedLongContext`) when it names none (a blank value names none), and none, logged, when
+    there is no model directory to build that set from.
 
     Raises:
         LongContextNotStaged: A key is named and its entry is not staged there, is unfinished or is not what its manifest
-            recorded; or the model's own set is there and cannot be read.
+            recorded.
     """
     key = environ.get(LONG_CONTEXT_ENV, "").strip()
     if key == LONG_CONTEXT_OFF:
         return None
     if not key:
-        return default_long_context(model_dir, environ, stage=stage)
+        if _model_directory(model_dir, environ) is None:
+            _LOG.info("long-context check off: no model directory to find its prompt set by")
+            return None
+        return ServedLongContext(model_dir, environ, stage=stage)
     return _setup_of(f"{LONG_CONTEXT_ENV}={key}", lambda: staged_set(key, environ))
 
 
 def staged_long_context(
     named: LongContextSetup | None, environ: Mapping[str, str], model_dir: Path | None = None, *, stage: bool = False
-) -> LongContextSetup | None:
+) -> LongContextSetup | ServedLongContext | None:
     """The setup a toolbox whose runners read the runner cache ``environ`` names runs the check with, or ``None`` for none.
 
     ``named`` is the setup the builder was given, read in that cache as a runner reads it; without one, the environment's
