@@ -138,10 +138,9 @@ def aiperf_sequence_lengths(workspace: Path | None) -> dict[str, dict[str, int]]
         export = json.loads(exports[-1].read_text())
     except (OSError, ValueError):
         return {}
-    metrics = export.get("metrics") if isinstance(export.get("metrics"), dict) else export
     lengths: dict[str, dict[str, int]] = {}
     for field, name in _SEQUENCE_LENGTHS:
-        metric = metrics.get(name) if isinstance(metrics, dict) else None
+        metric = export.get(name)
         if isinstance(metric, dict):
             shape = {key: int(metric[key]) for key in _SHAPE_PERCENTILES if isinstance(metric.get(key), (int, float))}
             if shape:
