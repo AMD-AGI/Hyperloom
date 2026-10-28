@@ -57,6 +57,13 @@ projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (t
 error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
+``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
+:mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
+sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
+run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
+is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment or the runner cache
+keeps a session from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no
+``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and notebook hold -- and rewrites its report, dashboard and breakdown. It
@@ -73,12 +80,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
+import json
 import logging
 import math
 import os
 import sys
-from collections.abc import Mapping, MutableMapping
-from dataclasses import replace
+from collections.abc import Callable, Mapping, MutableMapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -87,8 +98,13 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.outside_facts.image_check import ImageCheckFailed, mode_from_environment
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.hosted.campaign import parse_campaign
+from hyperloom.hosted.host_info import HostInfo, take_host_info
+from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
+from hyperloom.measure.runner.cache_build import CacheBuildError
+from hyperloom.measure.short_prompts.staging import cache_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -97,6 +113,18 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers
+from hyperloom_multibranch.scheduling.hosted_run import (
+    HostedExit,
+    arm_grant_stop,
+    grant_deadline,
+    grant_parallel_tests,
+    record_session,
+    recorded_session,
+    reported_stop_reason,
+    run_argv,
+    write_final_exit,
+)
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import (
     PersistedRun,
@@ -167,6 +195,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
     final_only.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+    hosted = commands.add_parser("hosted", help="Run under a host that injects the campaign spec and its inputs.")
+    hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
+    hosted_commands.add_parser(
+        "run",
+        help=(
+            "Run the session of the injected campaign spec, or finish the one an earlier start of the run began, and"
+            " tell the host in exit.json when the run is over."
+        ),
+    )
     return parser
 
 
@@ -390,8 +427,14 @@ def _references(specs: list[str]) -> tuple[ReferenceSource, ...]:
     return sources
 
 
-def settings_from(args: argparse.Namespace) -> RunSettings:
-    """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps."""
+def settings_from(
+    args: argparse.Namespace, tests_that_fit: Callable[[int], int] = machine_parallel_tests
+) -> RunSettings:
+    """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps.
+
+    ``tests_that_fit`` says how many tests of a TP run at once where the session measures, raising ValueError when one
+    does not fit: this machine's cards for ``run``, the grant for ``hosted run``.
+    """
 
     errors = _shape_errors(args) + _ep_errors(args) + _positive(args, ("tp", "conc", "judge_interval_sec"))
     if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
@@ -405,12 +448,12 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     if errors:
         raise ValueError("; ".join(errors))
     try:
-        fitting = machine_parallel_tests(args.tp)
+        fitting = tests_that_fit(args.tp)
     except ValueError as exc:
-        raise ValueError(f"--tp does not fit the machine: {exc}") from exc
+        raise ValueError(f"--tp does not fit where the session measures: {exc}") from exc
     parallel = fitting if args.max_parallel_tests is None else args.max_parallel_tests
     if parallel > fitting:
-        raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests the machine's cards run at TP")
+        raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests that run at once at TP")
     workload = Workload(
         _workload_model(args),
         args.framework,
@@ -512,8 +555,18 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
     return SessionServices(judge, resolver, recipe_kb, critic, author, model, model)
 
 
-def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
-    """Create the session directory, print it on one stdout line, run the session and return its exit code.
+def _print_root(root: Path) -> None:
+    print(root, flush=True)
+
+
+def run_session(
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    report_root: Callable[[Path], None] = _print_root,
+) -> int:
+    """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
+    anything else is built in it, run the session and return its exit code.
 
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to. Whatever the session's processes orphan is reparented to this process, so the session
@@ -521,13 +574,15 @@ def run_session(settings: RunSettings, peer_factory: PeerFactory, services: Sess
     """
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root))
 
 
-async def _run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
+async def _run_session(
+    settings: RunSettings, peer_factory: PeerFactory, services: SessionServices, report_root: Callable[[Path], None]
+) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
-    print(layout.root, flush=True)
+    report_root(layout.root)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
@@ -584,9 +639,120 @@ def _reused_image_digest(env: Mapping[str, str]) -> str:
     return digest
 
 
+def require_session_environment(settings: RunSettings, env: Mapping[str, str]) -> None:
+    """Raise ValueError when ``env`` contradicts the workload of ``settings``, cannot price its dollar cap or sets an
+    image check mode there is none of."""
+
+    require_workload_switch(settings.workload, env)
+    require_priced_models(settings.max_llm_usd, env)
+    mode_from_environment(env)
+
+
+@dataclass(frozen=True)
+class ReadySession:
+    """The peers a session is built on and the services it calls out to."""
+
+    peer_factory: PeerFactory
+    services: SessionServices
+
+
+def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory]) -> ReadySession:
+    """The peers ``load`` has for ``workload`` and the services, the Recipe KB and the RSI archive checked first;
+    raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming what is missing. Creates nothing."""
+
+    recipe_kb = recipe_kb_from_env()
+    require_rsi_archive(os.environ)
+    peer_factory = load(workload)
+    return ReadySession(peer_factory, session_services(recipe_kb))
+
+
+@dataclass(frozen=True)
+class HostedStart:
+    """What ``hosted run`` runs, and the seconds after which the grant's end stops it, ``None`` when it has none."""
+
+    run: Callable[[], int]
+    stop_after_sec: float | None
+
+
+def hosted_run() -> int:
+    """``hosted run``: the session of the campaign spec the host injected, or the finish of the one an earlier start
+    of the run began; writes ``exit.json`` with ``final: true`` once CLOSE ran or when the run cannot be served."""
+
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    host = take_host_info(os.environ, require=())
+    try:
+        start = _hosted_start(host)
+    except ValueError as exc:
+        return _not_run(host.state_dir, EXIT_USAGE, exc)
+    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
+        return _not_run(host.state_dir, EXIT_FAILED, exc)
+    if start.stop_after_sec is not None:
+        arm_grant_stop(max(0.0, start.stop_after_sec))
+    try:
+        returncode = start.run()
+    except (CacheBuildError, ToolboxInputsError) as exc:
+        return _not_run(host.state_dir, EXIT_FAILED, exc)
+    root = recorded_session(host.state_dir)
+    stop_reason = None if root is None else reported_stop_reason(root)
+    write_final_exit(host.state_dir, HostedExit(returncode, stop_reason=stop_reason))
+    return returncode
+
+
+def _hosted_start(host: HostInfo) -> HostedStart:
+    """A new session of the spec, or ``final-only`` over the session ``session.json`` names; raises ValueError when
+    the spec or that session is refused, and what :func:`ready_session` raises."""
+
+    deadline = grant_deadline(host, datetime.now(timezone.utc))
+    previous = recorded_session(host.state_dir)
+    persisted = None if previous is None else persisted_run(previous)
+    settings = _hosted_settings(host, deadline.session_hours) if persisted is None else persisted.settings
+    require_session_environment(settings, os.environ)
+    inputs = PinnedToolboxInputs(host, cache_root(os.environ))
+    ready = ready_session(settings.workload, partial(load_hosted_peers, inputs=inputs))
+    if persisted is not None:
+        run = partial(final_only, persisted, ready.peer_factory, ready.services)
+    else:
+        run = partial(run_session, settings, ready.peer_factory, ready.services, partial(_record_root, host.state_dir))
+    return HostedStart(run, deadline.stop_after_sec)
+
+
+def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) -> RunSettings:
+    spec = parse_campaign(json.loads(host.input_file.read_text(encoding="utf-8")))
+    tests_that_fit = partial(grant_parallel_tests, host.grant_limits)
+    argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
+    return settings_from(_parsed_run(argv), tests_that_fit)
+
+
+def _parsed_run(argv: list[str]) -> argparse.Namespace:
+    """``argv`` parsed as the command line it is; raises ValueError with argparse's message where it would exit."""
+
+    errors = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(errors):
+            return build_parser().parse_args(argv)
+    except SystemExit as exc:
+        message = errors.getvalue().strip().splitlines()[-1]
+        raise ValueError(f"the spec does not map onto the options of run: {message}") from exc
+
+
+def _record_root(state_dir: Path, root: Path) -> None:
+    _print_root(root)
+    record_session(state_dir, root)
+
+
+def _not_run(state_dir: Path, returncode: int, exc: Exception) -> int:
+    """End a run no session ran in for good: a start of it again would meet what kept this one from running."""
+
+    print(f"{PROG}: hosted run: {exc}", file=sys.stderr)
+    write_final_exit(state_dir, HostedExit(returncode, error=str(exc)))
+    return returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "hosted":
+        return hosted_run()
     persisted = None
     try:
         if args.command == "final-only":
@@ -597,22 +763,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.reuse_prelude is not None:
                 reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
                 settings = replace(settings, reuse_prelude=reused)
-        require_workload_switch(settings.workload, os.environ)
-        require_priced_models(settings.max_llm_usd, os.environ)
-        mode_from_environment(os.environ)
+        require_session_environment(settings, os.environ)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
-        recipe_kb = recipe_kb_from_env()
-        require_rsi_archive(os.environ)
-        peer_factory = load_peers(settings.workload)
-        services = session_services(recipe_kb)
+        ready = ready_session(settings.workload, load_peers)
         if persisted is not None:
-            return final_only(persisted, peer_factory, services)
-        return run_session(settings, peer_factory, services)
+            return final_only(persisted, ready.peer_factory, ready.services)
+        return run_session(settings, ready.peer_factory, ready.services)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
@@ -624,12 +785,17 @@ __all__ = [
     "RSI_ARCHIVE_DEFAULT",
     "SEQUENCE_LENGTHS",
     "EnvironmentIncomplete",
+    "HostedStart",
+    "ReadySession",
     "build_parser",
     "final_only",
+    "hosted_run",
     "main",
     "recipe_kb_from_env",
+    "ready_session",
     "require_priced_models",
     "require_rsi_archive",
+    "require_session_environment",
     "require_workload_switch",
     "run_session",
     "session_services",
