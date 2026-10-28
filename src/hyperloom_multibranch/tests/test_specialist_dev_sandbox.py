@@ -357,6 +357,24 @@ async def test_the_llm_spend_forge_ledgers_under_a_lease_is_the_branchs_once_it_
     assert usage.launch == "forge:lease-1"
 
 
+async def test_a_running_lease_charges_its_forge_spend_as_it_grows_and_counts_each_dollar_once(rig):
+    built = rig.build()
+    granted = await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60)
+    ledger = Path(granted["root"]) / "fuse" / "llm_usage.json"
+    ledger.parent.mkdir()
+    ledger.write_text(json.dumps({"input_tokens": 100, "total_cost_usd": 1.0}))
+    rig.clock.now += LIMITS.spend_s
+    await built.leases.sweep()
+    assert [usage.cost_usd for usage in rig.logs.usage] == [1.0], "the budget sees the spend within one sweep"
+    rig.clock.now += 1
+    await built.leases.sweep()
+    assert len(rig.logs.usage) == 1, "nothing new, nothing charged"
+    ledger.write_text(json.dumps({"input_tokens": 300, "total_cost_usd": 2.5}))
+    await built.server.call("dev_sandbox_release")
+    assert [usage.cost_usd for usage in rig.logs.usage] == [1.0, 1.5]
+    assert [usage.tokens.input for usage in rig.logs.usage] == [100, 200]
+
+
 async def test_a_lease_whose_tools_kept_no_ledger_records_no_spend(rig):
     built = rig.build()
     await built.server.call("dev_sandbox_lease")

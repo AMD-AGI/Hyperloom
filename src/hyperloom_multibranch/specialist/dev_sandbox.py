@@ -17,8 +17,9 @@ releases whatever is left.
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards,
 importing the branch worktree's source, at a lower CPU priority, with every JIT and kernel cache in the lease's root:
 a cache beside the package it compiles for would be in the worktree, and its files in the next patch. Nothing a dev
-sandbox measures is written as a test, claim or judgement; its records are branch-log notices and, when the lease
-ends, the LLM spend the Forge runs under its root kept in their ledgers, charged to the branch.
+sandbox measures is written as a test, claim or judgement; its records are branch-log notices and the LLM spend the
+Forge runs under its root keep in their ledgers, charged to the branch every :attr:`DevLimits.spend_s` and when the
+lease ends.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Coroutine
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, TypeVar
@@ -85,6 +86,8 @@ class DevLimits:
     #: A long lease, for work that runs for hours (a Forge fusion or rewrite): taken back only when it expires, or once
     #: nothing it started runs and it sat idle.
     long_max_s: float = 6 * 3600.0
+    #: How often a held lease's Forge spend is charged, so the session's dollar cap sees it during a long lease.
+    spend_s: float = 60.0
     queued_s: float = 300.0
     cooldown_s: float = 600.0
     idle_s: float = 600.0
@@ -182,6 +185,8 @@ class _Lease:
     term: LeaseTerm = LeaseTerm.SHORT
     queued_since: float | None = None
     processes: dict[int, AgentProcess] = field(default_factory=dict)
+    charged: tuple[float, TokenCounts] = (0.0, TokenCounts())
+    charged_at: float = 0.0
 
 
 class DevLeases:
@@ -288,6 +293,9 @@ class DevLeases:
             reason = self._overdue(held, now)
             if reason:
                 await self._end(branch, reason)
+            elif now - held.charged_at >= self._limits.spend_s:
+                held.charged_at = now
+                await self._charge(branch, held)
 
     def _overdue(self, held: _Lease, now: float) -> str:
         limits, quiet = self._limits, now - held.last_call
@@ -351,11 +359,20 @@ class DevLeases:
             await self._toolbox.release_branch_sandbox(held.lease.lease_id)
         minutes = (self._clock() - held.granted) / MINUTE
         await self._note(branch, f"dev sandbox ended after {minutes:.1f} min: {reason}")
+        await self._charge(branch, held)
+
+    async def _charge(self, branch: str, held: _Lease) -> None:
+        """Record what the Forge runs under the lease spent since the last charge."""
         spent = await asyncio.to_thread(forge_spend, held.lease.root)
-        if spent is not None:
-            await self._blackboards(branch).record_llm_usage(
-                LlmUsage(branch, UsageSource.SPECIALIST, spent[0], spent[1], f"forge:{held.lease.lease_id}")
-            )
+        if spent is None:
+            return
+        cost, tokens = spent[0] - held.charged[0], _less(spent[1], held.charged[1])
+        if cost <= 0 and tokens == TokenCounts():
+            return
+        held.charged = spent
+        await self._blackboards(branch).record_llm_usage(
+            LlmUsage(branch, UsageSource.SPECIALIST, cost, tokens, f"forge:{held.lease.lease_id}")
+        )
 
     def _watching(self) -> None:
         if self._watch is None or self._watch.done():
@@ -396,6 +413,10 @@ def forge_spend(root: Path) -> tuple[float, TokenCounts] | None:
         cache_write=sum(int(ledger.get("cache_creation_input_tokens", 0)) for ledger in ledgers),
     )
     return sum(float(ledger.get("total_cost_usd", 0.0)) for ledger in ledgers), tokens
+
+
+def _less(total: TokenCounts, before: TokenCounts) -> TokenCounts:
+    return TokenCounts(**{item.name: getattr(total, item.name) - getattr(before, item.name) for item in fields(total)})
 
 
 def _report_failure(task: asyncio.Task[None]) -> None:
