@@ -46,6 +46,7 @@ SCHEDULER = Family("scheduling and batching", Mechanism.KERNEL_TUNING, KERNEL)
 SPLIT = Family("attention", Mechanism.KERNEL_TUNING, CONFIG)
 FP8_KV = Family("KV cache", Mechanism.PRECISION, CONFIG)
 _KV_SOURCE = Family("KV cache", Mechanism.TUNING, SOURCE)
+_REPLAY = Component.WARM_START.value
 KV_INTENT = Intent("s1", "c0", "kv cache", "fp8 kv cache", CONFIG)
 KV_CHANGE = RecipeDelta(config=ConfigDelta(server_args="--kv-cache-dtype fp8"))
 
@@ -167,6 +168,29 @@ def test_a_component_tested_at_one_layer_is_still_untried_at_another_profile_or_
     # The session's FP8_KV acted on the KV cache at the config layer; the source layer is left.
     assert menu.items[-1].family == Family("KV cache", Mechanism.OTHER, SOURCE)
     assert menu.items[-1].marks == (UNTOUCHED,) and menu.items[-1].odds == pytest.approx(base_rate(SOURCE))
+
+
+def test_a_server_on_one_gpu_is_offered_no_parallelism_or_communication_on_any_line(snapshot: NotebookSnapshot) -> None:
+    parallel = Family(Component.PARALLEL.value, Mechanism.KERNEL_TUNING, CONFIG)
+    evidence = MenuEvidence({parallel: FamilyStat(10.0, 10.0, (50.0,))}, {})
+    assert snapshot.profile is not None
+    single = dataclasses.replace(snapshot, profile=dataclasses.replace(snapshot.profile, tp=1))
+
+    on_one = direction_menu(single, "s1", "c1", evidence, metric=METRIC)
+    on_eight = direction_menu(snapshot, "s1", "c1", evidence, metric=METRIC)
+
+    assert not any(item.family.target == Component.PARALLEL.value for item in on_one.items)
+    assert parallel in {item.family for item in on_eight.items}
+
+
+def test_the_untried_line_offers_no_warm_start_replay_as_replays_come_from_the_kb(snapshot: NotebookSnapshot) -> None:
+    every = _tested().archived
+    evidence = MenuEvidence({family: stat for family, stat in every.items() if family.target != _REPLAY}, {})
+
+    menu = direction_menu(snapshot, "s1", "c1", evidence, metric=METRIC)
+
+    # Every other component is tested at both layers and the profile holds no hot op: nothing is left untried.
+    assert not any(item.untried for item in menu.items)
 
 
 def test_a_claims_note_says_its_familys_odds_and_its_tests_on_the_claimed_commit(snapshot: NotebookSnapshot) -> None:
