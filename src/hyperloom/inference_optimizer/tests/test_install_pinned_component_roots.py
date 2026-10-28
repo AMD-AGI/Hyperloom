@@ -21,6 +21,7 @@ def _source_kernel_tools(tmp_path: Path, exports: dict[str, Path], then: str) ->
     repo_root = tmp_path / "repo"
     repo_root.mkdir(exist_ok=True)
     (tmp_path / "cache").mkdir(exist_ok=True)
+    (tmp_path / "geak").mkdir(exist_ok=True)
     lines = [
         "set -euo pipefail",
         "export ANTHROPIC_API_KEY=sk-test ANTHROPIC_BASE_URL=https://api.anthropic.com",
@@ -62,6 +63,7 @@ def test_tool_roots_in_dotenv_are_left_to_the_operator(tmp_path: Path, managed: 
         tracelens, geak = tmp_path / "cache" / "TraceLens@0000000", tmp_path / "cache" / "GEAK@0000000"
     else:
         tracelens, geak = tmp_path / "opt" / "TraceLens", tmp_path / "geak"
+        tracelens.mkdir(parents=True)
     runner = geak / "interface" / "run_e2e.py"
     entries = {"TRACELENS_ROOT": tracelens, "GEAK_ROOT": geak, "GEAK_E2E_RUNNER": runner}
     dotenv = tmp_path / "repo" / ".env"
@@ -90,9 +92,20 @@ def test_geak_cache_root_and_runner_follow_the_ref(tmp_path: Path) -> None:
     assert runner == f"{root}/interface/run_e2e.py"
 
 
+def test_a_missing_operator_tracelens_root_falls_back_to_the_pin(tmp_path: Path) -> None:
+    printed = _source_kernel_tools(
+        tmp_path, {"TRACELENS_ROOT": tmp_path / "gone"}, 'printf "%s\\n%s" "$TRACELENS_ROOT" "$_TRACELENS_SHA"'
+    )
+    resolved, sha = printed.split("\n")
+
+    assert resolved == str(tmp_path / "cache" / f"TraceLens@{sha}")
+
+
 @pytest.mark.parametrize("stale", [True, False], ids=["stale-cache-checkout", "operator-checkout"])
 def test_tracelens_root_follows_the_pin_unless_the_operator_chose_it(tmp_path: Path, stale: bool) -> None:
     root = tmp_path / "cache" / "TraceLens@0000000" if stale else tmp_path / "my-tracelens"
+    if not stale:
+        root.mkdir()
 
     resolved, sha = _source_kernel_tools(
         tmp_path, {"TRACELENS_ROOT": root}, 'printf "%s\\n%s" "$TRACELENS_ROOT" "$_TRACELENS_SHA"'

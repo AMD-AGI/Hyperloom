@@ -134,6 +134,9 @@ if [ -n "${TRACELENS_ROOT:-}" ]; then
   if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
      && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
     TRACELENS_ROOT=""
+  elif [ ! -e "${_tracelens_root_canonical}" ]; then
+    warn "TRACELENS_ROOT=${TRACELENS_ROOT} does not exist; using the pinned TraceLens checkout instead"
+    TRACELENS_ROOT=""
   else
     _tracelens_root_was_set=1
   fi
@@ -169,13 +172,17 @@ if [ -n "${GEAK_ROOT:-}" ]; then
   # Re-exported GEAK@* cache paths remain installer-managed across reruns.
   _geak_root_canonical="$(_canonicalize_path "${GEAK_ROOT}")"
   _geak_cache_root="$(_canonicalize_path "${_open_source_root}")"
-  if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
-     || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
-    _geak_root_is_operator_override=1
-  else
+  if [ "$(dirname "${_geak_root_canonical}")" = "${_geak_cache_root}" ] \
+     && [[ "$(basename "${_geak_root_canonical}")" == GEAK@* ]]; then
     # As for TraceLens: a cache path re-resolves to the current GEAK_REF, and the runner inside it follows.
     GEAK_ROOT=""
     GEAK_E2E_RUNNER=""
+  elif [ ! -e "${_geak_root_canonical}" ]; then
+    warn "GEAK_ROOT=${GEAK_ROOT} does not exist; using the GEAK_REF checkout instead"
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
+  else
+    _geak_root_is_operator_override=1
   fi
 fi
 # GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the

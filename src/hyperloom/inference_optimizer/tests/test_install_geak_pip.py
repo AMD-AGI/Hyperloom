@@ -181,14 +181,18 @@ def test_operator_geak_checkout_is_untouched(tmp_path: Path) -> None:
     assert _checkout_state(checkout) == before, proc.stdout
 
 
-def test_missing_operator_geak_checkout_is_not_created(tmp_path: Path) -> None:
+def test_missing_operator_geak_checkout_falls_back_to_the_ref(tmp_path: Path) -> None:
+    """A GEAK_ROOT that does not exist is not created; the install warns and uses the ref's own checkout."""
     remote = _new_remote(tmp_path)
     checkout = tmp_path / "missing-geak"
 
     proc = _run_installer_for_geak(tmp_path, checkout, remote)
 
-    assert proc.returncode != 0, proc.stdout
+    assert proc.returncode == 0, proc.stdout
+    assert "does not exist; using the GEAK_REF checkout instead" in proc.stdout
     assert not checkout.exists(), proc.stdout
+    head = _git(remote, "rev-parse", "HEAD")
+    assert _git(tmp_path / "cache" / f"GEAK@{head.strip()}", "rev-parse", "HEAD") == head, proc.stdout
 
 
 def test_operator_geak_root_must_be_a_valid_checkout(tmp_path: Path) -> None:
