@@ -144,7 +144,6 @@ def hot_kernels_by_class(trace_path: str | Path | None) -> dict[str, dict[str, A
         out[window_class] = {
             "steps": len(members),
             "is_decode": members[0].is_decode,
-            "step_ms_median": round(_median([(w.end_us - w.start_us) / _US_PER_MS for w in members]), _REPORTED_PLACES),
             "kernel_ms_total": round(total_us / _US_PER_MS, _REPORTED_PLACES),
             "kernels": [
                 {"name": name, "ms": round(us / _US_PER_MS, _REPORTED_PLACES), "pct": round(us / total_us * 100.0, 2)}
@@ -152,12 +151,6 @@ def hot_kernels_by_class(trace_path: str | Path | None) -> dict[str, dict[str, A
             ],
         }
     return dict(sorted(out.items(), key=lambda kv: kv[1]["kernel_ms_total"], reverse=True))
-
-
-def _median(values: list[float]) -> float:
-    """Median of a non-empty list."""
-    ordered = sorted(values)
-    return ordered[len(ordered) // 2]
 
 
 #: A rendered kernel name is cut here. A templated CK symbol runs past 400 characters of template arguments, and
@@ -194,8 +187,7 @@ def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, t
             [
                 f"### {window_class} ({phase})",
                 "",
-                f"{data['steps']} step(s), median {data['step_ms_median']} ms, "
-                f"{data['kernel_ms_total']} ms of kernel time in class",
+                f"{data['steps']} step(s), {data['kernel_ms_total']} ms of kernel time in class",
                 "",
                 "| share | ms | kernel |",
                 "|---:|---:|---|",
@@ -205,11 +197,6 @@ def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, t
         lines.append("")
     if any(" (collective) |" in line for line in lines):
         lines.extend([COLLECTIVE_NOTE, ""])
-    lines.append(
-        "Rankings are per class because the classes are not comparable: a prefill step runs tens of times "
-        "longer than a decode step, so one ranking over the whole trace is a ranking of prefill. Optimise "
-        "against the class the work is meant to move."
-    )
     return lines
 
 

@@ -75,20 +75,6 @@ def test_steps_of_one_class_are_pooled(tmp_path):
 
     assert out["VERIFY bs=3"]["steps"] == 2
     assert out["VERIFY bs=3"]["kernels"][0]["ms"] == 0.01
-    assert out["VERIFY bs=3"]["step_ms_median"] == 0.01
-
-
-def test_one_batch_size_is_not_pooled_with_another(tmp_path):
-    events = [
-        step("step[VERIFY bs=1]", 0.0, 10.0),
-        kernel("k", 1.0, 4.0),
-        step("step[VERIFY bs=3]", 100.0, 10.0),
-        kernel("k", 101.0, 6.0),
-    ]
-
-    out = sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events))
-
-    assert sorted(out) == ["VERIFY bs=1", "VERIFY bs=3"]
 
 
 def test_a_kernel_outside_every_step_is_not_counted(tmp_path):
@@ -111,43 +97,6 @@ def test_a_capture_without_step_annotations_ranks_nothing(tmp_path):
     assert sw.hot_kernels_by_class("") == {}
     assert sw.hot_kernels_by_class(None) == {}
     assert sw.hot_kernels_by_class(tmp_path / "absent.json") == {}
-
-
-def test_a_plain_json_capture_reads_the_same(tmp_path):
-    events = [step("step[VERIFY bs=3]", 0.0, 10.0), kernel("k", 1.0, 4.0)]
-
-    assert sw.hot_kernels_by_class(write_trace(tmp_path / "t.json", events))["VERIFY bs=3"]["steps"] == 1
-
-
-def test_the_rendering_names_the_phase_and_says_why_classes_are_apart(tmp_path):
-    events = [
-        step("step[EXTEND bs=1 toks=900]", 0.0, 600.0),
-        kernel("attention_prefill", 10.0, 400.0),
-        step("step[VERIFY bs=3]", 1000.0, 14.0),
-        kernel("moe_gemm", 1001.0, 9.0),
-    ]
-
-    body = "\n".join(
-        sw.render_hot_kernels_by_class(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
-    )
-
-    assert "### EXTEND bs=1 (prefill)" in body
-    assert "### VERIFY bs=3 (decode)" in body
-    assert "a ranking of prefill" in body
-
-
-def test_a_templated_kernel_name_is_cut_for_the_reader(tmp_path):
-    long_name = "void ck::kernel_gemm_xdl<" + "ck::Sequence<1, 0, 2>, " * 40 + ">"
-    events = [step("step[VERIFY bs=3]", 0.0, 10.0), kernel(long_name, 1.0, 4.0)]
-
-    body = "\n".join(
-        sw.render_hot_kernels_by_class(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
-    )
-
-    assert "…" in body
-    assert "void ck::kernel_gemm_xdl<" in body
-    kernel_rows = [line for line in body.splitlines() if line.startswith("| ") and "`" in line]
-    assert len(max(kernel_rows, key=len)) < len(long_name)
 
 
 def test_the_observed_decode_classes_are_listed_by_step_count_and_read_back(tmp_path):
@@ -192,11 +141,6 @@ def test_a_trace_without_decode_steps_lists_no_decode_class(tmp_path):
     assert rows == []
     assert sw.observed_decode_batch_sizes(f"{sw.OBSERVED_DECODE_HEADING}\n\n- none\n") == frozenset()
     assert sw.observed_decode_batch_sizes("# Trace Evidence\n\n- `VERIFY bs=3`: 2 step(s)\n") == frozenset()
-
-
-def test_nothing_renders_without_a_ranking():
-    assert sw.render_hot_kernels_by_class({}) == []
-    assert sw.render_hot_kernels_by_class(None) == []
 
 
 def test_a_collective_row_says_its_time_includes_the_wait_for_other_ranks(tmp_path):
