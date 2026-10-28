@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -63,7 +64,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     )
 
     assert "kill_task" not in text
-    assert "read_reference('specialist_rescue')" in text
+    read_reference = qualified_context_tool_name("read_reference")
+    assert f"{read_reference}(name='specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):

@@ -30,8 +30,9 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..mcp_tool_names import qualified_context_tool_name
 from . import read_rules_fragment as _read_rules_fragment
-from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
+from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines, reference_out_of_mode
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
@@ -731,12 +732,13 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         list[str]: Markdown lines for the failure-recovery block.
     """
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    read_reference = qualified_context_tool_name("read_reference")
     detail = (
         "/ `last_action_failures` for the error detail."
         if transport == TRANSPORT_STRUCTURED_OUTPUT
         else (
             "/ `last_action_failures` for the error detail. Full diagnostic surfaces,\n"
-            "fingerprint semantics, and examples: ``read_reference('failure_recovery')``."
+            f"fingerprint semantics, and examples: ``{read_reference}('failure_recovery')``."
         )
     )
     lines = [
@@ -1009,10 +1011,6 @@ def _section_cycle_directive(
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
-# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
-# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
-# so a synthetic run never lists a doc it should not act on.
-_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
 def _section_reference_index(
@@ -1027,17 +1025,14 @@ def _section_reference_index(
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
         benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
-            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
-            the AgentX workload. ``""`` (unscoped) still lists every doc.
+            :func:`reference_out_of_mode` keeps an AgentX-only doc out of a
+            synthetic run's index.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
-    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
-    mode_set = bool(str(benchmark_mode or "").strip())
-    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -1057,15 +1052,16 @@ def _section_reference_index(
             break
         if file_phases and not _renders_in(phase, file_phases):
             continue
-        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
+        if reference_out_of_mode(path.stem, benchmark_mode):
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
         return []
+    read_reference = qualified_context_tool_name("read_reference")
     lines: list[str] = [
         "## 8. ON-DEMAND REFERENCE INDEX",
         "",
-        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        f"Use ``{read_reference}(name='<name>')`` to pull the full document.",
         "",
     ]
     for stem, when in entries:
