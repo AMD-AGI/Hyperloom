@@ -161,7 +161,44 @@ class CeilingRequest:
     run_timeout_sec: int
 
 
-def estimate_workspace_ceiling(request: CeilingRequest) -> CeilingOutcome:
+@dataclass(frozen=True)
+class PreparedCeiling:
+    """A ceiling request with its workspace inputs resolved: everything the estimate runs, before it starts."""
+
+    request: CeilingRequest
+    workspace: Path
+    document: dict[str, Any]
+    command: list[str]
+    sources: list[str]
+    sandbox_mode: str
+
+
+def prepare_workspace_ceiling(request: CeilingRequest) -> PreparedCeiling:
+    """Resolve the workspace, its config, the benchmark command and the kernel sources an estimate needs.
+
+    Raises :class:`CeilingError` when one of them cannot be resolved, before anything is run.
+    """
+    inputs = request.inputs
+    workspace = Path(inputs.workspace_dir).expanduser().resolve()
+    if not workspace.is_dir():
+        raise CeilingError(f"workspace is not a directory: {workspace}")
+
+    config_file = Path(inputs.config_path).expanduser() if inputs.config_path.strip() else workspace / CONFIG_FILENAME
+    document = _load_config(config_file)
+    sandbox = request.analyst.agent_sandbox_mode
+    return PreparedCeiling(
+        request=request,
+        workspace=workspace,
+        document=document,
+        command=_resolve_performance_command(inputs.performance_command, document, config_file),
+        sources=_resolve_kernel_files(inputs.kernel_files, document, workspace),
+        sandbox_mode=Config.from_env(
+            **({"agent_sandbox_mode": sandbox} if sandbox is not None else {})
+        ).agent_sandbox_mode,
+    )
+
+
+def estimate_workspace_ceiling(prepared: PreparedCeiling) -> CeilingOutcome:
     """Estimate the theoretical achievable latency of one workspace's kernel, per scored shape.
 
     The answer is an optimistic lower bound under hardware limits and legal
@@ -170,32 +207,20 @@ def estimate_workspace_ceiling(request: CeilingRequest) -> CeilingOutcome:
     measures attainment against its own per-case medians instead. Raises
     :class:`CeilingError` when the estimate cannot be taken.
     """
-    inputs = request.inputs
-    analyst = request.analyst
-    workspace = Path(inputs.workspace_dir).expanduser().resolve()
-    if not workspace.is_dir():
-        raise CeilingError(f"workspace is not a directory: {workspace}")
-
-    config_file = Path(inputs.config_path).expanduser() if inputs.config_path.strip() else workspace / CONFIG_FILENAME
-    document = _load_config(config_file)
-    command = _resolve_performance_command(inputs.performance_command, document, config_file)
-    sources = _resolve_kernel_files(inputs.kernel_files, document, workspace)
-    sandbox_mode = Config.from_env(
-        **({"agent_sandbox_mode": analyst.agent_sandbox_mode} if analyst.agent_sandbox_mode is not None else {})
-    ).agent_sandbox_mode
-
-    print("[ceiling] collecting evidence (driver run, device profile, trace)...")
+    request, analyst = prepared.request, prepared.request.analyst
     try:
         return asyncio.run(
             estimate_ceiling(
                 resolve_analyst_backend(
-                    AnalystAgent(analyst.agent_provider, analyst.agent_model, analyst.agent_timeout_sec, sandbox_mode)
+                    AnalystAgent(
+                        analyst.agent_provider, analyst.agent_model, analyst.agent_timeout_sec, prepared.sandbox_mode
+                    )
                 ),
                 CeilingTask(
-                    run=PerformanceRun(command, workspace, float(request.run_timeout_sec)),
-                    kernel_files=sources,
-                    driver_script=inputs.driver_script,
-                    case_params=document.get("shapes") or document.get("cases") or {},
+                    run=PerformanceRun(prepared.command, prepared.workspace, float(request.run_timeout_sec)),
+                    kernel_files=prepared.sources,
+                    driver_script=request.inputs.driver_script,
+                    case_params=prepared.document.get("shapes") or prepared.document.get("cases") or {},
                     arch=request.arch,
                 ),
                 AnalystSession(model=analyst.agent_model, timeout_sec=analyst.agent_timeout_sec),
@@ -213,6 +238,8 @@ __all__ = [
     "CeilingError",
     "CeilingInputs",
     "CeilingRequest",
+    "PreparedCeiling",
     "estimate_workspace_ceiling",
+    "prepare_workspace_ceiling",
     "resolve_analyst_backend",
 ]

@@ -22,6 +22,7 @@ from kernelforge.roofline_ceiling.standalone import (
     CeilingInputs,
     CeilingRequest,
     estimate_workspace_ceiling,
+    prepare_workspace_ceiling,
 )
 
 #: Printed around the machine-readable result so a caller driving this command
@@ -97,7 +98,9 @@ def roofline_ceiling_command(request: CeilingRequest) -> None:
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     try:
-        outcome = estimate_workspace_ceiling(request)
+        prepared = prepare_workspace_ceiling(request)
+        click.echo("[ceiling] collecting evidence (driver run, device profile, trace)...")
+        outcome = estimate_workspace_ceiling(prepared)
     except CeilingError as exc:
         raise click.ClickException(str(exc)) from exc
 

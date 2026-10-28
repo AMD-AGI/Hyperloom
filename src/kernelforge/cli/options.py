@@ -103,9 +103,9 @@ def _parse_agent_options(ctx, param, value):
     try:
         provider_options = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise click.BadParameter(f"invalid JSON: {exc}", ctx=ctx, param=param) from exc
+        raise click.BadParameter(f"invalid JSON: {exc}", ctx=ctx, param_hint="--agent-options-json") from exc
     if not isinstance(provider_options, dict):
-        raise click.BadParameter("must be a JSON object", ctx=ctx, param=param)
+        raise click.BadParameter("must be a JSON object", ctx=ctx, param_hint="--agent-options-json")
     return provider_options
 
 

@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
 from kernelforge import cli as cli_module
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
@@ -18,7 +20,8 @@ from kernelforge.loop.bootstrap.errors import InvalidOptionValue
 from kernelforge.loop.bootstrap.request import validate_roofline_target
 from kernelforge.loop.bootstrap.run import _make_ceiling_estimator
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
-from kernelforge.roofline_ceiling.standalone import AnalystAgent
+from kernelforge.roofline_ceiling import standalone
+from kernelforge.roofline_ceiling.standalone import AnalystAgent, CeilingError
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
@@ -625,3 +628,49 @@ def test_off_leaves_a_report_sitting_in_the_workspace_unread(tmp_path):
 
 def test_the_ceiling_command_is_registered():
     assert "roofline-ceiling" in cli_module.main.commands
+
+
+def test_the_ceiling_command_announces_the_collection_before_it_starts(monkeypatch, tmp_path):
+    """Collecting evidence takes minutes, so its announcement has to be out before it, not after."""
+    # ``kernelforge.cli`` exports the command under its module's name, so the module is imported by path.
+    ceiling_command = importlib.import_module("kernelforge.cli.roofline_ceiling_command")
+    monkeypatch.setattr(ceiling_command, "prepare_workspace_ceiling", lambda request: request)
+
+    def estimate(_prepared):
+        raise CeilingError("estimate reached")
+
+    monkeypatch.setattr(ceiling_command, "estimate_workspace_ceiling", estimate)
+
+    result = CliRunner().invoke(cli_module.main, ["roofline-ceiling", "--workspace", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert result.output.index("[ceiling] collecting evidence") < result.output.index("estimate reached")
+
+
+def test_inputs_that_do_not_resolve_are_refused_before_the_collection_is_announced(tmp_path):
+    result = CliRunner().invoke(cli_module.main, ["roofline-ceiling", "--workspace", str(tmp_path / "absent")])
+
+    assert result.exit_code == 1
+    assert "workspace is not a directory" in result.output
+    assert "collecting evidence" not in result.output
+
+
+def test_the_library_estimate_writes_nothing_to_stdout(monkeypatch, capsys, tmp_path):
+    """What the run prints is the command's to decide; the library only returns the outcome."""
+
+    async def fake_estimate(*_args):
+        return "outcome"
+
+    monkeypatch.setattr(standalone, "estimate_ceiling", fake_estimate)
+    monkeypatch.setattr(standalone, "resolve_analyst_backend", lambda _agent: object())
+    request = standalone.CeilingRequest(
+        inputs=standalone.CeilingInputs(str(tmp_path), (), "driver.py", "", ""),
+        output_dir="",
+        arch="gfx942",
+        analyst=standalone.AnalystOptions("claude", "", 60, None),
+        run_timeout_sec=60,
+    )
+    prepared = standalone.PreparedCeiling(request, tmp_path, {}, ["true"], [], "workspace-write")
+
+    assert standalone.estimate_workspace_ceiling(prepared) == "outcome"
+    assert capsys.readouterr().out == ""
