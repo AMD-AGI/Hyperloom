@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_table, register_renderer
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import RenderedSection, md_table, register_renderer
 
 _MAX_ROWS = 30
 
@@ -32,11 +35,11 @@ def _action_rows(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
             dispatch, so concatenating in order is chronological.
     """
     rows: list[dict[str, Any]] = []
-    for event in as_dict(breakdown).get("timeline") or []:
+    for event in to_mapping(breakdown).get("timeline") or []:
         if not isinstance(event, dict) or str(event.get("type") or "") != "phase":
             continue
-        ext = as_dict(event.get("ext"))
-        for row in as_dict(ext.get("actions")).get("rows") or []:
+        ext = to_mapping(event.get("ext"))
+        for row in to_mapping(ext.get("actions")).get("rows") or []:
             if isinstance(row, dict):
                 rows.append(dict(row, phase=ext.get("phase"), macro_cycle=ext.get("macro_cycle")))
     return rows

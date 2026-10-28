@@ -674,9 +674,9 @@ class _BenchTasks:
     async def running(self):
         return self._running
 
-    async def create_or_return_existing(self, **kwargs):
-        existing = any(c["idempotency_key"] == kwargs["idempotency_key"] for c in self.created)
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
     async def find_by_idempotency_key(self, key):
@@ -977,7 +977,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     monkeypatch.setattr(FrameworkPhase, "_pump_framework_agent_phase", _rec("framework"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_bench_untested_proposals", _rec("bench"))
     monkeypatch.setattr(FrameworkPhase, "_maybe_finish_custom_only_cycle", _rec("finish"))
-    monkeypatch.setattr(FrameworkPhase, "_pump_predictor", _rec("predictor"))
+    monkeypatch.setattr(FrameworkPhase, "_predictor_pump", lambda self: SimpleNamespace(step=_rec("predictor")))
     monkeypatch.setattr(FrameworkPhase, "_record_advisory_plateau", lambda self: None)
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
     coord = SimpleNamespace(

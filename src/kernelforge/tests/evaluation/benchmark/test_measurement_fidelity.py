@@ -198,6 +198,7 @@ def _load_driver_module():
     stub.float16 = "float16"
     stub.float32 = "float32"
     stub.tensor = lambda *a, **k: types.SimpleNamespace(element_size=lambda: 2)
+    stub.cuda = types.SimpleNamespace(device_count=lambda: 0)
     dist = types.ModuleType("torch.distributed")
     stub.distributed = dist
     saved = {k: sys.modules.get(k) for k in ("torch", "torch.distributed")}

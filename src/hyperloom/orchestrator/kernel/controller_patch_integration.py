@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.kernel_rewrite_controller.task import load_task
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
@@ -22,6 +23,8 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
 )
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
+from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
+from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
 
 from .controller_publication import (
     ControllerPatchPublication,
@@ -82,6 +85,22 @@ KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
 
 #: Given how many E2E rounds already ran, says why the next one cannot start, or ``None`` to start it.
 RoundAdmission = Callable[[int], StoppedByTheRun | None]
+
+
+@dataclass(frozen=True)
+class KeepSession:
+    """The session a Controller integration records its KEEPs into.
+
+    Attributes:
+        session_dir: The session whose state the KEEPs are recorded into.
+        shared_state: The live session state, persisted after each recorded KEEP.
+        record_keep: The session-owned writeback every KEEP is recorded through,
+            so a promotion also lands on the stack ledger.
+    """
+
+    session_dir: Path
+    shared_state: Any
+    record_keep: KeepRecorder
 
 
 def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
@@ -215,6 +234,47 @@ def _keep_result(
     }
 
 
+def _committed_source_layer(
+    repo: Path,
+    keep_commit: str,
+    operator_id: str,
+    session_dir: Path,
+    framework: str,
+) -> dict[str, Any]:
+    """Snapshot the files the KEEP commit changed, so a resume onto a stock tree can reinstall them."""
+    handles: dict[str, Any] = {"framework_root": str(repo), "source_layer_landed": True}
+    try:
+        listing = _git_output(
+            repo, "-c", "core.quotepath=off", "diff-tree", "--no-commit-id", "--name-status", "-r", keep_commit
+        )
+        rows = [line.split("\t") for line in listing.splitlines() if "\t" in line]
+        import_root = get_adapter(framework).source_import_root(str(repo))
+        snap = snapshot_source_layer(
+            SourceLayer(
+                framework_root=repo,
+                base_sha=keep_commit,
+                rel_paths=[row[-1] for row in rows],
+                declared_ops={row[-1]: "delete" for row in rows if row[0].startswith("D")},
+                import_root=import_root,
+            ),
+            dest_dir=session_dir / "optimization_stack" / "src" / operator_directory_name(operator_id),
+            provenance=_CONTROLLER_SOURCE,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log.warning("KEEP %s committed but its source snapshot could not be written: %s", operator_id, error)
+        return handles
+    if not snap:
+        return handles
+    return {
+        **handles,
+        "source_snapshot": snap["snapshot_dir"],
+        "source_manifest": str(Path(snap["snapshot_dir"]) / MANIFEST_NAME),
+        "source_snapshot_complete": bool(snap["complete"]),
+        "source_import_root": snap["import_root"],
+        "target_files": [str(row["rel"]) for row in snap["files"]],
+    }
+
+
 async def _default_validator(
     publication: ControllerPatchPublication,
     *,
@@ -344,8 +404,8 @@ class _ControllerIntegration:
         self._rounds_run += 1
         try:
             validation = await self._validate(publication)
-        except Exception as error:  # noqa: BLE001 - translated into a reverted_e2e_failed result
-            log.warning("E2E validation raised for %s: %s", publication.operator_id, error)
+        except Exception as error:  # isolation boundary: one publication's E2E validation
+            log.warning("E2E validation raised for %s: %s", publication.operator_id, error, exc_info=True)
             reason = f"E2E validation raised: {error}" + _revert_note(repo, publication.patch_path)
             return _refusal(publication, "reverted_e2e_failed", reason, head_before)
         kept = (
@@ -396,9 +456,7 @@ def _measured(validation: dict[str, Any]) -> dict[str, float]:
 async def integrate_controller_patches(
     *,
     patches_root: str | Path,
-    session_dir: Path,
-    shared_state: Any,
-    record_keep: KeepRecorder,
+    session: KeepSession,
     validator: PatchValidator | None = None,
     admit_round: RoundAdmission = lambda _rounds_run: None,
 ) -> ControllerIntegrationSummary:
@@ -406,10 +464,7 @@ async def integrate_controller_patches(
 
     Args:
         patches_root: The Controller's published patch directory.
-        session_dir: The session whose state the KEEPs are recorded into.
-        shared_state: The live session state, persisted after each recorded KEEP.
-        record_keep: The session-owned writeback every KEEP is recorded through,
-            so a promotion also lands on the stack ledger.
+        session: The session every KEEP is recorded into.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
         admit_round: Asked before each patch is applied; a stop leaves the patch
@@ -425,15 +480,22 @@ async def integrate_controller_patches(
         keep_commit: str,
     ) -> str:
         try:
-            await record_keep(_keep_result(publication, validation, keep_commit))
-            shared_state.save(Path(session_dir))
-        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
-            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)
+            layer = _committed_source_layer(
+                publication.repo_root,
+                keep_commit,
+                publication.operator_id,
+                session.session_dir,
+                str(session.shared_state.framework or ""),
+            )
+            await session.record_keep({**_keep_result(publication, validation, keep_commit), **layer})
+            session.shared_state.save(Path(session.session_dir))
+        except Exception as error:  # isolation boundary: one committed publication's KEEP recording
+            log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error, exc_info=True)
             return f"Git KEEP committed; SharedState recording failed: {error}"
         return ""
 
     run = _ControllerIntegration(
-        validator or (lambda publication: _default_validator(publication, session_dir=Path(session_dir))),
+        validator or (lambda publication: _default_validator(publication, session_dir=Path(session.session_dir))),
         persist_keep,
         admit_round,
     )
@@ -466,6 +528,7 @@ async def integrate_controller_patches(
 
 __all__ = [
     "ControllerIntegrationSummary",
+    "KeepSession",
     "PatchIntegrationResult",
     "integrate_controller_patches",
 ]

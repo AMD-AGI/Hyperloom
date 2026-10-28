@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.perf_metric import VERDICT_KEEP
+from hyperloom.common.coerce import first_text
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
-from ...state.shared_state import resolve_anchor_with_drift, resolve_graded_comparison
+from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
 from ._enablement_config import DEFAULT_SWITCH_OFF_PARITY_BAND_PCT
@@ -51,7 +52,6 @@ class PerfGateMixin:
         *,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
@@ -60,16 +60,7 @@ class PerfGateMixin:
         shared_state = attempt.shared_state
         done_payload = attempt.done_payload
         assert attempt.output_root is not None
-        # Grade against the current live anchor, not a stale task snapshot.
-        base_tput, anchor_drifted = resolve_anchor_with_drift(
-            float(params.get("base_tput") or 0.0),
-            shared_state,
-        )
-        if anchor_drifted:
-            log.warning(
-                "integrate_patch: anchor drift; grading against live anchor %.1f",
-                base_tput,
-            )
+        base_tput = _live_base_tput(params, shared_state)
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
@@ -88,39 +79,11 @@ class PerfGateMixin:
             }
 
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-        if not graded.comparable:
-            log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
-        if not graded.graded_on_intvty:
-            delta_pct = gain_pct(bench_result.get("output_throughput"), base_tput)
-        elif graded.verdict == VERDICT_KEEP:
-            delta_pct = gain_pct(graded.candidate, graded.reference)
-        else:
-            log.info(
-                "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
-                graded.verdict,
-                graded.reference,
-                graded.candidate,
-                graded.tput_reference,
-                graded.tput_candidate,
-            )
-            delta_pct = None
+        delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
-        fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
-        required = bool(params.get("require_accuracy_for_keep", fw_authored))
-        acc_baseline = params.get("accuracy_baseline")  # filled by _stage_resolve
-        acc_block, acc_reason, acc_degraded = accuracy_keep_block(
-            accuracy_pass,
-            required=required,
-            baseline_accuracy=acc_baseline,
-        )
-        if acc_degraded:
-            log.warning(
-                "integrate_patch: accuracy gate required but no baseline accuracy; "
-                "KEEP allowed on throughput only (task=%s)",
-                specialist_task_id,
-            )
-        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), acc_baseline)
+        acc_block, acc_reason = _accuracy_block(params, accuracy_pass, specialist_task_id)
+        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), params.get("accuracy_baseline"))
 
         gate_pass = (
             graded.comparable
@@ -129,7 +92,7 @@ class PerfGateMixin:
             and not graded.veto_reason
             and not acc_block
         )
-        fix_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
+        fix_finding = first_text(_done_field(done_payload, "resolves_finding"))
         fix_refusals: list[str] = []
         correctness_fix = False
         if not gate_pass and fix_finding:
@@ -171,51 +134,14 @@ class PerfGateMixin:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
-        parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
-        if switch_manifest:
-            # The parity leg is an additional full bench, so it needs the same
-            # session bound the first bench got. Resolved here rather than
-            # threaded from the caller because the deadline is an absolute
-            # monotonic timestamp: the budget the first bench spent is already
-            # reflected in it. Only this leg reads it, so it is resolved only
-            # when the leg runs.
-            parity = await self._switch_off_parity(
-                _PatchBench.for_attempt(attempt, params), switch_manifest=switch_manifest, base_tput=base_tput
-            )
-        if not parity.get("ok"):
-            # An unmeasurable parity leg reverts under its own verdict: the patch was
-            # never shown to break, so neither the log line nor the KB lesson may say
-            # that it did.
-            from ...knowledge import kb_writeback as _kb
-
-            inconclusive = bool(parity.get("inconclusive"))
-            log.warning(
-                "integrate_patch: switch-off parity %s task=%s: %s",
-                "INCONCLUSIVE" if inconclusive else "FAILED",
-                specialist_task_id,
-                parity.get("reason"),
-            )
-            await self._maybe_write_framework_kb_record(
-                measured.lesson(
-                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
-                ),
-                done_payload=done_payload,
-                params=params,
-                extra=extra,
-            )
-            return _perf_revert(
-                attempt,
-                measured,
-                status="reverted",
-                reason=str(parity.get("reason") or "switch-off parity failed"),
-                error_class="switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed",
-                switch_off_parity=parity,
-            )
+        parity, parity_revert = await self._parity_gate(
+            attempt, measured, params=params, switch_manifest=switch_manifest
+        )
+        if parity_revert is not None:
+            return parity_revert
 
         if gate_pass:
-            await self._maybe_write_framework_kb_record(
-                measured.lesson("integrated"), done_payload=done_payload, params=params, extra=extra
-            )
+            await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
             commit_failure, keep_committed = self._commit_accepted_work(
                 attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
             )
@@ -229,17 +155,21 @@ class PerfGateMixin:
                     measured_against=measured.measured_against,
                     bench_result=bench_result,
                 )
+            if correctness_fix:
+                reason = (
+                    f"correctness fix {fix_finding} verified at {_fix_axis(graded)} delta {measured.delta_pct:+.2f}%"
+                )
+                keep_reason, resolves_finding = KEEP_REASON_CORRECTNESS_FIX, fix_finding
+            else:
+                reason = f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
+                keep_reason, resolves_finding = "", ""
             return _kept_patch(
                 attempt,
                 measured,
                 params=params,
-                reason=(
-                    f"correctness fix {fix_finding} verified at {_fix_axis(graded)} delta {measured.delta_pct:+.2f}%"
-                    if correctness_fix
-                    else f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
-                ),
-                keep_reason=KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
-                resolves_finding=fix_finding if correctness_fix else "",
+                reason=reason,
+                keep_reason=keep_reason,
+                resolves_finding=resolves_finding,
                 # The bundle cleared the gate, so its switches join the running
                 # configuration and are registered as levers that are already on.
                 # Attribution from here is leave-one-out.
@@ -267,15 +197,15 @@ class PerfGateMixin:
         # that is not inert when disabled would skew every later measurement,
         # and that check now runs on this path too.
         if switch_manifest and attempt.applied:
-            return await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
+            return await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
         await self._maybe_write_framework_kb_record(
-            measured.lesson("reverted_smoke_fail"), done_payload=done_payload, params=params, extra=extra
+            measured.lesson("reverted_smoke_fail"), attempt=attempt, params=params
         )
         reasons = _gate_failure_reasons(
             graded,
             measured.delta_pct,
             measured.keep_threshold_pct,
-            acc_reason if acc_block else "",
+            acc_reason,
             f"correctness fix {fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
             eval_probe_summary(gate_evidence.get("eval_probe")),
         )
@@ -286,6 +216,56 @@ class PerfGateMixin:
                 measured, accuracy_blocks=acc_block, accuracy_verdict=accuracy_pass, fix_refusals=fix_refusals
             ),
             reason="; ".join(reasons) or "gate failed",
+        )
+
+    async def _parity_gate(
+        self,
+        attempt: IntegrateAttempt,
+        measured: _PatchMeasurement,
+        *,
+        params: dict[str, Any],
+        switch_manifest: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """The switch-off parity verdict, and the revert verdict when the patch did not hold it."""
+        parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
+        if switch_manifest:
+            # The parity leg is an additional full bench, so it needs the same
+            # session bound the first bench got. Resolved here rather than
+            # threaded from the caller because the deadline is an absolute
+            # monotonic timestamp: the budget the first bench spent is already
+            # reflected in it. Only this leg reads it, so it is resolved only
+            # when the leg runs.
+            parity = await self._switch_off_parity(
+                _PatchBench.for_attempt(attempt, params), switch_manifest=switch_manifest, base_tput=measured.base_tput
+            )
+        if parity.get("ok"):
+            return parity, None
+        # An unmeasurable parity leg reverts under its own verdict: the patch was
+        # never shown to break, so neither the log line nor the KB lesson may say
+        # that it did.
+        from ...knowledge import kb_writeback as _kb
+
+        inconclusive = bool(parity.get("inconclusive"))
+        log.warning(
+            "integrate_patch: switch-off parity %s task=%s: %s",
+            "INCONCLUSIVE" if inconclusive else "FAILED",
+            attempt.specialist_task_id,
+            parity.get("reason"),
+        )
+        await self._maybe_write_framework_kb_record(
+            measured.lesson(
+                _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+            ),
+            attempt=attempt,
+            params=params,
+        )
+        return parity, _perf_revert(
+            attempt,
+            measured,
+            status="reverted",
+            reason=parity["reason"],
+            error_class="switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed",
+            switch_off_parity=parity,
         )
 
     def _capture_source_layer(
@@ -311,7 +291,7 @@ class PerfGateMixin:
             return evidence
         try:
             from ...enablement.runtime.adapters import get_adapter
-            from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
+            from ...source_snapshot import MANIFEST_NAME, SourceLayer, snapshot_source_layer
             from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
             base_sha = _git_head_sha(framework_root)
@@ -335,14 +315,16 @@ class PerfGateMixin:
             evidence["source_import_root"] = import_root
             slot = attempt.specialist_task_id or str(attempt.task_id or "keep")
             snap = snapshot_source_layer(
-                framework_root=framework_root,
-                base_sha=base_sha,
-                rel_paths=rel_paths,
+                SourceLayer(
+                    framework_root=framework_root,
+                    base_sha=base_sha,
+                    rel_paths=rel_paths,
+                    declared_ops=declared_ops,
+                    import_root=import_root,
+                ),
                 dest_dir=self.session_dir / "optimization_stack" / "src" / slot,
                 provenance="integrate_patch",
                 extra={"specialist_task_id": attempt.specialist_task_id},
-                declared_ops=declared_ops,
-                import_root=import_root,
             )
             if not snap:
                 return evidence
@@ -364,7 +346,7 @@ class PerfGateMixin:
                 evidence["source_realized_patch"] = harvest_realized_diff(
                     framework_root, rel_paths, Path(snapshot_dir) / "realized.patch"
                 )
-        except Exception:
+        except (OSError, RuntimeError, KeyError):
             log.exception("integrate_patch: source-layer snapshot failed")
         return evidence
 
@@ -491,7 +473,6 @@ class PerfGateMixin:
         measured: _PatchMeasurement,
         *,
         params: dict[str, Any],
-        extra: dict[str, Any],
         parity: dict[str, Any],
     ) -> dict[str, Any]:
         """Keep a correct-but-unprofitable rewrite patch dormant and register its levers.
@@ -517,7 +498,6 @@ class PerfGateMixin:
                 verdict, and the accuracy delta and config fingerprint for the
                 KB record.
             params: The task params.
-            extra: The runner's extra context.
             parity: The switch-off parity verdict, the inert KEEP's evidence of being inert.
 
         Returns:
@@ -537,10 +517,7 @@ class PerfGateMixin:
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         await self._maybe_write_framework_kb_record(
-            measured.lesson("kept_inert_levers_registered"),
-            done_payload=attempt.done_payload,
-            params=params,
-            extra=extra,
+            measured.lesson("kept_inert_levers_registered"), attempt=attempt, params=params
         )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
@@ -577,3 +554,54 @@ class PerfGateMixin:
             "framework_lever_outcome": "registered_off",
             "switch_off_parity": parity,
         }
+
+
+def _graded_delta_pct(graded: GradedComparison, bench_result: dict[str, Any], base_tput: float) -> float | None:
+    """The delta the KEEP gate weighs; ``None`` when graded on interactivity and that did not clear the gate."""
+    if not graded.comparable:
+        log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
+    if not graded.graded_on_intvty:
+        return gain_pct(bench_result.get("output_throughput"), base_tput)
+    if graded.verdict == VERDICT_KEEP:
+        return gain_pct(graded.candidate, graded.reference)
+    log.info(
+        "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
+        graded.verdict,
+        graded.reference,
+        graded.candidate,
+        graded.tput_reference,
+        graded.tput_candidate,
+    )
+    return None
+
+
+def _live_base_tput(params: dict[str, Any], shared_state: SharedState | None) -> float:
+    """The base throughput to grade against: the current live anchor, not a stale task snapshot."""
+    base_tput, anchor_drifted = resolve_anchor_with_drift(
+        float(params.get("base_tput") or 0.0),
+        shared_state,
+    )
+    if anchor_drifted:
+        log.warning(
+            "integrate_patch: anchor drift; grading against live anchor %.1f",
+            base_tput,
+        )
+    return base_tput
+
+
+def _accuracy_block(params: dict[str, Any], accuracy_pass: bool | None, specialist_task_id: str) -> tuple[bool, str]:
+    """Whether the accuracy gate blocks a KEEP, and why."""
+    fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
+    required = bool(params.get("require_accuracy_for_keep", fw_authored))
+    acc_block, acc_reason, acc_degraded = accuracy_keep_block(
+        accuracy_pass,
+        required=required,
+        baseline_accuracy=params.get("accuracy_baseline"),  # filled by _stage_resolve
+    )
+    if acc_degraded:
+        log.warning(
+            "integrate_patch: accuracy gate required but no baseline accuracy; "
+            "KEEP allowed on throughput only (task=%s)",
+            specialist_task_id,
+        )
+    return acc_block, acc_reason

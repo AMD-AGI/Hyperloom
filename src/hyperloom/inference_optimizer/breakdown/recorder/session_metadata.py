@@ -180,7 +180,6 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
 
 def _launch_config(state: Any) -> dict[str, Any]:
     """Workload shape and operator-supplied launch overrides from live state."""
-    server_args = getattr(state, "operator_server_args", "") or getattr(state, "server_args", "")
     config: dict[str, Any] = {
         "model_name": _text(getattr(state, "model_name", "")),
         "model_path": _text(getattr(state, "model_path", "")),
@@ -195,7 +194,7 @@ def _launch_config(state: Any) -> dict[str, Any]:
         "precision": _text(getattr(state, "precision", "")),
         "max_model_len": getattr(state, "max_model_len", None),
         "launch_env": redact_secret_env_values(getattr(state, "operator_extra_env", None)),
-        "launch_server_args": _text(server_args),
+        "launch_server_args": _text(getattr(state, "operator_server_args", "")),
     }
     # The singleton merges leaf-by-leaf with no notion of an empty value, so
     # the version detected at launch has to be left alone rather than

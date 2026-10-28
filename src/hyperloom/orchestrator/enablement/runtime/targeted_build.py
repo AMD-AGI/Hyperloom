@@ -373,7 +373,7 @@ class _TargetedRecipe:
             from hyperloom.agents.framework.models import Candidate
 
             prepare_repo_cache(self.repo_url, self.root)
-            candidate = Candidate(ref=self.ref or "HEAD", repo=self.repo_url)
+            candidate = Candidate(ref=self.ref or "HEAD")
             ws = prepare_candidate_workspace(candidate, repo_url=self.repo_url, work_dir=self.root, index=0)
             self.worktree_dir = ws.worktree_dir
             self.venv_dir = ws.venv_dir
@@ -800,8 +800,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         action = TargetedBuildAction.from_state(json.loads(plan_path.read_text(encoding="utf-8")))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: failed to load plan.json: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: failed to load plan.json: %s", exc, exc_info=True)
         result_path.write_text(
             json.dumps(
                 BuildResult(
@@ -840,8 +840,8 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
     try:
         result = recipe(action, str(root))
-    except Exception as exc:  # noqa: BLE001
-        log.warning("targeted build driver: recipe raised: %s", exc)
+    except Exception as exc:  # outermost process entry: the failure is written to result.json
+        log.warning("targeted build driver: recipe raised: %s", exc, exc_info=True)
         result = BuildResult(
             ok=False,
             attempt_root=str(root),

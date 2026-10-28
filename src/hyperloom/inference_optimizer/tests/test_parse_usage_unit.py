@@ -12,16 +12,6 @@ import pytest
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 
 
-# ---- coerce_optional_int ----
-
-
-def test_coerce_optional_int():
-    assert pu.coerce_optional_int(None) is None
-    assert pu.coerce_optional_int("5") == 5
-    assert pu.coerce_optional_int(7) == 7
-    assert pu.coerce_optional_int("x") is None
-
-
 # ---- reasoning_output_tokens ----
 
 

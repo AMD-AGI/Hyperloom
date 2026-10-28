@@ -14,6 +14,13 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from kernelforge.loop.experiments_layout import (
+    ARCHIVE_TIME_FORMAT,
+    CANDIDATE_META,
+    ExperimentsLayout,
+    iteration_tag,
+    tagged_iteration,
+)
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
@@ -35,10 +42,6 @@ class CandidateRecord:
     bench_detail: dict | None = None  # raw bench_wallclock dict
     snr_db: float | None = None
     vgpr: int | None = None
-    pmc_diagnosis: str = ""
-    # Structured profile metadata (profile_backend, bottleneck, target_kernels, roofline dtype/AI, HBM/compute pct,
-    # SoL metrics) — consumed from meta.json.
-    profile_meta: dict | None = None
 
     # Comparison anchors
     baseline_wall_ms: float | None = None
@@ -64,7 +67,6 @@ class CandidateRecord:
     # Full blobs written to their own files (kept out of meta.json to keep it small)
     kernel_source: str = ""
     change_diff: str = ""
-    pmc_full: str = ""
     validation_text: str = ""
 
 
@@ -72,7 +74,8 @@ class CandidateArchive:
     """Per-run store of full iteration solutions + measurements."""
 
     def __init__(self, workspace_dir: str, kernel_file: str = ""):
-        self.root = Path(workspace_dir) / "forge_experiments" / "candidates"
+        self._layout = ExperimentsLayout.of(workspace_dir)
+        self.root = self._layout.candidates
         self.index_path = self.root / "index.jsonl"
         # Snapshot file basename — use the real kernel filename so the archived copy is instantly recognizable (e.g.
         # flash_attn_kernel.py).
@@ -93,7 +96,7 @@ class CandidateArchive:
             self._mark_degraded(f"create {self.root}", e)
 
     def _iter_dir(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}"
+        return self._layout.candidate(iteration)
 
     def _mark_degraded(self, operation: str, error: Exception) -> None:
         self.degraded = True
@@ -129,13 +132,6 @@ class CandidateArchive:
             handle.flush()
             os.fsync(handle.fileno())
 
-    @staticmethod
-    def _iteration_from_dir(path: Path) -> int | None:
-        suffix = path.name.removeprefix("iter_")
-        if not suffix.isdigit():
-            return None
-        return int(suffix)
-
     def _inspect_complete_meta(
         self,
         directory: Path,
@@ -143,11 +139,11 @@ class CandidateArchive:
     ) -> tuple[str, dict | None]:
         """Classify metadata without treating transient I/O as corruption."""
         try:
-            meta = json.loads((directory / "meta.json").read_text())
+            meta = json.loads((directory / CANDIDATE_META).read_text())
         except FileNotFoundError:
             return "incomplete", None
         except OSError as error:
-            self._mark_degraded(f"read {directory / 'meta.json'}", error)
+            self._mark_degraded(f"read {directory / CANDIDATE_META}", error)
             return "unavailable", None
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return "incomplete", None
@@ -245,7 +241,7 @@ class CandidateArchive:
             scan_unavailable = True
 
         for directory in directories:
-            iteration = self._iteration_from_dir(directory)
+            iteration = tagged_iteration(directory.name)
             if iteration is None:
                 continue
             try:
@@ -268,6 +264,12 @@ class CandidateArchive:
             complete.append((iteration, directory, meta))
 
         expected = [self._index_entry_from_meta(meta, directory) for _iteration, directory, meta in sorted(complete)]
+        return self._reconcile_index_file(expected, uncertain_iterations, scan_unavailable)
+
+    def _reconcile_index_file(
+        self, expected: list[dict], uncertain_iterations: set[int], scan_unavailable: bool
+    ) -> list[dict]:
+        """Keep index lines the scan could not vouch for, and rewrite the index only after a clean scan."""
         try:
             current = self._read_index_file()
         except UnicodeDecodeError:
@@ -320,7 +322,7 @@ class CandidateArchive:
         return {
             "complete": True,
             "iteration": rec.iteration,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": time.strftime(ARCHIVE_TIME_FORMAT),
             "commit_hash": rec.commit_hash,
             "decision": rec.decision,
             "kept": rec.kept,
@@ -330,8 +332,6 @@ class CandidateArchive:
             "bench": rec.bench_detail or {},
             "snr_db": rec.snr_db,
             "vgpr": rec.vgpr,
-            "pmc_diagnosis": rec.pmc_diagnosis,
-            "profile": rec.profile_meta or {},
             "baseline_wall_ms": rec.baseline_wall_ms,
             "best_wall_ms_before": rec.best_wall_ms_before,
             "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
@@ -349,7 +349,6 @@ class CandidateArchive:
             "files": {
                 "kernel": self.kernel_basename if rec.kernel_source else None,
                 "diff": "change.diff" if rec.change_diff else None,
-                "profile": "profile.txt" if rec.pmc_full else None,
                 "validation": "validation.txt" if rec.validation_text else None,
             },
         }
@@ -386,7 +385,7 @@ class CandidateArchive:
             temp_dir = Path(
                 tempfile.mkdtemp(
                     dir=str(self.root),
-                    prefix=f".iter_{rec.iteration:03d}.tmp-",
+                    prefix=f".{iteration_tag(rec.iteration)}.tmp-",
                 )
             )
 
@@ -396,16 +395,13 @@ class CandidateArchive:
             # 2) Full diff of the commit (captures sibling-file edits too).
             if rec.change_diff:
                 self._write_text(temp_dir / "change.diff", rec.change_diff)
-            # 3) Full profiling summary (rocprof-compute SoL or a PMC summary; profile_meta.backend says which).
-            if rec.pmc_full:
-                self._write_text(temp_dir / "profile.txt", rec.pmc_full)
-            # 4) Validation report / failure tail.
+            # 3) Validation report / failure tail.
             if rec.validation_text:
                 self._write_text(temp_dir / "validation.txt", rec.validation_text)
 
-            # 5) Structured metadata.
+            # 4) Structured metadata.
             meta = self._metadata(rec)
-            self._write_text(temp_dir / "meta.json", json.dumps(meta, indent=2))
+            self._write_text(temp_dir / CANDIDATE_META, json.dumps(meta, indent=2))
             fsync_directory(temp_dir)
             os.rename(temp_dir, d)
             temp_dir = None

@@ -107,8 +107,8 @@ def time_paired(
             baseline()
             candidate()
         sync()
-    except Exception as exc:  # noqa: BLE001 - a candidate that cannot run is data
-        log.warning("tier3: candidate warmup raised, no timing: %r", exc)
+    except Exception as exc:  # isolation boundary: one candidate's warmup calls
+        log.warning("tier3: candidate warmup raised, no timing: %r", exc, exc_info=True)
         return PairedTiming(0.0, 0.0, None, f"{type(exc).__name__}: {exc}")
 
     base_s: list[float] = []
@@ -117,8 +117,8 @@ def time_paired(
         for _ in range(max(repeats, 1)):
             base_s.append(_sample(baseline, sync))
             cand_s.append(_sample(candidate, sync))
-    except Exception as exc:  # noqa: BLE001 - a candidate that cannot run is data
-        log.warning("tier3: candidate timing raised, no timing: %r", exc)
+    except Exception as exc:  # isolation boundary: one candidate's paired timing samples
+        log.warning("tier3: candidate timing raised, no timing: %r", exc, exc_info=True)
         return PairedTiming(0.0, 0.0, None, f"{type(exc).__name__}: {exc}")
 
     mb, mc = min(base_s), min(cand_s)

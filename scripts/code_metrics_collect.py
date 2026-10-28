@@ -42,7 +42,8 @@ from typing import NamedTuple
 
 MODULE = "<module>"
 #: Metric names used by more than one collector.
-COGNITIVE, FUNCTION_LINES, MODULE_LINES = "cognitive-complexity", "function-lines", "module-lines"
+CYCLOMATIC, COGNITIVE = "cyclomatic-complexity", "cognitive-complexity"
+FUNCTION_LINES, MODULE_LINES = "function-lines", "module-lines"
 FUNCTION_ARGS = "function-args"
 DIRECTORY_ENTRIES = "directory-entries"
 _JSON, _CONFIG = "json", "--config"
@@ -59,7 +60,7 @@ class Metric:
 METRICS = {
     m.name: m
     for m in (
-        Metric("cyclomatic-complexity", "Cyclomatic complexity"),
+        Metric(CYCLOMATIC, "Cyclomatic complexity"),
         Metric(COGNITIVE, "Cognitive complexity"),
         Metric(FUNCTION_LINES, "Function length (lines)"),
         Metric("nested-blocks", "Nested block depth"),
@@ -80,7 +81,6 @@ PENDING: tuple[str, ...] = ()
 
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
-    "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),
     "PLR1702": ("nested-blocks", "lint.pylint.max-nested-blocks"),
     "PLR0913": (FUNCTION_ARGS, "lint.pylint.max-args"),
 }
@@ -324,6 +324,33 @@ def parse_ruff(rows: list[dict], root: Path, units: Units) -> list[Finding]:
         metric = RUFF_RULES[row["code"]][0]
         findings.append(Finding(metric, path, units.owner(path, line), int(match.group(1)), line))
     return findings
+
+
+def radon_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:
+    """Cyclomatic complexity as radon counts it: every ``and`` / ``or``, ternary, comprehension and assert too."""
+    with tempfile.TemporaryDirectory() as work:
+        rows = json.loads(_run(["radon", "cc", "--json", *(str(root / f) for f in files)], work))
+    return parse_radon(rows, root, threshold, units)
+
+
+def parse_radon(rows: dict[str, object], root: Path, threshold: int, units: Units) -> list[Finding]:
+    """Functions and methods over ``threshold``; a closure is a unit of its own, a class is none."""
+    findings = []
+    for name, blocks in rows.items():
+        if not isinstance(blocks, list):
+            raise ToolError(f"radon could not measure {name}: {blocks}")
+        path = _relative(root, name)
+        pending, seen = list(blocks), set()
+        while pending:
+            block = pending.pop()
+            pending += block.get("methods", []) + block.get("closures", [])
+            if block["type"] == "class" or block["lineno"] in seen:
+                continue
+            seen.add(block["lineno"])
+            if worse(CYCLOMATIC, block["complexity"], threshold):
+                line = block["lineno"]
+                findings.append(Finding(CYCLOMATIC, path, units.owner(path, line), block["complexity"], line))
+    return sorted(findings, key=lambda f: (f.path, f.line))
 
 
 def complexipy_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:

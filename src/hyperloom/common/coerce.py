@@ -111,6 +111,13 @@ def to_str_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def text_or_none(value: Any) -> str | None:
+    """``str(value)`` stripped, or ``None`` when *value* is ``None`` or blank."""
+    if value is None:
+        return None
+    return str(value).strip() or None
+
+
 def first_str(*values: Any) -> str:
     for value in values:
         if value:
@@ -126,7 +133,13 @@ def to_list(value: Any) -> list[Any]:
     return list(value) if isinstance(value, (list, tuple)) else []
 
 
+def dict_rows(value: Any) -> list[dict[str, Any]]:
+    """The dict entries of a list, in order; ``[]`` when *value* is not a list."""
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
 __all__ = [
+    "dict_rows",
     "to_float",
     "recorded_float",
     "to_int",
@@ -134,6 +147,7 @@ __all__ = [
     "first_int",
     "first_str",
     "optional_positive_int",
+    "text_or_none",
     "to_unix",
     "to_list",
     "to_mapping",

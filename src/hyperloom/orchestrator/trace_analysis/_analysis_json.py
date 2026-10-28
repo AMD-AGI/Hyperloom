@@ -26,6 +26,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import first_str, to_float
+
 from ._kernel_source import ResolveResult, resolve_source_verdict
 
 
@@ -78,39 +80,36 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     everywhere but never recomputed here.
     """
     kernel_names = [str(n) for n in (member.get("kernel_name") or []) if str(n).strip()]
-    operation = str(task.get("operation") or "").strip()
+    operation = first_str(task.get("operation")).strip()
     # A graph-collapsed member can carry no Operation; its device symbol is the
     # identity, matching TraceLens' own deterministic-fallback grouping.
     name = operation or (kernel_names[0] if kernel_names else "")
 
-    pct_e2e = _as_float(member.get("pct_e2e"))
-    time_ms = _as_float(member.get("time_ms"))
-    impact = task.get("impact") if isinstance(task.get("impact"), dict) else {}
+    pct_e2e = to_float(member.get("pct_e2e"))
+    time_ms = to_float(member.get("time_ms"))
 
     candidate: dict[str, Any] = {
         "name": name,
         "duration_us": (time_ms or 0.0) * 1000.0,
-        "call_count": _as_int(member.get("count")),
+        "call_count": int(to_float(member.get("count"), 0.0)),
         "gpu_pct": pct_e2e,
         "device_kernel_name": kernel_names[0] if kernel_names else "",
         "device_kernel_names": kernel_names,
         "shapes": _shapes_with_dtypes(member.get("args_shapes"), member.get("args_datatypes")),
-        "library": str(member.get("library") or ""),
-        "tracelens_category": str(member.get("category") or ""),
-        "bound_type": str(member.get("bound") or ""),
-        "flops_per_byte": _as_float(member.get("flops_per_byte")) or 0.0,
-        "efficiency_percent": _as_float(member.get("efficiency_percent")) or 0.0,
-        "efficiency_peak_value": _as_float(member.get("efficiency_peak_value")) or 0.0,
-        "efficiency_peak_unit": str(member.get("efficiency_peak_unit") or ""),
-        "kernel_launcher_path": str(member.get("kernel_launcher_path") or ""),
-        "impact_score": _as_float(member.get("impact_score")) or 0.0,
-        "tracelens_pitem_rank": _as_int(task.get("priority")),
+        "library": first_str(member.get("library")),
+        "tracelens_category": first_str(member.get("category")),
+        "bound_type": first_str(member.get("bound")),
+        "flops_per_byte": to_float(member.get("flops_per_byte"), 0.0),
+        "efficiency_percent": to_float(member.get("efficiency_percent"), 0.0),
+        "efficiency_peak_value": to_float(member.get("efficiency_peak_value"), 0.0),
+        "efficiency_peak_unit": first_str(member.get("efficiency_peak_unit")),
+        "kernel_launcher_path": first_str(member.get("kernel_launcher_path")),
+        "impact_score": to_float(member.get("impact_score"), 0.0),
+        "tracelens_pitem_rank": int(to_float(task.get("priority"), 0.0)),
         "tracelens_pitem_title": operation,
-        "identification": str(task.get("identification") or ""),
-        "reasoning_for_slowdown": str(task.get("reasoning") or ""),
-        "resolution": str(task.get("resolution") or ""),
-        "impact_low_e2e_pct": _as_float(impact.get("low")),
-        "impact_high_e2e_pct": _as_float(impact.get("high")),
+        "identification": first_str(task.get("identification")),
+        "reasoning_for_slowdown": first_str(task.get("reasoning")),
+        "resolution": first_str(task.get("resolution")),
     }
     if candidate["shapes"]:
         candidate["shape_provenance"] = "torch_trace"
@@ -157,19 +156,3 @@ def _shapes_with_dtypes(shapes: Any, dtypes: Any) -> list[str]:
         text = str(shape).strip()
         out.append(f"{text} {dtype}".strip() if dtype else text)
     return out
-
-
-def _as_float(value: Any) -> float | None:
-    """Coerce a JSON scalar to ``float``, or ``None`` when it is not numeric."""
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value: Any) -> int:
-    """Coerce a JSON scalar to a non-negative ``int`` count, defaulting to 0."""
-    number = _as_float(value)
-    return int(number) if number is not None else 0

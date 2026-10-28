@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 from hyperloom.orchestrator.actions.cancel_channel import cancel_scope_listener
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
@@ -61,7 +61,6 @@ def _arm_kernel_phase(st):
     """Park the session mid-KERNEL with plenty of phase and session time left."""
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
@@ -71,17 +70,18 @@ def _arm_kernel_phase(st):
 
 def _spend_the_phase_budget(st):
     spent = datetime.now(timezone.utc) - timedelta(hours=100)
-    st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
 
 async def _create_kernel_agent(c, *, key: str = "kernel_agent_c0"):
     task, _ = await c.tasks.create_or_return_existing(
-        kind="kernel_agent",
-        params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
-        idempotency_key=key,
-        requires_lanes=list(_KERNEL_AGENT_LANES),
-        lease_ttl_sec=3600,
+        TaskSpec(
+            kind="kernel_agent",
+            params={"from_phase": ps.PHASE_FRAMEWORK_AGENT},
+            idempotency_key=key,
+            requires_lanes=list(_KERNEL_AGENT_LANES),
+            lease_ttl_sec=3600,
+        ),
     )
     return task
 
@@ -442,11 +442,13 @@ async def test_a_running_kernel_agent_keeps_roofline_queued_until_it_returns(coo
 
     lanes, ttl = c.dispatcher.registry_lanes_ttl("roofline")
     roofline, _ = await c.tasks.create_or_return_existing(
-        kind="roofline",
-        params={"source": "coordinator_internal", "reason": "test"},
-        idempotency_key="roofline-under-kernel-agent",
-        requires_lanes=lanes,
-        lease_ttl_sec=ttl,
+        TaskSpec(
+            kind="roofline",
+            params={"source": "coordinator_internal", "reason": "test"},
+            idempotency_key="roofline-under-kernel-agent",
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
+        ),
     )
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
 
@@ -512,7 +514,7 @@ async def test_a_covered_step_runs_inside_the_lanes_its_caller_holds(coord):
     """A reprofile under the kernel_agent lease needs no profile_lane and leaves no row for the pump."""
     c = coord
     agent = await _create_kernel_agent(c)
-    lease = await c.locks.try_acquire_many(
+    lease = await c.locks.acquire_many(
         list(_KERNEL_AGENT_LANES),
         holder_id=agent.task_id,
         task_id=agent.task_id,
@@ -574,7 +576,9 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
     _skip_phase_entry_effects(c, monkeypatch)
     st = c.shared_state
     _arm_kernel_phase(st)
-    roofline = await c.tasks.create(kind="roofline", params={}, idempotency_key="left-behind-roofline")
+    roofline, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="roofline", params={}, idempotency_key="left-behind-roofline")
+    )
 
     await c.phase_machine.advance_phase_if_needed()
 

@@ -27,27 +27,25 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
-    now_iso_seconds as _now,
-    text_or_none as _text_or_none,
-)
+from hyperloom.common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
+from hyperloom.plugs import progress as _progress
+
+from .event_fields import now_iso_seconds as _now, text as _text
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import EventSink, make_sink
+from .event_rows import fold_header, rows_for_event, sort_rows, wire_rows
+from .event_sink import bound_sink
 from .event_timeline import EventHeader, finish_event, open_event
 from .phase_records import (
     MAX_REASON_CHARS,
     ActionDispatch,
     ActionSettlement,
+    PhaseDenial,
     PhaseEntry,
     PhaseExit,
     PhaseMarker,
     PhaseProposal,
+    ProposalOutcome,
+    ProposalReview,
     SpecialistRound,
 )
 
@@ -111,20 +109,6 @@ def phase_event_id(phase: str, macro_cycle: int) -> str:
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
-def _sink(event: str) -> EventSink | None:
-    """The sink for ``event``, or ``None`` when no session is bound.
-
-    The rows themselves are written best-effort by the sink, so nothing below
-    guards its own writes: a spool that cannot be written drops the row there
-    and the phase carries on.
-    """
-    from ...session.session_binding import bound_session_or_none
-
-    if bound_session_or_none() is None:
-        return None
-    return make_sink(event, producer=PRODUCER)
-
-
 def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> int | None:
     """Put a phase on the timeline, once, however many callers ask.
 
@@ -137,7 +121,7 @@ def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> 
     }
     # Onto the fragment as well as the shell: assembly rebuilds ``ext`` from the
     # fragments and never re-reads the shell.
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is not None:
         sink.record(SECTION_EVENT, dict(shell))
     return open_event(
@@ -151,7 +135,7 @@ def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> 
 def record_entry(entry: PhaseEntry) -> None:
     """Open the phase being entered and record how the run got there. Never raises."""
     event = phase_event_id(entry.at.phase, entry.at.macro_cycle)
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     entered = str(entry.entered_at or "") or _now()
@@ -180,7 +164,7 @@ def record_exit(exit_: PhaseExit) -> None:
         entered_unix: float | None = None
     else:
         event, row_sequence, entered_unix = found
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     exited = str(exit_.exited_at or "") or _now()
@@ -204,7 +188,7 @@ def record_marker(marker: PhaseMarker) -> None:
 
     Never raises. ``marker.sequence`` is its ``phase_history`` position and keys it."""
     event = phase_event_id(marker.at.phase, marker.at.macro_cycle)
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     _open(event, phase=marker.at.phase, macro_cycle=marker.at.macro_cycle)
@@ -229,7 +213,7 @@ def record_specialist_round(round_: SpecialistRound) -> None:
     event = _action_event(key)
     if event is None:
         return
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     sink.record(SECTION_ACTION, round_.row(), row_type="action", natural_ids=key)
@@ -240,7 +224,7 @@ def record_dispatch(dispatch: ActionDispatch) -> bool:
     if not str(dispatch.task_id or ""):
         return False
     event = phase_event_id(dispatch.at.phase, dispatch.at.macro_cycle)
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return False
     opened = _open(event, phase=dispatch.at.phase, macro_cycle=dispatch.at.macro_cycle)
@@ -258,35 +242,14 @@ def record_dispatch(dispatch: ActionDispatch) -> bool:
     return opened is not None and recorded is not None
 
 
-def record_denial(
-    *,
-    actor: str,
-    proposal_msg_id: str | None,
-    action: str,
-    phase: str,
-    macro_cycle: int,
-    rule: str,
-    hint: str = "",
-    denied_at: str = "",
-) -> None:
+def record_denial(denial: PhaseDenial) -> None:
     """Record one PolicyGate denial at the point the decision is made."""
-    event = phase_event_id(phase, macro_cycle)
-    sink = _sink(event)
+    event = phase_event_id(denial.at.phase, denial.at.macro_cycle)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
-    _open(event, phase=phase, macro_cycle=macro_cycle)
-    sink.append(
-        SECTION_DENIAL,
-        {
-            "actor": str(actor or ""),
-            "proposal_msg_id": _text_or_none(proposal_msg_id),
-            "action": str(action or ""),
-            "phase": str(phase or "").strip().upper(),
-            "rule": str(rule or ""),
-            "hint": str(hint or ""),
-            "denied_at": str(denied_at or "") or _now(),
-        },
-    )
+    _open(event, phase=denial.at.phase, macro_cycle=denial.at.macro_cycle)
+    sink.append(SECTION_DENIAL, denial.row())
 
 
 def record_proposal(proposal: PhaseProposal) -> None:
@@ -299,7 +262,7 @@ def record_proposal(proposal: PhaseProposal) -> None:
     if not str(proposal.proposal_msg_id or ""):
         return
     event = phase_event_id(proposal.at.phase, proposal.at.macro_cycle)
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     _open(event, phase=proposal.at.phase, macro_cycle=proposal.at.macro_cycle)
@@ -311,22 +274,7 @@ def record_proposal(proposal: PhaseProposal) -> None:
     )
 
 
-def record_proposal_review(
-    *,
-    proposal_msg_id: str,
-    verdict: str,
-    effective_verdict: str = "",
-    source: str = "",
-    reasoning: Any = None,
-    confidence: Any = None,
-    failure_reason_code: Any = None,
-    required_evidence: Any = None,
-    risks: Any = None,
-    advice_text: Any = None,
-    alternative_action: Any = None,
-    variants: Any = None,
-    reviewed_at: str = "",
-) -> None:
+def record_proposal_review(review: ProposalReview) -> None:
     """File the Critic's ruling on the proposal it ruled on. Never raises.
 
     The row is located by reading back which phase event holds the proposal, not
@@ -335,82 +283,32 @@ def record_proposal_review(
     dropped rather than minting one. ``effective_verdict`` is what was
     committed, which the envelope validator can change.
     """
-    if not str(proposal_msg_id or ""):
+    if not str(review.proposal_msg_id or ""):
         return
-    event = _proposal_event(str(proposal_msg_id))
+    event = _proposal_event(str(review.proposal_msg_id))
     if event is None:
-        log.debug("phase event: no proposal row for %s to file a ruling on", proposal_msg_id)
+        log.debug("phase event: no proposal row for %s to file a ruling on", review.proposal_msg_id)
         return
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
-    authored = str(verdict or "")
-    effective = str(effective_verdict or "") or authored
-    sink.record(
-        SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "critic_review": {
-                "verdict": authored,
-                "effective_verdict": effective,
-                # Its own field because the two verdicts alone say that they
-                # differ, not that the envelope validator imposed it.
-                "held_to_rule": effective != authored,
-                "source": str(source or ""),
-                "reasoning": _clip(reasoning, MAX_REASON_CHARS),
-                "confidence": _float_or_none(confidence),
-                "failure_reason_code": _text_or_none(failure_reason_code),
-                "required_evidence": [str(item) for item in _as_list(required_evidence)],
-                "risks": [dict(risk) for risk in _as_list(risks) if isinstance(risk, Mapping)],
-                "advice_text": _text_or_none(advice_text),
-                "alternative_action": _text_or_none(alternative_action),
-                "variants": [dict(row) for row in _as_list(variants) if isinstance(row, Mapping)],
-                "reviewed_at": str(reviewed_at or "") or _now(),
-            },
-        },
-        row_type="proposal",
-        natural_ids=str(proposal_msg_id),
-    )
+    sink.record(SECTION_PROPOSAL, review.row(), row_type="proposal", natural_ids=str(review.proposal_msg_id))
 
 
-def record_proposal_outcome(
-    *,
-    proposal_msg_id: str,
-    materialized: bool = False,
-    denied: bool = False,
-    reauthored: bool = False,
-    task_id: Any = None,
-    patch_verdict_key: Any = None,
-    settled_at: str = "",
-) -> None:
+def record_proposal_outcome(outcome: ProposalOutcome) -> None:
     """Record what the loop did with a proposal. Never raises.
 
     ``task_id`` joins the proposal to the dispatch row it became, beside it on
     this same event. Located and dropped the same way as the ruling."""
-    if not str(proposal_msg_id or ""):
+    if not str(outcome.proposal_msg_id or ""):
         return
-    event = _proposal_event(str(proposal_msg_id))
+    event = _proposal_event(str(outcome.proposal_msg_id))
     if event is None:
         return
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
-    sink.record(
-        SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "outcome": {
-                "materialized": bool(materialized),
-                "denied": bool(denied),
-                "reauthored": bool(reauthored),
-                "task_id": _text_or_none(task_id),
-                "patch_verdict_key": _text_or_none(patch_verdict_key),
-                "settled_at": str(settled_at or "") or _now(),
-            },
-        },
-        row_type="proposal",
-        natural_ids=str(proposal_msg_id),
-    )
+    sink.record(SECTION_PROPOSAL, outcome.row(), row_type="proposal", natural_ids=str(outcome.proposal_msg_id))
 
 
 def record_settle(settlement: ActionSettlement) -> None:
@@ -422,10 +320,14 @@ def record_settle(settlement: ActionSettlement) -> None:
     """
     if not str(settlement.task_id or ""):
         return
-    event = _action_event(str(settlement.task_id))
+    row = _action_row(str(settlement.task_id))
+    _progress.candidate_settled(
+        str(settlement.task_id), str((row or {}).get("action") or ""), str(settlement.decision or "")
+    )
+    event = str(row["event_id"]) if row else None
     if event is None:
         return
-    sink = _sink(event)
+    sink = bound_sink(event, producer=PRODUCER)
     if sink is None:
         return
     sink.record(SECTION_ACTION, settlement.row(), row_type="action", natural_ids=str(settlement.task_id))
@@ -461,20 +363,14 @@ def _finish(event: str, *, end_time: str) -> None:
         note_failure(section=SECTION_EVENT, error=exc, detail=f"closing phase event {event}")
 
 
-def _rows(section: str, event: str) -> list[dict[str, Any]]:
-    """Read one section's rows for one event back out of the spool."""
-    from .assembler import recorded_rows
-
-    return recorded_rows(section, event=event)
-
-
 def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     """The phase's most recent unclosed entry: its event id, sequence, and
     entry epoch. ``None`` at a first transition or on an unreadable spool.
 
     A segment whose ``event_id`` will not parse is skipped: handing it to
-    :func:`_sink` or :func:`_finish` would raise the same ``ValueError`` the
-    sink already swallows on write, and the exit must not surface it.
+    :func:`~.event_sink.bound_sink` or :func:`_finish` would raise the same
+    ``ValueError`` the sink already swallows on write, and the exit must not
+    surface it.
     """
     from .assembler import recorded_section
     from .event_ids import parse_event_id
@@ -499,21 +395,31 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     return best
 
 
-def _event_holding(section: str, field: str, value: str) -> str | None:
-    """The phase event whose ``section`` row has ``field == value``, if any."""
+def _row_holding(section: str, field: str, value: str) -> dict[str, Any] | None:
+    """The ``section`` row, with an event, that has ``field == value``, if any."""
     from .assembler import recorded_section
 
     for row in recorded_section(section):
-        if str(row.get(field) or "") == str(value):
-            event = str(row.get("event_id") or "")
-            if event:
-                return event
+        if str(row.get(field) or "") == str(value) and str(row.get("event_id") or ""):
+            return row
     return None
+
+
+def _event_holding(section: str, field: str, value: str) -> str | None:
+    """The phase event whose ``section`` row has ``field == value``, if any."""
+    row = _row_holding(section, field, value)
+    return str(row["event_id"]) if row else None
+
+
+def _action_row(task_id: str) -> dict[str, Any] | None:
+    """The dispatch row of ``task_id``, if one was recorded."""
+    return _row_holding(SECTION_ACTION, "task_id", task_id)
 
 
 def _action_event(task_id: str) -> str | None:
     """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
-    return _event_holding(SECTION_ACTION, "task_id", task_id)
+    row = _action_row(task_id)
+    return str(row["event_id"]) if row else None
 
 
 def _proposal_event(proposal_msg_id: str) -> str | None:
@@ -528,52 +434,42 @@ def assemble_phase_ext(
 ) -> tuple[dict[str, Any], str]:
     """Assemble a phase event's ``ext``, and the status it reports, out of the
     sections read back from the spool."""
-    header = _header(rows_for_event(parts.get(SECTION_EVENT) or [], event))
+    header = fold_header(rows_for_event(parts[SECTION_EVENT], event))
     segments = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_SEGMENT) or [], event), keys=("sequence",)),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_SEGMENT], event), keys=("sequence",)), drop=("event_id",)
     )
     actions = [
         # Measured here because the settle cannot see the dispatch that opened
         # the row.
         dict(row, duration_sec=_span(row.get("dispatched_unix"), row.get("settled_unix")))
         for row in wire_rows(
-            sort_rows(
-                rows_for_event(parts.get(SECTION_ACTION) or [], event),
-                keys=("dispatched_at", "task_id"),
-            ),
+            sort_rows(rows_for_event(parts[SECTION_ACTION], event), keys=("dispatched_at", "task_id")),
             drop=("event_id",),
         )
     ]
     markers = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_MARKER) or [], event), keys=("sequence", "ts")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_MARKER], event), keys=("sequence", "ts")), drop=("event_id",)
     )
     proposals = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_PROPOSAL) or [], event),
-            keys=("proposed_at", "proposal_msg_id"),
-        ),
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL], event), keys=("proposed_at", "proposal_msg_id")),
         drop=("event_id",),
     )
     denials = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_DENIAL) or [], event),
-            keys=("denied_at", "proposal_msg_id", "action"),
-        ),
+        sort_rows(rows_for_event(parts[SECTION_DENIAL], event), keys=("denied_at", "proposal_msg_id", "action")),
         drop=("event_id",),
     )
+    first, last = (segments[0], segments[-1]) if segments else ({}, {})
     # Summed over the entries, not measured first to last: a phase re-entered
     # inside one cycle did not own the time the run spent elsewhere in between.
-    measured = [row.get("duration_sec") for row in segments if isinstance(row.get("duration_sec"), (int, float))]
+    measured = [float(row["duration_sec"]) for row in segments if isinstance(row.get("duration_sec"), (int, float))]
     ext: dict[str, Any] = {
-        "phase": str(header.get("phase") or ""),
+        "phase": _text(header.get("phase")),
         "macro_cycle": int(header.get("macro_cycle") or 0),
-        "entered_at": str((segments[0] or {}).get("entered_at") or "") if segments else "",
-        "exited_at": str((segments[-1] or {}).get("exited_at") or "") if segments else "",
-        "exit_reason": str((segments[-1] or {}).get("exit_reason") or "") if segments else "",
+        "entered_at": _text(first.get("entered_at")),
+        "exited_at": _text(last.get("exited_at")),
+        "exit_reason": _text(last.get("exit_reason")),
         "entries": len(segments),
-        "duration_sec": round(sum(float(d) for d in measured), 6) if measured else None,
+        "duration_sec": round(sum(measured), 6) if measured else None,
         # An entry with no exit is the segment the run was in when it stopped.
         "open": any(not row.get("exited_at") for row in segments),
         "segments": segments,
@@ -581,7 +477,7 @@ def assemble_phase_ext(
             "count": len(actions),
             # The gap to ``count`` is the actions still in or killed in flight.
             "settled": sum(1 for row in actions if row.get("status")),
-            "kinds": sorted({str(row.get("action") or "") for row in actions if row.get("action")}),
+            "kinds": sorted({str(row["action"]) for row in actions if row.get("action")}),
             "rows": actions,
         },
         "markers": {"count": len(markers), "rows": markers},
@@ -620,15 +516,6 @@ def _span(start: Any, end: Any) -> float | None:
     if lo is None or hi is None:
         return None
     return round(max(0.0, hi - lo), 6)
-
-
-def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Fold the event-level fragments into one header."""
-    header: dict[str, Any] = {}
-    for row in rows:
-        if isinstance(row, Mapping):
-            header.update({k: v for k, v in row.items() if k != "event_id"})
-    return header
 
 
 __all__ = [

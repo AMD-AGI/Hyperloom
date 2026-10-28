@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Protocol-layer tests (intent envelope, MessageBus, ResourceLockManager, TaskRegistry, CursorStore)."""
+"""Protocol-layer tests (intent envelope, MessageBus, SqliteLeaseBackend, TaskRegistry, CursorStore)."""
 
 from __future__ import annotations
 
@@ -21,8 +21,6 @@ from hyperloom.orchestrator.bus.message_bus import (
 from hyperloom.orchestrator.bus.resource_lock import (
     KNOWN_LANES,
     LANE_CONFLICTS,
-    LaneBusy,
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import (
@@ -30,6 +28,7 @@ from hyperloom.orchestrator.state.task_registry import (
     TASK_STATES,
     TERMINAL_STATES,
     TaskRegistry,
+    TaskSpec,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
@@ -183,7 +182,7 @@ def test_lane_conflicts_symmetric_for_bench_profile_server():
 
 @pytest.mark.asyncio
 async def test_resource_lock_acquire_release(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     lease = await locks.acquire_many(
         ["workspace_mutation"],
         holder_id="h1",
@@ -193,14 +192,13 @@ async def test_resource_lock_acquire_release(db):
     )
     assert lease.lanes == ("workspace_mutation",)
     assert (await locks.lane_holders()).get("workspace_mutation") == 1
-    n = await locks.release(lease)
-    assert n == 1
+    await locks.release(lease)
     assert await locks.lane_holders() == {}
 
 
 @pytest.mark.asyncio
 async def test_resource_lock_lane_busy_rolls_back(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     a = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="ha",
@@ -208,7 +206,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
         action="bench_runner",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy) as exc:
+    assert (
         await locks.acquire_many(
             ["benchmark_lane"],
             holder_id="hb",
@@ -216,7 +214,8 @@ async def test_resource_lock_lane_busy_rolls_back(db):
             action="bench_runner",
             ttl_sec=60,
         )
-    assert "benchmark_lane" in exc.value.busy_lanes
+        is None
+    )
     # Original lease should still be intact (atomic rollback)
     assert (await locks.lane_holders()).get("benchmark_lane") == 1
     await locks.release(a)
@@ -225,7 +224,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
 @pytest.mark.asyncio
 async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db):
     """benchmark_lane held → profile_lane acquire must fail."""
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     bench = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -233,7 +232,7 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
         action="bench_runner",
         ttl_sec=60,
     )
-    with pytest.raises(LaneBusy):
+    assert (
         await locks.acquire_many(
             ["profile_lane"],
             holder_id="hp",
@@ -241,12 +240,14 @@ async def test_resource_lock_cross_lane_conflict_blocks_profile_during_bench(db)
             action="profile_runner",
             ttl_sec=60,
         )
+        is None
+    )
     await locks.release(bench)
 
 
 @pytest.mark.asyncio
 async def test_resource_lock_unknown_lane_rejected(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     with pytest.raises(ValueError, match="unknown lane"):
         await locks.acquire_many(
             ["bogus_lane"],
@@ -259,7 +260,7 @@ async def test_resource_lock_unknown_lane_rejected(db):
 
 @pytest.mark.asyncio
 async def test_resource_lock_release_ignores_another_holder(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     lease = await locks.acquire_many(
         ["profile_lane"],
         holder_id="h1",
@@ -268,24 +269,15 @@ async def test_resource_lock_release_ignores_another_holder(db):
         ttl_sec=60,
     )
     # Wrong holder release must not delete the row
-    fake = type(lease)(
-        holder_id="other",
-        task_id="t1",
-        action="profile_runner",
-        lanes=lease.lanes,
-        acquired_at=lease.acquired_at,
-        expires_at=lease.expires_at,
-    )
-    n = await locks.release(fake)
-    assert n == 0
+    await locks.release(type(lease)(holder_id="other", lanes=lease.lanes))
     assert (await locks.lane_holders()).get("profile_lane") == 1
-    n = await locks.release(lease)
-    assert n == len(lease.lanes)
+    await locks.release(lease)
+    assert await locks.lane_holders() == {}
 
 
 @pytest.mark.asyncio
 async def test_resource_lock_does_not_expire_a_live_owner(db):
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     await locks.acquire_many(
         ["workspace_mutation"],
         holder_id="h1",
@@ -309,15 +301,15 @@ def test_task_states_and_terminals():
 @pytest.mark.asyncio
 async def test_task_registry_create_idempotent(db):
     tr = TaskRegistry(db)
-    t1 = await tr.create(kind="bench_runner", params={"x": 1}, idempotency_key="k1")
-    t2 = await tr.create(kind="bench_runner", params={"x": 1}, idempotency_key="k1")
+    t1, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
+    t2, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={"x": 1}, idempotency_key="k1"))
     assert t1.task_id == t2.task_id
 
 
 @pytest.mark.asyncio
 async def test_task_registry_legal_transitions(db):
     tr = TaskRegistry(db)
-    t = await tr.create(kind="bench_runner", params={}, idempotency_key="kT1")
+    t, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT1"))
     t2 = await tr.transition(t.task_id, "running")
     assert t2.state == "running"
     t3 = await tr.transition(t.task_id, "succeeded", evidence={"tput": 1840})
@@ -327,7 +319,7 @@ async def test_task_registry_legal_transitions(db):
 @pytest.mark.asyncio
 async def test_task_registry_illegal_transition_rejected(db):
     tr = TaskRegistry(db)
-    t = await tr.create(kind="bench_runner", params={}, idempotency_key="kT2")
+    t, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kT2"))
     with pytest.raises(IllegalTransition):
         await tr.transition(t.task_id, "succeeded")  # queued -> succeeded illegal
 
@@ -335,9 +327,9 @@ async def test_task_registry_illegal_transition_rejected(db):
 @pytest.mark.asyncio
 async def test_task_registry_cancel_family_bulk(db):
     tr = TaskRegistry(db)
-    a = await tr.create(kind="kernel_opt", params={}, idempotency_key="ka")
-    b = await tr.create(kind="kernel_opt", params={}, idempotency_key="kb")
-    c = await tr.create(kind="bench_runner", params={}, idempotency_key="kc")
+    a, _ = await tr.create_or_return_existing(TaskSpec(kind="kernel_opt", params={}, idempotency_key="ka"))
+    b, _ = await tr.create_or_return_existing(TaskSpec(kind="kernel_opt", params={}, idempotency_key="kb"))
+    c, _ = await tr.create_or_return_existing(TaskSpec(kind="bench_runner", params={}, idempotency_key="kc"))
     cancelled = await tr.cancel_family(["kernel_opt"])
     assert set(cancelled) == {a.task_id, b.task_id}
     bench_after = await tr.get(c.task_id)
@@ -350,24 +342,20 @@ async def test_cursor_store_empty_default(db):
     cs = CursorStore(db)
     state = await cs.load("Orchestration")
     assert state.last_processed_seq == 0
-    assert state.last_processed_msg_id == ""
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_advance_forward(db):
     cs = CursorStore(db)
-    s = await cs.advance("Critic", seq=5, msg_id="m5")
-    assert s.last_processed_seq == 5
-    s = await cs.advance("Critic", seq=10, msg_id="m10")
-    assert s.last_processed_seq == 10
+    await cs.advance("Critic", seq=5)
+    assert (await cs.load("Critic")).last_processed_seq == 5
+    await cs.advance("Critic", seq=10)
+    assert (await cs.load("Critic")).last_processed_seq == 10
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_never_moves_backwards(db):
     cs = CursorStore(db)
-    await cs.advance("Critic", seq=10, msg_id="m10")
-    s = await cs.advance("Critic", seq=3, msg_id="m3")
-    assert s.last_processed_seq == 10
-    current = await cs.load("Critic")
-    assert 3 <= current.last_processed_seq
-    assert 11 > current.last_processed_seq
+    await cs.advance("Critic", seq=10)
+    await cs.advance("Critic", seq=3)
+    assert (await cs.load("Critic")).last_processed_seq == 10

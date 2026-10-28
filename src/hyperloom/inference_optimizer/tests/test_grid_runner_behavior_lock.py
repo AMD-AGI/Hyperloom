@@ -29,12 +29,16 @@ from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     run_grid,
+    GridLaunch,
+    GridRecipe,
+    GridStop,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, STOPPED_BY_THE_RUN
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
 from .conftest import chatty_child
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 
 
 @pytest.fixture(autouse=True)
@@ -138,13 +142,11 @@ def _run_capturing_variant_notes(
         grid = [GridVariant(name=f"c{i}") for i in range(grid_n)]
         results = asyncio.run(
             run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=grid,
                 output_root=out,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-                keep_going_on_failure=True,
+                recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                launch=GridLaunch(magpie_python=sys.executable),
+                stop=GridStop(keep_going_on_failure=True),
             )
         )
     return results, notes
@@ -161,7 +163,7 @@ class TestVariantBoundaryReportsEveryOutcome:
         _write_base_yaml(base)
         notes: list[dict] = []
 
-        async def _restart_fail(**_kwargs):
+        async def _restart_fail(_server, **_kwargs):
             raise mnsl.ServerRestartFailed("server /health did not return 200")
 
         results, _ = _run_capturing_variant_notes(
@@ -183,7 +185,7 @@ class TestVariantBoundaryReportsEveryOutcome:
         _write_base_yaml(base)
         notes: list[dict] = []
 
-        async def _restart_fail(**_kwargs):
+        async def _restart_fail(_server, **_kwargs):
             raise mnsl.ServerRestartFailed("health probe timed out")
 
         results, _ = _run_capturing_variant_notes(
@@ -282,13 +284,11 @@ class TestKeepGoingAsymmetry:
         ):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c0"), GridVariant(name="c1")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
-                    keep_going_on_failure=False,
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
+                    stop=GridStop(keep_going_on_failure=False),
                 )
             )
 
@@ -387,10 +387,10 @@ class TestVariantAbort:
         _write_base_yaml(base)
         real_build = gr._build_variant_yaml
 
-        def _fail_on_second(base_yaml_path, base_extra_args, variant, **kwargs):
+        def _fail_on_second(recipe, variant, **kwargs):
             if variant.name == "c1":
                 raise RuntimeError("boom")
-            return real_build(base_yaml_path, base_extra_args, variant, **kwargs)
+            return real_build(recipe, variant, **kwargs)
 
         monkeypatch.setattr(gr, "_build_variant_yaml", _fail_on_second)
 
@@ -403,13 +403,11 @@ class TestVariantAbort:
         ):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c0"), GridVariant(name="c1"), GridVariant(name="c2")],
                     output_root=tmp_path / "out",
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
-                    keep_going_on_failure=keep_going,
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
+                    stop=GridStop(keep_going_on_failure=keep_going),
                 )
             )
 
@@ -463,12 +461,10 @@ class TestAutoWarmupTeardown:
         ):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="cand")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         return results, teardown_calls
@@ -537,6 +533,28 @@ class TestAutoWarmupTeardown:
         assert len(teardown_calls) == 1
         assert teardown_calls[0]["framework"] == "sglang"
         assert "run_grid_warmup_round_failed" in results[0].nonfatal_warnings
+
+    def test_warmup_setup_failure_fails_the_variant_instead_of_measuring_it_cold(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        state = {"n": 0}
+
+        def _broken_lifecycle(cfg_path):
+            raise ValueError("lifecycle probe broke")
+
+        def _run(cmd, *a, **k):
+            state["n"] += 1
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr(sl, "resolve_lifecycle_params", _broken_lifecycle)
+        results, teardown_calls = self._run_capture_teardown(_run, base, tmp_path / "out")
+        assert (results[0].status, results[0].error_class) == ("failed", "warmup_yaml_build_error")
+        assert results[0].error == "warmup_yaml_build_error: ValueError('lifecycle probe broke')"
+        assert state["n"] == 0
+        assert teardown_calls == []
 
     def test_measured_round_timeout_tears_down_once(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
@@ -618,12 +636,10 @@ class TestRoundServerTeardown:
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
             return asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="cand")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
 
@@ -702,12 +718,10 @@ class TestRoundServerTeardown:
         with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_round):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name="c28"), GridVariant(name="c20")],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
 
@@ -813,12 +827,10 @@ class TestVariantHeartbeat:
         ):
             results = asyncio.run(
                 run_grid(
-                    base_yaml_path=base,
-                    base_extra_args="",
                     grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
                     output_root=out,
-                    magpie_python=sys.executable,
-                    gpu_type="mi300x",
+                    recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                    launch=GridLaunch(magpie_python=sys.executable),
                 )
             )
         return results, notes

@@ -22,7 +22,7 @@ from hyperloom.orchestrator.actions.executors._server_argv import (
     reseal_config_argv,
     seal_server_argv,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs, LaunchLayer
 
 #: The name every composer ends on.
 SEAL = "seal_server_argv"
@@ -175,6 +175,7 @@ def test_profile_argument_writers_only_run_through_the_sealed_composer():
         "_apply_framework_profile": (_profile_setup, "prepare_profile"),
         "prepare_profile": (_workload_envs, "_shape_request_window"),
         "apply_atom_profile_caps": (_workload_envs, "_restate_profile_capture"),
+        "fit_capture_to_speculative": (_workload_envs, "_restate_profile_capture"),
     }
     calls = {name: [] for name in owners}
     for path in sorted(_PACKAGE.rglob("*.py")):
@@ -240,7 +241,9 @@ def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
 
-    config = materialize_config_with_envs(source, out, extra_server_args="--attention-backend aiter")
+    config = materialize_config_with_envs(
+        source, out, launch=LaunchLayer(extra_server_args="--attention-backend aiter")
+    )
 
     sealed = config_server_argv(config)
     exported = config_launch_env(config, {})[sealed.env_name]
@@ -407,7 +410,11 @@ def test_a_replacing_grid_variant_keeps_the_expert_parallel_flag(tmp_path, varia
     variant = GridVariant(name="v", extra_server_args="--max-num-seqs 64", args_mode=variant_mode)
 
     config = _grid_runner._build_variant_yaml(
-        base, "--max-num-seqs 32", variant, output_subdir=tmp_path / "v", base_args_mode=base_mode
+        _grid_runner.GridRecipe(
+            base_yaml_path=base, base=LaunchLayer(extra_server_args="--max-num-seqs 32", args_mode=base_mode)
+        ),
+        variant,
+        output_subdir=tmp_path / "v",
     )
 
     argv = config_server_argv(config).argv
@@ -452,7 +459,9 @@ def test_a_grid_variant_ep_that_does_not_divide_tp_adds_no_flag(tmp_path, caplog
     variant = GridVariant(name="v", extra_envs={"EP": "3"})
 
     with caplog.at_level("WARNING"):
-        config = _grid_runner._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v")
+        config = _grid_runner._build_variant_yaml(
+            _grid_runner.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v"
+        )
 
     assert "--ep-size" not in config_server_argv(config).argv
     assert "EP=3 does not divide the launched TP=8" in caplog.text

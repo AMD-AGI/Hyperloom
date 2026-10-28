@@ -16,11 +16,10 @@ from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 PROVENANCE_VERSION = 1
-#: Tags a full shared provenance block apart from a placeholder stub.
-PROVENANCE_SOURCE = "shared_v1"
 
 # Env var priority per stack component (operator pins beat auto-detect).
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
@@ -76,6 +75,8 @@ _IMAGE_ENVS = ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE")
 _CODE_REV_ENVS = ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA")
 
 _GFX_RE = re.compile(r"gfx\d+[a-z0-9]*", re.IGNORECASE)
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+_PID1_CGROUP = Path("/proc/1/cgroup")
 
 
 def _env_first(env: Mapping[str, str], *names: str) -> str | None:
@@ -96,16 +97,6 @@ def _arg_first(args: Any, *names: str) -> Any:
         if v is not None and v != "":
             return v
     return None
-
-
-def _int_or_none(value: Any) -> int | None:
-    """Coerce to int, or ``None`` when unset/blank/non-numeric."""
-    if value is None:
-        return None
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return None
 
 
 def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True) -> str | None:
@@ -292,8 +283,22 @@ def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
     return _env_first(env, *_CODE_REV_ENVS) or ""
 
 
+def _cgroup_container_image() -> str | None:
+    """``unknown@<12 hex>`` from the docker/containerd container id in PID 1's cgroup, else ``None``."""
+    try:
+        lines = _PID1_CGROUP.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if "docker" in line or "containerd" in line:
+            m = _CONTAINER_ID_RE.search(line)
+            if m:
+                return f"unknown@{m.group(0)[:12]}"
+    return None
+
+
 def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
-    """Container image from env vars or (when ``probe``) known marker files."""
+    """Container image from env vars or (when ``probe``) marker files, then the container id in PID 1's cgroup."""
     val = _env_first(env, *_IMAGE_ENVS)
     if val:
         return val
@@ -303,7 +308,7 @@ def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
         v = _read_first_line(Path(marker))
         if v:
             return v
-    return None
+    return _cgroup_container_image()
 
 
 def _server_args_list(args: Any, env: Mapping[str, str]) -> list[str]:
@@ -331,7 +336,6 @@ def build_provenance(
     *,
     env: Mapping[str, str] | None = None,
     probe: bool = True,
-    source: str = PROVENANCE_SOURCE,
 ) -> dict[str, Any]:
     """Assemble the shared provenance block."""
     env = os.environ if env is None else env
@@ -347,7 +351,6 @@ def build_provenance(
     gpu_type = _arg_first(args, "gpu_type") or _env_first(env, "TARGET_GPU_TYPE", "GPU_TYPE")
 
     return {
-        "_provenance_source": source,
         "provenance_version": PROVENANCE_VERSION,
         # model identity
         "model_name": model_name,
@@ -361,15 +364,15 @@ def build_provenance(
         # hardware / parallelism / graph
         "gpu_type": gpu_type,
         "gfx_arch": detect_gfx_arch(env, gpu_type=gpu_type, probe=probe),
-        "tp": _int_or_none(_arg_first(args, "tp") or _env_first(env, "TP")),
-        "ep": _int_or_none(_arg_first(args, "ep") or _env_first(env, "EP")),
+        "tp": to_int(_arg_first(args, "tp") or _env_first(env, "TP")),
+        "ep": to_int(_arg_first(args, "ep") or _env_first(env, "EP")),
         "graph_mode": (_arg_first(args, "graph_mode") or detect_graph_mode(env)),
         # dtype / workload
         "dtype": (_arg_first(args, "precision", "dtype") or _env_first(env, "PRECISION")),
-        "concurrency": _int_or_none(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
-        "isl": _int_or_none(_arg_first(args, "isl") or _env_first(env, "ISL")),
-        "osl": _int_or_none(_arg_first(args, "osl") or _env_first(env, "OSL")),
-        "max_model_len": _int_or_none(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
+        "concurrency": to_int(_arg_first(args, "conc", "concurrency") or _env_first(env, "CONC", "CONCURRENCY")),
+        "isl": to_int(_arg_first(args, "isl") or _env_first(env, "ISL")),
+        "osl": to_int(_arg_first(args, "osl") or _env_first(env, "OSL")),
+        "max_model_len": to_int(_arg_first(args, "max_model_len") or _env_first(env, "MAX_MODEL_LEN")),
         # full server args + fingerprint
         "server_args": server_args,
         "server_args_hash": server_args_hash(server_args),
@@ -378,7 +381,6 @@ def build_provenance(
 
 __all__ = [
     "PROVENANCE_VERSION",
-    "PROVENANCE_SOURCE",
     "RESOLVED_FRAMEWORK_ENV",
     "RESOLVED_FRAMEWORK_PYTHON_ENV",
     "build_provenance",

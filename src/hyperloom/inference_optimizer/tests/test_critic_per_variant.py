@@ -33,9 +33,6 @@ def test_shared_state_record_and_read_verdict():
     assert s.get_specialist_patch_verdict("t1") == "approve"
     s.record_specialist_patch_verdict("t1", "reject")
     assert s.get_specialist_patch_verdict("t1") == "reject"
-    # Empty verdict clears the entry (re-review pathway).
-    s.record_specialist_patch_verdict("t1", "")
-    assert s.get_specialist_patch_verdict("t1") == ""
 
 
 def test_shared_state_ignores_empty_task_id():

@@ -19,7 +19,6 @@ from kernelforge.fusion.validate import (
     _tail_text,
     _vllm_decode_probe,
     serving_smoke,
-    snr_db,
     validate_recipe,
 )
 from kernelforge.fusion import validate
@@ -189,11 +188,6 @@ class _Proc:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = rc
-
-
-def test_snr_zero_signal_returns_zero():
-    # noise>0 but signal==0 -> 0.0 branch (line 332)
-    assert snr_db([0.0, 0.0], [1.0, 1.0]) == 0.0
 
 
 def test_runtime_dir_honors_env(tmp_path, monkeypatch):

@@ -228,7 +228,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     """Load a JSONL file into a list of dict records."""
     from hyperloom.common.jsonio import read_jsonl
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
+    return read_jsonl(path)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -273,7 +273,6 @@ def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "wall_ms": row.get("wall_ms"),
         "snr_db": row.get("snr_db"),
         "validation_passed": row.get("validation_passed"),
-        "pmc_diagnosis": row.get("pmc_diagnosis"),
     }
 
 
@@ -527,7 +526,7 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:
+        except Exception:  # isolation boundary: one KB span row
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
             return False
@@ -574,7 +573,7 @@ class LangfuseEmitter:
             else:
                 self._counts["generations_token_only"] += 1
             return True
-        except Exception:
+        except Exception:  # isolation boundary: one Langfuse generation
             self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
             return False
@@ -608,7 +607,7 @@ class LangfuseEmitter:
         for name, step in steps.items():
             try:
                 step()
-            except Exception:
+            except Exception:  # isolation boundary: one flush step
                 failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
@@ -793,12 +792,12 @@ class LangfuseEmitter:
         while self._unended_spans:
             self._safe_end(self._unended_spans.pop())
 
-    @staticmethod
-    def _safe_end(span: Any) -> None:
-        """End a span, swallowing any errors."""
+    def _safe_end(self, span: Any) -> None:
+        """End a span; a failure is counted in the receipt's ``errors``."""
         try:
             span.end()
-        except Exception:
+        except Exception:  # isolation boundary: one span end
+            self._counts["errors"] += 1
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
@@ -998,7 +997,7 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:
+        except Exception:  # isolation boundary: one decision Score
             self._counts["errors"] += 1
             log.debug(
                 "langfuse: create_score failed for %s",

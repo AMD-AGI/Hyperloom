@@ -876,7 +876,7 @@ def test_teardown_undoes_a_nogit_apply(tmp_path, output_dir, backup_intact, capl
     backups = result["trees"][0]["nogit_backups"]
     patched = target.read_bytes()
     if not backup_intact:
-        Path(backups[0]["backup_path"]).write_text("# fp8 module\ncorrupt = True\n")
+        Path(backups[0]["backup"]).write_text("# fp8 module\ncorrupt = True\n")
     caplog.clear()
 
     restore = _revert_warm_patch_state(str(install_root), nogit_backups=backups)

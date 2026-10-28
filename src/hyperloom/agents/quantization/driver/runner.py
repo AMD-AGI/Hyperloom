@@ -6,19 +6,18 @@ import atexit
 import os
 import shutil
 import tempfile
+import traceback
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common import llm_config
-from hyperloom.agents.quantization.driver.result_collector import collect_artifacts
+from hyperloom.agents.quantization.driver.result_collector import CollectedArtifacts, collect_artifacts
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
 from hyperloom.common.llm_attribution import sdk_env_overlay
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 
 
-DEFAULT_MODEL = DEFAULT_CLAUDE_MODEL
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash"]
 DEFAULT_MAX_TURNS = 240  # Quark workflow has 4 STOPs + validator + eval
 
@@ -59,9 +58,7 @@ class ClaudeAgentSdk:
 class AttemptResult:
     """Low-level output of one SDK session."""
 
-    workspace: Path
     sdk_error: str = ""
-    raw_text: str = ""
 
 
 def _import_sdk() -> ClaudeAgentSdk:
@@ -70,8 +67,6 @@ def _import_sdk() -> ClaudeAgentSdk:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - exercised via injection seams in tests
         raise RuntimeError("claude_agent_sdk not installed; run the quantization-agent installer") from exc
-    if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return ClaudeAgentSdk(query=sdk.query, options_cls=sdk.ClaudeAgentOptions)
 
 
@@ -189,28 +184,31 @@ def _attempt_child_env() -> dict[str, str]:
     return env
 
 
-#: The phase an attempt reaches when it starts evaluating its quantized model; nothing later is owed.
-_TERMINAL_PHASE = "eval"
+def attempt_ended(artifacts: CollectedArtifacts) -> bool:
+    """Whether the attempt has an end the classifier can judge: blocked, an eval report, or why eval was skipped.
 
-
-def _attempt_finished(workspace: Path) -> bool:
-    """Whether the attempt has reached an end the classifier can judge: blocked, or through to evaluation."""
-    artifacts = collect_artifacts(workspace)
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not an end. The owed-end check and the retry
+    loop both read this, so a session is continued exactly when its attempt would otherwise be judged unfinished.
+    """
     return (
         artifacts.blocked_reason is not None
-        or artifacts.last_phase == _TERMINAL_PHASE
         or artifacts.eval_report_present
         or artifacts.eval_skipped_reason is not None
     )
 
 
+def _attempt_finished(workspace: Path) -> bool:
+    """:func:`attempt_ended` on the files ``workspace`` holds now."""
+    return attempt_ended(collect_artifacts(workspace))
+
+
 def _owed_attempt_end(workspace: Path) -> OwedArtifact:
-    """What an attempt owes: a ``blocked.md``, or the workflow carried through to its evaluation phase."""
+    """What an attempt owes: a ``blocked.md``, or the workflow carried through evaluation."""
     return OwedArtifact(
         done=lambda: _attempt_finished(workspace),
         continuation_prompt=(
-            "The quantization workflow is not finished: there is no blocked.md and last_phase.txt has not reached "
-            f"{_TERMINAL_PHASE}. A tool call written out as text in a reply is not executed. Continue from the phase "
+            "The quantization workflow is not finished: there is no blocked.md, eval_report.json or "
+            "eval_skipped.txt. A tool call written out as text in a reply is not executed. Continue from the phase "
             "last_phase.txt names, calling tools directly, and write blocked.md if you cannot go on."
         ),
     )
@@ -240,7 +238,7 @@ async def _run_attempt_on_deepseek(
     # An interactive attempt stops at its checkpoints for an answer nobody gives a headless session.
     owed = None if attempt.interactive else _owed_attempt_end(workspace)
     result = await run_deepseek_task(request, owed)
-    return AttemptResult(workspace=workspace, sdk_error=result.error, raw_text=result.text)
+    return AttemptResult(sdk_error=result.error)
 
 
 async def run_one_attempt(
@@ -278,29 +276,14 @@ async def run_one_attempt(
         "system_prompt": _ATTEMPT_SYSTEM_PROMPT,
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
+        # The Quark py310 shim reaches SDK-spawned tools through options, not the process-global os.environ.
         "env": _attempt_child_env(),
+        "cwd": str(workspace),
     }
     if model:
         kwargs["model"] = model
-    kwargs["cwd"] = str(workspace)
+    options = sdk.options_cls(**kwargs)
 
-    try:
-        options = sdk.options_cls(**kwargs)
-    except TypeError:
-        # Older SDK builds may not support cwd; prompt + SKILL.md use absolute paths so retrying without cwd is safe.
-        kwargs.pop("cwd", None)
-        try:
-            options = sdk.options_cls(**kwargs)
-        except TypeError as env_exc:
-            # The Quark py310 shim must be passed to SDK-spawned tools without mutating process-global os.environ
-            # across async awaits.
-            raise RuntimeError(
-                "claude_agent_sdk.ClaudeAgentOptions does not support env; "
-                "upgrade claude-agent-sdk so Hyperloom can pass the Quark "
-                "Python 3.10 compatibility shim to SDK subprocesses"
-            ) from env_exc
-
-    chunks: list[str] = []
     sdk_error = ""
 
     if log:
@@ -308,21 +291,16 @@ async def run_one_attempt(
 
     try:
         async for message in sdk.query(prompt=prompt, options=options):
-            for text in _iter_message_text(message):
-                chunks.append(text)
-                if log:
+            if log:
+                for text in _iter_message_text(message):
                     log(f"[claude-sdk] {text[:1000]}")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: one SDK quantization attempt
         # Capture but don't raise: valid artifacts may exist before the abort.
         sdk_error = f"{type(exc).__name__}: {exc}"
         if log:
-            log(f"[claude-sdk] WARNING: {sdk_error}")
+            log(f"[claude-sdk] WARNING: {sdk_error}\n{traceback.format_exc()}")
 
-    return AttemptResult(
-        workspace=workspace,
-        sdk_error=sdk_error,
-        raw_text="\n".join(chunks),
-    )
+    return AttemptResult(sdk_error=sdk_error)
 
 
 # Injection seam used in tests and by driver/retry.py.
@@ -335,7 +313,6 @@ __all__ = [
     "ClaudeAgentSdk",
     "DEFAULT_ALLOWED_TOOLS",
     "DEFAULT_MAX_TURNS",
-    "DEFAULT_MODEL",
     "RunOneAttemptFn",
     "build_attempt_prompt",
     "resolve_skill_path",

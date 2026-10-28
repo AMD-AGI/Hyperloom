@@ -79,7 +79,7 @@ jobs:
         # Same pins as [tool.hyperloom.code_metrics.tools]; the script refuses
         # to measure with any other version.
         run: |
-          pip install "ruff==0.16.2" "complexipy==8.0.1" "vulture==2.16"
+          pip install "ruff==0.16.2" "complexipy==8.0.1" "radon==6.0.1" "vulture==2.16"
           npm install --global "jscpd@5.4.1"
 
       - name: Code metrics gate

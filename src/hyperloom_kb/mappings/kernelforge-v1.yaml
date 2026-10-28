@@ -1,0 +1,91 @@
+format: hyperloom-kb.collect.v2
+description: >-
+  KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
+  gets its own, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
+  the plan was built on, the kernel it measured, and what KernelForge measured and decided; from the document
+  kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log. Each Experience
+  links one empty raw log, raw-logs-not-collected.log, which export-runs writes beside the document.
+declaration: kernelforge-run-v1
+producer:
+  name: kernelforge
+  # Hand-written label with no upstream source. Collect copies it to provenance.producer_version. The schema
+  # requires some non-empty value, and a later change can rename it. It does not name a KernelForge version, a log
+  # format, or the archive layout.
+  version: "10"
+
+# A kernel names offsets such as offs_token, which the configuration screen reads as a credential assignment.
+code_fields:
+  - change.source_code
+  - change.change_diff_file
+
+units:
+  - each: $doc.runs
+    as: run
+
+unit_id: {text: $run.unit_id}
+
+require:
+  - reason: >-
+      The logs could not be read as a run: export-runs needs a readable campaign_config.json, a run_state.json naming
+      its campaign_id, and a readable meta.json for each archived candidate. read_error in the exported document says
+      what it found.
+    check: {absent: $run.read_error}
+  - reason: >-
+      No reasoning, which every Experience requires: the logs hold no lesson for this candidate and no rationale in
+      its meta.json. A merge never has one, since no agent made it, and neither does a lane whose iteration recorded
+      no lesson. For any other candidate, provide the lesson the iteration wrote.
+    check: {present: $run.reasoning}
+
+experience:
+  run_id: {token: $run.run_id}
+  seq: {integer: $run.seq}
+  created_at: {text: $run.started_at}
+  completed_at: {text: $run.completed_at}
+  identity: $run.identity
+  objective: kernel_time_ms@v1
+  baseline:
+    best_wall_ms_before: {number: $run.best_wall_ms_before}
+    source_ms: {number: $run.source_ms}
+  rationale:
+    reasoning: {text: $run.reasoning}
+    plan: {text: $run.plan}
+    plan_file: $run.plan_file
+  change:
+    source_code: $run.source_code
+    change_diff_file: $run.change_diff_file
+  outcome:
+    decision: {text: $run.decision}
+    candidate_wall_ms: {number: $run.candidate_wall_ms}
+  reflection:
+    analysis_report: {text: $run.analysis_report}
+  raw_logs: $doc.raw_logs
+  provenance:
+    source_ref: {text: $run.unit_id}
+    extra:
+      compact:
+        object:
+          candidate_origin: $run.provenance.candidate_origin
+          kb_record: $run.provenance.kb_record
+          analysis_generation: $run.provenance.analysis_generation
+          analysis_report_omitted: $run.provenance.analysis_report_omitted
+          meta:
+            compact:
+              object:
+                commit_hash: $run.provenance.meta.commit_hash
+                decision: $run.provenance.meta.decision
+                kept: $run.provenance.meta.kept
+                validation_passed: $run.provenance.meta.validation_passed
+                wall_ms: $run.provenance.meta.wall_ms
+                mean_case_speedup: $run.provenance.meta.mean_case_speedup
+                snr_db: $run.provenance.meta.snr_db
+                vgpr: $run.provenance.meta.vgpr
+                baseline_wall_ms: $run.provenance.meta.baseline_wall_ms
+                best_wall_ms_before: $run.provenance.meta.best_wall_ms_before
+                best_mean_case_speedup_before: $run.provenance.meta.best_mean_case_speedup_before
+                delta_vs_best_pct: $run.provenance.meta.delta_vs_best_pct
+                session_end_reason: $run.provenance.meta.session_end_reason
+                turns: $run.provenance.meta.turns
+                agent_profile_id: $run.provenance.meta.agent_profile_id
+                agent_provider: $run.provenance.meta.agent_provider
+                agent_model: $run.provenance.meta.agent_model
+                blockage_epoch: $run.provenance.meta.blockage_epoch

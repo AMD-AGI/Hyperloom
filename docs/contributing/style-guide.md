@@ -76,7 +76,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 
 | Gated dimension | Fails when | Why this number | Tool |
 |-----------------|-----------|-----------------|------|
-| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
+| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it. Every `and` / `or`, ternary, comprehension and `assert` counts as a branch, so it reads higher than ruff `C901` | radon `cc` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
 | Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
@@ -107,12 +107,13 @@ A unit that only moved to another file keeps its baseline entry when its qualifi
 
 Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Checks without a baseline.** The same job runs five checks that have no backlog to carry, and the design checks below. Each of the five fails the PR on its own, and `baseline-raise` does not waive them:
+**Checks without a baseline.** The same job runs six checks that have no backlog to carry, and the design checks below. Each of the six fails the PR on its own, and `baseline-raise` does not waive them:
 
 | Check | Fails when | Scope |
 |-------|-----------|-------|
 | Comments | an added run of more than 8 consecutive full-line `#` comments; an added comment that points at a PR or issue (`#1234`, `PR 1234`, `GH-1234`, `issue #12`, a `/pull/` link) or narrates an incident (`after the outage`, a dated `incident`, `postmortem`). A comment starting with `TODO` and the line after it may link an issue, as Ruff's `TD003` asks. A comment the PR only moves, re-indents or carries through a rename is not added | added lines of `.py` files, tests included; docstrings are not comments |
-| Broad catch reason | an added `# noqa: BLE001` with no reason after the code on the same line (`except Exception:  # noqa: BLE001 - outermost CLI boundary, logged`). A line the PR only moves or re-indents is not added | added lines of `.py` files, tests included |
+| Broad catch reason | an added `# noqa: BLE001` with no reason after the code on the same line (`except Exception:  # noqa: BLE001 - outermost CLI boundary, logged`, or `- isolation boundary: one sweep point`). A line the PR only moves or re-indents is not added | added lines of `.py` files, tests included |
+| Broad catch records the error | an added broad `except` (bare, `Exception`, `BaseException`) that neither re-raises -- directly, through a `raise*` helper, or by keeping the error for a later `raise` -- nor records it: a logger call, `print`, `traceback`, `warnings` or a `*log*` helper. Whether the handler sits at the boundary that owns the failure is review-pr rule S8; a handler that logs with `exc_info` needs no `# noqa: BLE001`, and names its boundary in a plain comment on the `except` line. An `except` whose body the PR does not touch and whose code its own file lost (only its comment changed) is not added; the same line removed in another file exempts nothing | added lines of production `.py` files |
 | English only | a CJK character (CJK ideographs, CJK symbols and punctuation, halfwidth and fullwidth forms) | every tracked text file, and on a PR its title, body and every commit message. Test data that needs a multi-byte character uses a non-CJK one (the euro sign is three bytes in UTF-8) |
 | Production code does not import test code | a module under `src/` or `scripts/` that is not itself a test imports a `tests` package or a `test_*` module (a module merely named `test` is not test code) | the whole tree. Move what both sides need into a non-test module |
 | Repeated literals | the PR takes a string or bytes value (3+ characters) or a number (other than 0, 1, -1 and 2) from fewer than 3 occurrences in a module to 3 or more | the production modules the PR touches, counted before and after (a renamed module against the file it came from; a literal that only moved between touched modules is not added); dict keys, `x["key"]` subscripts, the key of `.get`/`.pop`/`.setdefault` and of an `in` test, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
@@ -137,7 +138,7 @@ A10 is limited to the enum's own vocabulary on purpose: matched against every en
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
-| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `radon cc` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
@@ -147,7 +148,7 @@ Neither number identifies a problem on its own. A long function can be one promp
 Measure rather than argue:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+radon cc -s -n C src/hyperloom src/kernelforge
 ```
 
 Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is, and so is the `code-metrics` gate above.
@@ -163,12 +164,10 @@ The ceiling sits at twice the trigger because the trigger asks a question the ce
 Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise <changed .py files under src/, tests excluded>
+radon cc -s -n D <changed .py files under src/, tests excluded>
 
 git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise /tmp/base.py
+radon cc -s -n D /tmp/base.py
 ```
 
 The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.

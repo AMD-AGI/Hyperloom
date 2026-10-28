@@ -262,8 +262,8 @@ def dispatch_single_task(
             status=TASK_STATUS_FAILED,
             reason=reason,
         )
-    except Exception as error:  # noqa: BLE001 - translated into a dispatch failure
-        log.warning("single-task dispatch failed for %s: %s", task_path, error)
+    except Exception as error:  # isolation boundary: one prepared operator task
+        log.warning("single-task dispatch failed for %s: %s", task_path, error, exc_info=True)
         reason = f"single-task dispatch failed: {error}"
         state_store.transition(TASK_STATUS_FAILED, reason=reason)
         return SingleTaskResult(

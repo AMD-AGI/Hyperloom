@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
 from hyperloom.common.timeutil import iso_z
 
 from . import tool_versions
@@ -118,10 +119,9 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder
     kid = str(result.get("kernel_id") or "")
     if not kid:
         return
-    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+    verification = to_mapping(result.get("verification"))
     adopted_attempt_id = str(verification.get("best_attempt_id") or "")
-    attempts = result.get("attempts") if isinstance(result.get("attempts"), list) else []
-    attempts = [att for att in attempts if isinstance(att, dict)]
+    attempts = dict_rows(result.get("attempts"))
     all_backends = [att["backend"] for att in attempts if att.get("backend")]
     for att in attempts:
         attempt_id = str(att.get("attempt_id") or "")
@@ -164,23 +164,19 @@ def record_backend_versions_and_timeline(
             section="versions",
         )
         return
-    result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    attempts = result.get("attempts")
-    attempts = attempts if isinstance(attempts, list) else []
+    result_meta = to_mapping(result.get("metadata"))
     recorded: set[str] = set()
-    for att in attempts:
-        if not isinstance(att, dict):
-            continue
+    for att in dict_rows(result.get("attempts")):
         backend = str(att.get("backend") or "").lower()
         if not backend or backend in recorded:
             continue
         recorded.add(backend)
-        att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+        att_meta = to_mapping(att.get("metadata"))
         tool_versions.record_tool_version(
             session_dir,
             tool=backend,
-            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+            root=att_meta.get("root_dir") or result_meta.get("root_dir"),
+            version=att_meta.get("version") or result_meta.get("version"),
             producer=producer,
         )
     # No attempts means the run failed before any backend launched. The
@@ -193,8 +189,8 @@ def record_backend_versions_and_timeline(
             tool_versions.record_tool_version(
                 session_dir,
                 tool=backend,
-                root=str(result_meta.get("root_dir") or "") or None,
-                version=str(result_meta.get("version") or "") or None,
+                root=result_meta.get("root_dir"),
+                version=result_meta.get("version"),
                 producer=producer,
             )
     _mirror_backend_attempts_to_kernel_timeline(result, recorder)

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import to_unix
+from hyperloom.common.coerce import to_float, to_unix
 from hyperloom.common.env import env_float as _env_float, env_int as _env_int
 from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
@@ -19,8 +19,8 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from ..kernel import kernel_decisions
 from ..state.shared_state import (
-    ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
     _LIFECYCLE_CAP,
@@ -491,7 +491,7 @@ def phase_status_summary(
     *,
     now_unix: float | None = None,
 ) -> str:
-    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable, and a phase held for its initial roofline a ``hold`` line."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
     # ``remaining`` paces this entry; ``cumulative`` totals every entry.
@@ -506,12 +506,13 @@ def phase_status_summary(
             f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
             f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
         )
+    entered = time.strftime("%FT%TZ", time.gmtime(t0)) if (t0 := _phase_started_unix(state)) > 0 else "(unset)"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
         f"cycle     : {state.macro_cycle}",
-        f"entered   : {state.phase_started_ts or '(unset)'}",
+        f"entered   : {entered}",
         budget_line,
         allowed_line,
     ]
@@ -531,6 +532,8 @@ def phase_status_summary(
         if phase != PHASE_SWEEP:
             reloop_line += " (projected)"
         lines.append(reloop_line)
+    if hold_line := _initial_analysis_hold_line(state, phase):
+        lines.append(hold_line)
     return "\n".join(lines)
 
 
@@ -552,10 +555,6 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
         return dict_rows
     cycle = state.macro_cycle
     return [row for row in dict_rows if _row_cycle(row) == cycle]
-
-
-# Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
-_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
 # per-phase judgments
@@ -655,13 +654,12 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if state.has_keep_pending_integrate:
+    if kernel_decisions.has_keep_pending_integrate(state):
         return True
-
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
-    return bool(state.untried_hot_reusable_kernels())
+    return bool(kernel_decisions.untried_hot_reusable_kernels(state))
 
 
 def measured_seconds(state: Any, field: str) -> float | None:
@@ -880,7 +878,7 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
 
 _STOP_TIME_EXHAUSTED = "time_exhausted"
 
-#: SWEEP's close reason per ``reloop_blocked`` value; too little time closes as ``skip_to_close`` would.
+#: SWEEP's close reason per ``reloop_blocked`` value.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
     "all_directions_saturated": "global_converged",
@@ -898,15 +896,8 @@ def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str
     return PHASE_SWEEP
 
 
-def _number(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _positive_number(value: Any) -> float | None:
-    number = _number(value)
+    number = to_float(value)
     return number if number is not None and number > 0.0 else None
 
 
@@ -944,20 +935,10 @@ def _base_workflow_predicate_inputs(
     enablement_in_flight: bool,
 ) -> dict[str, Any]:
     hint = _pending_escalate_hint(state) or None
-    last_conc = state.last_conc_sweep or {}
-    sweep_closeout_status = str(last_conc.get("status") or "").lower() if isinstance(last_conc, dict) else ""
     global_inputs: dict[str, Any] = {
         "stop_reason": str(state.stop_reason or "").strip(),
         "closing_phase": bool(state.closing_phase),
         "target_reached_at": str(state.target_reached_at or ""),
-        "sweep_closeout_status": sweep_closeout_status,
-        "session_remaining_sec": (
-            session_remaining_seconds(state, now_unix=now_unix) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        ),
-        "cycle_reloop_min_remaining_sec": (
-            _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
-        ),
-        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
     return {
         "current_phase": current,
@@ -986,9 +967,8 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "failure_streak": int(state.baseline_failure_streak or 0),
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
-        "tput": _number(state.baseline_tput) or 0.0,
-        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        "tput": to_float(state.baseline_tput) or 0.0,
+        **_initial_analysis_inputs(state),
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1040,9 +1020,7 @@ def _kernel_predicate_inputs(
         "kernel_work_pending": bool(kernel_work_pending(state)),
         "kernel_agent_in_flight": bool(kernel_work_in_flight),
         "optimizer": str(state.kernel_optimizer or "").strip().lower(),
-        "controller_cycle": int(
-            _number(controller.get("macro_cycle", -1)) if _number(controller.get("macro_cycle", -1)) is not None else -1
-        ),
+        "controller_cycle": int(to_float(controller.get("macro_cycle"), -1)),
         "controller_status": str(controller.get("status") or "").strip().lower(),
         "controller_patch_count": int(controller.get("patch_count") or 0),
         "controller_task_count": int(controller.get("task_count") or 0),
@@ -1083,7 +1061,7 @@ def _sweep_predicate_inputs(
         "summary_present": bool(summary),
         "reloop": {
             "current_gain_pct": _cumulative_gain_validated(state),
-            "gain_at_cycle_start_pct": _number(state.gain_at_cycle_start) or 0.0,
+            "gain_at_cycle_start_pct": to_float(state.gain_at_cycle_start) or 0.0,
             "min_gain_pct": decaying_keep_threshold_pct(cycle),
             "prior_no_gain_cycle_streak": int(state.no_gain_cycle_streak or 0),
             "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
@@ -1106,10 +1084,10 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     that sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
     the same decision.
     """
-    grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
+    grant_left = (to_float(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
     if grant_left <= 0.0:
         return
-    remaining = _number(budget.get("remaining_sec"))
+    remaining = to_float(budget.get("remaining_sec"))
     if remaining is not None and remaining < grant_left:
         budget["remaining_sec"] = grant_left
         if "current_balance" in budget:
@@ -1138,11 +1116,7 @@ def workflow_predicate_inputs(
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
-        inputs["baseline"] = {
-            "tput": _number(state.baseline_tput) or 0.0,
-            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
-        }
+        inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
             "enablement_in_flight": bool(enablement_in_flight),
@@ -1181,7 +1155,7 @@ def _transition_result(
 
 
 def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
-    usable = _number(baseline.get("session_usable_sec"))
+    usable = to_float(baseline.get("session_usable_sec"))
     runtime = _positive_number(baseline.get("runtime_sec"))
     post_ready = _positive_number(baseline.get("post_ready_runtime_sec"))
     warm = _positive_number(baseline.get("warm_runtime_sec"))
@@ -1210,9 +1184,9 @@ def _budget_exit(
     exhausted_reason: str,
     evidence: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
-    remaining = _number(budget.get("remaining_sec"))
-    elapsed = _number(budget.get("entry_elapsed_sec")) or 0.0
-    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
+    remaining = to_float(budget.get("remaining_sec"))
+    elapsed = to_float(budget.get("entry_elapsed_sec")) or 0.0
+    cumulative = to_float(budget.get("cumulative_elapsed_sec")) or 0.0
     timing = {
         **evidence,
         "entry_elapsed_seconds": elapsed,
@@ -1234,8 +1208,8 @@ class _FrameworkPlateau(NamedTuple):
 
 def _framework_plateau(plateau: dict[str, Any]) -> _FrameworkPlateau:
     """Read the per-arm plateau verdicts off the FRAMEWORK_AGENT predicate inputs."""
-    recent_gain = _number(plateau.get("recent_keep_gain_pct")) or 0.0
-    keep_threshold = _number(plateau.get("keep_gain_threshold_pct")) or 0.0
+    recent_gain = to_float(plateau.get("recent_keep_gain_pct")) or 0.0
+    keep_threshold = to_float(plateau.get("keep_gain_threshold_pct")) or 0.0
     empty_streak = int(plateau.get("empty_streak") or 0)
     empty_threshold = int(plateau.get("empty_streak_threshold") or 0)
     source_streak = int(plateau.get("source_consecutive_no_keep") or 0)
@@ -1285,11 +1259,11 @@ def _kernel_idle_exit(plateau: dict[str, Any], now_unix: Any) -> tuple[str, dict
     """The no-progress exit a KERNEL phase takes once it has been quiet for long enough."""
     idle_ticks = int(plateau.get("idle_ticks") or 0)
     idle_max_ticks = int(plateau.get("idle_max_ticks") or 0)
-    idle_since = _number(plateau.get("idle_since_unix")) or 0.0
+    idle_since = to_float(plateau.get("idle_since_unix")) or 0.0
     if idle_ticks < idle_max_ticks or idle_since <= 0.0:
         return None
-    idle_seconds = max(0.0, (_number(now_unix) or 0.0) - idle_since)
-    idle_min = _number(plateau.get("idle_min_seconds")) or 0.0
+    idle_seconds = max(0.0, (to_float(now_unix) or 0.0) - idle_since)
+    idle_min = to_float(plateau.get("idle_min_seconds")) or 0.0
     if idle_seconds < idle_min:
         return None
     return "kernel_no_more_leverage", {
@@ -1374,9 +1348,9 @@ def _reloop_block_evidence(
 def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     facts = dict(dict(inputs.get("sweep_result") or {}).get("reloop") or {})
     cycle = int(inputs.get("macro_cycle") or 0)
-    current_gain = _number(facts.get("current_gain_pct")) or 0.0
-    start_gain = _number(facts.get("gain_at_cycle_start_pct")) or 0.0
-    threshold = _number(facts.get("min_gain_pct")) or 0.0
+    current_gain = to_float(facts.get("current_gain_pct")) or 0.0
+    start_gain = to_float(facts.get("gain_at_cycle_start_pct")) or 0.0
+    threshold = to_float(facts.get("min_gain_pct")) or 0.0
     gained = (current_gain - start_gain) > threshold
     streak = 0 if gained else int(facts.get("prior_no_gain_cycle_streak") or 0) + 1
     evidence: dict[str, Any] = {
@@ -1390,9 +1364,9 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     if blocked:
         evidence.update(blocked)
         return False, evidence
-    minimum = _number(facts.get("min_remaining_sec")) or 0.0
+    minimum = to_float(facts.get("min_remaining_sec")) or 0.0
     evidence["min_remaining_sec_effective"] = round(minimum, 2)
-    remaining = _number(facts.get("session_remaining_sec"))
+    remaining = to_float(facts.get("session_remaining_sec"))
     if remaining is not None and remaining < minimum:
         evidence["reloop_blocked"] = "insufficient_remaining"
         evidence["session_remaining_seconds"] = round(remaining, 2)
@@ -1426,40 +1400,7 @@ def compute_next_phase(
         enablement_in_flight=enablement_in_flight,
         kernel_work_in_flight=kernel_work_in_flight,
     )
-    if "baseline_tput" in inputs["global"]:
-        return replay_next_phase(inputs)
-    # The session's contract cannot carry the baseline in the frozen inputs, so
-    # the close decision reads it from state and records it in the evidence.
-    return replay_next_phase(inputs, unrecorded_baseline_tput=_number(state.baseline_tput) or 0.0)
-
-
-def _skip_to_close_reason(
-    global_inputs: dict[str, Any],
-    hint: str,
-    unrecorded_baseline_tput: float | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Terminal reason and evidence for a close requested by a skip_to_close hint."""
-    evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
-    floor = _number(global_inputs.get("cycle_reloop_min_remaining_sec")) or 0.0
-    evidence["min_remaining_sec_effective"] = round(floor, 2)
-    remaining = _number(global_inputs.get("session_remaining_sec"))
-    if remaining is not None:
-        evidence["session_remaining_seconds"] = round(remaining, 2)
-    reason = _STOP_TIME_EXHAUSTED if remaining is not None and remaining < floor else "global_converged"
-    # Both of those read as a normal closeout. A session that never measured a
-    # baseline optimized nothing, so closing it early is a baseline failure
-    # whatever budget is left. A record frozen before this fact existed carries
-    # no value and replays as it was decided. A session whose contract cannot
-    # freeze the fact passes it from state instead.
-    if "baseline_tput" in global_inputs:
-        baseline_tput = _number(global_inputs.get("baseline_tput"))
-    else:
-        baseline_tput = _number(unrecorded_baseline_tput)
-    if baseline_tput is not None and baseline_tput <= 0.0:
-        evidence["baseline_tput"] = baseline_tput
-        evidence["unmeasured_close_reason"] = reason
-        reason = "baseline_failed"
-    return reason, evidence
+    return replay_next_phase(inputs)
 
 
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
@@ -1470,26 +1411,39 @@ def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
     """
     if not bool(baseline.get("initial_analysis_pending")):
         return False
-    affordable = _number(baseline.get("analysis_affordable_sec"))
+    affordable = to_float(baseline.get("analysis_affordable_sec"))
     return affordable is None or affordable > 0.0
 
 
-def _terminal_close_transition(
-    inputs: dict[str, Any],
-    unrecorded_baseline_tput: float | None,
-) -> tuple[str, str, dict[str, Any]] | None:
-    """The CLOSE a stop reason, a skip-to-close hint or the closing deadline forces, if one does."""
+def _initial_analysis_inputs(state: Any) -> dict[str, Any]:
+    """The two facts :func:`_holds_for_initial_analysis` decides on, read once for the predicates and the block."""
+    return {
+        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
+        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+    }
+
+
+def _initial_analysis_hold_line(state: Any, phase: str) -> str | None:
+    """The ``hold`` line of a PRELUDE or ENABLEMENT kept open for its initial roofline, or ``None`` when none holds it."""
+    if phase not in (PHASE_PRELUDE, PHASE_ENABLEMENT) or (to_float(state.baseline_tput) or 0.0) <= 0.0:
+        return None
+    facts = _initial_analysis_inputs(state)
+    if not _holds_for_initial_analysis(facts):
+        return None
+    affordable = facts["analysis_affordable_sec"]
+    bound = "" if affordable is None else f", for at most {int(affordable)}s more"
+    return (
+        f"hold      : waiting for initial roofline {state.auto_roofline_pending_task_id.strip()}{bound}. "
+        f"No hint advances {phase}, and remaining_sec above is this phase's share, not the session's; "
+        "answer each tick with a send_message observation until it moves on."
+    )
+
+
+def _terminal_close_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """The CLOSE a stop reason or the closing deadline forces, if one does."""
     if str(inputs["current_phase"]) == PHASE_CLOSE:
         return None
     global_inputs = dict(inputs.get("global") or {})
-    hint = str(inputs.get("hint") or "")
-    sweep_closed_out = (
-        str(inputs["current_phase"]) == PHASE_SWEEP
-        and str(global_inputs.get("sweep_closeout_status") or "") in _SWEEP_CLOSEOUT_STATUSES
-    )
-    if hint == ESCALATE_HINT_SKIP_TO_CLOSE and not sweep_closed_out:
-        reason, evidence = _skip_to_close_reason(global_inputs, hint, unrecorded_baseline_tput)
-        return _transition_result(PHASE_CLOSE, reason, {"terminal": True, **evidence}, inputs)
     stop_reason = str(global_inputs.get("stop_reason") or "")
     if stop_reason:
         evidence = {"reason_origin": "shared_state.stop_reason"}
@@ -1510,7 +1464,7 @@ def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
     """The evidence that retrying a dropped measure round no longer fits the session's budget."""
     if not bool(baseline.get("measure_round_dropped")):
         return None
-    usable = _number(baseline.get("session_usable_sec"))
+    usable = to_float(baseline.get("session_usable_sec"))
     runtime = _positive_number(baseline.get("runtime_sec"))
     benchmark = _positive_number(baseline.get("warm_runtime_sec")) or _positive_number(
         baseline.get("post_ready_runtime_sec")
@@ -1519,7 +1473,7 @@ def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
     if runtime is not None and benchmark is not None:
         retry += benchmark
     viability = _prelude_viability(baseline)
-    use_sec = _number(viability.get("measured_round_sec")) or runtime
+    use_sec = to_float(viability.get("measured_round_sec")) or runtime
     if usable is None or retry is None or use_sec is None or usable >= retry + use_sec:
         return None
     return {"terminal": True, "baseline_anchor": "cold", "retry_round_sec": round(retry, 1), **viability}
@@ -1530,7 +1484,7 @@ def _baseline_is_anchored(baseline: dict[str, Any]) -> bool:
     return (
         str(baseline.get("warm_replay_status") or "") != "in_flight"
         and not bool(baseline.get("measure_round_dropped"))
-        and (_number(baseline.get("tput")) or 0.0) > 0.0
+        and (to_float(baseline.get("tput")) or 0.0) > 0.0
     )
 
 
@@ -1580,7 +1534,7 @@ def _prelude_transition(
         if _holds_for_initial_analysis(baseline):
             return None
         return _anchored_baseline_transition(inputs, flags, baseline, _prelude_viability(baseline), "prelude_done")
-    usable = _number(baseline.get("session_usable_sec"))
+    usable = to_float(baseline.get("session_usable_sec"))
     if usable is not None and usable <= 0.0:
         return _transition_result(
             PHASE_CLOSE,
@@ -1588,7 +1542,7 @@ def _prelude_transition(
             {
                 "terminal": True,
                 "session_usable_sec": round(usable, 1),
-                "prelude_spent_sec": round(_number(baseline.get("phase_spent_sec")) or 0.0, 1),
+                "prelude_spent_sec": round(to_float(baseline.get("phase_spent_sec")) or 0.0, 1),
             },
             inputs,
         )
@@ -1603,7 +1557,7 @@ def _enablement_transition(
     baseline = dict(inputs.get("baseline") or {})
     pending = dict(inputs.get("pending_work") or {})
     if (
-        (_number(baseline.get("tput")) or 0.0) > 0.0
+        (to_float(baseline.get("tput")) or 0.0) > 0.0
         and not bool(pending.get("validation_pending"))
         and not bool(pending.get("enablement_in_flight"))
     ):
@@ -1669,18 +1623,9 @@ def _sweep_transition(
     return _transition_result(PHASE_CLOSE, exit_reason, {**exit_evidence, **reloop_evidence}, inputs)
 
 
-def replay_next_phase(
-    inputs: dict[str, Any],
-    *,
-    unrecorded_baseline_tput: float | None = None,
-) -> tuple[str, str, dict[str, Any]] | None:
-    """Recompute a phase decision from persisted primitive facts only.
-
-    ``unrecorded_baseline_tput`` is the baseline for a live decision whose
-    session contract has no ``global.baseline_tput`` slot; it is used only
-    when the frozen inputs lack that fact.
-    """
-    forced = _terminal_close_transition(inputs, unrecorded_baseline_tput)
+def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
+    """Recompute a phase decision from persisted primitive facts only."""
+    forced = _terminal_close_transition(inputs)
     if forced is not None:
         return forced
     current = str(inputs["current_phase"])
@@ -1830,7 +1775,6 @@ def record_phase_transition(
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
     state.phase = row["to_phase"]
-    state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
     _publish_phase_boundary(
         _PhaseBoundary(
@@ -1894,33 +1838,14 @@ def append_phase_history_event(
     return row
 
 
-def record_lifecycle_event(
-    state,
-    *,
-    step: str,
-    status: str,
-    phase: str | None = None,
-    label: str | None = None,
-    artifacts: dict[str, str] | None = None,
-    detail: str = "",
-    duration_s: float | None = None,
-    ts: str | None = None,
-) -> dict[str, Any]:
-    """Append a structured lifecycle event marking a phase/step boundary."""
+def record_lifecycle_event(state, mark: LifecycleMark, *, ts: str | None = None) -> dict[str, Any]:
+    """Append a structured lifecycle event marking a phase/step boundary; an unset phase is the current one."""
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
     next_seq = (int(events[-1].get("seq", -1)) + 1) if events else 0
     event = make_lifecycle_event(
-        LifecycleMark(
-            step=step,
-            status=status,
-            phase=(phase if phase is not None else (state.phase or "")),
-            label=label,
-            artifacts=artifacts,
-            detail=detail,
-            duration_s=duration_s,
-        ),
+        mark if mark.phase is not None else replace(mark, phase=state.phase or ""),
         seq=next_seq,
         ts=ts or _now_iso(),
     )

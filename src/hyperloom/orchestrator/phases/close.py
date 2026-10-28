@@ -23,8 +23,7 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_c
 from . import machine_state as _phase_state
 from .machine import Transition
 from ..bus.message_bus import Message
-from ..state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE
-from ..state.task_registry import IllegalTransition, Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
@@ -341,7 +340,7 @@ class ClosePhase(CoordinatorCollaborator):
         """
         try:
             await coro
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one CLOSE step of the sequence
             log.exception("CLOSE step %r failed", step_name)
             await self._record_close_step(step_name, status="failed", detail=repr(exc)[:240])
 
@@ -517,7 +516,7 @@ class ClosePhase(CoordinatorCollaborator):
         pkg_path: Path | None = None
         try:
             pkg_path = await self._do_artifact_package()
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the artifact_package CLOSE step
             log.exception("CLOSE step %r failed", "artifact_package")
             await self._record_close_step("artifact_package", status="failed", detail=repr(exc)[:240])
 
@@ -544,9 +543,9 @@ class ClosePhase(CoordinatorCollaborator):
 
         # Refresh the breakdown's ``close`` key now that the sequence is on
         # disk: step 2 wrote the breakdown, so the copy it produced describes
-        # only the close-out up to itself. Splices one key; best-effort and
-        # last, after stop_reason and close_sequence_done are settled, so it
-        # cannot affect the run.
+        # only the close-out up to itself. Splices one key, last, after stop_reason
+        # and close_sequence_done are settled; an unreadable breakdown is logged below,
+        # any other failure leaves the close entry.
         #
         # Re-package when that changed something: ``session_breakdown.json`` is
         # bundled into the zip and the package is what external sync ships. The
@@ -594,13 +593,14 @@ class ClosePhase(CoordinatorCollaborator):
         task: Task | None = None
         for key in (idempotency_key, f"{idempotency_key}-{_RETRY_KEY_SUFFIX}"):
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=kind,
-                params=params,
-                idempotency_key=key,
-                requires_lanes=[],
-                side_effects=["writes_results"],
-                lease_ttl_sec=120,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind=kind,
+                    params=params,
+                    idempotency_key=key,
+                    requires_lanes=[],
+                    lease_ttl_sec=120,
+                    dispatch_class="coordinator",
+                )
             )
             if not was_existing:
                 return task
@@ -870,16 +870,17 @@ class ClosePhase(CoordinatorCollaborator):
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
         machine.set_terminal_stop_reason(state, reason)
-        if state.pending_escalate_hint == ESCALATE_HINT_SKIP_TO_CLOSE:
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
+        if state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
         _phase_state.record_phase_transition(
             state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
         )
         machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
-            state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            state,
+            _phase_state.LifecycleMark(
+                step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
+            ),
         )
         state.save(self.session_dir)
         return prior
@@ -923,16 +924,17 @@ class ClosePhase(CoordinatorCollaborator):
         idempotency_key = f"closing-report-{int(closing_started)}-{uuid.uuid4().hex[:6]}"
         task_id = ""
         task, _existing = await self.tasks.create_or_return_existing(
-            kind="report",
-            params={
-                "session_dir": str(self.session_dir),
-                "max_highlights": 50,
-            },
-            idempotency_key=idempotency_key,
-            requires_lanes=[],
-            side_effects=["writes_results"],
-            lease_ttl_sec=120,
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="report",
+                params={
+                    "session_dir": str(self.session_dir),
+                    "max_highlights": 50,
+                },
+                idempotency_key=idempotency_key,
+                requires_lanes=[],
+                lease_ttl_sec=120,
+                dispatch_class="coordinator",
+            )
         )
         task_id = task.task_id
         self.shared_state.closing_report_task_id = task_id

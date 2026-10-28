@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -12,12 +13,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.loop import runner as runner_module
 from kernelforge.loop.fanout import LaneResult
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.orchestrator.contracts import PlanCriticOutcome
 from kernelforge.tracker import ExperimentTracker
+from kernelforge.tests.conftest import silence_jit_rebuild
 
 
 def _loop(tmp_path, monkeypatch):
@@ -50,7 +52,7 @@ def _reopen(workspace, tmp_path, monkeypatch):
 
 
 def _open_loop(workspace, experiments_root, monkeypatch):
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
 
     loop = IterationLoop(
         IterationConfig(
@@ -549,6 +551,36 @@ def _widen(workspace):
     return diff_of
 
 
+def test_a_queued_lesson_outlives_the_process(tmp_path, monkeypatch):
+    """The record is taken in the round, and the process that measures the lane may be a later one."""
+    loop, workspace = _loop(tmp_path, monkeypatch)
+    record = SummaryOutcome(text="lane 1 widened the loads")
+    loop._lane_queue = [LaneResult(lane_id="1", plan="widen the loads", diff="patch-1", lesson=record)]
+    loop._persist_lane_queue()
+
+    later = _reopen(workspace, tmp_path, monkeypatch)
+    later._restore_lane_queue()
+
+    assert [item.lesson for item in later._lane_queue] == [record]
+
+
+def test_a_queue_entry_without_a_lesson_restores_with_the_reason_it_has_none(tmp_path, monkeypatch):
+    """An entry holding neither a lesson nor its reason still names a candidate to measure."""
+    loop, _workspace = _loop(tmp_path, monkeypatch)
+    path = loop._lane_queue_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"candidates": [{"lane_id": "1", "plan": "widen the loads", "diff": "patch-1"}]}),
+        encoding="utf-8",
+    )
+
+    loop._restore_lane_queue()
+
+    assert [(item.lane_id, item.lesson) for item in loop._lane_queue] == [
+        ("1", SummaryOutcome(reason="the lane queue held no record for this lane"))
+    ]
+
+
 def test_a_candidate_a_round_bought_outlives_the_process(tmp_path, monkeypatch):
     """The sessions are the expensive part of a round, and they are finished."""
     loop, workspace = _loop(tmp_path, monkeypatch)
@@ -621,7 +653,6 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypa
     def _no_room(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "atomic_write_json", _no_room, raising=False)
     monkeypatch.setattr("kernelforge.loop.recovery.atomic_write_json", _no_room)
 
     loop._persist_lane_queue()
