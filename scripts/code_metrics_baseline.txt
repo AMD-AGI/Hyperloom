@@ -619,7 +619,6 @@ module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3995
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1733
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1384
-module-lines src/hyperloom/orchestrator/actions/executors/report.py 1262
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1277
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2644
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1449
@@ -629,7 +628,7 @@ module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
 module-lines src/hyperloom/orchestrator/phases/kernel.py 3970
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 1914
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 1879
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205

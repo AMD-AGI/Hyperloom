@@ -246,9 +246,7 @@ def test_the_prelude_allowance_never_reads_as_a_debt():
 
 def test_a_prelude_that_can_buy_nothing_closes_instead_of_idling():
     """The phase that ticked for 4.1h: nothing it may spend, no arm of its own, and a clock that is not zero."""
-    state = _prelude_state(
-        max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2
-    )
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
     out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     next_phase, reason, evidence = out
@@ -268,9 +266,7 @@ def test_a_prelude_with_budget_of_its_own_keeps_retrying():
 
 def test_a_round_still_in_flight_is_not_an_idle_prelude():
     """A warm replay that has not landed is work in progress, not a phase waiting on nothing."""
-    state = _prelude_state(
-        max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2
-    )
+    state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
     state.warm_replay_outcome = {"status": "in_flight", "replay_task_id": "abc"}
     assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
