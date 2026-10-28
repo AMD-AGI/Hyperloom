@@ -706,10 +706,10 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the first arm may spend
-    half the time left and the second runs only the rungs it reached, so a
-    budget that runs out drops whole pairs. ``concs_ordered`` is the session's
-    own CONC first, then the rest cheapest first."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the
+    first arm may spend half the time left, and the second runs only the rungs
+    it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
+    is the session's own CONC first, then the rest cheapest first."""
 
     grid_source: str | None
     concs_requested: list[int]
@@ -720,7 +720,7 @@ class V6ConcSweepPlan(TypedDict, total=False):
 
 
 class V6ConcSweepBudget(TypedDict, total=False):
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
     ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is null:
     a rung is held to its arm's deadline rather than priced. ``deadline`` is a

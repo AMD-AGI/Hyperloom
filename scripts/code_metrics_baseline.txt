@@ -624,7 +624,7 @@ module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2644
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1373
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1268
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1332
-module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
+module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1426
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
 module-lines src/hyperloom/orchestrator/phases/kernel.py 3970

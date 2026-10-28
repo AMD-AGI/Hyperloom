@@ -223,9 +223,8 @@ class SweepPlan:
     """The ladder the sweep resolved and the order it will run it in.
 
     ``concs_ordered`` is deduplicated: the session's own CONC first, then the
-    rest cheapest first, so a deadline cuts the costliest rungs. ``grid_source`` is a
-    ``GRID_*`` value, and ``num_prompts_factor`` turns a rung's CONC into its
-    NUM_PROMPTS.
+    rest cheapest first. ``grid_source`` is a ``GRID_*`` value, and
+    ``num_prompts_factor`` turns a rung's CONC into its NUM_PROMPTS.
     """
 
     concs_requested: Any = None
@@ -259,11 +258,8 @@ class SweepBudget:
     deadline: Any = None
 
     def block(self) -> dict[str, Any]:
-        """The ``budget`` block this record persists as; the gate is active whenever a total was declared.
-
-        ``rung_cost_sec`` stays in the schema as null: a rung is held to its arm's deadline, not admitted against an
-        estimate of what it costs.
-        """
+        """The ``budget`` block this record persists as; the gate is active whenever a total was declared, and
+        ``rung_cost_sec`` is null because a rung is held to its arm's deadline rather than priced."""
         return {
             "declared_total_sec": _int_or_none(self.declared_total_sec),
             "rung_cost_sec": None,

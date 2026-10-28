@@ -490,12 +490,8 @@ class _Window:
         return _ArmDeadlines(self, self)
 
     def split_for_first_arm(self) -> _ArmDeadlines:
-        """The deadlines of the arm that runs first, which spends for both arms of every pair it starts.
-
-        Its first rung has no pair yet to leave room for, so it may use the whole window. A later rung is held to half
-        of what is left now: once the second arm's replay of the first rung is set aside, that is the first arm's half
-        of the rest. With nothing left there is nothing to split, and the stop stays with the deadline that ran out.
-        """
+        """The deadlines of the arm that runs first: the whole window for its first rung, which has no pair yet to leave
+        room for, and half of what is left now for each later one. With nothing left there is nothing to split."""
         remaining_sec = self.remaining_sec()
         if remaining_sec is None or remaining_sec <= 0:
             return self.whole()
@@ -659,15 +655,12 @@ class _SweepRun:
             ),
         )
 
-    def record_ran(self, arm_name: str, results: list[VariantResult], note: _RungNote, window: _Window) -> None:
-        """Publish the results a rung returned; one a run-side stop names is recorded as a budget skip."""
-        for result in results:
-            self.results.append(result)
-            if self.stop_named_by(result, window) is not None:
-                stopped = replace(note, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=self.budget.remaining_sec)
-                self.record_rung(arm_name, result, stopped)
-            else:
-                self.record_rung(arm_name, result, note)
+    def record_ran(self, arm_name: str, result: VariantResult, note: _RungNote, window: _Window) -> None:
+        """Publish a rung's result; one a run-side stop names is recorded as a budget skip."""
+        self.results.append(result)
+        if self.stop_named_by(result, window) is not None:
+            note = replace(note, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=self.budget.remaining_sec)
+        self.record_rung(arm_name, result, note)
 
     def record_boot(
         self,
@@ -730,11 +723,11 @@ class _SweepRun:
 
     async def run_rung(
         self, variant: GridVariant, launch: GridLaunch, window: _Window, base: LaunchLayer
-    ) -> list[VariantResult]:
+    ) -> VariantResult:
         """Run one rung from the sweep's base config under ``window``; a deadline stop inside it exhausts the budget."""
         if self.observe_cancel():
-            return [_deadline_skip_result(variant, _CANCEL_STOP)]
-        results = await run_grid(
+            return _deadline_skip_result(variant, _CANCEL_STOP)
+        (result,) = await run_grid(
             grid=[variant],
             output_root=self.workspace,
             recipe=GridRecipe(
@@ -749,10 +742,10 @@ class _SweepRun:
             launch=launch,
             stop=GridStop(session_deadline_sec=window.deadline_sec, deadline_stop=window.stop),
         )
-        self.observe_cancel(results)
-        if any(result.error_class == window.stop.error_class for result in results):
+        self.observe_cancel([result])
+        if result.error_class == window.stop.error_class:
             self.budget.run_out(window)
-        return results
+        return result
 
     def session_closing(self) -> bool:
         return bool(self.state.closing_phase or self.state.stop_reason)
@@ -850,8 +843,7 @@ class _ArmServer:
     """The server one arm's ladder runs against, and how bringing it up went.
 
     ``lifecycle`` is whether the framework keeps one server across rungs; without it every rung starts its own. Until
-    a round brings the persistent server up, each rung's round boots it: no launch reads CONC, so a boot that failed
-    at one rung is retried by the next.
+    a round brings the persistent server up, each rung's round boots it.
     """
 
     arm_name: str
@@ -892,7 +884,7 @@ class _ArmServer:
         )
 
     def restart_round(self) -> _ArmRound:
-        return _ArmRound(GridLaunch(serving_lease=self.lease), label="option_b")
+        return _ArmRound(GridLaunch(serving_lease=self.lease), label="server_restart")
 
     def teardown(self) -> None:
         from ..actions.executors._server_lifecycle import teardown_lifecycle_server
@@ -1000,7 +992,7 @@ async def _sweep_arm(
                 for variant in ladder
             ],
         )
-    run.record_never_run(arm.name, [variant for variant in grid if variant not in ladder], unpaired)
+    run.record_never_run(arm.name, [variant for variant in grid if variant_conc(variant) not in concs], unpaired)
     if not ladder:
         run.close_arm(arm.name, None)
         return
@@ -1062,13 +1054,13 @@ async def _run_rung_on(
     """Run one round of a rung on the arm's server and record it; ``None`` when the round only booted the server."""
     if not server.lifecycle:
         ran = await _run_round(run, variant, server.restart_round(), window)
-        run.record_ran(server.arm_name, [ran.result], ran.note(STAGE_SERVER_RESTART), window)
+        run.record_ran(server.arm_name, ran.result, ran.note(STAGE_SERVER_RESTART), window)
         return ran.result
     if server.booted is None:
         ran = await _run_round(run, variant, server.boot_round(), window)
         return None if _settle_boot(run, server, variant, ran, window) else ran.result
     ran = await _run_round(run, variant, server.reuse_round(cleanup=is_last), window)
-    run.record_ran(server.arm_name, [ran.result], ran.note(STAGE_REUSE), window)
+    run.record_ran(server.arm_name, ran.result, ran.note(STAGE_REUSE), window)
     return ran.result
 
 
@@ -1085,14 +1077,14 @@ def _settle_boot(run: _SweepRun, server: _ArmServer, variant: GridVariant, ran: 
         if not stopped:
             server.attempted.append(variant)
             server.failed.append(result)
-        run.record_ran(server.arm_name, [result], ran.note(STAGE_BOOT_ATTEMPT), window)
+        run.record_ran(server.arm_name, result, ran.note(STAGE_BOOT_ATTEMPT), window)
         return False
     server.attempted.append(variant)
     server.booted = variant
     if result.note == "server_lifecycle_boot_only":
         run.record_rung(server.arm_name, result, ran.note(STAGE_BOOT))
         return True
-    run.record_ran(server.arm_name, [result], ran.note(STAGE_BOOT), window)
+    run.record_ran(server.arm_name, result, ran.note(STAGE_BOOT), window)
     return False
 
 
@@ -1102,12 +1094,11 @@ async def _run_round(run: _SweepRun, variant: GridVariant, arm_round: _ArmRound,
     start_time = now_iso("seconds")
     started_at = time.time()
     try:
-        results = await run.run_rung(variant, arm_round.launch, window, arm_round.base)
+        result = await run.run_rung(variant, arm_round.launch, window, arm_round.base)
     except Exception as exc:  # isolation boundary: one round of an arm's ladder, recorded as its rung's failure
         log.warning("conc_sweep: %s round of %s raised %r", arm_round.label, variant.name, exc, exc_info=True)
-        results = [_raised_result(variant, arm_round.label, exc)]
-    # run_rung runs a one-variant grid, which returns one result.
-    return _RungRun(results[0], start_time, round(time.time() - started_at, 3), remaining_sec)
+        result = _raised_result(variant, arm_round.label, exc)
+    return _RungRun(result, start_time, round(time.time() - started_at, 3), remaining_sec)
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
@@ -1198,11 +1189,8 @@ def _decline_before_start(
 async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
     """Record the budget and plan, then run the baseline arm and the optimized arm on the rungs it reached.
 
-    A pair needs both arms, so the arm that runs first spends for two: past its first rung it gets half of what is
-    left, and the second arm runs only the rungs the first one reached, so a deadline drops whole pairs rather than
-    leaving half of one.
-    The baseline goes first because the optimized stack is the faster one at the anchor: its replay of the same
-    rungs fits in the half the baseline left it.
+    The first arm spends for both arms of each pair, so past its first rung it gets half of what is left. The baseline
+    goes first because the optimized stack, faster at the anchor, replays its rungs in the half it left.
     """
     recorder = run.recorder
     total_budget_sec = run.total_budget_sec

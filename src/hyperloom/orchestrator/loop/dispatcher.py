@@ -1244,9 +1244,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return None
 
     def admission_cost_minutes(self, action_name: str) -> float:
-        """What a catalogued action is admitted at: anchored on this session's own baseline round once one exists, the
-        way PRELUDE's affordability gate is; see :func:`expected_action_cost_minutes` for why a catalogue-anchored gate
-        admits arms a real model cannot pay for."""
+        """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""
         measured_sec = measured_baseline_runtime_sec(self.shared_state)
         return expected_action_cost_minutes(self.action_registry.get(action_name), measured_baseline_sec=measured_sec)
 
