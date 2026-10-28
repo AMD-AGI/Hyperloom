@@ -101,9 +101,8 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
-# What only a hosted run needs, on top of ``runtime``; the lock file ``requirements/app.lock`` is compiled from
-# ``runtime`` and ``hosted``. Hosted measurement: Ed25519 signing (cryptography), the E2B sandbox SDK and the S3 result
-# archive, each imported lazily, only by the hosted-measurement modules. ``e2b`` 2.53 is the first SDK whose ``connect``
+# What only a hosted run needs, on top of ``runtime``. Hosted measurement: Ed25519 signing (cryptography), the E2B
+# sandbox SDK and the S3 result archive, each imported lazily, only by the hosted-measurement modules. ``e2b`` 2.53 is the first SDK whose ``connect``
 # sends the ``E2b-Sandbox-Id`` header the data-plane router needs and whose errors carry a ``status_code``.
 hosted = [
     "cryptography>=42",
