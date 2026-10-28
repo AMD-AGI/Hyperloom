@@ -371,15 +371,10 @@ def apply_compatibility_filter(
     base_server_args: str = "",
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
-    if serving.model_path:
-        is_mla, is_moe = _detect_model_class(serving.model_path)
-    else:
-        # Cannot detect -> assume compatible.
-        is_mla, is_moe = True, True
+    # Cannot detect -> assume compatible.
+    is_mla, is_moe = _detect_model_class(serving.model_path) if serving.model_path else (True, True)
 
-    fw = serving.framework.strip().lower()
-
-    is_xdit = fw == "xdit"
+    is_xdit = serving.framework.strip().lower() == "xdit"
     unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(serving)
 
     kept: list[GridVariant] = []
