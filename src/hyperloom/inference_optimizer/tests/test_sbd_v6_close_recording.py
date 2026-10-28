@@ -373,7 +373,7 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     )
 
     progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "throughput"
+    assert progress["ceiling_available"] is True
     assert progress["ceiling_tok_per_sec"] == 4000.0
     assert progress["target_tok_per_sec"] == 2800.0
     assert progress["current_best_tput"] == 1250.0
@@ -386,28 +386,6 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     assert progress["trajectory"][-1]["gain_pct"] == 25.0
     # The snapshot history stays in the roofline events; two copies could disagree.
     assert "snapshots" not in progress
-
-
-def test_progress_reports_the_latency_domain_when_there_is_no_token_ceiling(sd: Path) -> None:
-    record_close_opened(sd)
-    record_roofline_progress(
-        sd,
-        RooflineProgress(
-            baseline_tput=0.4,
-            baseline_ts="2026-09-06T09:00:00Z",
-            optimization_stack=[],
-            latest_snapshot={"snapshot_id": 2, "roofline_ideal_ms": 800.0, "e2e_mean_ms": 2000.0},
-            current_best_tput=0.4,
-        ),
-    )
-
-    progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "latency"
-    assert progress["ceiling_available"] is False
-    assert progress["latency_ceiling_available"] is True
-    assert progress["latency_ceiling_ms"] == 800.0
-    assert progress["achieved_latency_ms"] == 2000.0
-    assert progress["current_best_pct_of_latency_ceiling"] == 40.0
 
 
 def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
@@ -433,7 +411,7 @@ def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: P
     record_roofline_progress(sd, RooflineProgress(baseline_tput=1000.0, optimization_stack=[], latest_snapshot=None))
 
     progress = _close(sd)["roofline_progress"]
-    assert progress["ceiling_kind"] == "none"
+    assert progress["ceiling_available"] is False
     assert progress["ceiling_tok_per_sec"] is None
     assert progress["target_tok_per_sec"] is None
     assert progress["current_best_pct_of_ceiling"] is None

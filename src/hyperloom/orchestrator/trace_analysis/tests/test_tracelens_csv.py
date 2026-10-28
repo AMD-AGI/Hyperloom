@@ -21,11 +21,11 @@ from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
+from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfReportAnalysis
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
 from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 from hyperloom.orchestrator.trace_analysis import _trace_shapes as trace_shapes
 from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
-from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
@@ -1076,7 +1076,8 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
     ]
     import os as _os
 
@@ -1136,7 +1137,8 @@ def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkey
             str(trace),
             "--workspace-path",
             str(tmp_path / "workspace"),
-            "--use-llm-orchestrator",
+            "--route",
+            "agent",
         ],
     )
 
@@ -2046,7 +2048,8 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
         "--capture-folder",
         str(capture),
         "--split-llm-inference",
@@ -2149,7 +2152,8 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
         "--capture-folder",
         str(capture),
         "--split-llm-inference",
@@ -2257,7 +2261,8 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
         "MI300X",
         "--budget-minutes",
         "1",
-        "--no-llm-orchestrator",
+        "--route",
+        "non-llm",
     ]
     argv += list(extra_argv or [])
 
@@ -2340,12 +2345,51 @@ def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts
         _drive_main_over_capture_dir(
             tmp_path,
             trace_dir,
-            extra_argv=["--use-llm-orchestrator", "--framework", "custom", "--capture-folder", str(capture)],
+            extra_argv=["--route", "agent", "--framework", "custom", "--capture-folder", str(capture)],
         )
 
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "failed"
     assert result["error"].startswith("ConfigError")
+
+
+@pytest.mark.parametrize(
+    ("idle_pct", "gated", "kernel_names"),
+    [(5.0, False, ["kernel_a"]), (95.0, True, [])],
+)
+def test_the_non_llm_route_writes_the_same_artifacts_and_gates_on_the_report_shares(
+    tmp_path, capsys, idle_pct, gated, kernel_names
+):
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    report = tmp_path / "analysis.json"
+    report.write_text(
+        json.dumps({"compute_optimizations": [{"operation": "kernel_a", "members": [{"kernel_name": ["kernel_a"]}]}]}),
+        encoding="utf-8",
+    )
+    analysis = PerfReportAnalysis(report, trace_gates.WorkloadShares(idle_pct, 80.0, 5.0), ["window is short"])
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "analyze_perf_report", return_value=analysis),
+    ):
+        _drive_main_over_capture_dir(tmp_path, trace_dir)
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["orchestrator_mode"] == "non-llm"
+    assert [k["name"] for k in result["hot_kernels"]] == kernel_names
+    assert result["trace_report_path"] == str(report)
+    warning_codes = [w["code"] for w in result["trace_health_warnings"]]
+    assert "trace_quality_poor" in warning_codes
+    assert ("high_gpu_idle_pct" in warning_codes) is gated
+    assert Path(result["artifact_paths"]["kernel_candidates"]).is_file()
+    assert Path(result["artifact_paths"]["tracelens_summary"]).is_file()
 
 
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
@@ -3044,88 +3088,6 @@ def test_python_task_group_key_is_stable_across_definition_line_changes(tmp_path
     second_key = tlr.aggregate_by_source_function([candidate])[0]["task_group_key"]
 
     assert first_key == second_key
-
-
-def test_trace_routes_generate_compatible_operator_identities(tmp_path):
-    src = tmp_path / "operator.py"
-    src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
-    operation = "fused_operator<float>"
-    bypass_group = bypass_report._build_task_groups(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "device_kernel_name": "fused_operator_kernel",
-                "source_file": str(src),
-                "reusable_native_kernel": True,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-            }
-        ]
-    )[0]
-    skill_group = tlr.aggregate_by_source_function(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-                "kernel_launcher_path": f"{src}(1): forward",
-            }
-        ]
-    )[0]
-
-    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
-    assert bypass_group["task_group_key"].startswith('{"function":')
-
-
-def test_native_trace_routes_generate_compatible_operator_identities(tmp_path):
-    src = tmp_path / "operator.cu"
-    src.write_text("// native kernel\n", encoding="utf-8")
-    operation = "aiter::fused_operator<float>"
-    bypass_group = bypass_report._build_task_groups(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "device_kernel_name": "_ZN5aiter14fused_operatorIfEEv",
-                "source_file": str(src),
-                "reusable_native_kernel": True,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-            }
-        ]
-    )[0]
-    skill_group = tlr.aggregate_by_source_function(
-        [
-            {
-                "kernel_id": "k001",
-                "name": operation,
-                "duration_us": 100.0,
-                "call_count": 1,
-                "gpu_pct": 10.0,
-                "kernel_launcher_path": f"{src}(1): fused_operator",
-            }
-        ]
-    )[0]
-
-    assert bypass_group["task_group_key"] != skill_group["task_group_key"]
-    assert set(bypass_group["legacy_task_group_keys"]) & set(skill_group["legacy_task_group_keys"])
-    legacy_skill_key = json.dumps(
-        (
-            "native",
-            "aiter::fused_operator",
-            str(src.resolve()),
-            "fused_operator",
-        ),
-        separators=(",", ":"),
-    )
-    assert legacy_skill_key in bypass_group["legacy_task_group_keys"]
-    assert legacy_skill_key in skill_group["legacy_task_group_keys"]
 
 
 def test_aggregate_does_not_merge_different_operations_sharing_wrapper(tmp_path):
@@ -4011,7 +3973,7 @@ def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch
     assert threshold == 80.0
     assert high_idle is None  # NOT suppressed
     assert graph_warn is not None
-    assert graph_warn["code"] == "bypass_graph_under_recorded"
+    assert graph_warn["code"] == "graph_under_recorded"
     assert graph_warn["graph_launch_count"] == 8
 
 
@@ -4042,3 +4004,15 @@ def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert trace_gates._graph_coverage_from_raw_trace(None) == {}
     assert trace_gates._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
+
+
+def test_graph_coverage_from_raw_trace_reports_the_reader_coverage_unless_truncated(tmp_path, monkeypatch):
+    launches = [{"cat": "cuda_runtime", "name": "hipGraphLaunch", "args": {"correlation": c}} for c in (1, 2, 3)]
+    kernel = {"cat": "kernel", "ph": "X", "name": "kernel_a", "ts": 0, "dur": 10, "args": {"correlation": 1}}
+    trace = tmp_path / "graph.trace.json"
+    trace.write_text(json.dumps({"traceEvents": [*launches, kernel]}), encoding="utf-8")
+
+    assert trace_gates._graph_coverage_from_raw_trace(trace)["graph_under_recorded"] is True
+
+    monkeypatch.setattr("hyperloom.orchestrator.trace_analysis._trace_reader._MAX_BUFFERED_GPU_EVENTS", 0)
+    assert trace_gates._graph_coverage_from_raw_trace(trace) == {}

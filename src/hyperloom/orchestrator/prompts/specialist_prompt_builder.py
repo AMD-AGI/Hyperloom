@@ -1790,16 +1790,9 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
 
     analysis_path = ev.get("analysis_md_path")
     if analysis_path:
-        rows.append(f"**Full analysis.md path:** `{analysis_path}`")
+        rows.append(f"**Full TraceLens report path:** `{analysis_path}`")
         rows.append("")
-        rows.append(
-            "Use the `Read` tool on this path for the full TraceLens "
-            "report (~10-20 KB). All section headings are stable: "
-            "`## Executive Summary` / `## Top Operations` / "
-            "`## Compute Kernel Optimizations` / "
-            "`## Kernel Fusion Opportunities` / "
-            "`## System-Level Optimizations` / `## Recommendations`."
-        )
+        rows.append("Use the `Read` tool on this path for the full TraceLens report.")
     return rows
 
 

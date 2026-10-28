@@ -15,40 +15,6 @@ from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 log = logging.getLogger(__name__)
 
 
-def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
-    """Find the newest TraceShapeManifest this session produced.
-
-    ``bypass_trace_analysis`` writes ``trace_shape_manifest.json`` next to its
-    other bypass artifacts; forge calls it the preferred dense-shape source but
-    nothing forwarded it, so the file was written and never read. Newest wins:
-    a later trace reflects the currently resolved server args.
-    """
-    # Deduplicate: state.session_dir is usually the same path we were handed,
-    # and an empty session then paid for two full-tree walks to find nothing.
-    seen_roots: set[str] = set()
-    roots: list[Path] = []
-    for raw in (session_dir, Path(str(getattr(state, "session_dir", "") or session_dir))):
-        if raw is None or not Path(raw).is_dir():
-            continue
-        key = str(Path(raw).resolve())
-        if key in seen_roots:
-            continue
-        seen_roots.add(key)
-        roots.append(Path(raw))
-    for root in roots:
-        best: tuple[float, str] | None = None
-        for found in Path(root).glob("**/trace_shape_manifest.json"):
-            try:
-                mtime = found.stat().st_mtime
-            except OSError:
-                continue
-            if best is None or mtime > best[0]:
-                best = (mtime, str(found))
-        if best is not None:
-            return best[1]
-    return ""
-
-
 def _is_forge_compatible_shapes_json(path: Path) -> bool:
     """Validate that a shapes JSON file matches forge's expected format.
 

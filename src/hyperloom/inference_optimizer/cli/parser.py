@@ -657,9 +657,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Stop when the latest roofline snapshot reaches N%% of its modelled "
-            "ceiling. Inert until a roofline has been measured, and satisfied "
-            "independently of --target-gain / --target-tput / --target-baseline-dir."
+            "Stop when the latest roofline snapshot reaches N%% of its modelled ceiling. Inert until a roofline "
+            "has been measured or when the workload has no ceiling, and satisfied independently of "
+            "--target-gain / --target-tput / --target-baseline-dir."
         ),
     )
     add_constraint_arguments(opt)

@@ -6,6 +6,8 @@
 
 Conservative: records every step, writes a stable artifact set, supports TraceLens
 capture directories, and has a dry-run path that works without TraceLens installed.
+Two routes produce the report: ``agent`` runs the TraceLens skill under a model,
+``non-llm`` maps TraceLens's own perf report.
 """
 
 import argparse
@@ -30,7 +32,6 @@ from hyperloom.inference_optimizer.framework_paths import (
 from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
-    TraceLensSkillRunResult,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
     extract_exposed_comm_pct_from_analysis_md,
@@ -41,17 +42,20 @@ from .tracelens_skill_runner import (
 from hyperloom.inference_optimizer.framework_registry import (
     tracelens_analysis_mode,
 )
+from TraceLens.Agent.Analysis.category_analyses.analysis_utils import perf_report_csv_dir
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
 from ._analysis_json import load_report_tasks
 from ._io_utils import append_log
 from ._analysis_reports import OrchestratorOutcome, write_reports
+from .analysis_route import AnalysisRoute
 from ._candidate_assembly import _finalize_candidates, analyze_trace_files, write_source_resolution_artifact
 from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
+from ._perf_report_analysis import analyze_perf_report
 from ._run_status import RunStatus
-from ._trace_gates import _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
+from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
     _capture_classification_root,
     _count_kernels_if_readable,
@@ -265,20 +269,17 @@ class _ReportGates(NamedTuple):
 
 
 def _evaluate_report_gates(
-    report_path: Path, raw_trace_path: Path, warnings: list[dict[str, Any]], log_path: Path
+    shares: WorkloadShares, report_path: Path, raw_trace_path: Path, warnings: list[dict[str, Any]], log_path: Path
 ) -> _ReportGates:
-    """Evaluate the idle and low-compute gates on ``analysis.md``, recording a graph under-recording guard.
+    """Evaluate the idle and low-compute gates on the report's shares, recording a graph under-recording guard.
 
     Logs the idle share when it clears the gates.
     """
-    idle_pct_value = extract_idle_pct_from_analysis_md(report_path)
     idle_pct_threshold, high_idle_warning, graph_under_recorded_warning = _evaluate_idle_gate_with_graph_guard(
-        idle_pct_value, report_path, raw_trace_path
+        shares.idle_pct, report_path, raw_trace_path
     )
-    compute_pct_value = extract_compute_pct_from_analysis_md(report_path)
-    exposed_comm_pct_value = extract_exposed_comm_pct_from_analysis_md(report_path)
     compute_pct_threshold, low_compute_warning = _evaluate_low_compute_gate(
-        compute_pct_value, exposed_comm_pct_value, report_path
+        shares.compute_pct, shares.exposed_communication_pct, report_path
     )
     if graph_under_recorded_warning is not None:
         # Under-recording deflates every recorded share alike, so
@@ -292,18 +293,18 @@ def _evaluate_report_gates(
             "skipping the idle/compute gates and keeping hot_kernels[].",
         )
     gates = _ReportGates(
-        idle_pct_value,
+        shares.idle_pct,
         idle_pct_threshold,
         high_idle_warning,
-        compute_pct_value,
+        shares.compute_pct,
         compute_pct_threshold,
         low_compute_warning,
     )
-    if not gates.suppressed and idle_pct_value is not None and graph_under_recorded_warning is None:
+    if not gates.suppressed and shares.idle_pct is not None and graph_under_recorded_warning is None:
         append_log(
             log_path,
             f"TraceLens Executive Summary: "
-            f"Idle % = {idle_pct_value:.2f}% "
+            f"Idle % = {shares.idle_pct:.2f}% "
             f"(threshold {idle_pct_threshold:.2f}%) — "
             "below gate, continuing with kernel "
             "candidate extraction",
@@ -343,24 +344,89 @@ def _record_gate_suppression(gates: _ReportGates, warnings: list[dict[str, Any]]
         )
 
 
-def _report_json_candidates(
-    skill_result: TraceLensSkillRunResult, framework: str, warnings: list[dict[str, Any]], log_path: Path
-) -> tuple[list[dict[str, Any]], str]:
-    """Return the report's candidate rows plus injected collectives, and the label of the sources they came from."""
-    # TraceLens owns the parse/group/prose/impact/order; render
-    # its structured analysis.json beside the md, then read it.
-    analysis_json_path = render_analysis_json(skill_result.report_path)
-    report_cands = load_report_tasks(analysis_json_path, framework=framework)
-    raw_agent_candidates = _inject_collective_candidates(
-        skill_result.output_dir,
-        report_cands,
-        log_path=log_path,
-        health_warnings=warnings,
+class RouteOutcome(NamedTuple):
+    """What a route hands the shared tail: its report, how it ran, the candidates it kept and its artifacts."""
+
+    report_path: Path
+    orchestrator_mode: str
+    raw_candidates: list[dict[str, Any]]
+    artifact_paths: dict[str, str]
+
+
+def _run_agent_route(
+    request: TraceLensSkillRequest,
+    args: argparse.Namespace,
+    raw_trace_path: Path,
+    warnings: list[dict[str, Any]],
+    log_path: Path,
+) -> RouteOutcome:
+    """Run the TraceLens skill under a model; gate on its ``analysis.md``, read candidates from its ``analysis.json``."""
+    with _trajectory_scope(args):
+        skill_result = asyncio.run(
+            run_tracelens_skill(
+                request,
+                budget_minutes=args.budget_minutes,
+                model=_resolve_tracelens_model(),
+                log=lambda msg: append_log(log_path, msg),
+            )
+        )
+    report_path = skill_result.report_path
+    shares = WorkloadShares(
+        idle_pct=extract_idle_pct_from_analysis_md(report_path),
+        compute_pct=extract_compute_pct_from_analysis_md(report_path),
+        exposed_communication_pct=extract_exposed_comm_pct_from_analysis_md(report_path),
     )
-    source_parts = ["analysis.json"]
-    if len(raw_agent_candidates) > len(report_cands):
-        source_parts.append("nccl_summary")
-    return raw_agent_candidates, "+".join(source_parts)
+    gates = _evaluate_report_gates(shares, report_path, raw_trace_path, warnings, log_path)
+    raw_candidates: list[dict[str, Any]] = []
+    if gates.suppressed:
+        _record_gate_suppression(gates, warnings, log_path)
+    else:
+        # TraceLens owns the parse/group/prose/impact/order; render its structured analysis.json beside the md.
+        report_cands = load_report_tasks(render_analysis_json(report_path), framework=args.framework)
+        raw_candidates = _inject_collective_candidates(
+            skill_result.output_dir,
+            report_cands,
+            log_path=log_path,
+            health_warnings=warnings,
+        )
+    return RouteOutcome(
+        report_path=report_path,
+        orchestrator_mode=skill_result.runner,
+        raw_candidates=raw_candidates,
+        artifact_paths=skill_result.artifact_paths,
+    )
+
+
+def _run_non_llm_route(
+    run_config_path: Path,
+    framework: str,
+    raw_trace_path: Path,
+    warnings: list[dict[str, Any]],
+    log_path: Path,
+) -> RouteOutcome:
+    """Map TraceLens's perf report to ``analysis.json`` with no model, gate on its shares and read candidates from it.
+
+    Collective candidates are not injected: they come from ``category_data/multi_kernel_metrics.json``,
+    which only the agent writes.
+    """
+    analysis = analyze_perf_report(run_config_path)
+    report_path = analysis.report_path
+    warnings.extend(
+        {"code": "trace_quality_poor", "severity": "warning", "message": text, "source": str(report_path)}
+        for text in analysis.warnings
+    )
+    gates = _evaluate_report_gates(analysis.shares, report_path, raw_trace_path, warnings, log_path)
+    raw_candidates: list[dict[str, Any]] = []
+    if gates.suppressed:
+        _record_gate_suppression(gates, warnings, log_path)
+    else:
+        raw_candidates = load_report_tasks(report_path, framework=framework)
+    return RouteOutcome(
+        report_path=report_path,
+        orchestrator_mode=AnalysisRoute.NON_LLM.value,
+        raw_candidates=raw_candidates,
+        artifact_paths={},
+    )
 
 
 def _reject_capture_only_input(trace_input: Path, trace_files: list[Path]) -> None:
@@ -424,34 +490,8 @@ def _probe_gpu_kernels(trace_files: list[Path]) -> _KernelProbe:
     return _KernelProbe(analysis_trace_path, kernel_event_count, probed, spent_bytes)
 
 
-def _add_model_args(parser: argparse.ArgumentParser) -> None:
-    """Add the model, diffusion-sidecar and report-naming flags; their env defaults are read now."""
-    parser.add_argument(
-        "--num-denoise-steps",
-        type=int,
-        default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
-        help=(
-            "Denoise steps captured in the profiled window (scriptable/xDiT "
-            "diffusion only). Enables per-denoise-step timings in the workload "
-            "roofline sidecar. Env: HYPERLOOM_NUM_DENOISE_STEPS."
-        ),
-    )
-    parser.add_argument(
-        "--model-path",
-        default=os.environ.get("MODEL_PATH", ""),
-        help=(
-            "Local model directory. Selected config.json fields inform bounded "
-            "kernel source resolution for every framework. For scriptable/xDiT "
-            "diffusion it also enables the config/safetensors-derived analytic "
-            "compute ceiling in the workload roofline sidecar. Falls back to "
-            "resolving --model-name; env: MODEL_PATH."
-        ),
-    )
-    parser.add_argument(
-        "--precision",
-        default="",
-        help="Diffusion analytic-ceiling precision (bf16/fp8/fp16); default bf16.",
-    )
+def _add_run_args(parser: argparse.ArgumentParser) -> None:
+    """Add the report-naming, capture-folder and budget flags; their env defaults are read now."""
     parser.add_argument(
         "--roofline-output-name",
         default="kernel_roofline.json",
@@ -550,7 +590,7 @@ def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
     Parses arguments, optionally splits the trace into a steady-state chunk,
-    runs the TraceLens SDK orchestrator, extracts hot-kernel candidates,
+    runs the selected analysis route, extracts hot-kernel candidates,
     merges roofline data, and writes the run's report sidecars and status.
 
     Returns:
@@ -589,7 +629,7 @@ def main() -> int:
         "Rehydration module; plumbed to run_tracelens_skill. "
         "Leave empty for the open-source-only report.",
     )
-    _add_model_args(parser)
+    _add_run_args(parser)
     # Join keys of the launching Hyperloom session's trajectory ledger; unset outside a session.
     parser.add_argument("--trajectory-session-dir", default="")
     parser.add_argument("--trajectory-phase", default="")
@@ -597,34 +637,19 @@ def main() -> int:
     parser.add_argument("--trajectory-task-id", default="")
     parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
-    default_llm_orchestrator = os.environ.get(
-        "KERNEL_AGENT_USE_LLM_ORCHESTRATOR",
-        "1",
-    ).strip().lower() not in {"0", "false", "no", "off"}
     parser.add_argument(
-        "--use-llm-orchestrator",
-        dest="use_llm_orchestrator",
-        action="store_true",
-        default=default_llm_orchestrator,
+        "--route",
+        choices=[route.value for route in AnalysisRoute],
+        default=AnalysisRoute.AGENT.value,
         help=(
-            "Run TraceLens analysis-orchestrator skill through "
-            "claude_agent_sdk to produce analysis.md, then parse hot kernels "
-            "from it (default: env KERNEL_AGENT_USE_LLM_ORCHESTRATOR, on)."
-        ),
-    )
-    parser.add_argument(
-        "--no-llm-orchestrator",
-        dest="use_llm_orchestrator",
-        action="store_false",
-        help=(
-            "Disable the Claude SDK TraceLens skill runner. Production runs "
-            "will fail rather than falling back to intermediate/CSV candidate "
-            "parsers; --dry-run still uses the test-only raw parser."
+            "agent runs the TraceLens analysis-orchestrator skill through claude_agent_sdk; "
+            "non-llm maps TraceLens's perf report with no model."
         ),
     )
     _add_split_args(parser)
     _add_chunk_selection_args(parser)
     args = parser.parse_args()
+    route = AnalysisRoute(args.route)
 
     args.target_platform = normalize_platform(args.target_platform)
 
@@ -641,8 +666,8 @@ def main() -> int:
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
     run_status = RunStatus(status_path, log_path, artifacts, run_id, started_at)
-    agent_candidates: list[dict[str, Any]] | None = None
-    agent_report_path: Path | None = None
+    route_candidates: list[dict[str, Any]] | None = None
+    route_report_path: Path | None = None
     orchestrator_mode = "inline"
     # Structured trace-health findings surfaced to the Coordinator.
     trace_health_warnings: list[dict[str, Any]] = []
@@ -950,81 +975,50 @@ def main() -> int:
                     exists=False,
                 )
 
-            if args.use_llm_orchestrator:
-                run_status.write(
-                    state="running",
-                    current_step="run_tracelens_sdk_orchestrator",
+            run_status.write(
+                state="running",
+                current_step="run_trace_analysis",
+            )
+            run_config_path = write_run_config(
+                output_dir=tracelens_dir,
+                trace_path=cli_trace_path,
+                platform=args.target_platform,
+                analysis_mode=tracelens_analysis_mode(args.framework),
+                capture_folder=capture_folder,
+            )
+            if route is AnalysisRoute.AGENT:
+                outcome = _run_agent_route(
+                    TraceLensSkillRequest(
+                        skill_path=skill,
+                        output_dir=tracelens_dir,
+                        tracelens_root=tl_root,
+                        tracelens_internal_root=tl_internal_root,
+                        capture_folder=capture_folder,
+                    ),
+                    args,
+                    raw_trace_path,
+                    trace_health_warnings,
+                    log_path,
                 )
-                write_run_config(
-                    output_dir=tracelens_dir,
-                    trace_path=cli_trace_path,
-                    platform=args.target_platform,
-                    analysis_mode=tracelens_analysis_mode(args.framework),
-                    capture_folder=capture_folder,
+            else:
+                outcome = _run_non_llm_route(
+                    run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
                 )
-                with _trajectory_scope(args):
-                    skill_result = asyncio.run(
-                        run_tracelens_skill(
-                            TraceLensSkillRequest(
-                                skill_path=skill,
-                                output_dir=tracelens_dir,
-                                tracelens_root=tl_root,
-                                tracelens_internal_root=tl_internal_root,
-                                capture_folder=capture_folder,
-                            ),
-                            budget_minutes=args.budget_minutes,
-                            model=_resolve_tracelens_model(),
-                            log=lambda msg: append_log(log_path, msg),
-                        )
-                    )
-                artifacts.update(skill_result.artifact_paths)
-                agent_report_path = skill_result.report_path
-                orchestrator_mode = skill_result.runner
-
-                gates = _evaluate_report_gates(
-                    skill_result.report_path, raw_trace_path, trace_health_warnings, log_path
+            artifacts.update(outcome.artifact_paths)
+            route_report_path = outcome.report_path
+            orchestrator_mode = outcome.orchestrator_mode
+            route_candidates = []
+            if outcome.raw_candidates:
+                route_candidates = _finalize_candidates(
+                    outcome.raw_candidates,
+                    perf_report_csv_dir=perf_report_csv_dir(str(tracelens_dir)),
                 )
-                if gates.suppressed:
-                    agent_candidates = []
-                    _record_gate_suppression(gates, trace_health_warnings, log_path)
-                else:
-                    raw_agent_candidates, report_source = _report_json_candidates(
-                        skill_result, args.framework, trace_health_warnings, log_path
-                    )
-                    if raw_agent_candidates:
-                        agent_candidates = _finalize_candidates(
-                            raw_agent_candidates,
-                            perf_report_csv_dir=(skill_result.output_dir / "perf_report_csvs"),
-                        )
-                        write_source_resolution_artifact(
-                            agent_candidates,
-                            run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
-                            framework=args.framework,
-                            model_name=args.model_name,
-                            log_path=log_path,
-                        )
-                        append_log(
-                            log_path,
-                            f"TraceLens SDK orchestrator produced "
-                            f"{len(agent_candidates)} hot kernels "
-                            f"(source={report_source})",
-                        )
-                    else:
-                        agent_candidates = []
-                        append_log(
-                            log_path,
-                            "TraceLens analysis.json had no compute "
-                            "optimization tasks. Producing empty "
-                            "hot_kernels[] — downstream Coordinator will "
-                            "route to params/backends.",
-                        )
-
-            if agent_candidates is None:
-                raise RuntimeError(
-                    "TraceLens analysis.json was not produced; refusing to "
-                    "fall back to priority_data/category_data/CSV candidate "
-                    "parsers because the orchestrator's analysis.json is the "
-                    "candidate source of truth."
+                write_source_resolution_artifact(
+                    route_candidates,
+                    run_dir / _KSC.SOURCE_RESOLUTION_FILENAME,
+                    framework=args.framework,
+                    model_name=args.model_name,
+                    log_path=log_path,
                 )
         else:
             append_log(log_path, "[dry-run] skipping TraceLens install and external CLI")
@@ -1033,20 +1027,16 @@ def main() -> int:
             state="running",
             current_step="extract_hot_kernels",
         )
-        # Production candidates come only from the orchestrator's analysis.json.
-        candidates = agent_candidates
+        # Production candidates come only from the route's analysis.json.
+        candidates = route_candidates
         if candidates:
             append_log(
                 log_path,
-                f"hot kernels from TraceLens SDK orchestrator ({len(candidates)})",
+                f"hot kernels from the {route.value} route ({len(candidates)})",
             )
-        elif candidates is None:
-            # Dry-run only: a production run without candidates raised above.
-            # Test-only path: parse the raw trace so unit tests can exercise extraction.
-            append_log(
-                log_path,
-                "dry-run: parsing raw trace for hot kernels (production code path raises here — see #203)",
-            )
+        elif args.dry_run:
+            # Dry-run only.
+            append_log(log_path, "dry-run: parsing raw trace for hot kernels")
             candidates = analyze_trace_files(trace_files, _default_top_k())
         else:
             # Routing signal (high idle / TraceLens failure): keep candidates
@@ -1075,7 +1065,7 @@ def main() -> int:
                 trace_inputs,
                 candidates,
                 args,
-                OrchestratorOutcome(agent_report_path, trace_health_warnings),
+                OrchestratorOutcome(route_report_path, trace_health_warnings),
             )
         )
         artifacts["cli_log_path"] = str(log_path)

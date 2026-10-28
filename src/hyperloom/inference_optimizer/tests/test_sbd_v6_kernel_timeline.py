@@ -718,7 +718,7 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
     record_geak_attempts(
         event=recorder.event_id,
         journey={
-            "discovery_runs": [{"source": "bypass", "status": "success", "hot_kernels": [1, 2, 3]}],
+            "discovery_runs": [{"source": "tracelens", "status": "success", "hot_kernels": [1, 2, 3]}],
             "kernels": [
                 {
                     "kernel_id": "k001",
