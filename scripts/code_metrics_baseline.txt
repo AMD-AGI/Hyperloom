@@ -301,7 +301,6 @@ function-lines src/hyperloom/orchestrator/kernel/_shape_capture.py::_capture_tun
 function-lines src/hyperloom/orchestrator/kernel/_shape_capture.py::_reuse_vllm_block_fp8_roofline_shapes 68
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_invalidate_aiter_cpp_itfs_cache 74
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_ceiling 62
-function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 144
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 115
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 59
 function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::_ControllerIntegration._apply_and_validate 62
@@ -622,7 +621,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1384
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1262
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1277
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2644
-module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1449
+module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1374
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1268
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1332
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
