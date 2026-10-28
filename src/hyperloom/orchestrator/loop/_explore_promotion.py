@@ -203,7 +203,6 @@ class ExplorePromotionMixin:
             if self.shared_state.record_framework_lever_attribution(
                 str(attribution.get("switch") or ""),
                 gain_pct=attribution.get("gain_pct"),
-                source=str(attribution.get("source") or ""),
             ):
                 recorded = True
         return recorded

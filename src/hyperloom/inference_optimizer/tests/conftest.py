@@ -113,7 +113,7 @@ def seed_kernel_keep(
     task_group_key: str = "",
 ) -> str:
     """Queue one KEEP patch in the shape the integrate lane stores it; a non-KEEP decision queues nothing."""
-    from hyperloom.orchestrator.kernel._kernel_decisions import _kernel_integration_id
+    from hyperloom.orchestrator.kernel.kernel_decisions import _kernel_integration_id
 
     if decision.upper() != "KEEP":
         return ""
@@ -666,8 +666,12 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ray", RayDouble())
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
-    with rs.ServingLease(num_gpus=1) as lease:
+    lease = rs.ServingLease(num_gpus=1)
+    lease.ensure()
+    try:
         yield lease
+    finally:
+        lease.close()
 
 
 def cli_call_sequence(entry: str) -> list[str]:

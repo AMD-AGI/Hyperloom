@@ -301,12 +301,7 @@ class CurrentBestLiftMixin:
         self.shared_state.optimization_stack.append(stack_entry)
         report_missing_source_snapshot(stack_entry, request.task_kind, launch.variant_name)
         # Mirror the append into gain_per_stack_entry so the two lists stay index-aligned.
-        self.shared_state.append_stack_gain_entry(
-            action=request.task_kind,
-            variant_name=launch.variant_name,
-            new_tput=request.tput,
-            extra_server_args=launch.full_args,
-        )
+        self.shared_state.append_stack_gain_entry(new_tput=request.tput)
         if graded is None:
             return
         # ``graded.reference`` is the anchor this winner had to beat, and this

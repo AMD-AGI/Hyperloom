@@ -51,11 +51,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts = [f"explore: {tally.tested} variant(s) measured across {len(tally.rounds)} round(s), {tally.keeps} kept."]
     if tally.best_gain_pct is not None:
         facts.append(f"Best measured variant gain: {fmt_pct(tally.best_gain_pct, plus=True)}.")
-    if tally.keep_unstable:
-        facts.append(
-            f"{tally.keep_unstable} variant(s) won their round and were withheld "
-            "when the confirmation did not reproduce the win."
-        )
 
     rows = []
     for attempt, _proposal in config_attempts(breakdown):

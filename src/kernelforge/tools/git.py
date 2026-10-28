@@ -116,6 +116,28 @@ def git_bytes(
     return _communicate(process, input, timeout, check)
 
 
+def git_head(cwd: str | Path) -> str:
+    """The commit HEAD resolves to in ``cwd``; ``""`` when git cannot run there or HEAD resolves to none."""
+    try:
+        result = git("rev-parse", "HEAD", cwd=cwd, check=False)
+    except OSError:
+        return ""
+    lines = result.stdout.split()
+    return lines[0] if result.returncode == 0 and lines else ""
+
+
+def git_checkout_branch(cwd: str | Path, branch: str) -> str:
+    """Switch ``cwd`` to ``branch``, creating it at HEAD when it does not exist; returns git's own report."""
+    if not branch:
+        return ""
+    try:
+        exists = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=cwd, check=False).returncode == 0
+        result = git("checkout", *(() if exists else ("-b",)), branch, cwd=cwd, check=False)
+    except OSError as error:
+        return f"checkout failed: {error}"
+    return (result.stdout + "\n" + result.stderr).strip()
+
+
 FALLBACK_COMMIT_IDENTITY = ("KernelForge", "kernel-forge@localhost")
 
 

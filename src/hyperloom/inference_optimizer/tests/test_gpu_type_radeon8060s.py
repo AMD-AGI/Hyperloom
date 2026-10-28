@@ -79,7 +79,8 @@ def test_radeon8060s_is_an_accepted_gpu_type(monkeypatch):
 
 
 def test_radeon8060s_dispatches_as_gfx1151_with_40_cus():
-    assert gpu_types.amd_gpu_dispatch_identity("radeon8060s") == ("gfx1151", 40)
+    board = gpu_types.amd_gpu_board("radeon8060s")
+    assert (board.gfx, board.compute_units) == ("gfx1151", 40)
 
 
 def test_radeon8060s_names_its_own_magpie_script():

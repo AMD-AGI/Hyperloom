@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK_FAILED,
     REBENCH_NO_MATERIAL,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
@@ -61,7 +62,8 @@ def geak_verdict_is_terminal(persisted: Any) -> bool:
     prev = persisted if isinstance(persisted, dict) else {}
     status = str(prev.get("revalidation_status") or "")
     return status in _TERMINAL_REVALIDATION_STATUSES or (
-        status == "fallback_failed" and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
+        status == REBENCH_FALLBACK_FAILED
+        and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
     )
 
 

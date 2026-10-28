@@ -87,7 +87,6 @@ class ApplyStageMixin:
             return await self._refuse_apply(
                 attempt,
                 params,
-                extra,
                 "artifact_not_runtime_ready",
                 deliverable.artifact_runtime_errors,
                 artifacts_applied=[],
@@ -109,7 +108,7 @@ class ApplyStageMixin:
                 return None
             return _no_patches_result(attempt, deliverable, params)
 
-        framework_root, root_refusal = await self._resolve_apply_root(attempt, params, extra, deliverable.patch_paths)
+        framework_root, root_refusal = await self._resolve_apply_root(attempt, params, deliverable.patch_paths)
         if root_refusal is not None:
             return root_refusal
 
@@ -139,7 +138,6 @@ class ApplyStageMixin:
                 return await self._refuse_apply(
                     attempt,
                     params,
-                    extra,
                     "artifact_backup_failed",
                     deliverable.artifact_resolve_errors + backup_errors,
                     artifacts_applied=[],
@@ -155,7 +153,7 @@ class ApplyStageMixin:
             git_head=recovery["git_head"],
             backup_root=recovery_root / "patch_backups",
         )
-        ended = await self._end_patch_series(attempt, params, extra, deliverable, series)
+        ended = await self._end_patch_series(attempt, params, deliverable, series)
         if ended is not None:
             return ended
 
@@ -169,7 +167,6 @@ class ApplyStageMixin:
                 return await self._refuse_apply(
                     attempt,
                     params,
-                    extra,
                     "artifact_install_failed",
                     deliverable.artifact_resolve_errors + artifact_apply_errors,
                     artifacts_applied=[],
@@ -201,7 +198,6 @@ class ApplyStageMixin:
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         patch_paths: list[Path],
     ) -> tuple[Path | None, dict[str, Any] | None]:
         """The framework root the patches land in, or the refusal when no single root holds every patch target."""
@@ -240,7 +236,6 @@ class ApplyStageMixin:
                 return framework_root, await self._refuse_apply(
                     attempt,
                     params,
-                    extra,
                     "patch_target_missing",
                     missing_records,
                     **_reauthor_fields(
@@ -323,7 +318,6 @@ class ApplyStageMixin:
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         deliverable: _Deliverable,
         series: _PatchSeries,
     ) -> dict[str, Any] | None:
@@ -332,21 +326,19 @@ class ApplyStageMixin:
             return await self._refuse_apply(
                 attempt,
                 params,
-                extra,
                 "git_apply_failed",
                 series.errors,
                 workspace=str(attempt.output_root),
                 **_reauthor_fields(params, series.patches, feedback=series.feedback),
             )
         if series.changed_nothing and not _changes_beyond_patches(attempt, deliverable):
-            return await self._end_already_present(attempt, params, extra, series.already_present)
+            return await self._end_already_present(attempt, params, series.already_present)
         return None
 
     async def _end_already_present(
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         evidence: list[dict[str, str]],
     ) -> dict[str, Any]:
         """End a round whose every patch the tree already holds, and that changes nothing else, without a benchmark.
@@ -359,7 +351,7 @@ class ApplyStageMixin:
         log.info("integrate_patch: the framework tree already holds this candidate; not benchmarking: %s", evidence)
         attempt.applied.clear()
         await self._maybe_write_framework_kb_record(
-            _KbLesson(_kb.OUTCOME_ALREADY_PRESENT, 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+            _KbLesson(_kb.OUTCOME_ALREADY_PRESENT, 0.0), attempt=attempt, params=params
         )
         result: dict[str, Any] = {
             "status": "already_present",
@@ -376,13 +368,12 @@ class ApplyStageMixin:
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         error_class: str,
         error: Any,
         **fields: Any,
     ) -> dict[str, Any]:
         """Refuse the round at the apply stage, filing the lesson against the patch's PR identity."""
         await self._maybe_write_framework_kb_record(
-            _KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+            _KbLesson("rejected_apply_fail", 0.0), attempt=attempt, params=params
         )
         return _apply_failed(attempt, error_class, error, **fields)

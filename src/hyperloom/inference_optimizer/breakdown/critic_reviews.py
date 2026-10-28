@@ -102,7 +102,7 @@ def normalize_framework_reviews(
     proposals = {str(row["msg_id"]): row for row in dict_rows(judge.get("proposals")) if row.get("msg_id")}
     effective: dict[str, dict[str, Any]] = {}
     for intent in dict_rows(_nested(emit, "intent_envelope", "intents")):
-        if str(intent.get("intent_type") or "") != "review_verdict":
+        if intent.get("intent_type") != "review_verdict":
             continue
         payload = to_mapping(intent.get("payload"))
         target = str(payload.get("target_proposal_msg_id") or "")

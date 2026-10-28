@@ -20,7 +20,7 @@ from hyperloom.common.aiter_jit_cache import (
     resolve_serving_context,
 )
 from hyperloom.common.gpu_identity import row_dispatches_on
-from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 log = logging.getLogger(__name__)
 
@@ -654,7 +654,8 @@ def prepare_serving_so_for_csvs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
-    target = amd_gpu_dispatch_identity()
+    board = amd_gpu_board()
+    target = (board.gfx, board.compute_units) if board else None
     modules_needed: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")

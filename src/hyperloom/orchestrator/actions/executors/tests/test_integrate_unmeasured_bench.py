@@ -37,7 +37,6 @@ async def _gate(tmp_path: Path, bench_result: dict, applied: tuple[Path, ...] = 
     return await IntegratePatchExecutor(session_dir=tmp_path / "session")._gate_perf(
         attempt=attempt,
         params={"base_tput": 314.0, "keep_threshold_pct": 1.0},
-        extra={"shared_state": state},
         bench_result=bench_result,
         gate_evidence={"accuracy_pass": None},
     )

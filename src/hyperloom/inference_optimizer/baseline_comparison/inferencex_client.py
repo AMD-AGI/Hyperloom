@@ -197,7 +197,7 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
 def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
     """Filter single-node rows matching ``query`` without treating agentic lengths as fixed shapes."""
     isl, osl = query.isl, query.osl
-    hw = str(query.gpu or "").strip().casefold()
+    hw = query.gpu.strip().casefold()
     matched = [
         r
         for r in rows
@@ -217,7 +217,7 @@ def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
             and to_int(r.get("isl")) == int(isl)
             and to_int(r.get("osl")) == int(osl)
         ]
-    prec = str(query.precision or "").strip().casefold()
+    prec = query.precision.strip().casefold()
     if prec:
         matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]
     return matched

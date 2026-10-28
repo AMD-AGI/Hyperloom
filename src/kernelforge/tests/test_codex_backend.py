@@ -1041,6 +1041,54 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
     assert captured["spec"].allow_untracked is False
 
 
+@pytest.mark.parametrize("insession_gate", [False, True])
+def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    insession_gate: bool,
+) -> None:
+    """The session does not keep a reasoning log. A later turn writes the lesson."""
+    specs: list[AgentRunSpec] = []
+
+    class FakeBackend:
+        name = "codex"
+        capabilities = AgentCapabilities(stop_hooks=True)
+
+        async def run(self, spec: AgentRunSpec, usage: object = None) -> AgentRunResult:
+            specs.append(spec)
+            return AgentRunResult(text="PLAN: vectorize loads")
+
+    def fake_factory(runtime, **_kwargs: object) -> FakeBackend:
+        backend = FakeBackend()
+        backend.runtime = runtime
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", fake_factory)
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("VALUE = 1\n")
+    driver = tmp_path / "forge_driver.py"
+    driver.write_text("print('allclose: True')\n")
+    agent_fn = agent_module.make_agent_fn(
+        Config(workspace=str(tmp_path), agent_backend="codex", agent_model="m", agent_precheck=False),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=insession_gate),
+        ),
+    )
+
+    asyncio.run(agent_fn(str(kernel), "history"))
+
+    spec = specs[0]
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
+    assert "reasoning log" not in spec.system_prompt.lower()
+    assert "land in time.\n\n## Prior experience" in spec.user_prompt
+    assert "You do NOT write a takeaway" in spec.system_prompt
+    assert "separate turn" in spec.system_prompt
+    assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
+
+
 def test_outer_gate_counts_only_incremental_resume_target_edits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

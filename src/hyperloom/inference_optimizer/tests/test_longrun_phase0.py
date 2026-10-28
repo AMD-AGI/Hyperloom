@@ -35,13 +35,11 @@ def conn(tmp_path):
 def test_intervention_mix_capped():
     st = SharedState()
     cap = ss_mod._INTERVENTION_MIX_CAP
-    for i in range(cap + 250):
-        st.record_intervention(change_type="config", action="explore", task_id=str(i))
+    for _ in range(cap + 250):
+        st.record_intervention(change_type="config")
+    st.record_intervention(change_type="code_patch")
     assert len(st.intervention_mix) == cap
-    # Most-recent retained, oldest evicted.
-    assert st.intervention_mix[-1]["task_id"] == str(cap + 250 - 1)
-    # Control counter is NOT trimmed.
-    assert st.consecutive_config_only_rounds == cap + 250
+    assert st.intervention_mix[-1]["change_type"] == "code_patch"
 
 
 def test_specialist_rounds_capped():

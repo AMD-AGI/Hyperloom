@@ -334,17 +334,17 @@ ignore_imports =
     hyperloom.orchestrator.actions.executors._kernel_agent_tool -> hyperloom.orchestrator.kernel.apply_kernel_patch
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.phases.machine_state
-    hyperloom.orchestrator.actions.executors.benchmark_backend -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.actions.executors.conc_sweep -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.attempt_summary
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep_plot
+    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.actions.executors.target_analysis -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.build_lifecycle
     hyperloom.orchestrator.actions.executors.targeted_build_executor -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.bringup.argv_preflight -> hyperloom.orchestrator.actions.executors._grid_runner
+    hyperloom.orchestrator.bringup.argv_preflight -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
     hyperloom.orchestrator.bus.resource_lock -> hyperloom.orchestrator.state.task_states
     hyperloom.orchestrator.enablement.build -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.actions.executors._accuracy_gate
@@ -392,7 +392,8 @@ ignore_imports =
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
     hyperloom.orchestrator.state.gaps -> hyperloom.orchestrator.specialists.domains
-    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel._kernel_decisions
+    hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.kernel.kernel_decisions
+    hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
     kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist

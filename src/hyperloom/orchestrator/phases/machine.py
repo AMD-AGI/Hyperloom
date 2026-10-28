@@ -126,7 +126,7 @@ class MachinePhase(CoordinatorCollaborator):
         """
         state = self.shared_state
         prior_cycle = int(state.macro_cycle or 0)
-        state.open_macro_cycle()
+        state.open_macro_cycle(no_gain_cycle_streak=int(state.no_gain_cycle_streak or 0))
         self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: session resumed in CLOSE, a phase with no way out; "

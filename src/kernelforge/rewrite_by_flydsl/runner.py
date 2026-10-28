@@ -14,9 +14,8 @@ import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.tools.git import git
+from kernelforge.tools.git import git, git_checkout_branch, git_head
 from kernelforge.config import Config
-from kernelforge.loop.knowledge_integration import git_checkout_branch
 from kernelforge.knowledge.kb_store.errors import (
     kb_store_secrets,
     sanitize_read_error,
@@ -182,14 +181,6 @@ def _plan_budget(
         f"search={max(0, int(search_stop_unix - started_at))}s applyback_reserve={budget.applyback_reserve_sec}s"
     )
     return deadline_unix, budget, search_stop_unix
-
-
-def _git_head(workspace: str) -> str:
-    """The workspace's HEAD commit, or "" when it has none that resolves."""
-    result = _git(workspace, "rev-parse", "HEAD")
-    if result.returncode != 0 or not result.stdout.strip():
-        return ""
-    return result.stdout.strip().splitlines()[0]
 
 
 def _with_port_fallbacks(opt: dict, *, best_ms, speedup, port_commit: str) -> dict:
@@ -380,7 +371,7 @@ class _Rewrite:
         )
         # The framework patch must be based on the pristine caller-owned repository, before the standalone FlyDSL
         # seed/PORT commits are introduced.
-        self.base_commit = _git_head(self.workspace)
+        self.base_commit = git_head(self.workspace)
         # A resolvable HEAD is what the agent sessions need, not evidence that the caller wants a framework patch.
         # Asking is what makes one required: a consumer of the standalone kernel has no framework tree for a patch to
         # target, and its run must not be judged on a stage it declined.
@@ -636,7 +627,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
             [run.attempt.relative_root],
             branch=request.optimize.git_branch,
         )
-        port_commit = _git_head(run.workspace)
+        port_commit = git_head(run.workspace)
         measurement = _measure_flydsl_baseline(
             run.spec, run.driver_path, run.preflight, run.search_stop_unix, port.snr_db
         )

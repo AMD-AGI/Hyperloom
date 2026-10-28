@@ -28,7 +28,7 @@ from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 
 if TYPE_CHECKING:
     from kernelforge.config import Config
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration.iteration_types import IterationConfig
     from kernelforge.evaluation.correctness.canonical import CanonicalCorrectnessResult
     from kernelforge.evaluation.correctness.pipeline import ValidationReport
 

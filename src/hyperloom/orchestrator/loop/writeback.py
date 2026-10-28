@@ -157,24 +157,12 @@ class WritebackCollaborator(
         adopted = verdict is Verdict.ADOPTED
         kind = (task.kind or "").strip()
         if kind == "explore":
-            best = result.get("best_variant")
-            delta_pct = best.get("gain_pct") if adopted and isinstance(best, dict) else None
-            self.shared_state.record_intervention(
-                change_type="config" if adopted else "config_attempt",
-                action="explore",
-                task_id=task.task_id,
-                delta_pct=delta_pct if isinstance(delta_pct, (int, float)) else None,
-            )
+            self.shared_state.record_intervention(change_type="config" if adopted else "config_attempt")
             return
         if kind == "integrate_patch":
             if not str(result.get("status") or "").strip():
                 return
-            self.shared_state.record_intervention(
-                change_type="code_patch" if adopted else "code_patch_attempt",
-                action="integrate_patch",
-                task_id=task.task_id,
-                delta_pct=result.get("delta_pct"),
-            )
+            self.shared_state.record_intervention(change_type="code_patch" if adopted else "code_patch_attempt")
 
     async def promote_to_shared_state(
         self,

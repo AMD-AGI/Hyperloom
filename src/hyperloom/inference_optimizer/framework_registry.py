@@ -129,6 +129,12 @@ def jit_cache_envs(framework: str | None) -> tuple[str, ...]:
     return _spec_or_default(framework).jit_cache_envs
 
 
+def tracelens_analysis_mode(framework: str | None) -> str:
+    """Return the TraceLens analysis mode for ``framework``."""
+    spec = _spec_or_default(framework)
+    return "default" if spec.name == "custom" else "inference"
+
+
 def _registered_spec(framework: str) -> FrameworkSpec:
     """Return the spec for ``framework``; raises ``KeyError`` when it is not registered."""
     return FRAMEWORKS[framework.strip().lower()]

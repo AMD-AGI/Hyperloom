@@ -350,13 +350,11 @@ class IntegratePromotionMixin:
         if not (isinstance(levers, list) and levers):
             return False
         lever_outcome = str(result.get("framework_lever_outcome") or "")
-        measured_pct = result.get("delta_pct")
         recorded = bool(
             self.shared_state.record_authored_framework_levers(
                 levers,
                 default_on=(lever_outcome == "default_on"),
                 specialist_task_id=str(result.get("specialist_task_id") or ""),
-                stack_delta_pct=measured_pct if measured_pct is not None else result.get("graded_delta_pct"),
             )
         )
         if result.get(SCREEN_PARAM) == SCREEN_CYCLE:

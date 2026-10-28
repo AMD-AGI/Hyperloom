@@ -25,6 +25,7 @@ from hyperloom.common.env_safety import build_benchmark_env
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
+from ._inferencex_patcher import BENCH_SEED_ENV
 
 
 def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
@@ -281,6 +282,8 @@ class _Round:
                 num_warmups=num_warmups,
                 profile=self.profile,
                 trust_remote_code=True,
+                # Passed explicitly: this command does not depend on the checkout carrying the seed patch.
+                seed=to_int(os.environ.get(BENCH_SEED_ENV)),
             )
         )
         rc = _run_subprocess(client_cmd, self.timeout_s, self.workspace, "client")

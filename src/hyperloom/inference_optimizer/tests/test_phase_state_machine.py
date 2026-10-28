@@ -687,7 +687,6 @@ def test_shared_state_phase_fields_default_to_empty():
     s = SharedState()
     assert s.phase == ""
     assert s.phase_history == []
-    assert s.phase_started_ts == ""
     assert s.phase_started_unix == 0.0
     assert s.phase_budget_pct == {}
 
@@ -702,7 +701,6 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1747600000.0),
     )
     assert s.phase == "PRELUDE"
-    assert s.phase_started_ts == "2026-05-19T00:00:00+00:00"
     assert s.phase_started_unix == 1747600000.0
     assert s.phase_history == [row]
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"

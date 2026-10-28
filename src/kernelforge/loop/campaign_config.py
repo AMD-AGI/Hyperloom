@@ -11,11 +11,11 @@ import logging
 import math
 import os
 import re
-import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from kernelforge.tools.git import git
+from kernelforge.tools.gpu_arch import canon_arch, detect_arch
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,
@@ -27,14 +27,13 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     implementation_signature,
 )
 from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
+from kernelforge.loop.experiments_layout import ExperimentsLayout
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.agent_relay import AgentRelayPolicy
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
-# The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
-_GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 _AMDGPU_ASSEMBLY_RE = re.compile(
     r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
     re.MULTILINE,
@@ -216,8 +215,9 @@ class CampaignConfigStore:
 
     def __init__(self, workspace_dir: str):
         self.workspace = Path(workspace_dir).resolve()
-        self.root = self.workspace / "forge_experiments"
-        self.path = self.root / "campaign_config.json"
+        layout = ExperimentsLayout.of(self.workspace)
+        self.root = layout.root
+        self.path = layout.campaign_config
         self.program_path = self.root / "program.md"
 
     def exists(self) -> bool:
@@ -321,22 +321,15 @@ def detect_gpu_target() -> str:
     """Resolve the active AMD GPU architecture without a CLI option."""
     configured = os.environ.get("GPU_TARGET", "").strip().lower()
     if configured:
-        if not _GPU_TARGET_RE.fullmatch(configured):
+        if canon_arch(configured) != configured:
             raise ValueError(f"invalid GPU_TARGET: {configured}")
         return configured
-    try:
-        result = subprocess.run(
-            ["rocminfo"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    detected = detect_arch()
+    if not detected:
+        raise ValueError(
+            "could not detect exactly one GPU target; ensure rocminfo is available or set GPU_TARGET to the runtime GPU"
         )
-    except Exception as error:
-        raise ValueError("could not detect GPU target; ensure rocminfo is available") from error
-    targets = sorted(set(_GPU_TARGET_RE.findall(result.stdout or "")))
-    if result.returncode != 0 or len(targets) != 1:
-        raise ValueError("could not detect exactly one GPU target; configure the runtime GPU")
-    return targets[0].lower()
+    return detected
 
 
 def normalize_kernel_backend_name(kernel_backend: str) -> str:

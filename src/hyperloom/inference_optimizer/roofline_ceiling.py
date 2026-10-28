@@ -13,60 +13,34 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
 
 log = logging.getLogger(__name__)
 
 
+#: Precision tags this module reads, by the precision ``GpuBoard.vendor_peak_tflops`` is keyed on.
+_PRECISION_TAGS: dict[str, tuple[str, ...]] = {
+    "bf16": ("bf16", "bfloat16"),
+    "fp16": ("fp16", "float16"),
+    "fp8": ("fp8", "float8_e4m3fn", "float8_e5m2"),
+    "fp4": ("mxfp4", "fp4", "float4"),
+    "fp32": ("fp32", "float32"),
+}
+
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
 #: ⇒ 0.0 falls back to T_mem).
-_MI300X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 1307.4,
-    "bfloat16": 1307.4,
-    "fp16": 1307.4,
-    "float16": 1307.4,
-    "fp8": 2614.9,
-    "float8_e4m3fn": 2614.9,
-    "float8_e5m2": 2614.9,
-    "fp32": 163.4,
-    "float32": 163.4,
-}
-_MI355X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 2516.6,
-    "bfloat16": 2516.6,
-    "fp16": 2516.6,
-    "float16": 2516.6,
-    "fp8": 5033.2,
-    "float8_e4m3fn": 5033.2,
-    "float8_e5m2": 5033.2,
-    "mxfp4": 10066.4,
-    "fp4": 10066.4,
-    "float4": 10066.4,
-    "fp32": 157.3,
-    "float32": 157.3,
-}
-#: https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
-_R9700_FP16_MATRIX_TFLOPS = 191.0
-_R9700_FP8_MATRIX_TFLOPS = 383.0
-_R9700_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": _R9700_FP16_MATRIX_TFLOPS,
-    "bfloat16": _R9700_FP16_MATRIX_TFLOPS,
-    "fp16": _R9700_FP16_MATRIX_TFLOPS,
-    "float16": _R9700_FP16_MATRIX_TFLOPS,
-    "fp8": _R9700_FP8_MATRIX_TFLOPS,
-    "float8_e4m3fn": _R9700_FP8_MATRIX_TFLOPS,
-    "float8_e5m2": _R9700_FP8_MATRIX_TFLOPS,
-    "fp32": 47.8,
-    "float32": 47.8,
-}
 HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi308x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi325x": {"hbm_gb": 256.0, "hbm_bw_gbps": 6000.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi355x": {"hbm_gb": 288.0, "hbm_bw_gbps": 8000.0, "peak_tflops": _MI355X_PEAK_TFLOPS},
-    "r9700": {"hbm_gb": 32.0, "hbm_bw_gbps": 640.0, "peak_tflops": _R9700_PEAK_TFLOPS},
+    product: {
+        "hbm_gb": board.hbm_gb,
+        "hbm_bw_gbps": board.hbm_bw_gbps,
+        "peak_tflops": board.vendor_peaks_by_tag(_PRECISION_TAGS),
+    }
+    for product, board in AMD_GPU_BOARDS.items()
+    if board.hbm_bw_gbps is not None
 }
 
 
@@ -500,18 +474,27 @@ def _sum_weight_file_sizes(model_path: Path, pattern: str) -> int | None:
     return int(total) if total > 0 else None
 
 
-def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
-    """Routed experts activated per token, across the naming variants in use."""
-    for key in ("num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk"):
+_HIDDEN_SIZE_KEY = "hidden_size"
+_NUM_HIDDEN_LAYERS_KEY = "num_hidden_layers"
+
+
+def _config_int(cfg: dict[str, Any], *keys: str) -> int:
+    """The first set value among the alias ``keys``, as an ``int``; ``0`` when none is set."""
+    for key in keys:
         value = cfg.get(key)
         if value:
             return int(value)
     return 0
 
 
+def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
+    """Routed experts activated per token, across the naming variants in use."""
+    return _config_int(cfg, "num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk")
+
+
 def _derive_moe_hidden_size(cfg: dict[str, Any]) -> int:
     """The routed experts' input dimension, which need not be ``hidden_size``."""
-    return int(cfg.get("routed_expert_hidden_size") or cfg.get("moe_hidden_size") or cfg.get("hidden_size") or 0)
+    return _config_int(cfg, "routed_expert_hidden_size", "moe_hidden_size", _HIDDEN_SIZE_KEY)
 
 
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
@@ -527,7 +510,7 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     head_dim = cfg.get("head_dim")
     if head_dim:
         return int(head_dim)
-    hidden = cfg.get("hidden_size")
+    hidden = cfg.get(_HIDDEN_SIZE_KEY)
     heads = cfg.get("num_attention_heads")
     if hidden and heads:
         return int(hidden) // int(heads)
@@ -546,7 +529,7 @@ def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: 
         moe = sum(1 for v in freq if v)
         return moe, num_layers - moe
 
-    first_dense = int(cfg.get("first_k_dense_replace") or 0)
+    first_dense = _config_int(cfg, "first_k_dense_replace")
     first_dense = max(0, min(first_dense, num_layers))
 
     # The stride is phased differently by the two upstream implementations, and both phase it on the ABSOLUTE layer
@@ -572,13 +555,13 @@ def _compute_expert_decomposition(
     expert_bpe: float,
 ) -> tuple[int, int, int, int]:
     """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases, the per-token aliases in :func:`_derive_experts_per_tok`, and the latent-MoE expert width in :func:`_derive_moe_hidden_size`."""
-    num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
+    num_experts = _config_int(cfg, "num_experts", "n_routed_experts", "num_local_experts")
     experts_per_tok = _derive_experts_per_tok(cfg)
     if num_experts <= 0 or experts_per_tok <= 0:
         return int(weight_bytes), 0, 0, 0
     hidden_size = _derive_moe_hidden_size(cfg)
-    num_layers = int(cfg.get("num_hidden_layers") or 0)
-    moe_inter = int(cfg.get("moe_intermediate_size") or cfg.get("intermediate_size") or 0)
+    num_layers = _config_int(cfg, _NUM_HIDDEN_LAYERS_KEY)
+    moe_inter = _config_int(cfg, "moe_intermediate_size", "intermediate_size")
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
     # Only the MoE layers hold expert weights.
@@ -620,8 +603,6 @@ def load_model_meta(
     if not p.is_dir():
         # ``model_path`` may be an HF repo id (the CLI ``--model`` is persisted verbatim); resolve it to the engine's
         # local HF cache dir via the shared resolver so the decode ceiling isn't null for repo-id launches.
-        from hyperloom.common.model_paths import resolve_local_model_dir
-
         resolved = resolve_local_model_dir(model_path)
         if resolved is None:
             return None
@@ -657,16 +638,15 @@ def load_model_meta(
         weight_bytes=weight_bytes,
         expert_bpe=expert_dtype_bytes,
     )
-    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(
-        cfg, int(cfg.get("num_hidden_layers") or 0), num_experts
-    )
-    intermediate_size = int(cfg.get("intermediate_size") or 0)
-    moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
+    num_layers = _config_int(cfg, _NUM_HIDDEN_LAYERS_KEY)
+    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
+    intermediate_size = _config_int(cfg, "intermediate_size")
+    moe_intermediate_size = _config_int(cfg, "moe_intermediate_size")
     if num_experts > 0 and moe_intermediate_size <= 0:
         moe_intermediate_size = intermediate_size
     return ModelMeta(
         weight_bytes=weight_bytes,
-        num_layers=int(cfg.get("num_hidden_layers") or 0),
+        num_layers=num_layers,
         num_kv_heads=_derive_kv_heads(cfg),
         head_dim=_derive_head_dim(cfg),
         weight_dtype_bytes=dtype_bytes,
@@ -675,12 +655,12 @@ def load_model_meta(
         num_experts=num_experts,
         experts_per_tok=experts_per_tok,
         expert_weight_bytes=total_expert_bytes,
-        hidden_size=int(cfg.get("hidden_size") or 0),
+        hidden_size=_config_int(cfg, _HIDDEN_SIZE_KEY),
         intermediate_size=intermediate_size,
         moe_intermediate_size=moe_intermediate_size,
         moe_hidden_size=(_derive_moe_hidden_size(cfg) if num_experts > 0 else 0),
-        vocab_size=int(cfg.get("vocab_size") or 0),
-        num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        vocab_size=_config_int(cfg, "vocab_size"),
+        num_attention_heads=_config_int(cfg, "num_attention_heads"),
         moe_layers=n_moe_layers,
         dense_ffn_layers=n_dense_ffn_layers,
     )
@@ -826,7 +806,7 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
         return 8, 0
     boc = cfg.get("block_out_channels")
     vae_scale = 2 ** (len(boc) - 1) if isinstance(boc, list) and boc else 8
-    latent_channels = int(cfg.get("latent_channels") or 0)
+    latent_channels = _config_int(cfg, "latent_channels")
     return vae_scale, latent_channels
 
 
@@ -863,24 +843,20 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     # Every field below is attacker-shaped JSON, so a non-numeric value must degrade to "unreadable" rather than
     # escape as TypeError past the caller.
     try:
-        num_layers = int(cfg.get("num_layers") or cfg.get("num_hidden_layers") or 0)
-        num_single_layers = int(cfg.get("num_single_layers") or 0)
-        hidden = int(cfg.get("hidden_size") or cfg.get("inner_dim") or 0)
+        num_layers = _config_int(cfg, "num_layers", _NUM_HIDDEN_LAYERS_KEY)
+        num_single_layers = _config_int(cfg, "num_single_layers")
+        hidden = _config_int(cfg, _HIDDEN_SIZE_KEY, "inner_dim")
         if hidden <= 0:
-            heads = int(cfg.get("num_attention_heads") or 0)
-            head_dim = int(cfg.get("attention_head_dim") or cfg.get("head_dim") or 0)
-            hidden = heads * head_dim
+            hidden = _config_int(cfg, "num_attention_heads") * _config_int(cfg, "attention_head_dim", "head_dim")
         _ps = cfg.get("patch_size")
+        patch = (_ps if isinstance(_ps, (list, tuple)) else [_ps]) or [1]
         # A 3-element patch is (temporal, h, w): a video denoiser, whose token count needs the frame axis nothing in
         # this module models.
-        video_patch = isinstance(_ps, (list, tuple)) and len(_ps) >= 3
-        if isinstance(_ps, (list, tuple)):
-            # A 2-element patch is (h, w) and need not be square, so keep both.
-            patch_h = int((_ps[0] if _ps else 0) or 1) or 1
-            patch_w = int((_ps[-1] if _ps else 0) or 1) or 1
-        else:
-            patch_h = patch_w = int(_ps or 1) or 1
-        sample = int(cfg.get("sample_size") or 0)
+        video_patch = len(patch) >= 3
+        # A 2-element patch is (h, w) and need not be square, so keep both.
+        patch_h = int(patch[0] or 1) or 1
+        patch_w = int(patch[-1] or 1) or 1
+        sample = _config_int(cfg, "sample_size")
     except (TypeError, ValueError):
         return None
     if num_layers <= 0 or hidden <= 0:
@@ -899,8 +875,6 @@ def _read_diffusion_dit_meta(model_path: str, *, height: int = 0, width: int = 0
     total_layers = num_layers + num_single_layers
     param_layer_units = 2 * num_layers + num_single_layers if num_single_layers > 0 else num_layers
     dit_params = 12 * param_layer_units * hidden * hidden
-    if dit_params <= 0:
-        return None
     return DitGeometry(dit_params, latent_tokens, total_layers, hidden)
 
 
@@ -911,7 +885,7 @@ def _diffusion_latent_tokens_from_resolution(
     if height <= 0 or width <= 0:
         return 0
     vae_scale, latent_channels = _read_vae_geometry(model_path)
-    in_ch = int(transformer_cfg.get("in_channels") or 0)
+    in_ch = _config_int(transformer_cfg, "in_channels")
     pack = 2
     if in_ch > 0 and latent_channels > 0 and in_ch % latent_channels == 0:
         ratio = in_ch // latent_channels
@@ -948,8 +922,6 @@ def _compute_diffusion_breakdown_from_state(state: Any, runtime: RuntimeWorkload
     height, width = _read_diffusion_resolution(state)
     # ``model_path`` may be an HF repo id; resolve to the local diffusers dir so the DiT/VAE config reads work
     # (load_model_meta re-resolves internally, so passing the resolved dir is harmless).
-    from hyperloom.common.model_paths import resolve_local_model_dir
-
     _resolved = resolve_local_model_dir(runtime.model_path)
     model_dir = str(_resolved) if _resolved is not None else runtime.model_path
     dit = _read_diffusion_dit_meta(model_dir, height=height, width=width)

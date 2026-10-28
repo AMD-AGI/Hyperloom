@@ -69,19 +69,11 @@ from . import cycle_bench_arm as _cycle_bench
 from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
-from ._proposal_identity import BaseControls, effective_fingerprint, normalize_proposal
+from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
-from ._grid_variant_filter import ServingStack
-from ._grid_base import (
-    TS_FAILED,
-    TS_KILLED_OVERTIME,
-    TS_SKIPPED_DEDUP,
-)
+from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
 from .benchmark_result import double_run_requested
 from ._grid_runner import (
-    DEFAULT_KEEP_THRESHOLD_PCT,
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     GridLaunch,
     GridRecipe,
     GridStop,
@@ -89,20 +81,26 @@ from ._grid_runner import (
     SessionDirField,
     _build_variant_yaml,
     _num_gpus_for_config,
+    _safe,
+    run_grid,
+    sanitize_result_dir,
+    sanitize_script_name,
+    session_grid_bounds,
+)
+from ._grid_variant_filter import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
+    ServingStack,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
     apply_multi_node_invalid_variants,
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
-    run_grid,
-    sanitize_result_dir,
-    sanitize_script_name,
-    session_grid_bounds,
 )
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
-    server_args_env_name,
 )
 from ._ray_serving import maybe_serving_lease
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
@@ -245,21 +243,6 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
 def _variant_fingerprint(variant: Any) -> str:
     """The canonical fingerprint stamped on a variant before the round launched it."""
     return str(getattr(variant, "canonical_fp", "") or "")
-
-
-def _variant_control_fields(variant: Any) -> dict[str, Any]:
-    """Return non-default remove/unset/replace controls for identity and ledger rows."""
-    remove_args = to_str_list(getattr(variant, "remove_args", []))
-    unset_envs = to_str_list(getattr(variant, "unset_envs", []))
-    args_mode = str(getattr(variant, "args_mode", "append") or "append").strip().lower()
-    out: dict[str, Any] = {}
-    if remove_args:
-        out["remove_args"] = remove_args
-    if unset_envs:
-        out["unset_envs"] = unset_envs
-    if args_mode == "replace":
-        out["args_mode"] = "replace"
-    return out
 
 
 def _keep_uses_effective_args(
@@ -424,8 +407,6 @@ def _atom_default_grid(
     *,
     model_class: str,
     conc: int,
-    isl: int = 0,
-    osl: int = 0,
 ) -> list[GridVariant]:
     """Atom default explore grid, seeded from atom's known perf knobs."""
     mc_l = (model_class or "").strip().lower()
@@ -483,7 +464,7 @@ def _atom_default_grid(
     return variants
 
 
-def _xdit_default_grid(*, model_class: str) -> list[GridVariant]:
+def _xdit_default_grid() -> list[GridVariant]:
     """xDiT (diffusion) default explore grid, seeded from the empirical KB."""
     variants: list[GridVariant] = []
 
@@ -696,20 +677,13 @@ def _default_grid_for_framework(
     *,
     model_class: str,
     conc: int = 0,
-    isl: int = 0,
-    osl: int = 0,
 ) -> list[GridVariant]:
     """Framework-keyed default grid dispatch."""
     fw = (framework or "").strip().lower()
     if fw == "atom":
-        return _atom_default_grid(
-            model_class=model_class,
-            conc=conc,
-            isl=isl,
-            osl=osl,
-        )
+        return _atom_default_grid(model_class=model_class, conc=conc)
     if fw == "xdit":
-        return _xdit_default_grid(model_class=model_class)
+        return _xdit_default_grid()
     return []
 
 
@@ -789,11 +763,8 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
     model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
-    conc, isl, osl = (
-        to_int(params.get(key.lower()) or yaml_envs.get(key) or os.environ.get(key) or 0, 0) or 0
-        for key in ("CONC", "ISL", "OSL")
-    )
-    seed = _default_grid_for_framework(framework, model_class=model_class, conc=conc, isl=isl, osl=osl)
+    conc = to_int(params.get("conc") or yaml_envs.get("CONC") or os.environ.get("CONC") or 0, 0) or 0
+    seed = _default_grid_for_framework(framework, model_class=model_class, conc=conc)
     if not seed:
         return []
     log.info(
@@ -819,16 +790,7 @@ def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[s
 # The numbers a measured variant produced. ``base_tput`` is carried verbatim rather than left to be back-solved
 # from the gain: each KEEP advances the round anchor, so a consumer dividing the gain out of the final throughput
 # reconstructs whichever anchor happens to be current, and a FAILED variant has no gain to divide.
-# ``estimated_output_throughput`` is the rough decode tput salvaged from a killed-overtime variant's partial
-# server.log, and the wall-clock pair says "ran too slow -> early kill" instead of an opaque FAILED row.
-_VARIANT_METRIC_KEYS: tuple[str, ...] = (
-    "tput",
-    "gain_pct",
-    "base_tput",
-    "estimated_output_throughput",
-    "runtime_sec",
-    "wall_clock_ratio_vs_baseline",
-)
+_VARIANT_METRIC_KEYS: tuple[str, ...] = ("tput", "gain_pct", "base_tput")
 
 # The ledgers' views of the row the round records for a variant.
 _VARIANT_FIELDS: tuple[str, ...] = (
@@ -890,7 +852,6 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
             error_class=te.get("error_class"),
             error_excerpt=te.get("error_excerpt"),
             reason=reason,
-            explicit=te.get("failure_attribution"),
         )
         if outcome in UNMEASURED_OUTCOMES
         else "",
@@ -924,7 +885,7 @@ class _ExploreRound:
         self.ctx = ctx
         self.params = params
         self.output_root = output_root
-        self.ss = extra.get("shared_state") or extra.get("state")
+        self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
         script, self.result_dir = _sanitized_overrides(params)
         self.target = BenchmarkTarget(
@@ -983,7 +944,6 @@ class _ExploreRound:
         self.rejected: list[dict[str, Any]] = []
         self.winners_history: list[dict[str, Any]] = []
         self.tested: dict[str, dict[str, Any]] = {}
-        self.name_index: dict[str, Any] = {}
         # Servers this round launched, and the variants that reached the measured check and were answered by the
         # stack or the ledger instead (a restatement of the stack, or a verdict the session already holds).
         self.launched: dict[str, str] = {}
@@ -1121,7 +1081,7 @@ class _ExploreRound:
             gv.canonical_fp = effective_fingerprint(  # type: ignore[attr-defined]
                 gv.extra_server_args,
                 gv.extra_envs,
-                controls=_variant_control_fields(gv),
+                controls=controls_of(vars(gv)),
                 base=BaseControls(self.base_remove_args, self.base_unset_envs, self.args_mode),
             )
         self.grid = grid
@@ -1301,7 +1261,7 @@ class _ExploreRound:
         prior = measured_verdict(
             getattr(self.ss, "explore_search", None),
             fingerprint,
-            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **_variant_control_fields(gv)},
+            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **controls_of(vars(gv))},
             now=MeasuredOn(stack_of_measured(self.measured_against()), self.ws_sig, self.keep_threshold_pct),
         )
         if prior is None:
@@ -1418,10 +1378,6 @@ class _ExploreRound:
                 session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.decision_expected_sec
             ),
         )
-        if not results:
-            # run_grid returns one result per grid entry.
-            log.warning("explore: variant %s produced no result", gv.name)
-            return None
         return None if self._stopped_by_the_run(results[0], gv, idx, "decision") else results[0]
 
     async def _warmup(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path, lifecycle: Any) -> Any:
@@ -1431,7 +1387,12 @@ class _ExploreRound:
             grid=[run_gv],
             output_root=warmup_slot,
             recipe=self._recipe(),
-            launch=GridLaunch(result_dir=self.result_dir, serving_lease=self.lease, server_lifecycle=lifecycle),
+            launch=GridLaunch(
+                result_dir=self.result_dir,
+                serving_lease=self.lease,
+                server_lifecycle=lifecycle,
+                warmup_round=True,
+            ),
             stop=GridStop(
                 session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.warmup_expected_sec
             ),
@@ -1503,7 +1464,6 @@ class _ExploreRound:
             **self._graded_verdict(gv, r, variant_meas),
             "status": r.status,
             "tput": r.output_throughput,
-            "decision_tput": r.output_throughput,
             **graded_axes_of(variant_meas),
             "base_tput": self.running_tput,
             "round_id": self.round_id,
@@ -1534,7 +1494,7 @@ class _ExploreRound:
             "name": gv.name,
             "extra_server_args": gv.extra_server_args,
             "extra_envs": dict(gv.extra_envs),
-            **_variant_control_fields(gv),
+            **controls_of(vars(gv)),
             **_decision_fields(gv),
         }
 
@@ -1646,8 +1606,6 @@ class _ExploreRound:
 
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
-        if gv.name:
-            self.name_index[gv.name] = row["fingerprint"]
         if row["outcome"] != "KEEP":
             self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
             self.losers.append(_ledger_view(row, _LOSER_FIELDS))
@@ -1660,7 +1618,7 @@ class _ExploreRound:
                 "gain_pct": row["gain_pct"],
                 "extra_args": row["extra_server_args"],
                 "extra_envs": row["extra_envs"],
-                **_variant_control_fields(gv),
+                **controls_of(vars(gv)),
                 "provenance": row["provenance"],
                 "scope": row["scope"],
                 "ts": row["ts"],
@@ -1668,7 +1626,7 @@ class _ExploreRound:
         )
 
     def _keep(self, gv: GridVariant, run_gv: GridVariant, r: Any, row: dict[str, Any], meas: dict[str, Any]) -> dict:
-        control_fields = _variant_control_fields(gv)
+        control_fields = controls_of(vars(gv))
         run_remove_args = self._run_remove_args(gv)
         next_effective_args = compose_server_args(
             inherited_args=self.inherited_args,
@@ -1699,8 +1657,8 @@ class _ExploreRound:
         self.remove_args = list(run_remove_args)
         self.unset_envs = list(run_gv.unset_envs)
         self.args_mode = "replace" if persist else "append"
-        if row["decision_tput"] and row["decision_tput"] > 0:
-            self.running_tput = row["decision_tput"]
+        if row["tput"] and row["tput"] > 0:
+            self.running_tput = row["tput"]
         if self.grade_on_intvty:
             # Only a comparable intvty KEEP advances the round anchor. Degraded measurements never reach here.
             self.running_perf = perf_snapshot_from_mapping(meas)
@@ -1728,7 +1686,6 @@ class _ExploreRound:
             # baseline) rather than that it scored nothing.
             "accuracy": next((g["observed"] for g in row["gates"] if g["gate"] == "accuracy"), None),
             "tput": row["tput"],
-            "decision_tput": row["decision_tput"],
             # The axes this KEEP was graded on travel with it: current_best becomes the next round's anchor, and
             # an anchor without them degrades the session.
             **graded_axes_of(meas),
@@ -1747,7 +1704,7 @@ class _ExploreRound:
         outcomes = [
             _outcome_row(te, fingerprint, reasons.get(fingerprint, ""), task_id)
             for fingerprint, te in self.tested.items()
-            if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED, TS_KILLED_OVERTIME)
+            if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED)
         ]
         outcomes.extend(
             {
@@ -1777,7 +1734,7 @@ class _ExploreRound:
         # A round whose every variant already had its verdict, or only restated the stack, is answered, as if
         # measured again.
         answered = bool(self.runnable) and self.judged_without_measuring == len(self.runnable)
-        measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.tested.values())
+        measured = any(t.get("outcome") in ("KEEP", "REVERT") for t in self.tested.values())
         status = "succeeded" if measured or self.winners or answered else "failed"
         return {
             "status": status,
@@ -1785,10 +1742,8 @@ class _ExploreRound:
             # failed. As a bare ``failed`` with no error_class nothing downstream could tell the two apart, and
             # the KB would learn that these variants are bad.
             **self._budget_error(status),
-            "session_budget_untested": self.untested,
             "base_tput": self.base_tput,
-            "running_base_tput": self.running_tput,
-            # Each KEEP advances ``running_base_tput``, so this is the final stack.
+            # Each KEEP advances the running anchor, so this is the final stack.
             "output_throughput": float(self.running_tput) if self.winners else None,
             "best_variant": best,
             "best_gain_pct": best_gain_pct,
@@ -1798,12 +1753,9 @@ class _ExploreRound:
             "per_variant_outcomes": outcomes,
             "framework_lever_attributions": levers,
             "explore_search_update": {
-                "schema_version": 1,
                 "tested": self.tested,
                 "rejected": list(rejected.values()),
-                "name_index": self.name_index,
                 "winners_history": self.winners_history,
-                "domains_round_summary": [],
                 "last_round": self._last_round_summary(),
             },
             "round_id": self.round_id,
@@ -1832,7 +1784,6 @@ class _ExploreRound:
             "base_extra_args": self.base_args,
             "tested": [w["fingerprint"] for w in self.winners] + [lr["fingerprint"] for lr in self.losers],
             "round_winners": [w["fingerprint"] for w in self.winners],
-            "killed_overtime": [fp for fp, te in self.tested.items() if te.get("outcome") == TS_KILLED_OVERTIME],
             "skipped_dup": self.skipped,
             "ts": _now_iso(),
         }
@@ -1904,11 +1855,6 @@ def _screen_cycle_batch(
     except (OSError, KeyError, ValueError) as exc:
         return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
     return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec, stop=stop)}
-
-
-def _safe(name: str) -> str:
-    """Filesystem-safe slug for variant directory names."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:60]
 
 
 explore_executor = ExploreExecutor()

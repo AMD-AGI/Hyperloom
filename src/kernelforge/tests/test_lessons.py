@@ -223,7 +223,8 @@ def test_cutoff_classification(end_reason, expected):
 # ── summarize_iteration ───────────────────────────────────────────────────────
 
 
-def test_summarize_writes_the_returned_text(tmp_path):
+def test_summarize_returns_the_text_and_leaves_the_store_alone(tmp_path):
+    """The caller writes the text: a lane's record is persisted with the iteration that measures it."""
     store = _store(tmp_path)
     seen: list[str] = []
 
@@ -233,7 +234,6 @@ def test_summarize_writes_the_returned_text(tmp_path):
 
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="turn_cap",
             summarizer=fake_summarizer,
@@ -242,15 +242,14 @@ def test_summarize_writes_the_returned_text(tmp_path):
 
     assert outcome
     assert "bigger tile" in outcome.text
-    assert "bigger tile" in store.read(2)
     assert "turn_cap" in seen[0]
+    assert store.existing_iterations() == []
 
 
 def test_summarize_without_a_resumable_provider(tmp_path):
     store = _store(tmp_path)
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="",
             summarizer=None,
@@ -271,7 +270,6 @@ def test_summarize_propagates_a_failing_session_to_the_recording_caller(tmp_path
     with pytest.raises(RuntimeError, match="^backend exploded$"):
         asyncio.run(
             summarize_iteration(
-                store=store,
                 iteration=2,
                 end_reason="",
                 summarizer=broken,
@@ -288,7 +286,6 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
 
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="",
             summarizer=empty,
@@ -296,27 +293,6 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
     )
     assert not outcome
     assert "no text" in outcome.reason
-    assert store.existing_iterations() == []
-
-
-def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
-    store = _store(tmp_path)
-
-    async def summary(_prompt: str) -> str:
-        return "use wider vector loads\n- [better] vectorized loads | 1.04x"
-
-    monkeypatch.setattr(store, "write", lambda _iteration, _text: None)
-    outcome = asyncio.run(
-        summarize_iteration(
-            store=store,
-            iteration=2,
-            end_reason="",
-            summarizer=summary,
-        )
-    )
-
-    assert not outcome
-    assert outcome.reason == "failed to persist lesson document"
     assert store.existing_iterations() == []
 
 

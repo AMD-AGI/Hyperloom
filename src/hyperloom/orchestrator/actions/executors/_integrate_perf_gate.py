@@ -11,8 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.coerce import first_text
+from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, agentx_enabled
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -134,7 +134,6 @@ class PerfGateMixin:
         *,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
@@ -209,15 +208,13 @@ class PerfGateMixin:
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
         parity, parity_revert = await self._parity_gate(
-            attempt, measured, params=params, extra=extra, switch_manifest=switch_manifest
+            attempt, measured, params=params, switch_manifest=switch_manifest
         )
         if parity_revert is not None:
             return parity_revert
 
         if gate_pass:
-            await self._maybe_write_framework_kb_record(
-                measured.lesson("integrated"), done_payload=done_payload, params=params, extra=extra
-            )
+            await self._maybe_write_framework_kb_record(measured.lesson("integrated"), attempt=attempt, params=params)
             commit_failure, keep_committed = self._commit_accepted_work(
                 attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
             )
@@ -273,9 +270,9 @@ class PerfGateMixin:
         # that is not inert when disabled would skew every later measurement,
         # and that check now runs on this path too.
         if switch_manifest and attempt.applied:
-            return await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
+            return await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
         await self._maybe_write_framework_kb_record(
-            measured.lesson("reverted_smoke_fail"), done_payload=done_payload, params=params, extra=extra
+            measured.lesson("reverted_smoke_fail"), attempt=attempt, params=params
         )
         reasons = _gate_failure_reasons(
             graded,
@@ -300,7 +297,6 @@ class PerfGateMixin:
         measured: _PatchMeasurement,
         *,
         params: dict[str, Any],
-        extra: dict[str, Any],
         switch_manifest: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """The switch-off parity verdict, and the revert verdict when the patch did not hold it."""
@@ -333,9 +329,8 @@ class PerfGateMixin:
             measured.lesson(
                 _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
             ),
-            done_payload=attempt.done_payload,
+            attempt=attempt,
             params=params,
-            extra=extra,
         )
         return parity, _perf_revert(
             attempt,
@@ -509,7 +504,7 @@ class PerfGateMixin:
                     "because the patch was shown to be non-inert"
                 ),
             }
-        delta_pct = (float(parity_tput) - base_tput) / base_tput * 100.0
+        delta_pct = gain_pct_or_zero(float(parity_tput), base_tput)
         if abs(delta_pct) > band_pct:
             return {
                 "ran": True,
@@ -547,7 +542,7 @@ class PerfGateMixin:
             "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
         }
 
-    async def _admit_dormant(self, attempt: IntegrateAttempt, params: dict[str, Any], extra: dict[str, Any]) -> dict:
+    async def _admit_dormant(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> dict:
         """Commit an applied switched patch dormant without a bench, for the cycle bench to screen its levers.
 
         Inertness with every switch unset is shown by the next cycle batch, whose base runs this tree.
@@ -564,7 +559,7 @@ class PerfGateMixin:
             measured_against={},
         )
         parity = {"ran": False, "ok": True, "reason": _PARITY_DEFERRED_TO_CYCLE_BASE}
-        result = await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
+        result = await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
         return {**result, SCREEN_PARAM: SCREEN_CYCLE}
 
     async def _keep_inert_switches(
@@ -573,7 +568,6 @@ class PerfGateMixin:
         measured: _PatchMeasurement,
         *,
         params: dict[str, Any],
-        extra: dict[str, Any],
         parity: dict[str, Any],
     ) -> dict[str, Any]:
         """Keep a correct-but-unprofitable rewrite patch dormant and register its levers.
@@ -599,7 +593,6 @@ class PerfGateMixin:
                 verdict, and the accuracy delta and config fingerprint for the
                 KB record.
             params: The task params.
-            extra: The runner's extra context.
             parity: The switch-off parity verdict, the inert KEEP's evidence of being inert.
 
         Returns:
@@ -622,10 +615,7 @@ class PerfGateMixin:
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         if parity.get("reason") != _PARITY_DEFERRED_TO_CYCLE_BASE:
             await self._maybe_write_framework_kb_record(
-                measured.lesson(_kb.OUTCOME_KEPT_INERT),
-                done_payload=attempt.done_payload,
-                params=params,
-                extra=extra,
+                measured.lesson(_kb.OUTCOME_KEPT_INERT), attempt=attempt, params=params
             )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",

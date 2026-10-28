@@ -273,14 +273,6 @@ class BaselinePromotionMixin:
         )
         if self.shared_state.baseline_tput > 0:
             await self.drain_queued_baselines(reason="baseline_established")
-        # Standalone baseline-arm roofline ceiling (pure CPU): backs up the
-        # snapshot ceiling in case the later roofline step fails. Abstains under
-        # AgentX, where the ceiling is derived from the inert ISL/OSL and the
-        # conc-sweep chart already refuses to draw it for the same reason.
-        from hyperloom.orchestrator.actions.executors._workload_envs import agentx_active
-
-        if measured_ok and not agentx_active(self.shared_state):
-            self.shared_state.record_baseline_roofline_ceiling()
         # Only the run that first establishes the anchor bootstraps; a later
         # re-baseline must not re-fire replay, scout or recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap(tput):

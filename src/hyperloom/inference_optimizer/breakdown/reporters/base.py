@@ -112,15 +112,6 @@ def stop_target_text(objective: Any) -> str:
     return ", ".join(label for t in targets or [target] if (label := _target_label(t)))
 
 
-def measured_ms(value: Any) -> float | None:
-    """A latency reading in milliseconds, or ``None`` when the round measured none.
-
-    A workload that measures no request latency records ``0``, which is not a real reading.
-    """
-    ms = to_float(value)
-    return ms if ms is not None and ms > 0 else None
-
-
 def outcome_of(breakdown: Any) -> dict[str, Any]:
     """The session result block.
 

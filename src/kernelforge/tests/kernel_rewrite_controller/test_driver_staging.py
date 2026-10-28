@@ -105,7 +105,7 @@ def test_preparation_that_repairs_the_staged_driver_succeeds_with_nothing_to_com
     _task, workspace, driver = staged
     for args in (("init", "-q"), ("add", "-A"), ("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "base")):
         assert task_preparer._git(workspace, *args)[0] == 0
-    base = task_preparer._git_head(workspace)
+    base = task_preparer.git_head(workspace)
 
     def reference(_workspace):
         ref_dir = driver.parent / task_preparer.REFERENCE_SUBDIR
@@ -143,7 +143,7 @@ def test_preparation_that_repairs_the_staged_driver_succeeds_with_nothing_to_com
     )
 
     assert result.ok is True, result.message
-    assert task_preparer._git_head(workspace) == base
+    assert task_preparer.git_head(workspace) == base
     assert driver.read_text(encoding="utf-8") == "# driver with its ranks\n"
 
 

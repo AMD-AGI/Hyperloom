@@ -21,11 +21,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    apply_compatibility_filter,
-    GridRecipe,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridVariant
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -35,6 +32,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
 )
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -593,6 +591,7 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
+        "fingerprint": "cc" * 8,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
@@ -602,7 +601,6 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state.record_explore_accepted(variant)
     state.record_explore_accepted(variant)
     assert len(state.explore_search["accepted"]) == 1
-    assert len(state.explore_search["winners_history"]) == 2
 
 
 def test_apply_explore_search_update_preserves_accepted():
@@ -618,7 +616,6 @@ def test_apply_explore_search_update_preserves_accepted():
     # Update arrives with tested/rejected but NOT accepted; the bucket survives the merge.
     state.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "bb" * 8: {
                     "name": "b",
@@ -634,7 +631,6 @@ def test_apply_explore_search_update_preserves_accepted():
                     "reason": "not_keep",
                 }
             ],
-            "name_index": {"b": "bb" * 8},
             "cursor": 1,
             "last_round": {"round_id": "explore-001"},
         }
@@ -647,10 +643,8 @@ def test_apply_explore_search_update_preserves_accepted():
 def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
     """One round's worth of executor ledger writes."""
     return {
-        "schema_version": 1,
         "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
         "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
-        "name_index": {name: fingerprint},
         "last_round": {"round_id": f"explore-{round_no:03d}"},
     }
 
@@ -664,7 +658,6 @@ def test_apply_explore_search_update_accumulates_across_rounds():
     search = state.explore_search
     assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
     assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
-    assert search["name_index"] == {"a": "aa" * 8, "b": "bb" * 8}
 
 
 def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
@@ -1417,7 +1410,6 @@ async def test_explore_missing_axes_fails_closed(
     assert out["winners"] == []
     assert out["best_variant"] is None
     assert out["output_throughput"] is None
-    assert out["running_base_tput"] == base_tput
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
@@ -1605,7 +1597,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    assert out["output_throughput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
     # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
     # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
     for row in (*out["winners"], tested["v_good"]):
@@ -1750,7 +1742,7 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         assert tested["gain_pct"] is None
         assert out["losers"][0]["reason"] == "gain_below_threshold"
     assert bool(out["winners"]) is (expected_outcome == "KEEP")
-    assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
+    assert out["output_throughput"] == (output if expected_outcome == "KEEP" else None)
 
 
 @pytest.mark.asyncio
@@ -2370,7 +2362,6 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
                     },
                     "rejected": [],
                     "accepted": [],
-                    "name_index": {},
                 },
             },
             idempotency_key="ex-dedup",
@@ -2406,11 +2397,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     output_dir = tmp_path / "explore-warm"
 
     bench_calls: list[str] = []
+    round_seeds: dict[bool, str | None] = {}
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        round_seeds["warmup_round" in str(slot)] = (kwargs.get("env") or {}).get(BENCH_SEED_ENV)
         if "warmup_round" in str(slot):
             (slot / "server.log").write_text(
                 "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
@@ -2451,6 +2444,8 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     # warmup (discarded) + decision == 2 Magpie runs.
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
+    # The decision round reuses the warmup's server, so the warmup must not send the decision round's prompts.
+    assert round_seeds == {True: "1", False: None}
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
     warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
     decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
@@ -2867,7 +2862,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
     # a bare, unattributed failure.
     assert res.result["error_class"] == "session_time_exhausted"
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
     # Untested variants stay out of the ledger so a resume can retry them.
     assert res.result["losers"] == []
     assert res.result["explore_search_update"]["tested"] == {}
@@ -2932,7 +2927,6 @@ async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_
 
     assert len(started) == 1
     assert result["status"] == "succeeded"
-    assert result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -3024,7 +3018,6 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     # KB a clock's verdict.
     assert [t["name"] for t in tested.values()] == ["v_measured"]
     assert [lr["name"] for lr in res.result["losers"]] == []
-    assert res.result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -3102,7 +3095,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     assert res.result["explore_search_update"]["tested"] == {}
     assert res.result["losers"] == []
     assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
 
 
 @pytest.mark.asyncio
@@ -3196,8 +3189,6 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     grid = _atom_default_grid(
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
@@ -3216,8 +3207,6 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     grid = _atom_default_grid(
         model_class="dense",
         conc=8,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_ep" not in names
@@ -3233,8 +3222,6 @@ def test_atom_default_grid_fp8_model_emits_kv_fp8():
     grid = _atom_default_grid(
         model_class="moe_fp8",
         conc=16,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_kv_fp8" in names
@@ -3280,8 +3267,6 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
         "atom",
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     assert grid, "atom framework should produce a non-empty default grid"
     assert any(v.name == "atom_level_2" for v in grid)
@@ -3797,7 +3782,6 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
                             "gain_pct": 5.0,
                         }
                     ],
-                    "name_index": {},
                 },
             },
             idempotency_key="ex-rerun-all",

@@ -84,6 +84,11 @@ def _mock_state(
         max_minutes=150,
         last_trace_analyze=last_trace_analyze or {},
         roofline_snapshots=list(roofline_snapshots or []),
+        pending_kernel_integrations={},
+        kernel_integrate_attempts={},
+        rejected_kernel_ids=[],
+        kernel_rewrite_controller_result={},
+        optimization_stack_has_unvalidated_keeps=lambda: False,
     )
 
 

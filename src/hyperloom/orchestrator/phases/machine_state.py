@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
-from hyperloom.common.coerce import to_float, to_unix
+from hyperloom.common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom.common.env import env_float as _env_float, env_int as _env_int
 from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.orchestrator.lever import (
@@ -19,6 +19,7 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+from ..kernel import kernel_decisions
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -505,12 +506,13 @@ def phase_status_summary(
             f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
             f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
         )
+    entered = time.strftime("%FT%TZ", time.gmtime(t0)) if (t0 := _phase_started_unix(state)) > 0 else "(unset)"
     actions_in_phase = allowed_actions_for(phase)
     allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
     lines = [
         f"phase     : {phase}",
         f"cycle     : {state.macro_cycle}",
-        f"entered   : {state.phase_started_ts or '(unset)'}",
+        f"entered   : {entered}",
         budget_line,
         allowed_line,
     ]
@@ -652,13 +654,13 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    if state.has_keep_pending_integrate:
+    if kernel_decisions.has_keep_pending_integrate(state):
         return True
 
     if kernel_controller_settled(state) or _geak_phase_terminal(state):
         return False
 
-    return bool(state.untried_hot_reusable_kernels())
+    return bool(kernel_decisions.untried_hot_reusable_kernels(state))
 
 
 def measured_seconds(state: Any, field: str) -> float | None:
@@ -895,11 +897,6 @@ def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str
     return PHASE_SWEEP
 
 
-def _positive_number(value: Any) -> float | None:
-    number = to_float(value)
-    return number if number is not None and number > 0.0 else None
-
-
 def _budget_predicate_inputs(
     state: Any,
     *,
@@ -979,9 +976,9 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         **_initial_analysis_inputs(state),
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
-        "runtime_sec": _positive_number(state.baseline_runtime_sec),
-        "post_ready_runtime_sec": _positive_number(state.baseline_post_ready_runtime_sec),
-        "warm_runtime_sec": _positive_number(state.baseline_warm_runtime_sec),
+        "runtime_sec": optional_positive_float(state.baseline_runtime_sec),
+        "post_ready_runtime_sec": optional_positive_float(state.baseline_post_ready_runtime_sec),
+        "warm_runtime_sec": optional_positive_float(state.baseline_warm_runtime_sec),
     }
 
 
@@ -1164,9 +1161,9 @@ def _transition_result(
 
 def _prelude_viability(baseline: dict[str, Any]) -> dict[str, Any]:
     usable = to_float(baseline.get("session_usable_sec"))
-    runtime = _positive_number(baseline.get("runtime_sec"))
-    post_ready = _positive_number(baseline.get("post_ready_runtime_sec"))
-    warm = _positive_number(baseline.get("warm_runtime_sec"))
+    runtime = optional_positive_float(baseline.get("runtime_sec"))
+    post_ready = optional_positive_float(baseline.get("post_ready_runtime_sec"))
+    warm = optional_positive_float(baseline.get("warm_runtime_sec"))
     benchmark = warm or post_ready
     round_sec = None
     if runtime is not None and post_ready is not None and benchmark is not None:
@@ -1479,8 +1476,8 @@ def _cold_anchor_shortfall(baseline: dict[str, Any]) -> dict[str, Any] | None:
     if not bool(baseline.get("measure_round_dropped")):
         return None
     usable = to_float(baseline.get("session_usable_sec"))
-    runtime = _positive_number(baseline.get("runtime_sec"))
-    benchmark = _positive_number(baseline.get("warm_runtime_sec")) or _positive_number(
+    runtime = optional_positive_float(baseline.get("runtime_sec"))
+    benchmark = optional_positive_float(baseline.get("warm_runtime_sec")) or optional_positive_float(
         baseline.get("post_ready_runtime_sec")
     )
     retry = runtime
@@ -1789,7 +1786,6 @@ def record_phase_transition(
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
     state.phase = row["to_phase"]
-    state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
     _publish_phase_boundary(
         _PhaseBoundary(

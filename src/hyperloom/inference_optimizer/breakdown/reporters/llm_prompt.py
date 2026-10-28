@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict
 from typing import Any
 
 from .base import RenderedSection
@@ -28,13 +29,10 @@ You may NOT:
 - Invent numbers, percentages, kernel names, paths, or GPU types. Every
   numeric or named entity you write MUST appear verbatim in one of:
   ``global_facts``, ``key_facts``, or ``decisions``.
-- Describe a capability (for example ``explore`` / ``conc_sweep`` /
-  ``specialist`` / ``geak`` / ``forge`` / ``kernel_opt``) as "ran" /
-  "contributed" / "applied" unless its decision is one of: ``kept`` /
-  ``attempted`` / ``reverted`` / ``rejected`` / ``partial``. Legacy
-  aliases such as ``backends`` / ``params`` / ``validate_stack`` must be
-  described as archived compatibility rows unless a decision says they
-  actually ran. Capabilities listed in ``capabilities_not_attempted``
+- Describe a capability (``explore`` / ``geak`` / ``specialist`` /
+  ``forge``) as "ran" / "contributed" / "applied" unless its decision is
+  one of: ``kept`` / ``attempted`` / ``reverted`` / ``rejected`` /
+  ``partial``. Capabilities listed in ``capabilities_not_attempted``
   MUST be described as "never ran" / "not attempted" / "not invoked".
 - Write a paragraph for any section whose ``skipped`` flag is true.
 - Rephrase or "summarize" the deterministic markdown block.
@@ -86,7 +84,7 @@ def build_user_prompt(
 ) -> str:
     """Build the user-message JSON the LLM sees (string so the exact bytes are log-inspectable)."""
     payload = {
-        "global_facts": global_facts.as_prompt_dict(),
+        "global_facts": asdict(global_facts),
         # Skipped sections are withheld.
         "sections": [_section_input(s) for s in rendered if not s.skipped],
     }

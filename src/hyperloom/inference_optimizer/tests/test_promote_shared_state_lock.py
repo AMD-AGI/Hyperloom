@@ -2229,7 +2229,7 @@ class TestWritebackRequiredAxes:
         else:
             await coord.writeback._promote_explore(
                 {
-                    "winners": [candidate],
+                    "winners": [{**candidate, "fingerprint": "fp-next"}],
                     "best_variant": candidate,
                     "output_throughput": 150.0,
                     "round_id": "r-local-win",

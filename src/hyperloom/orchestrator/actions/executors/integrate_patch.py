@@ -10,7 +10,8 @@ from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
-from ._grid_runner import DEFAULT_KEEP_THRESHOLD_PCT, SessionDirField
+from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
+from ._grid_runner import SessionDirField
 from ._integrate_apply import ApplyStageMixin
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_bench import BenchStageMixin
@@ -90,9 +91,9 @@ class IntegratePatchExecutor(
                 and attempt.switch_manifest
                 and screen_open(attempt.shared_state)
             ):
-                result = await self._admit_dormant(attempt, params, extra)
+                result = await self._admit_dormant(attempt, params)
             if result is None:
-                result = {**await self._stage_gate(attempt, params, extra), RESULT_BENCHED: True}
+                result = {**await self._stage_gate(attempt, params), RESULT_BENCHED: True}
         except BaseException:
             try:
                 self._finish_attempt(attempt, {"status": "cancelled"})
