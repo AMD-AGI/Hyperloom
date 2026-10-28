@@ -11,8 +11,10 @@ this session holds evidence of by commit odds times the gain within reach over t
   at most :data:`~.family_stats.MAX_TRIALS` tests in all, a failure on another commit than the menu's counting
   :data:`ELSEWHERE_FAILURE`. A family tried little draws widely, so now and then it ranks high, while one tried often
   that failed stays low; each branch draws its own, so the branches spread;
-* the gain within reach is the family's typical gain where it committed, else that of any commit; for an op family no
-  more than the Amdahl ceiling of its ops on the commit's profile, for a component no more than the roofline headroom;
+* the gain within reach is the family's typical gain where it committed, drawn toward the usual gain of any commit as
+  if that were :data:`GAIN_PRIOR_COMMITS` more commits, so a gain counts as much as the commits behind it weigh: one
+  commit of a session far from this one moves it little; for an op family no more than the Amdahl ceiling of its ops on
+  the commit's profile, for a component no more than the roofline headroom;
 * the cost of a test is the median GPU seconds of this session's tests of the family's layer, over that of them all.
 
 A line says whether the family was tried on the commit, another branch holds a claim in it, or the integration head
@@ -71,6 +73,8 @@ CONTROL_SHARE = 0.25
 ELSEWHERE_FAILURE = 0.5
 #: The gain within reach when no commit's gain is known yet.
 DEFAULT_GAIN_PCT = 1.0
+#: How many commits the usual gain counts for when a family's typical gain is drawn toward it.
+GAIN_PRIOR_COMMITS = 1.0
 #: The share of a commit's profile, in percent, an op family's ops take for the menu to offer it before any test.
 HOT_OP_SHARE_PCT = 5.0
 #: The layers an op family is offered at before any test acts on it there, and those a component is.
@@ -354,8 +358,10 @@ class _Scoring:
 
         odds = _odds(family, archived, here)
         known = [*(archived.gains if archived is not None else ()), *(here.gains if here is not None else ())]
+        weight = (archived.commits if archived is not None else 0.0) + (here.commits if here is not None else 0.0)
         typical = statistics.median(known) if known else self.usual
-        reach = max(0.0, _within_reach(family, typical, self.shares, self.headroom))
+        drawn = (weight * typical + GAIN_PRIOR_COMMITS * self.usual) / (weight + GAIN_PRIOR_COMMITS)
+        reach = max(0.0, _within_reach(family, drawn, self.shares, self.headroom))
         draw = odds.draw(self.draws)
         return MenuItem(
             family, draw, odds.mean, odds.tests, reach, draw * reach / self.costs.get(family.layer, 1.0), marks

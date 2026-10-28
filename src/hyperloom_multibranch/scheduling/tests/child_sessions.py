@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Builders of a baseline-prelude child's session for the scheduling tests: a framework git checkout, the
-``state.json`` of a completed child with one kept patch on it, a roofline profile, and an AgentX baseline run."""
+``state.json`` of a completed child on it or of one whose baseline failed, a roofline profile, and an AgentX baseline
+run."""
 
 from __future__ import annotations
 
@@ -24,11 +25,11 @@ from hyperloom_multibranch.scheduling.prelude_reader import MB_LATEST_STATE_SCHE
 
 REMOTE_URL = "https://example.invalid/sglang.git"
 COMPLETED_STOP_REASON = "time_exhausted"
+#: How the main flow ends a run whose baseline kept failing, and the error class of the baseline attempt it failed on.
+BASELINE_FAILED_STOP_REASON = "baseline_failed"
+BASELINE_ERROR_CLASS = "subprocess_nonzero"
 BASELINE_TPUT = 1234.5
 ROOFLINE_PEAK = 4000.0
-PATCH_TEXT = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n"
-BASE_SHA = "ab" * 20
-SETUP_SCRIPT = "#!/bin/bash\npip install x\n"
 ROOFLINE_RUN_ID = "5f3e583beda4475e841f4bb7bacc9e4b"
 TRACE_FILE = "1785743528.38-TP-0.trace.json.gz"
 POINT_CONFIG = "benchmark:\n  envs:\n    CONC: 16\n    OSL: 1024\n"
@@ -69,8 +70,8 @@ def head_of(root: Path) -> str:
     return _git(root, "rev-parse", "HEAD")
 
 
-def state_document(framework: Path, patch_file: Path) -> dict[str, object]:
-    """A completed child session's ``state.json``, with one kept patch on ``framework``."""
+def state_document(framework: Path) -> dict[str, object]:
+    """A completed child session's ``state.json``, run on the framework checkout ``framework``."""
 
     return {
         "schema_version": MB_LATEST_STATE_SCHEMA_VERSION,
@@ -78,14 +79,7 @@ def state_document(framework: Path, patch_file: Path) -> dict[str, object]:
         "baseline_tput": BASELINE_TPUT,
         "framework_version": "0.4.1",
         "gpu_type": "mi355x",
-        "enablement": {
-            "accepted_config": {"extra_server_args": " --mem-fraction-static 0.8 ", "extra_envs": {"FOO": "1"}},
-            "kept_patches": [str(patch_file)],
-            "patch_roots": {str(patch_file): str(framework)},
-            "framework_root": str(framework),
-            "base_sha_by_root": {str(framework): BASE_SHA},
-            "setup_commands": ["pip install x"],
-        },
+        "framework_repo_path": str(framework),
         "roofline_snapshots": [
             {"theoretical_peak_tok_per_sec": ROOFLINE_PEAK},
             {"theoretical_peak_tok_per_sec": None},
@@ -100,17 +94,25 @@ def write_child_session(session_dir: Path, state: dict[str, object]) -> Path:
 
 
 def child_with_patch(tmp_path: Path) -> Path:
-    """A completed child session whose one kept patch applies to a fresh framework checkout, with its setting script."""
+    """A completed child session on a fresh framework checkout."""
 
-    framework = framework_checkout(tmp_path)
-    session = tmp_path / "child"
-    patch_file = session / "enablement" / "1.patch"
-    patch_file.parent.mkdir(parents=True)
-    patch_file.write_text(PATCH_TEXT)
-    script = session / "reports" / "enablement" / "enablement_setting.sh"
-    script.parent.mkdir(parents=True)
-    script.write_text(SETUP_SCRIPT)
-    return write_child_session(session, state_document(framework, patch_file))
+    return write_child_session(tmp_path / "child", state_document(framework_checkout(tmp_path)))
+
+
+def failed_child(tmp_path: Path) -> Path:
+    """The session of a child whose baseline failed until the main flow stopped it, on a fresh framework checkout."""
+
+    state = {
+        **state_document(framework_checkout(tmp_path)),
+        "stop_reason": BASELINE_FAILED_STOP_REASON,
+        "baseline_tput": 0.0,
+        "roofline_snapshots": [],
+        "baseline_attempts": [
+            {"task_id": "b1", "status": "failed", "decision": "", "error_class": "oom"},
+            {"task_id": "b2", "status": "failed", "decision": "", "error_class": BASELINE_ERROR_CLASS},
+        ],
+    }
+    return write_child_session(tmp_path / "child", state)
 
 
 def with_roofline_profile(session: Path, run_id: str = ROOFLINE_RUN_ID) -> Path:
@@ -150,7 +152,7 @@ def with_agentx_baseline_run(
         "decision": "promoted",
         "status": "succeeded",
         "workspace": str(run / AGENTX_BENCHMARK),
-        "extras": {"baseline_tput": state["baseline_tput"], "is_revalidation": False},
+        "extras": {"baseline_tput": state["baseline_tput"]},
     }
     attempt.update(anchor)
     state["baseline_attempts"] = [attempt]

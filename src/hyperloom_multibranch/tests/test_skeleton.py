@@ -173,7 +173,12 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     specialist_runtime,
     tagged,
 )
-from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch, with_agentx_baseline_run
+from hyperloom_multibranch.scheduling.tests.child_sessions import (
+    BASELINE_ERROR_CLASS,
+    child_with_patch,
+    failed_child,
+    with_agentx_baseline_run,
+)
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE
@@ -868,6 +873,19 @@ async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     assert "exited with 1" in outcome.error
     assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
     assert stage.judge.calls == []
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
+
+
+async def test_a_child_whose_baseline_failed_fails_prelude_at_once_with_its_reason(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=failed_child(tmp_path), exit_code=1)
+
+    outcome = await stage.run()
+
+    assert outcome.stop_reason is SessionStopReason.PRELUDE_FAILED and outcome.exit_code == 1
+    assert "stop_reason='baseline_failed'" in outcome.error and repr(BASELINE_ERROR_CLASS) in outcome.error
+    assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
+    assert stage.judge.calls == [] and stage.toolbox.requests == {}
+    assert stage.time.now() - START < 60.0
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
 
 
