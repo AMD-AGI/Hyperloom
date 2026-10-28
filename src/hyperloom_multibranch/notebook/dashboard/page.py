@@ -252,8 +252,10 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
         if session.get(key)
     )
     spend = dashboard["spend"]
+    held = spend.get("held_card_hours") or 0.0
+    leased = f", {_text(held)} card hours held by leases" if held else ""
     spent = (
-        f"spent {_text(spend['gpu_hours'])} GPU hours and ${_text(spend['llm_usd'])} of LLM calls"
+        f"spent {_text(spend['gpu_hours'])} GPU hours{leased} and ${_text(spend['llm_usd'])} of LLM calls"
         f"{_unpriced(spend['llm_unpriced_tokens'])}"
     )
     body = "".join(

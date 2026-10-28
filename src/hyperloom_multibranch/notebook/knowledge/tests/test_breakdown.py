@@ -9,13 +9,22 @@ import dataclasses
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.contracts.measurement import BuildCharge, BuildPayment
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord, NotebookSnapshot, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.notebook.records import (
+    CardHold,
+    LeaseStart,
+    LlmUsage,
+    LlmUsageRecord,
+    NotebookSnapshot,
+    TestRecord,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import LeaseEndReason, LeaseKind, UsageSource
 from hyperloom_multibranch.notebook.knowledge.breakdown import (
     EXPORTER_VERSION,
     FILENAME,
@@ -46,7 +55,13 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
         "s1": 1.25,
         "s2": 0.5,
     }
-    assert breakdown["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0, "llm_unpriced_tokens": NO_TOKENS}
+    assert breakdown["spend"] == {
+        "gpu_hours": 1.0,
+        "held_card_hours": 0.0,
+        "llm_usd": 2.0,
+        "llm_unpriced_tokens": NO_TOKENS,
+    }
+    assert breakdown["card_holds"] == {"leases": [], "card_hours_by_branch": {}, "card_hours_by_kind": {}}
     assert breakdown["environment_changes"] == []
     assert [row["request"]["request_id"] for row in breakdown["tests"]] == ["r1", "r2", "r3", "r5", "r4", "m1"]
     assert [(row["node"], row["tests"], row["gpu_seconds"]) for row in breakdown["measurement_nodes"]] == [
@@ -154,6 +169,27 @@ def test_the_spend_counts_the_tokens_of_unpriced_llm_calls_beside_the_dollars(sn
         "cache_read": 20_000,
         "cache_write_1h": 300,
     }
+
+
+def test_the_card_holds_count_each_lease_to_the_snapshot_and_total_them_by_branch_and_kind(
+    snapshot: NotebookSnapshot,
+) -> None:
+    start = snapshot.taken_at - 3600.0
+    arbor = LeaseStart("lease-1", "s1", "s1", LeaseKind.AUTONOMOUS, 2, start, gpu_ids=(4, 5))
+    forge = LeaseStart("lease-2", "tool:job-7", "s1", LeaseKind.TOOL_JOB, 1, start, tool="forge", sandbox_id="sb-1")
+    # Card 4 went back after half an hour and card 5 is still out; the Forge job's one card went back after 15 min.
+    holds = (CardHold(arbor, {4: start + 1800.0}), CardHold(forge, {0: start + 900.0}, LeaseEndReason.RELEASED))
+
+    breakdown = build_breakdown(dataclasses.replace(snapshot, card_holds=holds))
+
+    section = breakdown["card_holds"]
+    assert [lease["card_hours"] for lease in section["leases"]] == [pytest.approx(1.5), pytest.approx(0.25)]
+    assert section["leases"][0]["returned"] == {"4": start + 1800.0} and section["leases"][0]["end_reason"] is None
+    assert section["leases"][1]["lease"]["tool"] == "forge" and section["leases"][1]["end_reason"] == "released"
+    assert section["card_hours_by_branch"] == {"s1": pytest.approx(1.75)}
+    assert section["card_hours_by_kind"] == {"autonomous": pytest.approx(1.5), "tool_job": pytest.approx(0.25)}
+    assert breakdown["spend"]["held_card_hours"] == pytest.approx(1.75)
+    assert json.loads(json.dumps(breakdown))["card_holds"]["leases"][1]["lease"]["kind"] == "tool_job"
 
 
 def test_the_close_section_names_the_commit_final_selection_chose_and_how(snapshot: NotebookSnapshot) -> None:

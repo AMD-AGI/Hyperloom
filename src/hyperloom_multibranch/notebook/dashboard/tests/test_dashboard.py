@@ -16,9 +16,11 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ClaimKe
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchNode,
     BranchProgress,
+    CardHold,
     Claim,
     CommittedCommit,
     FrontierScore,
+    LeaseStart,
     LlmUsage,
     LlmUsageRecord,
     MergeState,
@@ -28,6 +30,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
+    LeaseKind,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
@@ -92,7 +95,12 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
         (1.25, 1),
         (0.5, 2),
     ]
-    assert dashboard["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0, "llm_unpriced_tokens": encode(TokenCounts())}
+    assert dashboard["spend"] == {
+        "gpu_hours": 1.0,
+        "held_card_hours": 0.0,
+        "llm_usd": 2.0,
+        "llm_unpriced_tokens": encode(TokenCounts()),
+    }
     (waiting,) = dashboard["in_flight"]["tests"]
     assert (waiting["request_id"], waiting["waiting_s"]) == ("r9", pytest.approx(30.0))
     assert [(claim["branch"], claim["expires_in_s"]) for claim in dashboard["in_flight"]["claims"]] == [("s1", 45.0)]
@@ -183,6 +191,20 @@ def test_the_tokens_of_unpriced_llm_calls_show_beside_the_dollars_they_are_not_i
     assert (dashboard["spend"]["llm_usd"], dashboard["spend"]["llm_unpriced_tokens"]) == (2.0, encode(tokens + tokens))
     page = render_html(dashboard)
     assert "and $2.00 of LLM calls, plus unpriced calls of 2,000 input, 1,000 output, 40,000 cache read tokens;" in page
+
+
+def test_the_spend_line_names_the_card_hours_leases_held_when_there_are_any(snapshot: NotebookSnapshot) -> None:
+    lease = LeaseStart("lease-1", "s1", "s1", LeaseKind.AUTONOMOUS, 1, snapshot.taken_at - 1800.0, gpu_ids=(4,))
+    rows = tuple(
+        dataclasses.replace(row, held_card_seconds=1800.0) if row.branch == "s1" else row for row in snapshot.progress
+    )
+    held = dataclasses.replace(snapshot, card_holds=(CardHold(lease),), progress=rows)
+
+    dashboard = build_dashboard(held, metric=METRIC)
+
+    assert dashboard["spend"]["held_card_hours"] == pytest.approx(0.5)
+    assert {row["branch"]: row["held_card_hours"] for row in dashboard["branches"]}["s1"] == pytest.approx(0.5)
+    assert "spent 1.00 GPU hours, 0.50 card hours held by leases and $2.00 of LLM calls" in render_html(dashboard)
 
 
 def test_the_dashboard_shows_who_covers_each_direction_and_every_hypothesis(busy: NotebookSnapshot) -> None:

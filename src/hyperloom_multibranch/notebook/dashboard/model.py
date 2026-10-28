@@ -10,8 +10,9 @@
 * ``playbook``: the scheduling playbook the session plays, as its manifest records it, and the breach it fell back on;
 * ``stranded``: the branches that lead integration by more than the merge bar while commits of theirs failed to merge,
   with those commits (:func:`~hyperloom_multibranch.notebook.rsi.stranded.stranded_leads`);
-* ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together, and the
-  tokens of the LLM calls whose model the price sheet does not list, which the dollars leave out;
+* ``spend``: the session's GPU hours, the card hours its leases held outside the tests and its LLM dollars so far, its
+  specialists', judge's and resolver's together, and the tokens of the LLM calls whose model the price sheet does not
+  list, which the dollars leave out;
 * ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
 * ``directions``: every direction an intent named, the states it was tried on, its best gain, the running branches
   whose head carries one of its commits and the branches holding a claim on it;
@@ -98,6 +99,7 @@ def _branches(snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], metric
             "commits": row.commits,
             "judged_since_commit": row.judged_since_commit,
             "gpu_hours": row.gpu_seconds / 3600.0,
+            "held_card_hours": row.held_card_seconds / 3600.0,
             "llm_usd": row.llm_usd,
             "head_value": dict(row.head_value),
             "gain_pct": _gain(row.head_value, baseline, metric),

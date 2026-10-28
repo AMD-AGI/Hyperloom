@@ -16,6 +16,9 @@ export has its own schema version and its own sections:
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
 * ``branches`` and ``committed``: each branch's progress, and each commit with its gain and merge state.
+* ``spend`` and ``card_holds``: the tests' GPU hours, the card hours leases held outside the tests and the LLM dollars;
+  and each lease of cards outside the tests, an autonomous branch's, a dev sandbox's or a tool job's, with when its
+  cards went back and the card hours it held, totalled by the branch charged and by kind.
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
 * ``measurement_nodes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts; ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its
@@ -47,7 +50,7 @@ from hyperloom.orchestrator.specialists.resources import (
     SPECIALIST_RECORD_KIND,
 )
 from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import SECONDS_PER_HOUR, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.notebook.knowledge.stranded_spans import stranded_spans
@@ -108,13 +111,32 @@ def measurement_usage(records: Iterable[TestRecord]) -> tuple[MeasurementUsage, 
 
 
 def session_spend(snapshot: NotebookSnapshot) -> dict[str, object]:
-    """GPU hours and LLM dollars so far, and the tokens of the LLM calls the dollars leave out for want of a price."""
+    """The tests' GPU hours, the card hours leases held outside the tests, the LLM dollars so far, and the tokens of the
+    LLM calls the dollars leave out for want of a price."""
 
     return {
         "gpu_hours": snapshot.gpu_hours,
+        "held_card_hours": snapshot.held_card_hours,
         "llm_usd": snapshot.llm_usd,
         "llm_unpriced_tokens": encode(snapshot.llm_unpriced_tokens),
     }
+
+
+def card_holds(snapshot: NotebookSnapshot) -> dict[str, object]:
+    """The leases of cards outside the tests: each with when its cards went back, why the last one did, and the card
+    hours it held by the snapshot; and those card hours by the branch charged and by the lease's kind."""
+
+    leases: list[dict[str, object]] = []
+    by_branch: dict[str, float] = {}
+    by_kind: dict[str, float] = {}
+    for hold in snapshot.card_holds:
+        hours = hold.card_seconds(snapshot.taken_at) / SECONDS_PER_HOUR
+        reason = hold.end_reason.value if hold.end_reason is not None else None
+        returned = {str(card): at for card, at in sorted(hold.returned.items())}
+        leases.append({"lease": encode(hold.start), "returned": returned, "end_reason": reason, "card_hours": hours})
+        by_branch[hold.start.branch_id] = by_branch.get(hold.start.branch_id, 0.0) + hours
+        by_kind[hold.start.kind.value] = by_kind.get(hold.start.kind.value, 0.0) + hours
+    return {"leases": leases, "card_hours_by_branch": by_branch, "card_hours_by_kind": by_kind}
 
 
 def session_metadata(
@@ -258,6 +280,7 @@ def build_breakdown(
         "lineage": encode(snapshot.lineage),
         "branches": encode(snapshot.progress),
         "spend": session_spend(snapshot),
+        "card_holds": card_holds(snapshot),
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_nodes": encode(measurement_usage(snapshot.records)),
@@ -326,6 +349,7 @@ __all__ = [
     "agent_resources",
     "build_breakdown",
     "build_usage",
+    "card_holds",
     "hosted_records",
     "measurement_usage",
     "session_metadata",
