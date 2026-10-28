@@ -19,8 +19,10 @@ a failure leaves the check off with a warning that says why). The set is read in
 this host (``HYPERLOOM_RUNNER_CACHE``, where ``python -m hyperloom.measure.short_prompts.build`` staged it) before the
 toolbox is built, and the runners are told that directory; one that is not staged there refuses the build.
 
-The long-context check is off the same way: ``LocalOptions.long_context``, or the key named by ``HYPERLOOM_LONG_CONTEXT``
-(staged by ``python -m hyperloom.measure.long_context.build``). It runs for the requests that set ``long_context_check``.
+The long-context check is on by default the same way: ``LocalOptions.long_context``, or the key named by
+``HYPERLOOM_LONG_CONTEXT`` (``off`` turns it off), else the set ``python -m hyperloom.measure.long_context.build`` makes for
+the session model at its own context limit, staged here at the build when it is missing
+(``long_context.default_long_context``). It runs under the short-prompt check's triggers, on the test's own server.
 """
 
 from __future__ import annotations
@@ -261,8 +263,8 @@ class LocalOptions:
     host's runner cache (``HYPERLOOM_RUNNER_CACHE``, ``/runner-cache`` when unset) and the build refuses one that is not staged
     there; the runners read the same directory (``HYPERLOOM_RUNNER_CACHE`` in
     their template, which therefore wins over the same name in ``runner_envs``), the branches' sandboxes are not told.
-    ``long_context`` is the staged prompt set of the long-context check, named and read the same way (``None`` takes the
-    key in ``HYPERLOOM_LONG_CONTEXT``); a request that sets ``long_context_check`` runs the check with it.
+    ``long_context`` is the staged prompt set of the long-context check, named, found and read the same way (``None`` takes
+    the key in ``HYPERLOOM_LONG_CONTEXT``, ``off`` for no check, and without either the model's own set).
     """
 
     policy: QueuePolicy | None = None
@@ -384,7 +386,7 @@ def _acceptance_with_prompts(
     return replace(
         acceptance,
         short_prompts=staged_short_prompts(named, environ, model_dir, stage=True),
-        long_context=staged_long_context(long_named, environ),
+        long_context=staged_long_context(long_named, environ, model_dir, stage=True),
     )
 
 

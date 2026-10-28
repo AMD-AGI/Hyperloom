@@ -214,8 +214,8 @@ class AcceptanceSetup:
     acceptance as ``unsupported_kind``, and ``None`` accepts every kind. ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check: with it, a test whose change touches attention, the KV cache or prefill (the rule
     pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
-    ``long_context`` is the staged prompt set of the long-context check, which a request that sets ``long_context_check``
-    runs; ``None`` runs none.
+    ``long_context`` is the staged prompt set of the long-context check, which runs under the short-prompt check's lever
+    list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none.
 
     ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
     force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
@@ -326,7 +326,7 @@ class Acceptance:
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)
         accepted = self._with_short_prompts(planned, recipe, candidate, request)
-        return Prepared(self._with_long_context(accepted, request), digest)
+        return Prepared(self._with_long_context(accepted, recipe, candidate, request), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it: on the
@@ -353,9 +353,9 @@ class Acceptance:
                 return with_extra_processes(plan, request, pooled + earlier.unfinished, root_top_up=True)
         return with_extra_processes(plan, request, pooled)
 
-    def _with_long_context(self, accepted: object, request: TestRequest) -> object:
+    def _with_long_context(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the long-context check this request runs, when it runs one and ``accepted`` can carry it."""
-        plan = decide_long_context(request, self._long_context)
+        plan = decide_long_context(request, parent, candidate, self._long_context, self._patch_files)
         return (
             replace(accepted, long_context=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)

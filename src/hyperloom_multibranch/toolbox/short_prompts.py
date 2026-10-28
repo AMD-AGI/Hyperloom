@@ -83,9 +83,12 @@ __all__ = [
     "decide",
     "output_counts",
     "blob_patch_files",
+    "bounded_reasons",
     "default_short_prompts",
     "environment_short_prompts",
+    "lever_lines",
     "no_patch_files",
+    "purpose_reasons",
     "rederive",
     "short_prompt_rules",
     "staged_short_prompts",
@@ -334,13 +337,28 @@ def touch_lines(parent: Recipe, candidate: Recipe, files: PatchFiles) -> list[st
     return lines
 
 
-def _bounded(reasons: list[str]) -> tuple[str, ...]:
+def bounded_reasons(reasons: list[str]) -> tuple[str, ...]:
     shown = [reason[:_MAX_LINE_CHARS] for reason in reasons[: _MAX_REASONS - 1]]
     if len(reasons) >= _MAX_REASONS:
         shown.append(f"... and {len(reasons) - _MAX_REASONS + 1} more lines")
     else:
         shown = [reason[:_MAX_LINE_CHARS] for reason in reasons]
     return tuple(shown)
+
+
+def purpose_reasons(request: TestRequest) -> list[str]:
+    """``purpose <purpose>`` when ``request``'s purpose is one of the pack's ``always_purposes`` (a baseline, which
+    measures the root, and a final candidate); nothing otherwise."""
+    purpose = request.purpose.value
+    return [f"purpose {purpose}"] if purpose in short_prompt_rules().always_purposes else []
+
+
+def lever_lines(parent: Recipe, candidate: Recipe, files: PatchFiles) -> list[str]:
+    """The lines of the change from ``parent`` to ``candidate`` (:func:`touch_lines`) that the pack's lever list
+    (``short_prompt_touch``) matches: what touches attention, the KV cache or prefill. The long-context check reads the
+    same list."""
+    touch = short_prompt_rules().touch
+    return [line for line in touch_lines(parent, candidate, files) if touch.search(line)]
 
 
 def decide(
@@ -357,12 +375,10 @@ def decide(
     if setup is None or request.kind not in _CHECKED_KINDS:
         return None
     rules = short_prompt_rules()
-    reasons = []
-    if request.purpose.value in rules.always_purposes:
-        reasons.append(f"purpose {request.purpose.value}")
+    reasons = purpose_reasons(request)
     if request.forces_consistency_check:
         reasons.append("request consistency_check")
-    reasons += [line for line in touch_lines(parent, candidate, files) if rules.touch.search(line)]
+    reasons += lever_lines(parent, candidate, files)
     if not reasons:
         return None
     return ShortPromptPlan(
@@ -371,7 +387,7 @@ def decide(
         processes=1,
         max_new_tokens=rules.max_new_tokens,
         phase_cap_sec=rules.phase_cap_sec,
-        trigger=_bounded(reasons),
+        trigger=bounded_reasons(reasons),
     )
 
 

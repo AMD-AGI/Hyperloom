@@ -6,14 +6,21 @@
 A frozen set of long synthetic prompts (needle retrieval, multi-key retrieval, variable tracking, common-word extraction) is
 answered greedily by the candidate's own server and graded by substring match. The types here state the scores and what
 each prompt did, never a verdict: what refuses a candidate is the gate's rule, not this record. A prompt that errored or was
-never run counts as not passed and makes the check ``incomplete``, which is never a pass. Like the rest of the measurement
+never run counts as not passed and makes the check ``incomplete``, which is never a pass and never blocks.
+
+The root's reading (:class:`LongContextRoot`, made by :func:`root_reading`) pools the complete checks of the session root's
+tests and states its score with a Wilson 95% interval; a candidate's result carries the reading the toolbox had when the
+candidate ended. :func:`refuses` is the bar the board decided (#142 c3219, bar (b)) for the gate to apply: a drop from the
+lower end of the root's interval of more than the check's own sampling noise, ``NOISE_SHARE`` of the items (3 of 64). Like the rest of the measurement
 contract they are frozen dataclasses that validate on construction and round-trip through ``to_document()`` and
 ``from_document()``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections.abc import Iterable
+from dataclasses import dataclass, fields
 
 from hyperloom.contracts._validate import (
     MeasurementError,
@@ -30,16 +37,22 @@ from hyperloom.contracts._validate import (
 )
 
 __all__ = [
+    "CI_Z",
     "LONG_CONTEXT_COMPLETE",
     "LONG_CONTEXT_INCOMPLETE",
     "LONG_CONTEXT_STATUSES",
     "PROMPT_ERROR",
     "PROMPT_NOT_RUN",
     "PROMPT_OK",
+    "NOISE_SHARE",
     "PROMPT_STATUSES",
     "LongContextPrompt",
     "LongContextResult",
+    "LongContextRoot",
     "LongContextTask",
+    "refuses",
+    "root_reading",
+    "wilson_interval",
 ]
 
 #: How far a long-context check got: every prompt was answered, or not (and then the result says why).
@@ -52,6 +65,7 @@ PROMPT_ERROR = "error"
 PROMPT_NOT_RUN = "not_run"
 PROMPT_STATUSES = (PROMPT_OK, PROMPT_ERROR, PROMPT_NOT_RUN)
 _EPSILON = 1e-9
+_TESTS = "tests"
 
 
 @dataclass(frozen=True)
@@ -120,6 +134,63 @@ class LongContextTask:
         return cls(task=f.get("task"), n=f.get("n"), passed=f.get("passed"), score=f.get("score"))  # type: ignore[arg-type]
 
 
+#: The z of the two-sided 95% interval on the root's score.
+CI_Z = 1.959963984540054
+#: The check's own sampling noise, as a share of its prompts: about 3 of 64 binary items.
+NOISE_SHARE = 3 / 64
+
+
+def wilson_interval(passed: int, n: int) -> tuple[float, float]:
+    """The Wilson score interval at 95% (``CI_Z``) on ``passed`` of ``n`` binary items; ``n`` is at least 1."""
+    share, spread = passed / n, CI_Z * CI_Z / n
+    centre = (share + spread / 2) / (1 + spread)
+    half = CI_Z * math.sqrt(share * (1 - share) / n + spread / (4 * n)) / (1 + spread)
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+@dataclass(frozen=True)
+class LongContextRoot:
+    """The session root's reading of the check, which a candidate's drop is judged after: the complete checks of the root's
+    tests (``tests``, their request ids) pooled, ``passed`` of ``n`` prompts, ``score`` that share and ``ci_low`` and
+    ``ci_high`` the Wilson 95% interval on it (:func:`wilson_interval`), on the prompt set ``prompt_set_sha256``."""
+
+    prompt_set_sha256: str
+    tests: tuple[str, ...]
+    n: int
+    passed: int
+    score: float
+    ci_low: float
+    ci_high: float
+
+    def __post_init__(self) -> None:
+        _sha256(self.prompt_set_sha256, "the root's prompt_set_sha256")
+        _strings(self.tests, "the root's tests")
+        if not self.tests:
+            raise MeasurementError("the root's reading names the tests it pools")
+        _int(self.n, "the root's n", minimum=1)
+        if _int(self.passed, "the root's passed", minimum=0) > self.n:
+            raise MeasurementError("the root cannot pass more prompts than it has")
+        if abs(_number(self.score, "the root's score") - self.passed / self.n) > _EPSILON:
+            raise MeasurementError("the root's score must be passed over n")
+        low, high = _number(self.ci_low, "the root's ci_low"), _number(self.ci_high, "the root's ci_high")
+        if not 0 <= low <= self.score + _EPSILON or not self.score - _EPSILON <= high <= 1:
+            raise MeasurementError("the root's interval must hold its score, within 0 and 1")
+
+    def to_document(self) -> dict[str, object]:
+        return {_TESTS: list(self.tests), **{key: getattr(self, key) for key in _root_scalars()}}
+
+    @classmethod
+    def from_document(cls, document: object) -> LongContextRoot:
+        f = _mapping(document, "a long-context root reading")
+        tests = tuple(_items(f.get(_TESTS), _TESTS))
+        return cls(tests=tests, **{key: f.get(key) for key in _root_scalars()})  # type: ignore[arg-type]
+
+
+def _root_scalars() -> tuple[str, ...]:
+    """The fields of a root reading other than the tests it pools, as its document names them."""
+    return tuple(field.name for field in fields(LongContextRoot) if field.name != _TESTS)
+
+
 @dataclass(frozen=True)
 class LongContextResult:
     """One long-context check.
@@ -147,8 +218,11 @@ class LongContextResult:
     prefill_tokens: int
     trigger: tuple[str, ...] = ()
     outputs: str = ""
+    root: LongContextRoot | None = None
 
     def __post_init__(self) -> None:
+        if self.root is not None and not isinstance(self.root, LongContextRoot):
+            raise MeasurementError(f"root must be a LongContextRoot, got {self.root!r}")
         if self.status not in LONG_CONTEXT_STATUSES:
             raise MeasurementError(f"status must be one of {LONG_CONTEXT_STATUSES}, got {self.status!r}")
         if not isinstance(self.reason, str) or (self.status == LONG_CONTEXT_INCOMPLETE) != bool(self.reason):
@@ -206,6 +280,7 @@ class LongContextResult:
             "prefill_tokens": self.prefill_tokens,
             "trigger": list(self.trigger),
             "outputs": self.outputs,
+            **({} if self.root is None else {"root": self.root.to_document()}),
         }
 
     @classmethod
@@ -219,5 +294,34 @@ class LongContextResult:
             tasks=tuple(map(LongContextTask.from_document, _items(f.get("tasks"), "tasks"))),
             prompts=tuple(map(LongContextPrompt.from_document, _items(f.get("prompts"), "prompts"))),
             trigger=tuple(_items(f.get("trigger", ()), "trigger")),  # type: ignore[arg-type]
+            root=None if f.get("root") is None else LongContextRoot.from_document(f.get("root")),
             **{key: f.get(key) for key in scalars},  # type: ignore[arg-type]
         )
+
+
+def root_reading(checks: Iterable[tuple[str, LongContextResult]]) -> LongContextRoot | None:
+    """The root's reading from its tests' checks, ``(request id, check)`` in the order they ended: the complete ones on the
+    prompt set of the last of them, pooled; ``None`` when none is complete (an incomplete check is no reading)."""
+    complete = [(test, check) for test, check in checks if check.status == LONG_CONTEXT_COMPLETE]
+    if not complete:
+        return None
+    prompt_set = complete[-1][1].prompt_set_sha256
+    pooled = [(test, check) for test, check in complete if check.prompt_set_sha256 == prompt_set]
+    n, passed = sum(check.n for _, check in pooled), sum(check.passed for _, check in pooled)
+    low, high = wilson_interval(passed, n)
+    return LongContextRoot(prompt_set, tuple(test for test, _ in pooled), n, passed, passed / n, low, high)
+
+
+def refuses(candidate: LongContextResult | None, root: LongContextRoot | None) -> bool:
+    """Whether the candidate's check shows a drop beyond the check's own sampling noise (#142 c3219, bar (b)).
+
+    The drop is taken after the CI on the root's score: from the lower end of the root's 95% interval, in the candidate's
+    items, ``root.ci_low * n - passed``. It refuses when that drop exceeds ``NOISE_SHARE`` of the candidate's ``n`` (3
+    items of 64); a drop of exactly that much does not. Nothing is refused without a complete check, without a root
+    reading, or when the two were made on different prompt sets: an ``incomplete`` check is recorded and never blocks.
+    """
+    if candidate is None or root is None or candidate.status != LONG_CONTEXT_COMPLETE:
+        return False
+    if candidate.prompt_set_sha256 != root.prompt_set_sha256:
+        return False
+    return root.ci_low * candidate.n - candidate.passed > NOISE_SHARE * candidate.n + _EPSILON

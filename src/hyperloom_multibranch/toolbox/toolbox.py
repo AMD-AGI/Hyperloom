@@ -74,6 +74,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
     median_test_seconds,
 )
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
+from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey, ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -684,6 +685,7 @@ class RealToolbox:
             )
         builds = self._builds.charges(item.request_id)
         result = await asyncio.to_thread(self._pooled, item.request_id, result)
+        result = with_root_reading(item.request, result, self._log.entries())
         return replace(result, request_id=item.request_id, queued_at=item.queued_at, builds=builds)
 
     def _pool_count(self, key: PoolKey) -> int:

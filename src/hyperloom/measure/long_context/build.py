@@ -26,9 +26,10 @@ from hyperloom.measure.long_context.tasks import build_prompts
 from hyperloom.measure.short_prompts.build import huggingface_encoder, tokenizer_hashes
 from hyperloom.measure.short_prompts.staging import StagedEntry
 
-__all__ = ["build_entry", "main", "set_length"]
+__all__ = ["DEFAULT_SEED", "build_entry", "main", "set_length"]
 
-_DEFAULT_SEED = 20261024
+#: The seed the set is built with when none is given; the toolbox finds the default set of a model by it.
+DEFAULT_SEED = 20261024
 
 
 def set_length(model_limit: int | None, served_context: int | None) -> int:
@@ -49,7 +50,7 @@ def build_entry(
     cache: Path,
     *,
     length: int,
-    seed: int = _DEFAULT_SEED,
+    seed: int = DEFAULT_SEED,
     encode: Callable[[str], Sequence[int]] | None = None,
 ) -> StagedEntry:
     """Build the prompts for the tokenizer in ``model_dir`` and stage them in ``cache``; ``encode`` replaces the Hugging
@@ -72,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="the context the check's launch serves, in tokens (default: the model's limit)",
     )
     size.add_argument("--length", type=int, help="the prompts' length in tokens, set outright")
-    parser.add_argument("--seed", type=int, default=_DEFAULT_SEED)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     arguments = parser.parse_args(argv)
     try:
         length = arguments.length
