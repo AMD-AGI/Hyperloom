@@ -16,7 +16,6 @@ from typing import AbstractSet, Any, Mapping
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
-from hyperloom.common.coerce import to_option_names
 from hyperloom.common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
@@ -39,10 +38,6 @@ class LaunchChanges:
     remove_args: list[str] = field(default_factory=list)
     unset_env: list[str] = field(default_factory=list)
     replace_args: bool = False
-
-    def __post_init__(self) -> None:
-        """Reduce the removals to bare option names, the only shape AgentX's ``remove_args`` accepts."""
-        self.remove_args = to_option_names(self.remove_args)
 
 
 REPLACE = "replace"
@@ -133,7 +128,11 @@ def apply_launch_changes(
     Raises:
         ServerArgvInvalidError: When the composed args cannot become an argv intact.
     """
-    from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
+    from hyperloom.inference_optimizer.grid_server_args import (
+        compose_server_args,
+        dedupe_extra_server_args,
+        removal_option_names,
+    )
 
     agentx = benchmark["agentx"]
     if not isinstance(agentx, dict):
@@ -153,9 +152,12 @@ def apply_launch_changes(
         changes.args,
     )
     launch["replace_args"] = changes.replace_args or launch.get("replace_args", False)
-    # Magpie matches removals against the recipe, before appending our options. A local-only ablation must not
-    # become a second removal there; options present in both layers must still be removed from both.
-    recipe_removals = set(changes.remove_args) - (appended_options - recipe_options)
+    # Magpie matches removals against the recipe, before appending our options, and takes one bare long option
+    # name per entry -- so the value a spec is scoped to is dropped here, at the boundary that asks for it, and
+    # never upstream: compose_server_args above still needs the scope to keep an option the variant re-adds.
+    # A local-only ablation must not become a second removal there; options present in both layers must still
+    # be removed from both.
+    recipe_removals = set(removal_option_names(changes.remove_args)) - (appended_options - recipe_options)
     launch["remove_args"] = sorted(set(launch.get("remove_args", [])) | recipe_removals)
     env = launch.setdefault("env", {})
     for name in changes.unset_env:

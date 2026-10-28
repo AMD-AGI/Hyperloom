@@ -962,35 +962,46 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     assert "SGLANG_ENABLE_FOO" not in envs
 
 
-def test_build_variant_yaml_drops_every_copy_of_a_valued_base_removal(tmp_path):
-    """A native launch reads a base removal the way its fingerprint does: as an option name, not one occurrence.
-
-    The inherited args carry the option twice; a base layer asking to drop ``--cuda-graph-max-bs 8`` is the
-    same layer the round is identified by, so leaving the second copy behind would measure a stack no
-    fingerprint describes.
-    """
+def test_build_variant_yaml_keeps_a_value_the_replacing_variant_re_adds(tmp_path):
+    """A removal scoped to the base's value must not take the variant's own copy of that flag with it."""
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
-    cfg = yaml.safe_load(base.read_text())
-    cfg["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = (
-        "--cuda-graph-max-bs 8 --mem-fraction-static 0.9 --cuda-graph-max-bs 16"
-    )
-    base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
-
-    layer = LaunchLayer(remove_args=["--cuda-graph-max-bs 8"])
-    assert layer.remove_args == ["--cuda-graph-max-bs"]
 
     out = _build_variant_yaml(
-        GridRecipe(base_yaml_path=base, base=layer),
-        GridVariant("valued_base_removal", "--max-num-seqs 256"),
-        output_subdir=tmp_path / "valued_base_removal",
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--cuda-graph-max-bs 8 --tp 8")),
+        GridVariant(
+            "bigger_graphs",
+            "--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8"],
+            args_mode="replace",
+        ),
+        output_subdir=tmp_path / "bigger_graphs",
     )
 
     args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
-    assert "--cuda-graph-max-bs" not in args
-    assert "16" not in args.split()
-    assert "--mem-fraction-static 0.9" in args
-    assert "--max-num-seqs 256" in args
+    assert "--cuda-graph-max-bs 16" in args
+    assert "--cuda-graph-max-bs 8" not in args
+
+
+def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_value():
+    """Magpie takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
+
+    bench = {"framework": "sglang", "agentx": {"enabled": True}}
+    apply_launch_changes(
+        bench,
+        LaunchChanges(
+            args="--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8", "--disable-cuda-graph --enable-dp-attention"],
+            replace_args=True,
+        ),
+    )
+
+    launch = bench["agentx"]["launch_overrides"]
+    # Magpie matches these against the recipe before our append_args, so the re-added value survives the removal.
+    assert launch["remove_args"] == ["--cuda-graph-max-bs", "--disable-cuda-graph", "--enable-dp-attention"]
+    argv = launch["append_args"]
+    assert argv[argv.index("--cuda-graph-max-bs") + 1] == "16"
 
 
 def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):

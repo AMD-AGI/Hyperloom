@@ -68,16 +68,6 @@ def test_removal_union_is_base_first_and_deduped():
     assert both == effective_fingerprint("", {}, controls=_controls(["--b", "--v"], [], "append"))
 
 
-def test_a_removal_that_carries_a_value_normalizes_to_the_option_name():
-    assert normalize_proposal({"remove_args": ["--cuda-graph-max-bs-decode 64", "--page-size=16"]})["remove_args"] == [
-        "--cuda-graph-max-bs-decode",
-        "--page-size",
-    ]
-    valued = effective_fingerprint("", {}, controls=_controls(["--b 8"], [], "append"))
-    assert valued == effective_fingerprint("", {}, controls=_controls(["--b"], [], "append"))
-    assert valued == effective_fingerprint("", {}, controls={}, base=BaseControls(remove_args=["--b=8"]))
-
-
 @pytest.mark.parametrize(
     "proposal,expected",
     [

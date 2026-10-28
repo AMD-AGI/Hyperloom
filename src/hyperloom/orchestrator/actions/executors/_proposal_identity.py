@@ -9,7 +9,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_option_names, to_str_list
+from hyperloom.common.coerce import to_str_list
 
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
@@ -58,7 +58,7 @@ def normalize_proposal(proposal: Mapping[str, Any]) -> dict[str, Any]:
         "name": str(proposal.get("name") or "").strip(),
         "extra_args": coerce_args(proposal.get("extra_args") or proposal.get("extra_server_args")),
         "extra_envs": {str(k): str(v) for k, v in envs.items()} if isinstance(envs, Mapping) else {},
-        "remove_args": to_option_names(proposal.get("remove_args")),
+        "remove_args": to_str_list(proposal.get("remove_args")),
         "unset_envs": to_str_list(proposal.get("unset_envs")),
         "args_mode": _args_mode_of(proposal.get("args_mode")),
         "atomic": bool(proposal.get("atomic")),
@@ -112,7 +112,7 @@ def effective_fingerprint(
 ) -> str:
     """Fingerprint a variant against the stack it will be launched on."""
     identity = dict(controls or {})
-    remove_args = to_option_names(to_str_list(base.remove_args) + to_str_list(identity.get("remove_args")))
+    remove_args = list(dict.fromkeys(to_str_list(base.remove_args) + to_str_list(identity.get("remove_args"))))
     unset_envs = list(dict.fromkeys(to_str_list(base.unset_envs) + to_str_list(identity.get("unset_envs"))))
     if remove_args:
         identity["remove_args"] = remove_args

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import first_text, to_float, to_int, to_option_names, to_str_list
+from hyperloom.common.coerce import first_text, to_float, to_int, to_str_list
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
@@ -209,11 +209,10 @@ PROFILE_OVERRIDABLE_KEYS: tuple[str, ...] = (
 )
 
 # ``base_*`` task param -> the ``current_best`` field it mirrors and its normalizer.
-# ``remove_args`` leaves here as bare option names, the one shape a task's fingerprint and its launch read alike.
 _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("base_extra_args", "extra_server_args", lambda v: str(v or "").strip()),
     ("base_extra_envs", "extra_envs", _normalize_envs),
-    ("base_remove_args", "remove_args", to_option_names),
+    ("base_remove_args", "remove_args", to_str_list),
     ("base_unset_envs", "unset_envs", to_str_list),
     ("base_args_mode", "args_mode", lambda v: "replace" if str(v or "").strip().lower() == "replace" else ""),
 )

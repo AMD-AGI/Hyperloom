@@ -96,14 +96,6 @@ class TestInjectStackBaseParams:
         assert params["base_extra_args"] == ""
         assert params["base_extra_envs"] == {}
 
-    def test_a_valued_removal_leaves_as_a_bare_option_name(self):
-        """Both a task's fingerprint and its launch compose from ``base_remove_args``; a bare name is what means the same to each."""
-        params: dict = {}
-        state = self._state()
-        state.current_best = {"tput": 1000.0, "remove_args": ["--cuda-graph-max-bs 8", "--cuda-graph-max-bs=16"]}
-        inject_stack_base_params(params, state, anchor=True)
-        assert params["base_remove_args"] == ["--cuda-graph-max-bs"]
-
     def test_skips_fields_current_best_does_not_carry(self):
         params: dict = {}
         state = SharedState()

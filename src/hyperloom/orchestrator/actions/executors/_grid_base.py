@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom.common.coerce import to_option_names, to_str_list
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 
 log = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class GridVariant:
         )
         if dropped_envs:
             log.warning("Variant %s: dropping unsafe extra_envs %s", self.name, ", ".join(sorted(dropped_envs)))
-        self.remove_args = to_option_names(self.remove_args)
+        self.remove_args = to_str_list(self.remove_args)
         self.unset_envs = to_str_list(self.unset_envs)
         mode = str(self.args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
