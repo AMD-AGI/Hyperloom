@@ -1078,17 +1078,33 @@ def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
 
+@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 4), (3, 3)])
 @pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_for(
-    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_sandboxes_for(
+    max_sandboxes: int, tests: int, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": max_sandboxes}))
     host.spec(placement={"profile": "hosted-gpu"})
 
     assert cli.main(["hosted", "run"]) == 0
 
     [settings] = agent_cli
-    assert settings.caps.max_parallel_tests == GRANT["max_gpus"] // 2
+    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs, at most one test per sandbox"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_grant_that_states_only_some_totals_ends_the_run_for_good_naming_them(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({"max_gpus": 4, "max_runtime_sec": 86400}))
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "states no max_sandboxes, gpu_hours" in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
 
 
 @pytest.mark.usefixtures("ready_environment")

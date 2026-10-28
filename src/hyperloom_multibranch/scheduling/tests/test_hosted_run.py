@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a hosted run reads from the host and writes back: the grant's bounds on the session's time and tests, the
-stop the grant's end sends, and the files that tell the host whether to start the run again. The mapping of the spec
+"""What a hosted run reads from the host and writes back: the grant's bound on the session's time, the stop the
+grant's end sends, and the files that tell the host whether to start the run again. The mapping of the spec
 onto ``run`` is pinned through the command in ``test_cli``."""
 
 from __future__ import annotations
@@ -15,8 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.hosted.host_info import GrantLimits, HostInfo, read_host_info
-from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS
+from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
     GRANT_MARGIN_SECONDS,
@@ -25,7 +24,6 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     HostedRefused,
     arm_grant_stop,
     grant_deadline,
-    grant_parallel_tests,
     record_session,
     recorded_session,
     write_final_exit,
@@ -69,24 +67,6 @@ def test_a_grant_that_states_no_runtime_leaves_the_specs_hours_and_stops_nothing
 def test_a_grant_without_time_for_a_session_refuses_it(left: float) -> None:
     with pytest.raises(HostedRefused, match="CLOSE grace"):
         GrantDeadline(left).session_hours(8.0)
-
-
-@pytest.mark.parametrize(
-    ("limits", "tests"),
-    [
-        (None, DEFAULT_MAX_PARALLEL_TESTS),
-        (GrantLimits(4, None, 10.0, 3600), DEFAULT_MAX_PARALLEL_TESTS),
-        (GrantLimits(4, 8, 10.0, 3600), 4),
-        (GrantLimits(4, 3, 10.0, 3600), 1),
-    ],
-)
-def test_the_grant_runs_as_many_tests_at_once_as_its_gpus_hold(limits: GrantLimits | None, tests: int) -> None:
-    assert grant_parallel_tests(limits, 2) == tests
-
-
-def test_a_grant_whose_gpus_hold_no_test_refuses_the_tp() -> None:
-    with pytest.raises(ValueError, match="1 GPUs cannot run a test of TP=2"):
-        grant_parallel_tests(GrantLimits(4, 1, 10.0, 3600), 2)
 
 
 def test_the_grant_stop_sends_this_process_sigterm() -> None:
