@@ -40,7 +40,7 @@ from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
-from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LineageKind
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
@@ -693,12 +693,17 @@ async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_spe
         leases = built.wiring.dev_leases
         assert isinstance(leases, DevLeases) and leases.limits.cap == 2
         await built.peers.toolbox.start()
+        scheduler = LocalBlackboard(built.layout.blackboard, Writer(Role.SCHEDULER, "test-scheduler"))
+        await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+        await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
         grant = built.wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
         assert DEV_SANDBOX_TOOLS <= await asyncio.to_thread(_list_tools, grant)
 
         leased = await asyncio.to_thread(_call_tool, grant, "dev_sandbox_lease", {"cards": 1, "minutes": 5})
         assert leased["result"]["isError"] is False, leased
         assert json.loads(leased["result"]["content"][0]["text"])["cards"] == 1
+        [hold] = await scheduler.card_holds()
+        assert (hold.start.kind, hold.start.branch_id) == (LeaseKind.DEV, "b01")
         await leases.reclaim("b01", "its branch stopped")
         released = await asyncio.to_thread(_call_tool, grant, "dev_sandbox_release")
 
