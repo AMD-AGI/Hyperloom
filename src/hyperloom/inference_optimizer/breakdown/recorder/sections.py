@@ -68,7 +68,8 @@ KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
 )
 
 #: The roofline substreams. Rows belong to whichever event tagged them: the
-#: roofline's own when dispatched, the enclosing phase's when called inline.
+#: roofline's own when dispatched, the enclosing phase's when called inline;
+#: only the rows' event id differs.
 ROOFLINE_EVENT_SECTIONS: tuple[str, ...] = (
     "roofline_event",
     "roofline_action",
@@ -77,6 +78,9 @@ ROOFLINE_EVENT_SECTIONS: tuple[str, ...] = (
     "roofline_kernel",
 )
 
+#: Runs and rounds are separate because the executor retries at both levels:
+#: a pass the budget refused before it booted anything has a run and no round,
+#: and a flat list would drop it.
 BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
     "baseline_event",
     "baseline_action",
@@ -84,6 +88,9 @@ BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
     "baseline_round",
 )
 
+#: An arm is a whole ladder run under one set of server args, a variant one
+#: rung of it including rungs that only ever attempted to boot, a pair the two
+#: arms joined at one concurrency.
 CONC_SWEEP_EVENT_SECTIONS: tuple[str, ...] = (
     "conc_sweep_event",
     "conc_sweep_action",
@@ -92,6 +99,8 @@ CONC_SWEEP_EVENT_SECTIONS: tuple[str, ...] = (
     "conc_sweep_pair",
 )
 
+#: One event per session: the lane's trigger and the round that settles it are
+#: recorded from different phases and must land on the same event.
 ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
     "enablement_event",
     "enablement_attempt",
@@ -100,6 +109,10 @@ ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
     "enablement_human_review",
 )
 
+#: One event per (phase, macro_cycle), so a re-entry is another segment row
+#: rather than a second event. Proposals live here rather than on the framework
+#: event because a proposal exists in every phase, and a refused one is never
+#: dispatched and so never gets an action row.
 PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     "phase_event",
     "phase_segment",
@@ -109,18 +122,25 @@ PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     "phase_denial",
 )
 
+#: One event per session: adoptions arrive from four phases into one ordered
+#: chain, and reconciliation covers the whole.
 STACK_EVENT_SECTIONS: tuple[str, ...] = (
     "stack_event",
     "stack_adoption",
     "stack_validation",
 )
 
+#: Applies are rows rather than a tally on the event: the plan's counts already
+#: say how many landed, and what a reader needs from a replay that lost is which
+#: item it was that did not.
 WARM_REPLAY_EVENT_SECTIONS: tuple[str, ...] = (
     "warm_replay_event",
     "warm_replay_gate",
     "warm_replay_apply",
 )
 
+#: Reads are rows rather than a tally, which cannot be confined to T0: the
+#: session's audit log also holds writes and mid-session amendment reads.
 WARM_START_EVENT_SECTIONS: tuple[str, ...] = (
     "warm_start_event",
     "warm_start_read",

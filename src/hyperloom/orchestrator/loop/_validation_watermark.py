@@ -11,8 +11,8 @@ from typing import Any, Mapping
 
 from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.perf_metric import with_output_per_gpu
+from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
 
-from ..actions._recorder_trace import trace_recording_skipped
 from ..state.shared_state import resolve_graded_comparison
 from ._current_best_lift import _graded_source
 
@@ -86,11 +86,8 @@ class ValidationMixin:
             # the ledger: with no promoted figure to compare against, the
             # session total falls back to the sum of the very steps it is
             # meant to be checking.
-            trace_recording_skipped(
-                "session_validation",
-                reason="caller raised before the recorder",
-                entity=source,
-                error=exc,
+            trace_skip(
+                reason="caller raised before the recorder", section="session_validation", entity=source, error=exc
             )
         return True
 

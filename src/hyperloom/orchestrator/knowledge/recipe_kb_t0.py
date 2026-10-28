@@ -911,41 +911,6 @@ class T0AnchorRequest:
     resume: bool = False
 
 
-class _WarmStartConsult(NamedTuple):
-    """What T0's warm-start lookup found, and the experience it published from it."""
-
-    match: dict[str, Any]
-    context: dict[str, Any]
-    experience: dict[str, Any]
-
-
-def _consult_warm_start(
-    kb: RecipeKB,
-    shared_state: Any,
-    request: T0AnchorRequest,
-    identity: Mapping[str, Any],
-    session_dir: Path,
-) -> _WarmStartConsult:
-    """Stamp T0's authority row, look the workload up and publish what it found.
-
-    The steps between opening the ``warm_start`` event and settling it, so the
-    caller can close that event on whatever any of them raises.
-    """
-    fingerprint: Mapping[str, Any] = request.stack_fingerprint or {}
-    # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    extras = _build_t0_trace_extras(
-        shared_state, extra=request.extra_attrs or {}, fp=fingerprint, image_digest=request.image_digest
-    )
-    _stamp_local_authority_row(
-        kb, session_id=shared_state.recipe_kb_session_id, fingerprint=fingerprint, identity=identity, extras=extras
-    )
-    match, context = _warm_start_lookup(kb, shared_state, identity)
-    shared_state.warm_start_recipe = match
-    shared_state.warm_start_context = context
-    experience = _publish_warm_start_experience(shared_state, session_dir, identity=identity, context=context)
-    return _WarmStartConsult(match=match, context=context, experience=experience)
-
-
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
@@ -995,12 +960,13 @@ def run_t0_anchor(
             scope=_warm_start_scope(shared_state),
             start_time=shared_state.warm_start_ts,
         )
-    try:
-        match, context, experience = _consult_warm_start(kb, shared_state, request, identity, sd)
-    except BaseException as exc:
-        if ws_recorder is not None:
-            ws_recorder.finish_crashed(exc)
-        raise
+    # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
+    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=request.image_digest)
+    _stamp_local_authority_row(kb, session_id=sid, fingerprint=fingerprint, identity=identity, extras=extras)
+    match, context = _warm_start_lookup(kb, shared_state, identity)
+    shared_state.warm_start_recipe = match
+    shared_state.warm_start_context = context
+    experience = _publish_warm_start_experience(shared_state, sd, identity=identity, context=context)
 
     # Settled before the state save so the event stands even if the save fails: the lookup happened either way.
     if ws_recorder is not None:

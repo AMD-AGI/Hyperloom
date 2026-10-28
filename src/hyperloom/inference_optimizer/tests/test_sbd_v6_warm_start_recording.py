@@ -287,24 +287,6 @@ def test_finalize_closes_a_lookup_that_outlived_its_process(_bound_session):
     assert event["ext"]["reads"]["count"] == 1
 
 
-def test_a_lookup_that_raised_closes_failed_naming_the_exception_and_keeping_its_reads(_bound_session):
-    recorder = _recorder()
-    record_read(_bound_session, _read())
-
-    recorder.finish_crashed(RuntimeError("kb offline"))
-    finalize_events(_bound_session)
-
-    event = _event(_bound_session)
-    assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stage"] == "warm_start"
-    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
-    assert "kb offline" in event["ext"]["failure"]["message"]
-    assert event["ext"]["reads"]["count"] == 1
-    # The workflow contract admits a null outcome on a warm_start event; a lookup that never answered has none.
-    assert event["business_outcome"] is None
-    assert event["failure"]["error_class"] == "RuntimeError"
-
-
 def test_the_closing_fragment_carries_only_exported_fields(_bound_session):
     from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
     from hyperloom.inference_optimizer.breakdown.recorder.sections import WARM_START_EVENT_SECTIONS

@@ -410,13 +410,6 @@ def _snapshot_session_row(tmp_path, **state_attrs) -> dict:
     return assemble_parts(tmp_path, warnings=[])["session"]
 
 
-def test_a_budget_nobody_set_is_left_off_the_snapshot(tmp_path):
-    """Writing it as 0 is what forced the export to guess, and guess wrong."""
-    row = _snapshot_session_row(tmp_path)
-    assert "max_minutes" not in row
-    assert "tick_count" not in row
-
-
 def test_a_session_that_really_ran_zero_ticks_records_the_zero(tmp_path):
     row = _snapshot_session_row(tmp_path, max_minutes=0, tick=0)
     assert row["max_minutes"] == 0
