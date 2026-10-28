@@ -187,13 +187,13 @@ def test_the_first_arms_later_rungs_run_on_half_the_deadline(sweep_run, persiste
 
 
 def test_a_long_top_rung_no_longer_takes_the_whole_budget(sweep_run):
-    """#2254: OSL 8192 at CONC 16, 2869s granted, a 413s boot and a 655s anchor benchmark. The anchor rung sends the
+    """OSL 8192 at CONC 16, 2869s granted, a 413s boot and a 655s anchor benchmark. The anchor rung sends the
     session's request window, so it costs what the session measured; it runs first, the cheaper rung next, and the
-    top rung -- longer than the whole budget -- is cut at the baseline's half, so the optimized arm pairs both."""
+    top rung -- longer than the whole budget -- never starts, so the optimized arm pairs both."""
     recorder = MagicMock()
     payload, backend, calls, bounds, clock = sweep_run(
         persistent=True,
-        attempts=[_measured(1068.0), _measured(300.0), _hang(), _measured(884.0), _measured(250.0)],
+        attempts=[_measured(1068.0), _measured(300.0), _measured(884.0), _measured(250.0)],
         bounded=False,
         total_budget_sec=2869,
         concs=(256, 16, 2),
@@ -203,7 +203,6 @@ def test_a_long_top_rung_no_longer_takes_the_whole_budget(sweep_run):
     assert [call["grid"][0].name for call in calls] == [
         "baseline_conc16",
         "baseline_conc2",
-        "baseline_conc256",
         "optimized_conc16",
         "optimized_conc2",
     ]
@@ -215,11 +214,38 @@ def test_a_long_top_rung_no_longer_takes_the_whole_budget(sweep_run):
             (16, "succeeded", ""),
             (256, "skipped", "budget_exhausted"),
         ]
-    assert clock.elapsed == 1434.5 + 884.0 + 250.0
+    assert clock.elapsed == 1068.0 + 300.0 + 884.0 + 250.0
     assert payload["budget_skip_reason"] == "first_arm_share_exhausted"
     recorder.record_budget.assert_called_once_with(
         SweepBudget(declared_total_sec=2869, deadline=clock.wall() - clock.elapsed + 2869)
     )
+
+
+@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
+def test_a_rung_that_cannot_outrun_the_one_before_it_is_never_started(sweep_run, persistent):
+    """Past the anchor no rung benchmarks faster than the one before it, so with 3s of the baseline's half left after
+    a 12s rung the next one is recorded as never run."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        persistent=persistent,
+        attempts=[_measured(5.0), _measured(12.0), _measured(5.0), _measured(12.0)],
+        bounded=False,
+        total_budget_sec=40,
+    )
+    assert [call["grid"][0].name for call in calls] == [
+        "baseline_conc2",
+        "baseline_conc4",
+        "optimized_conc2",
+        "optimized_conc4",
+    ]
+    assert clock.elapsed == 34.0
+    assert payload["summary"]["successful_pairs"] == 2
+    for arm in ("baseline", "optimized"):
+        assert _points(payload, arm)[2] == (8, "skipped", "budget_exhausted")
+    assert payload["baseline"]["points"][2]["error"] == (
+        "the conc_sweep budget left no time to measure this concurrency on both arms"
+    )
+    assert payload["budget_skip_reason"] == "first_arm_share_exhausted"
+    assert payload["budget_remaining_sec"] == 3.0
 
 
 def test_an_anchor_longer_than_half_the_budget_is_still_paired(sweep_run):

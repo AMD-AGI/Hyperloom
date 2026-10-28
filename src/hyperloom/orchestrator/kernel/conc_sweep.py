@@ -191,8 +191,8 @@ _SWEEP_BUDGET_STOP = StoppedByTheRun(
 )
 
 
-# A pair needs both arms, so the arm that runs first may spend only half of what is left. A round that half reaps,
-# every rung after it, and every rung of the second arm whose partner never ran are recorded under this cause.
+# The stop for a first-arm rung its half of the budget reaps or never reaches, and for a second-arm rung whose partner
+# never ran.
 _PAIR_SHARE_STOP = StoppedByTheRun(
     error_class="budget_exhausted",
     interrupted="the first arm's half of the conc_sweep budget ran out while this round was running",
@@ -481,6 +481,11 @@ class _Window:
     def remaining_sec(self) -> float | None:
         return session_deadline_to_remaining_sec(self.deadline_sec)
 
+    def cannot_fit(self, least_sec: float | None) -> bool:
+        """Whether a round that takes at least ``least_sec`` would outlast this window."""
+        remaining_sec = self.remaining_sec()
+        return least_sec is not None and remaining_sec is not None and remaining_sec < least_sec
+
     def whole(self) -> _ArmDeadlines:
         return _ArmDeadlines(self, self)
 
@@ -526,6 +531,9 @@ class _Budget:
 
     def spend_on_session_reserve(self) -> None:
         self.exhaust(_SESSION_RESERVE, 0.0)
+
+    def run_out(self, window: _Window) -> None:
+        self.exhaust(window.exhausted_reason, max(0.0, window.remaining_sec() or 0.0))
 
 
 @dataclass(frozen=True)
@@ -743,7 +751,7 @@ class _SweepRun:
         )
         self.observe_cancel(results)
         if any(result.error_class == window.stop.error_class for result in results):
-            self.budget.exhaust(window.exhausted_reason, max(0.0, window.remaining_sec() or 0.0))
+            self.budget.run_out(window)
         return results
 
     def session_closing(self) -> bool:
@@ -1022,12 +1030,17 @@ async def _sweep_arm(
 
 
 async def _run_ladder(run: _SweepRun, server: _ArmServer, ladder: list[GridVariant], deadlines: _ArmDeadlines) -> None:
-    """Run the rungs in order until a stop ends the ladder; the rungs after a stopped one are recorded as never run."""
+    """Run the rungs in order until a stop ends the ladder; the rungs it never starts are recorded as never run."""
+    least_sec: float | None = None
     idx = 0
     while idx < len(ladder):
         if run.skip_rest(server.arm_name, ladder[idx:]):
             return
         window = deadlines.of_rung(idx)
+        if window.cannot_fit(least_sec):
+            run.budget.run_out(window)
+            run.record_never_run(server.arm_name, ladder[idx:], window.stop)
+            return
         result = await _run_rung_on(run, server, ladder[idx], window, is_last=idx == len(ladder) - 1)
         if result is None:
             # The round only brought the server up; the same rung's measuring round runs next.
@@ -1037,6 +1050,9 @@ async def _run_ladder(run: _SweepRun, server: _ArmServer, ladder: list[GridVaria
         if stop is not None:
             run.record_never_run(server.arm_name, ladder[idx + 1 :], stop)
             return
+        if idx > 0 and result.status == "succeeded":
+            # Past the anchor the rungs run cheapest first, so none benchmarks faster than the one before it.
+            least_sec = result.duration_seconds or least_sec
         idx += 1
 
 
