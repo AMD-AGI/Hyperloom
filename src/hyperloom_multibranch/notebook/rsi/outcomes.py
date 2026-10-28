@@ -131,7 +131,8 @@ def _last_menu(menus: Sequence[LoggedMenu], branch: str, before: float) -> Logge
 
 def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Family) -> GroupOutcome:
     """One explore test of ``family``, read against the menu ``shown`` before it, if any: a line lists the test when
-    its family covers the test's, as the line of an op family no test had acted on covers every test of that op."""
+    its family covers the test's, as the untried line, a target at one layer with its mechanism open, covers every test
+    of that target at that layer."""
 
     found = GroupOutcome(
         tests=1,
