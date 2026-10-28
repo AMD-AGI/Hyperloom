@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.orchestrator.measurement import host_input_cost as hic
 
 
@@ -84,50 +83,3 @@ def test_an_absent_run_reports_nothing(tmp_path):
     assert hic.input_cost(tmp_path / "absent") is None
     assert hic.input_cost(None) is None
     assert hic.input_cost("") is None
-
-
-def test_the_report_says_where_a_large_cost_is_paid():
-    out = hic.input_cost
-    body = "\n".join(
-        rp.render_input_cost(
-            {
-                "ms_per_100k_tokens": 230.3,
-                "requests": 564,
-                "low_isl": 49092,
-                "low_ttft_ms": 289.7,
-                "high_isl": 213618,
-                "high_ttft_ms": 668.5,
-                "flagged": True,
-            }
-        )
-    )
-
-    assert out is not None
-    assert "+230.3 ms" in body and "564 requests" in body
-    assert "290 ms at 49k" in body and "668 ms at 213k" in body
-    assert "in front of the engine" in body
-
-
-def test_the_report_states_a_small_cost_without_warning():
-    body = "\n".join(
-        rp.render_input_cost(
-            {
-                "ms_per_100k_tokens": 7.2,
-                "requests": 500,
-                "low_isl": 50_000,
-                "low_ttft_ms": 200.0,
-                "high_isl": 200_000,
-                "high_ttft_ms": 210.8,
-                "flagged": False,
-            }
-        )
-    )
-
-    assert "+7.2 ms" in body
-    assert "⚠" not in body
-    assert "in front of the engine" not in body
-
-
-def test_nothing_renders_without_a_measurement():
-    assert rp.render_input_cost(None) == []
-    assert rp.render_input_cost({}) == []

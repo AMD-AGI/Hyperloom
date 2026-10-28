@@ -82,30 +82,3 @@ def input_cost(workspace: str | Path | None) -> dict[str, Any] | None:
         "high_ttft_ms": round(high_ttft, 1),
         "flagged": bool(slope >= FLAG_MS_PER_100K),
     }
-
-
-def render_input_cost(cost: dict[str, Any] | None) -> list[str]:
-    """Render the per-input-token cost, and what it means when the prefix is cached."""
-    if not cost:
-        return []
-    line = (
-        f"- front-end cost     : `{cost['ms_per_100k_tokens']:+.1f} ms` of TTFT per 100k input tokens "
-        f"({cost['low_ttft_ms']:.0f} ms at {cost['low_isl'] // 1000}k → {cost['high_ttft_ms']:.0f} ms at "
-        f"{cost['high_isl'] // 1000}k, {cost['requests']} requests)"
-    )
-    if not cost["flagged"]:
-        return [line]
-    return [
-        line + " ⚠",
-        "  *On a cached prefix the GPU does little work for those tokens, so growth this size is paid in front "
-        "of the engine — template rendering, re-tokenising the whole prompt, pickling it to the scheduler.*",
-    ]
-
-
-__all__ = [
-    "FLAG_MS_PER_100K",
-    "MIN_ISL_SPAN",
-    "MIN_REQUESTS",
-    "input_cost",
-    "render_input_cost",
-]
