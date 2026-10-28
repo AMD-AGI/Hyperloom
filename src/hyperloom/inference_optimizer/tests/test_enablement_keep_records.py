@@ -270,7 +270,7 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
             assert argv_key not in result["enablement_launch_evidence"]
         _rearm_on_kept(state, result)
         state.enablement = EnablementRound.from_dict(asdict(state.enablement))
-        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
         decision = collected["replay_sufficiency"]
         activation_reasons = [reason for reason in decision["reasons"] if reason["code"] == "activation_incomplete"]
         expected = {"code": "activation_incomplete", "scope": "observed_server_launch_flags", "blocks": "both"}
@@ -1389,7 +1389,7 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     state.enablement.patch_roots = {str(patch): str(repo)}
     for key, value in out.items():
         setattr(state.enablement, key.removeprefix("enablement_"), value)
-    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
     codes = [r["code"] for r in section["replay_sufficiency"]["reasons"]]
     assert section["replay_sufficiency"]["status"] == "insufficient"
     assert "patch_targets_unknown" in codes

@@ -238,19 +238,6 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     assert consumer.read_text() == "new\n"
 
 
-def test_git_checkout_branch_creates_and_switches_branch(tmp_path):
-    repo = _init_repo(tmp_path)
-
-    out = integ.git_checkout_branch(str(repo), "kernel-agent-optimize")
-    assert "Switched to a new branch" in out
-    assert _run(["git", "branch", "--show-current"], repo) == "kernel-agent-optimize"
-
-    _run(["git", "checkout", "master"], repo)
-    out = integ.git_checkout_branch(str(repo), "kernel-agent-optimize")
-    assert "Switched to branch" in out
-    assert _run(["git", "branch", "--show-current"], repo) == "kernel-agent-optimize"
-
-
 def test_kb_read_status_is_compact_and_stable():
     status = integ.kb_read_status(
         {

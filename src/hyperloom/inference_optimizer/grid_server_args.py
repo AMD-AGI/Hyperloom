@@ -275,10 +275,7 @@ def _repair_unquoted_json(blob: str) -> str | None:
         return None
 
 
-def compact_json_server_args(
-    server_args: str | None,
-    framework: str | None,
-) -> str:
+def compact_json_server_args(server_args: str | None) -> str:
     """Normalize JSON-valued server args for unquoted Magpie expansion."""
     args = str(server_args or "").strip()
     if not args or ("{" not in args and "[" not in args):
@@ -362,8 +359,6 @@ SPACE_VALUE_FLAGS = (
     "--hf-overrides",
     "--kv-transfer-config",
 )
-# Compatibility export used by ``_grid_runner`` and out-of-tree tests.
-_SPACE_VALUE_FLAGS = SPACE_VALUE_FLAGS
 
 _MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",
@@ -388,6 +383,20 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
         "--pipeline-parallel-size",
     }
 )
+
+
+def server_arg_value(args: str | None, flag: str) -> str:
+    """Value of the last ``flag`` occurrence (space or ``=`` form), else ``""``.
+
+    Whitespace-split, so a quoted or malformed token elsewhere in ``args`` does not void the lookup the way it voids
+    :func:`tokenize_server_args_preserving_json`.
+    """
+    toks = str(args or "").replace("=", " ").split()
+    value = ""
+    for i, tok in enumerate(toks):
+        if tok == flag and i + 1 < len(toks):
+            value = toks[i + 1]
+    return value
 
 
 def tokenize_server_args_preserving_json(
@@ -478,49 +487,6 @@ def dedup_vllm_server_args(
         return normalized
     kept = [tok for idx, tok in enumerate(tokens) if idx not in drop]
     return " ".join(kept)
-
-
-def shell_safe_dedupe(args: str) -> str:
-    """Last-wins dedupe for single-token-valued flags only."""
-    if not args.strip():
-        return ""
-    if any(f in args for f in _MULTI_VALUE_FLAGS):
-        return args
-    parsed = tokenize_server_args_preserving_json(args)
-    if parsed is None:
-        return args
-    normalized, tokens = parsed
-    pairs: dict[str, list[str]] = {}
-    order: list[str] = []
-    i = 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t.startswith("--"):
-            if "=" in t:  # Normalize so it dedupes against ``--flag value``.
-                flag, _, val = t.partition("=")
-                pair = [flag, val]
-                i += 1
-            else:
-                flag = t
-                i += 1
-                if i < len(tokens) and not tokens[i].startswith("--"):
-                    pair = [flag, tokens[i]]
-                    i += 1
-                else:
-                    pair = [flag]
-            if flag not in pairs:
-                order.append(flag)
-            pairs[flag] = pair
-        else:
-            key = f"__pos_{len(order)}__"
-            order.append(key)
-            pairs[key] = [t]
-            i += 1
-    out: list[str] = []
-    for k in order:
-        out.extend(pairs[k])
-    rendered = " ".join(out)
-    return rendered if rendered != normalized else normalized
 
 
 # sglang scheduler watchdog timeout injection: the first request's JIT compile can exceed sglang's default watchdog,
@@ -647,14 +613,14 @@ def validate_warm_replay_context_length(
     isl: int,
     osl: int,
     max_model_len: int | str | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Validate a replayed SGLang context window without changing its config."""
+) -> dict[str, Any]:
+    """Validate a replayed SGLang context window and return its compatibility evidence."""
     args = str(server_args or "")
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args, {"status": "not_sglang"}
+        return {"status": "not_sglang"}
     required = max(0, int(isl or 0)) + max(0, int(osl or 0))
     if required <= 0:
-        return args, {"status": "target_shape_unknown"}
+        return {"status": "target_shape_unknown"}
     max_len = optional_positive_int(max_model_len)
     if max_len is not None and max_len < required:
         raise ValueError(f"target workload exceeds MAX_MODEL_LEN: isl+osl={required} > max_model_len={max_len}")
@@ -685,13 +651,13 @@ def validate_warm_replay_context_length(
             raise ValueError("--context-length must be positive")
         values.append(value)
     if not values:
-        return args, {
+        return {
             "status": "context_length_absent",
             "required_context_length": required,
         }
     effective = values[-1]
     if effective >= required:
-        return args, {
+        return {
             "status": "compatible",
             "effective_context_length": effective,
             "required_context_length": required,
@@ -746,19 +712,10 @@ def inject_sglang_context_length(
     )
 
 
-def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
-    """Pick the dual-chunk attention backend for the current hardware."""
-    override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
-    if override:
-        return override
-    return _SGLANG_DUAL_CHUNK_BACKEND
-
-
 def inject_sglang_attention_backend(
     server_args: str | None,
     framework: str | None,
     model_path: str | None,
-    gpu_type: str | None = None,
 ) -> str:
     """Append an ``--attention-backend`` for dual-chunk sglang models."""
     args = str(server_args or "").strip()
@@ -770,12 +727,9 @@ def inject_sglang_attention_backend(
 
     if not _model_has_dual_chunk_attention(str(model_path or "")):
         return args
-    backend = _resolve_dual_chunk_backend(gpu_type)
+    backend = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip() or _SGLANG_DUAL_CHUNK_BACKEND
     if backend != _SGLANG_DUAL_CHUNK_BACKEND:
-        log.info(
-            "dual-chunk model on AMD/ROCm: injecting --attention-backend %s (dual_chunk_flash_attn needs sm90+).",
-            backend,
-        )
+        log.info("dual-chunk model: injecting --attention-backend %s from HYPERLOOM_DUAL_CHUNK_BACKEND.", backend)
     return merge_server_args(
         args,
         f"{_SGLANG_ATTN_BACKEND_FLAG} {backend}",
@@ -791,8 +745,7 @@ def inject_sglang_attention_backend(
 # ``moe_runner_requires_aiter`` below strips an *inherited*
 # ``--moe-runner-backend`` that would crash an aiter-only quant scheme (grid
 # variants, baseline retries).
-_SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
-
+#
 # Matches space- or equals-separated form without false-matching a longer flag.
 SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
@@ -902,7 +855,7 @@ def merge_cumulative_extra_server_args(
     if full and full != candidate:
         merged = full
     elif candidate and base:
-        if candidate.startswith(base) or base in candidate.split():
+        if candidate == base or candidate.startswith(f"{base} ") or base in candidate.split():
             merged = candidate
         else:
             merged = f"{base} {candidate}".strip()

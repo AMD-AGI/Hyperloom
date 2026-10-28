@@ -115,7 +115,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
     }
 
 
-def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
+def _objective_summary(args: argparse.Namespace | None) -> dict[str, Any]:
     """Mirror cli._run_optimize's objective derivation, without importing it."""
     targets: list[dict[str, Any]] = []
     if getattr(args, "target_gain", None):
@@ -184,8 +184,8 @@ def build_manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id or build_session_id(model_name),
-        "claw_session_id": (os.environ.get("CLAW_SESSION_ID") or "").strip() or None,
-        "sandbox_user_id": (os.environ.get("SANDBOX_USER_ID") or "").strip() or None,
+        "claw_session_id": os.environ.get("CLAW_SESSION_ID", "").strip() or None,
+        "sandbox_user_id": os.environ.get("SANDBOX_USER_ID", "").strip() or None,
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate the on-disk artifacts.
@@ -197,12 +197,12 @@ def build_manifest(
         "tp": _env_digits("TP"),
         **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,
-        "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
+        "objective": _objective_summary(args),
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
         "code_revision": _prov["code_revision"],
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
-        "host": platform.node() or socket.gethostname() or "",
+        "host": platform.node() or socket.gethostname(),
         "image": _prov["image"],
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
@@ -213,7 +213,7 @@ def build_manifest(
         "workflow_flags": {
             "kernel_enabled": not getattr(args, "no_kernel", False),
             "framework_agent_enabled": not getattr(args, "no_framework_agent", False),
-            "enablement_mode": str(getattr(args, "enablement", "all") or "all"),
+            "enablement_mode": getattr(args, "enablement", "all"),
         },
         # IR-3 soft-degrade audit.
         "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),

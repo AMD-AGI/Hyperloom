@@ -24,7 +24,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     VariantResult,
     GridRecipe,
 )
-from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module
+from hyperloom.orchestrator.kernel import conc_sweep as conc_sweep_module, kernel_decisions
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
@@ -974,23 +974,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     assert captured["budget"] == 60
 
 
-def test_conc_sweep_executor_missing_session_dir_yields_failure():
-    from hyperloom.orchestrator.actions.executors.conc_sweep import (
-        ConcSweepExecutor,
-    )
-
-    class _Task:
-        params = {}
-
-    class _Ctx:
-        task = _Task()
-        extra: dict = {}
-
-    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_session_dir"
-
-
 def test_conc_sweep_executor_state_load_failure_propagates(monkeypatch):
     from hyperloom.orchestrator.actions.executors.conc_sweep import (
         ConcSweepExecutor,
@@ -1167,7 +1150,6 @@ def test_sweep_exits_based_on_ladder_status():
         return SharedState(
             last_conc_sweep=last_conc_sweep or {},
             phase="SWEEP",
-            phase_started_ts="2026-06-02T10:00:00+00:00",
             max_minutes=360,
             phase_budget_pct={"SWEEP": 0.50},
         )
@@ -1203,7 +1185,6 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
 
     state = SharedState(
         phase="SWEEP",
-        phase_started_ts="2026-06-02T10:00:00+00:00",
         max_minutes=360,
         phase_budget_pct={"SWEEP": 0.50},
     )
@@ -1276,7 +1257,11 @@ def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
         {"kernel_id": "k001", "integration_id": "integration-1"},
         {"kernel_id": "k002", "integration_id": "integration-2"},
     ]
-    coord.shared_state.pending_kernel_integration_records = lambda: [pending_queue.pop(0)] if pending_queue else []
+    monkeypatch.setattr(
+        kernel_decisions,
+        "pending_kernel_integration_records",
+        lambda state: [pending_queue.pop(0)] if pending_queue else [],
+    )
     coord.writeback.record_integrate_keep = AsyncMock()
     coord.session_dir = Path("/tmp/sess")
 

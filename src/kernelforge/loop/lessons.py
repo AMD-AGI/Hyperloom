@@ -12,6 +12,7 @@ import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from kernelforge.loop.experiments_layout import ExperimentsLayout, tagged_iteration
 from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -746,7 +747,8 @@ class LessonStore:
         recent: int = DEFAULT_RECENT_LESSONS,
         max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS,
     ):
-        self.root = Path(workspace_dir) / "forge_experiments" / "lessons"
+        self._layout = ExperimentsLayout.of(workspace_dir)
+        self.root = self._layout.lessons
         self.recent = max(0, recent)
         self.max_prompt_chars = max(0, max_prompt_chars)
         self.degraded = False
@@ -757,18 +759,14 @@ class LessonStore:
             log.debug("lessons: could not create %s: %s", self.root, error)
 
     def path(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}.md"
-
-    def _iteration_of(self, path: Path) -> int | None:
-        match = re.fullmatch(r"iter_(\d+)", path.stem)
-        return int(match.group(1)) if match else None
+        return self._layout.lesson(iteration)
 
     def existing_iterations(self) -> list[int]:
         """Archived iteration numbers, ascending."""
         found: list[int] = []
         with contextlib.suppress(OSError):
-            for entry in self.root.glob("iter_*.md"):
-                number = self._iteration_of(entry)
+            for entry in self.root.glob("*.md"):
+                number = tagged_iteration(entry.stem)
                 if number is not None:
                     found.append(number)
         return sorted(found)
@@ -951,13 +949,12 @@ class PrReferenceNote:
 
 async def summarize_iteration(
     *,
-    store: LessonStore,
     iteration: int,
     end_reason: str,
     summarizer,
     references: PrReferenceNote = PrReferenceNote(),
 ) -> SummaryOutcome:
-    """Ask the just-finished implementer session to write its lesson document."""
+    """Ask the just-finished implementer session for its lesson text. The caller writes it."""
     if summarizer is None:
         return SummaryOutcome(reason="provider cannot resume the session")
     prompt = build_summary_prompt(
@@ -970,8 +967,6 @@ async def summarize_iteration(
     text = (text or "").strip()
     if not text:
         return SummaryOutcome(reason="session replied with no text")
-    if store.write(iteration, text) is None:
-        return SummaryOutcome(reason="failed to persist lesson document")
     return SummaryOutcome(text=text)
 
 

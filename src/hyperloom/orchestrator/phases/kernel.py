@@ -25,8 +25,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
-from hyperloom.common.coerce import first_str
+from hyperloom.common.coerce import first_str, to_float, to_int
 from hyperloom.common.env import env_bool, env_float, env_int
+from hyperloom.common import gain_math
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
@@ -54,6 +56,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
+    KernelRewriteRun,
     LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -74,6 +77,7 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
+from ..kernel import kernel_decisions
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
@@ -123,14 +127,6 @@ MAX_FUSION_INFRA_RETRIES = 2
 
 # One lane ceiling covers both fusion pipelines, so a round can leave targets unfunded.
 MAX_FUSION_WITHHELD_RETRIES = 2
-
-
-def _as_int(value: object) -> int:
-    """Read a counter that round-tripped through JSON, defaulting to 0."""
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _record_gemm_e2e_envelope(
@@ -302,14 +298,6 @@ def _withheld_targets(result: object) -> int:
         return 0
     withheld = nomination.get("withheld")
     return max(0, withheld) if isinstance(withheld, int) and not isinstance(withheld, bool) else 0
-
-
-def _as_float(value: object, default: float) -> float:
-    """Read a measurement that round-tripped through JSON, defaulting on junk."""
-    try:
-        return float(value or default)
-    except (TypeError, ValueError):
-        return default
 
 
 # Which table each aiter config env var is resolved under at serving time.
@@ -739,13 +727,11 @@ class KernelPhase(CoordinatorCollaborator):
         """Record settled Controller integrations as Forge kernel rewrites."""
         integration = result.get("integration")
         rows = integration.get("results") if isinstance(integration, dict) else None
-        if not isinstance(rows, list):
+        recorder = self.timeline()
+        if recorder is None or not isinstance(rows, list):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
-            record_backend_versions_and_timeline,
-        )
-
         cycle = int(result.get("macro_cycle") or self.shared_state.macro_cycle or 0)
+        recorded_any = False
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
@@ -761,47 +747,34 @@ class KernelPhase(CoordinatorCollaborator):
                 decision = "SKIPPED"
             else:
                 decision = "FAILED"
-            attempt_id = f"controller-c{cycle}-{index}"
             gain_pct = row.get("gain_pct")
             speedup = (
                 1.0 + float(gain_pct) / 100.0
                 if isinstance(gain_pct, (int, float)) and not isinstance(gain_pct, bool)
                 else None
             )
-            record_backend_versions_and_timeline(
-                self.session_dir,
-                {
-                    "kernel_id": kernel_id,
-                    "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
-                    "run_id": first_str(result.get("run_id"), f"controller-c{cycle}"),
-                    "status": status,
-                    "attempts": [
-                        {
-                            "attempt_id": attempt_id,
-                            "backend": "forge",
-                            "status": status,
-                            "decision": decision,
-                            "micro_speedup": speedup,
-                            # The integration status *is* this route's failure
-                            # taxonomy -- ``reverted_apply_conflict``,
-                            # ``skipped_dirty_worktree`` -- and an integration
-                            # row carries no separate class. Stamping it here
-                            # is what makes ``error_class`` answerable on this
-                            # route: the GEAK and fusion lanes both fill it, so
-                            # a reader asking why a candidate did not land had
-                            # one field that was empty only for forge.
-                            "error_class": "" if status == "kept" else status,
-                            "error": first_str(row.get("reason")),
-                        }
-                    ],
-                    "verification": {
-                        "best_attempt_id": attempt_id if decision == "KEEP" else "",
-                        "micro_speedup": speedup,
-                    },
-                    "proposal": {"decision": decision},
-                },
-                recorder=self.timeline(),
+            recorder.record_kernel_rewrite(
+                KernelRewriteRun(
+                    lane=LaneRunFields(
+                        run_id=f"controller-c{cycle}-{index}",
+                        status=status,
+                        micro_decision=decision,
+                        failure_reason=first_str(row.get("reason")),
+                        # The integration status is this route's failure taxonomy
+                        # (``reverted_apply_conflict``, ``skipped_dirty_worktree``),
+                        # and an integration row carries no separate class.
+                        error_class="" if status == "kept" else status,
+                    ),
+                    kernel_id=kernel_id,
+                    kernel_name=kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
+                    backends_tried=["forge"],
+                    adopted_backend="forge" if decision == "KEEP" else "",
+                    speedup=speedup or None,
+                )
             )
+            recorded_any = True
+        if recorded_any:
+            tool_versions.record_tool_version(self.session_dir, tool="forge")
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled GEMM campaign in the Forge lane -- one row per tuner that ran.
@@ -2003,7 +1976,7 @@ class KernelPhase(CoordinatorCollaborator):
         log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
         fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
         # Both are verdicts 2a has already recorded.
-        if fb.get("validated") or fb.get("status") == "no_promote":
+        if fb.get("validated") or fb.get("status") == REBENCH_NO_PROMOTE:
             return
         error = str(fb.get("reason") or decline_reason)[:500]
         state.geak_pending = {
@@ -2017,7 +1990,7 @@ class KernelPhase(CoordinatorCollaborator):
         ):
             state.geak_result = {
                 **state.geak_result,
-                "revalidation_status": "fallback_failed",
+                "revalidation_status": REBENCH_FALLBACK_FAILED,
                 "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
                 "revalidation_error": error,
                 # This refusal is reusable only while its overlay remains unloadable.
@@ -2072,7 +2045,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
         self._record_geak_claim_and_product(result, accepted_flags, parsed_envs)
         # Surface a large cross-harness measurement divergence as a warning only.
-        divergence = _as_float(basis_facts.get("measurement_divergence_pct"), 0.0)
+        divergence = to_float(basis_facts.get("measurement_divergence_pct"), 0.0)
         if abs(divergence) > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
             log.warning(
                 "geak candidate: large cross-harness measurement divergence %.2f%% (|.|>%.1f%%) - candidate held "
@@ -2112,7 +2085,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Audit-only self-reported numbers (not the headline until rebench).
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
-            "self_reported_gain_pct": ((new_tput - base) / base * 100.0) if (base > 0 and comparable) else None,
+            "self_reported_gain_pct": gain_math.incremental_gain_pct(new_tput, base) if comparable else None,
             # Why the gain above is a number or None, so a reader never has to
             # guess whether an absent gain means "no gain" or "not comparable".
             "workload_comparability": comparability or None,
@@ -2167,9 +2140,7 @@ class KernelPhase(CoordinatorCollaborator):
         attempt_id: str = "geak_final_validation",
     ) -> None:
         """Close a measured candidate without recording an adoption."""
-        rejected_result = dict(result)
-        rejected_result["revalidation_status"] = "no_promote"
-        rejected_result["revalidation_error"] = reason
+        rejected_result = {**result, "revalidation_status": REBENCH_NO_PROMOTE, "revalidation_error": reason}
         rejected_result["final_validation"] = {
             "decision": "REJECTED",
             "reason": reason,
@@ -2193,12 +2164,12 @@ class KernelPhase(CoordinatorCollaborator):
                     attempt_id=attempt_id,
                     base_tput=current_best_tput,
                     measured_tput=measured_tput if measured_tput > 0 else None,
-                    decision="no_promote",
+                    decision=REBENCH_NO_PROMOTE,
                     decision_reason=reason,
-                    status="no_promote",
+                    status=REBENCH_NO_PROMOTE,
                 )
             )
-            recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
+            recorder.record_geak_rebench_conclusion(final_status=REBENCH_NO_PROMOTE, final_error=reason)
 
     def _geak_promotion_measurement(
         self,
@@ -2351,11 +2322,11 @@ class KernelPhase(CoordinatorCollaborator):
         """Promote a measured GEAK candidate and return whether the lift succeeded."""
         if not isinstance(result, dict):
             return False
-        measured = _as_float(measured_tput, 0.0)
+        measured = to_float(measured_tput, 0.0)
         if measured <= 0:
             return False
         # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
-        pre_geak_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
+        pre_geak_tput = to_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
             accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
         except ValueError as exc:
@@ -2446,9 +2417,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         rows = [{"kernel_id": geak_spec_name(k), "spec": k} for k in specs]
 
-        rebench_gain: float | None = None
-        if baseline_tput > 0 and measured_tput > 0:
-            rebench_gain = (measured_tput - baseline_tput) / baseline_tput * 100.0
+        rebench_gain = gain_math.gain_pct(measured_tput, baseline_tput)
         # One kernel, overlay proven loaded, one measured number: the gain is attributable.
         attributable = bool(overlay_loaded) and len(rows) == 1
         am = result.get("alignment_metrics") or {}
@@ -3022,7 +2991,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Never started, so no attempt to record; a recorded ``skipped`` would latch GEMM off for later entries.
             return
         self._sync_profile_state_after_gemm_roofline(result)
-        self.shared_state.record_gemm_tuning(result)
+        kernel_decisions.record_gemm_tuning(self.shared_state, result)
         try:
             await self._validate_gemm_tuning_e2e(result)
         except Exception as exc:  # isolation boundary: one GEMM campaign's e2e validation, recorded as a REVERT fault
@@ -3150,7 +3119,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "env_var": env_var,
                     "env_value": env_value,
                     "envs": envs,
-                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                    "micro_speedup": to_float(row.get("best_micro_speedup")) or 1.0,
                 }
             )
         return candidates
@@ -3226,9 +3195,7 @@ class KernelPhase(CoordinatorCollaborator):
             "kernel_id": f"gemm_tune_{tuner_name}",
             "source": "forge_gemm_tuning",
             "base_tput": base_tput,
-            "model_path": resolve_session_model_path(
-                state_model_path=str(self.shared_state.model_path or ""), for_serving=True
-            ),
+            "model_path": resolve_session_model_path(state_model_path=str(self.shared_state.model_path or "")),
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
             "keep_threshold_pct": 1.0,
@@ -3727,11 +3694,11 @@ class KernelPhase(CoordinatorCollaborator):
             # A round that kept nothing and left targets unfunded answers only for the ones it ran, so it re-arms
             # fusion until the retry cap is spent.
             if not last.get("kept") and _withheld_targets(last) > 0:
-                return _as_int(self.shared_state.fusion_withheld_retries) < MAX_FUSION_WITHHELD_RETRIES
+                return to_int(self.shared_state.fusion_withheld_retries, 0) < MAX_FUSION_WITHHELD_RETRIES
             return False
         if isinstance(last, dict) and last.get("infrastructure_abort"):
             # An abort judged nothing, so it must stay retryable -- but not forever.
-            spent = _as_int(self.shared_state.fusion_infra_aborts)
+            spent = to_int(self.shared_state.fusion_infra_aborts, 0)
             if spent >= MAX_FUSION_INFRA_RETRIES:
                 log.info(
                     "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
@@ -3788,11 +3755,11 @@ class KernelPhase(CoordinatorCollaborator):
             # Counted on the session, not on the record: ``last_fusion`` is replaced by every run, so a timeout or a
             # handler crash landing between two aborts would carry no count forward and hand the cap back a clean
             # slate on every other entry.
-            spent = _as_int(self.shared_state.fusion_infra_aborts)
+            spent = to_int(self.shared_state.fusion_infra_aborts, 0)
             self.shared_state.fusion_infra_aborts = spent + 1
         if isinstance(result, dict) and not result.get("kept") and _withheld_targets(result) > 0:
             # Counted on the session for the same reason as the aborts above.
-            withheld_spent = _as_int(self.shared_state.fusion_withheld_retries)
+            withheld_spent = to_int(self.shared_state.fusion_withheld_retries, 0)
             self.shared_state.fusion_withheld_retries = withheld_spent + 1
         if isinstance(result, dict) and not first_str(result.get("fusion_run_id")).strip():
             cycle = int(self.shared_state.macro_cycle or 0)
@@ -3825,7 +3792,6 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""
-        from ..kernel._kernel_decisions import enqueue_nominated_patch
         from ..kernel.nomination_result import parse_outcome, summarize_dropped_patches
 
         outcome = parse_outcome(result)
@@ -3848,7 +3814,7 @@ class KernelPhase(CoordinatorCollaborator):
         keep_pct = env_float("HYPERLOOM_FUSION_KEEP_PCT", default=1.0)
         queued = 0
         for patch in outcome.patches:
-            record = enqueue_nominated_patch(
+            record = kernel_decisions.enqueue_nominated_patch(
                 self.shared_state,
                 patch=patch,
                 keep_threshold_pct=keep_pct,

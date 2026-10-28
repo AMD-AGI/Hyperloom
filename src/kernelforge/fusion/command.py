@@ -20,6 +20,7 @@ import click
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 from kernelforge.tools.git import git
+from kernelforge.tools.gpu_arch import canon_arch, detect_arch
 from kernelforge.option_groups import option_group
 
 from . import __version__
@@ -45,7 +46,6 @@ from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_
 from .diagnose import diagnose_trace
 from .discover import DiscoverySession, DiscoveryTarget, discover_recipes, registered_agent_llm_fn
 from .emit import FusionFiles, _git_tracks, export_artifacts, restore_exported_changes
-from .gpu_arch import canon_arch, detect_arch
 from .llm_failure import LlmUnavailableError
 from .locate import FrameworkInstall, build_recipes, resolve_framework_source_file
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
@@ -1299,7 +1299,7 @@ def _run_target_arch(gpu_arch: str) -> str:
     The author tunes for it, so a mismatch would have it writing for a chip the
     run is not on.
     """
-    run_arch = canon_arch(gpu_arch) or canon_arch(detect_arch())
+    run_arch = canon_arch(gpu_arch) or detect_arch()
     if run_arch:
         log.info("target GPU arch: %s", run_arch)
     else:

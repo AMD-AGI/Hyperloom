@@ -368,7 +368,7 @@ require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
-decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+decided that — in a versioned schema (`schema_version`, currently `1.2.0`), so
 consumers and triage read a contract rather than candidate internals.
 
 ---
@@ -1057,8 +1057,11 @@ stay, because other code reads them. The sandbox keys, the MCP token and the arc
 ### The hosted entry and its bootstrap
 
 `hyperloom hosted run` (`src/hyperloom/hosted/entry.py`) reads the variables above and the campaign spec in
-`HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), then runs
-`optimize` in the same process. The session directory is
+`HYPERLOOM_INPUT_FILE` (`hyperloom.campaign-spec/v1`, schema `src/hyperloom/contracts/campaign_spec.v1.schema.json`), runs the
+packaged `src/hyperloom/inference_optimizer/assets/install.sh` (no flags; the installer of the legacy launchers, from the same
+wheel as the running code; it provisions TraceLens, GEAK, ray and `runtime/kernel-agent.env.sh`) on every leg, fresh or resumed, into the interpreter that runs the entry (`PYTHON`, `VIRTUAL_ENV` and `INFERENCE_OPTIMIZER_FORCE_PYTHON=1` are set for it, and that interpreter's `bin` directory leads `PATH` for the installer and `optimize`), with its
+output in `$HYPERLOOM_STATE_DIR/install.log`, then runs `optimize` in the same process. An installer that exits non-zero ends the run
+with `{"final": true, "returncode": 2, "error": ...}` naming `install.sh` and the log. The session directory is
 `$USER_DATA_PATH/<model directory name>/<HYPERLOOM_RUN_CREATED_AT as YYYYMMDDTHHMMSSZ>-<first 8 hex of sha256(HYPERLOOM_RUN_ID)>`; a
 restart finds the same directory and resumes it when it holds `manifest.json` and `state.json`. The entry writes two files in
 `$HYPERLOOM_STATE_DIR`: `session.json` (`{"session_dir": ...}`, as soon as the directory exists) and `exit.json`
@@ -1067,14 +1070,14 @@ restart finds the same directory and resumes it when it holds `manifest.json` an
 `HYPERLOOM_IMAGE` is set from the spec's `framework.image`, and the entry needs `USER_DATA_PATH` set to an absolute path. The result
 archive directory of the run is `<session dir>/archive/`, mode 0700, owned by the application user.
 
-`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom.
+`src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
 `scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HYPERLOOM_SOURCE_REPO` | Yes | `OWNER/NAME` on GitHub, or a git URL or path, of the Hyperloom source to run. |
-| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and the dependencies are installed with `--require-hashes` from the commit's `requirements/app.lock` into `$HYPERLOOM_STATE_DIR/venv`. |
+| `HYPERLOOM_SOURCE_SHA` | Yes | Full 40-character commit id of that source. The wheel for it is built once into `$USER_DATA_PATH/.hyperloom/wheels/<sha>/` and only that wheel is installed (`--no-deps --force-reinstall`, so a new commit replaces an old one) into the image's framework Python environment (`/opt/venv` when it exists, else `$PYTHON`, else `python3`, the order `install.sh` uses), which also runs the entry. The runtime dependencies are resolved there by the `install.sh` the entry runs before `optimize`, as in the legacy flow. The environment records the installed commit in `.hyperloom-install`; a container that already holds it installs nothing. |
 | `HYPERLOOM_CODE_REVISION` | Set by the script | The commit id, exported before the entry starts: a wheel has no `.git` to read it from. |
 
 ### Progress events

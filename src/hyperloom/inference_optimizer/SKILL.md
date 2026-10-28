@@ -758,6 +758,7 @@ and the operator's stated value is lost:
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
+| xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
@@ -802,9 +803,11 @@ python3 -m hyperloom optimize \
 
 - The `--quantize` text is the quantization request only (scheme / kv-cache /
   excluded layers / acceptable eval gap). **Do not** repeat the model path or
-  export dir — the adapter folds `--model` + a per-model export dir under the
-  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
-  prompt automatically.
+  export dir — the adapter folds `--model` and the export dir into the prompt
+  automatically. Each run quantizes in its own directory,
+  `<workspace_root>/quantization/<model>/runs/<run_id>/`, and exports to
+  `quantized/` inside it, so a rerun never overwrites a model an earlier
+  session is serving.
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
   `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a

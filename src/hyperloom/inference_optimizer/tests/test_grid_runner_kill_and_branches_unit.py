@@ -95,25 +95,6 @@ async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_grid_server_dead_branch(tmp_path, monkeypatch):
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _dead(*_a, **_k):
-        return gr.SERVER_DEAD_RETURNCODE, "", "engine crashed"
-
-    monkeypatch.setattr(gr, "_run_magpie", _dead)
-    results = await run_grid(
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        recipe=GridRecipe(base_yaml_path=base),
-    )
-    assert results[0].status == "failed"
-    assert results[0].error_class == "server_init_dead"
-    assert results[0].returncode == gr.SERVER_DEAD_RETURNCODE
-
-
-@pytest.mark.asyncio
 async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
@@ -409,7 +390,7 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
             "Engine core initialization failed.\n"
             "Traceback follows\n"
         )
-        return gr.SERVER_DEAD_RETURNCODE, "", ""
+        return 1, "", ""
 
     monkeypatch.setattr(gr, "_run_magpie", _dead)
     results = await run_grid(
@@ -419,7 +400,7 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     )
     r = results[0]
     assert r.status == "failed"
-    assert r.error_class == "server_init_dead"
+    assert r.error_class == "no_benchmark_workspace"
     assert "mla_gluon" in (r.error or ""), "excerpt should mention mla_gluon"
     assert r.server_log_path is not None
     assert r.server_log_path.endswith("server.log")
@@ -446,7 +427,7 @@ async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypat
             "Engine core initialization failed.\n"
             "Traceback follows\n"
         )
-        return gr.SERVER_DEAD_RETURNCODE, "", ""
+        return 1, "", ""
 
     monkeypatch.setattr(gr, "_run_magpie", _dead)
     results = await run_grid(
@@ -456,7 +437,7 @@ async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypat
     )
     r = results[0]
     assert r.status == "failed"
-    assert r.error_class == "server_init_dead"
+    assert r.error_class == "no_benchmark_workspace"
     assert "mori_ep_dispatch" in (r.error or ""), "the cause must be read after the log is harvested"
     assert r.server_log_path is not None
     assert r.server_log_path.endswith("server.log")

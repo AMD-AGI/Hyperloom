@@ -38,15 +38,14 @@ from ..stop_attribution import (
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
 )
-from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
-from ._benchmark_interpreter import _resolve_probe_python as _resolve_probe_python
+from ._benchmark_runtime import apply_runtime_benchmark_overrides
+from ._benchmark_interpreter import _resolve_probe_python
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     RoundWatch,
     resolve_benchmark_timeouts,
@@ -65,13 +64,14 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
-from .benchmark_config import prepare_benchmark_runtime
+from .benchmark_config import apply_benchmark_round_seed, prepare_benchmark_runtime
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.overlay import is_safe_path_entry
 from hyperloom.inference_optimizer import speculative_capability
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override, prepend_launch_path
 from ._recipe_script import launcher_overwritten_envs
@@ -79,30 +79,14 @@ from ._server_argv import seal_server_argv
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
-# Re-exported from sibling modules to keep the module namespace intact.
-from ._grid_base import (
-    DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
-    GridVariant as GridVariant,
-    VariantResult as VariantResult,
-)
+from ._grid_base import GridVariant, VariantResult
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     SGLANG_MOE_RUNNER_BACKEND_RE,
+    compose_server_args,
     moe_runner_requires_aiter,
     remove_moe_runner_backend_arg,
-    server_args_env_name as server_args_env_name,
-    merge_server_args as merge_server_args,
-    compose_server_args as compose_server_args,
-    shell_safe_dedupe as shell_safe_dedupe,
-)
-from ._grid_variant_filter import (
-    resolve_skip_spec as resolve_skip_spec,
-    _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
-    _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
-    reorder_grid_for_multi_node as reorder_grid_for_multi_node,
-    apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
-    apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
-    apply_compatibility_filter as apply_compatibility_filter,
-    apply_user_skip_list as apply_user_skip_list,
+    dedupe_extra_server_args,
 )
 
 
@@ -415,6 +399,9 @@ class GridLaunch:
     ready_server_log: str | None = None
     warmup_before_measure: bool | None = None
     lifecycle_boot_only: bool = False
+    # The grid's measured round is itself a caller's discarded warmup, so it must not send the prompts of the
+    # measured round that follows it on the same server.
+    warmup_round: bool = False
 
 
 @dataclass(frozen=True)
@@ -440,6 +427,7 @@ class MagpieRound:
     silence_timeout_sec: float | None = None
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
+    warmup: bool = False
 
 
 def _run_magpie(
@@ -475,6 +463,7 @@ def _run_magpie(
     preparation_failure = prepare_benchmark_runtime(config_path, env)
     if preparation_failure is not None:
         return preparation_failure.returncode, "", preparation_failure.error
+    apply_benchmark_round_seed(config_path, env, warmup=bench_round.warmup)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = bench_round.result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
@@ -557,43 +546,11 @@ def _mn_restart_env(
     return merged
 
 
-def _resolve_mn_effective_server_args(
-    cfg_path: Path,
-    base_yaml_path: Path,
-    variant: Any,
-    *,
-    base_extra_args: str,
-    base_args_mode: str,
-) -> str:
-    """Resolve the multi-node server args for a variant restart; prefer the materialized variant YAML, falling back to a recompose from the base YAML."""
-    try:
-        with cfg_path.open(encoding="utf-8") as _f:
-            _variant_cfg = yaml.safe_load(_f) or {}
-        _variant_bench = _variant_cfg.get("benchmark") or {}
-        _variant_envs = _variant_bench.get("envs") or {}
-        _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
-        return str(_variant_envs.get(_variant_framework_env) or "")
-    except (OSError, ValueError, yaml.YAMLError, AttributeError):
-        log.debug(
-            "grid_runner: failed to read materialized variant args from %s",
-            cfg_path,
-            exc_info=True,
-        )
-        with base_yaml_path.open(encoding="utf-8") as _f:
-            _base_cfg = yaml.safe_load(_f) or {}
-        _base_bench = _base_cfg.get("benchmark") or {}
-        _base_envs = _base_bench.get("envs") or {}
-        _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-        _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-        return shell_safe_dedupe(
-            compose_server_args(
-                inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
-                base_extra_args=base_extra_args,
-                variant_extra_args=variant.extra_server_args,
-                remove_args=getattr(variant, "remove_args", []),
-                args_mode=getattr(variant, "args_mode", "append"),
-            )
-        )
+def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
+    """The server args the materialized variant YAML carries, for a multi-node variant restart."""
+    with cfg_path.open(encoding="utf-8") as f:
+        bench = (yaml.safe_load(f) or {}).get("benchmark") or {}
+    return str((bench.get("envs") or {}).get(server_args_env_name(bench.get("framework"))) or "")
 
 
 def _variant_progress_note(
@@ -1008,13 +965,7 @@ async def _variant_yaml_or_abort(
 
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
     cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.launch.server_lifecycle)
-    mn_effective_args = _resolve_mn_effective_server_args(
-        cfg_path,
-        run.recipe.base_yaml_path,
-        at.variant,
-        base_extra_args=run.recipe.base.extra_server_args,
-        base_args_mode=run.recipe.base.args_mode,
-    )
+    mn_effective_args = _resolve_mn_effective_server_args(cfg_path)
     cold = _VariantRounds(cfg_path, {"eligible": False}, False, mn_effective_args)
     if not run.auto_warmup_requested:
         return cold
@@ -1076,6 +1027,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
                 cwd=str(run.output_root),
                 result_dir=run.launch.result_dir,
                 session_deadline_sec=run.stop.session_deadline_sec,
+                warmup=True,
             ),
         )
     except subprocess.TimeoutExpired as exc:
@@ -1232,6 +1184,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             cwd=str(run.output_root),
             result_dir=None,
             session_deadline_sec=run.stop.session_deadline_sec,
+            warmup=True,
         ),
     )
     log.info(
@@ -1268,6 +1221,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
                 silence_timeout_sec=run.silence_timeout_sec,
                 server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
                 session_deadline_sec=run.stop.session_deadline_sec,
+                warmup=run.launch.warmup_round,
             ),
         )
     except subprocess.TimeoutExpired as exc:
@@ -1292,36 +1246,25 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
 
 
-def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
+def _abort_on_detokenizer_stall(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
     destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
     # server.log is itself one of the salvaged artifacts, so the cause of death only reaches the slot here.
     harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
     server_log = at.path / "server.log"
-    if round_.proc.returncode == SERVER_DEAD_RETURNCODE:
-        cause = "server_init_dead (engine/worker bootstrap failed; parent hung)"
-        failure = _VariantFailure(
-            "server_init_dead",
-            server_log_death_excerpt(str(server_log))
-            or "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog",
-        )
-    else:
-        cause = "detokenizer_stall (server ready but log went silent)"
-        failure = _VariantFailure(
-            "detokenizer_stall",
-            "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-            "reaped by the detokenizer-stall watchdog",
-            "detokenizer_stall: server ready but log went silent",
-        )
     log.warning(
-        "grid_runner: variant %s aborted: %s after %.1fs",
+        "grid_runner: variant %s aborted: detokenizer_stall (server ready but log went silent) after %.1fs",
         _variant_tag(run, at),
-        cause,
         runtime_sec,
     )
     _abort_variant(
         at,
-        failure,
+        _VariantFailure(
+            "detokenizer_stall",
+            "server reported ready but emitted no log output (hung engine / detokenizer stall); "
+            "reaped by the detokenizer-stall watchdog",
+            "detokenizer_stall: server ready but log went silent",
+        ),
         returncode=round_.proc.returncode,
         runtime_sec=runtime_sec,
         server_log_path=_existing_log_path(server_log),
@@ -1344,8 +1287,8 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
             returncode=returncode,
             runtime_sec=round(max(0.0, time.time() - round_.started_unix), 2),
         )
-    if returncode in (SERVER_DEAD_RETURNCODE, DETOKENIZER_STALL_RETURNCODE):
-        _abort_on_watchdog(run, at, round_)
+    if returncode == DETOKENIZER_STALL_RETURNCODE:
+        _abort_on_detokenizer_stall(run, at, round_)
     stopped = stopped_by_the_run(returncode)
     if stopped is not None:
         attempt = _RoundAttempt(at, returncode, round_.started_unix, at.path / "server.log", round_.server_survivors)
@@ -1862,24 +1805,11 @@ __all__ = [
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
     "VariantResult",
-    "apply_multi_node_invalid_variants",
-    "apply_aiter_moe_pin_filter",
-    "apply_runtime_benchmark_overrides",
-    "reorder_grid_for_multi_node",
-    "merge_server_args",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
-    "server_args_env_name",
     "session_grid_bounds",
     "stopped_by_the_run",
-    # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_probe_python",
-    "resolve_skip_spec",
-    "_MN_PARAMS_PRIORITY",
-    "_MN_BACKENDS_PRIORITY",
-    "apply_compatibility_filter",
-    "apply_user_skip_list",
 ]
 
 
@@ -1925,8 +1855,7 @@ def _importable_overlay_dir(variant: GridVariant) -> str:
     overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
     if not overlay:
         return ""
-    contained = ":" not in overlay and ".." not in Path(overlay).parts
-    if contained and not any(c in overlay for c in ("\n", "\r", "\x00")) and Path(overlay).is_dir():
+    if is_safe_path_entry(overlay) and Path(overlay).is_dir():
         return overlay
     log.warning(
         "grid: dropping unsafe overlay_pythonpath %r (not a single existing directory / contains separator or traversal)",
@@ -1997,7 +1926,7 @@ def _build_variant_yaml(
         combined, args_env=extra_args_env, model_path=target.model_path, variant=variant
     )
     if combined:
-        envs[extra_args_env] = shell_safe_dedupe(combined)
+        envs[extra_args_env] = dedupe_extra_server_args(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)

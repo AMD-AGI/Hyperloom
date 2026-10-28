@@ -13,17 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_unix, to_mapping
+from hyperloom.common.coerce import first_str, to_unix, to_mapping
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
-from ..recorder.baseline_event import anchoring_eval_from_timeline
+from ..recorder.baseline_event import anchoring_baseline_action, anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ..variant_funnel import variants_from_timeline
 from ._common import (
     _first,
-    _optional_bool,
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
@@ -319,31 +318,24 @@ def _stage_reached(
     return "install"
 
 
+#: Each PRELUDE stage with the ``state.json`` fields that show a run reached it; the first stage with any set wins.
+_PRELUDE_STAGE_FIELDS = (
+    ("roofline", ("roofline_snapshots", "last_roofline", "roofline_attempts")),
+    ("profile", ("last_profile_trace", "last_profile", "profile_attempts")),
+    ("warm_replay", ("warm_replay_attempted", "warm_replay_outcome", "warm_replay_pending")),
+    ("baseline", ("baseline_tput", "last_baseline", "baseline_attempts", "baseline_failure_streak")),
+    (
+        "warm_start",
+        ("warm_start_ts", "warm_start_recipe", "warm_start_pitfalls", "warm_start_lessons", "warm_start_context"),
+    ),
+)
+
+
 def _prelude_stage_from_state(state: dict[str, Any]) -> str:
     """PRELUDE stage from leftover state fields when the timeline is empty."""
-    if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
-        return "roofline"
-    if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
-        return "profile"
-    if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
-        return "warm_replay"
-    baseline_tput = state.get("baseline_tput")
-    if (
-        isinstance(baseline_tput, (int, float))
-        and baseline_tput > 0
-        or state.get("last_baseline")
-        or state.get("baseline_attempts")
-        or int(state.get("baseline_failure_streak") or 0) > 0
-    ):
-        return "baseline"
-    if (
-        state.get("warm_start_ts")
-        or state.get("warm_start_recipe")
-        or state.get("warm_start_pitfalls")
-        or state.get("warm_start_lessons")
-        or state.get("warm_start_context")
-    ):
-        return "warm_start"
+    for stage, fields in _PRELUDE_STAGE_FIELDS:
+        if any(state.get(field) for field in fields):
+            return stage
     return ""
 
 
@@ -355,12 +347,6 @@ _BASELINE_OUTCOME_FIELDS = (
     "ttft_mean_ms",
     "e2el_mean_ms",
 )
-
-#: Action statuses whose figure the session went on to use. ``degraded`` is a
-#: baseline that stands on its cold warmup round because the budget would not
-#: hold the hot pass: knowingly depressed, but it is the number every later gain
-#: in the session was read against, so it is the number to publish.
-_ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 
 def _graded_axes(recorded: Any) -> dict[str, Any]:
@@ -385,16 +371,6 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
 def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
-    Two dispatches reach the baseline executor and land an action on a
-    ``baseline`` event: the genuine baseline and ``replay_warm_recipe``. The
-    kernel lane's throughput-only probes -- integrate re-baseline, stack
-    validation, shape capture -- go through the same executor but record into
-    the kernel event that asked for them, so they are not here at all. Only
-    the genuine baseline anchors the session, so the selection reads the
-    action's own ``establishes_quality_ref`` -- the flag the executor set from
-    the dispatch kind and ``quality_ref_exempt`` -- rather than re-deciding
-    from the kind.
-
     Args:
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
 
@@ -402,33 +378,17 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
         dict[str, Any]: The four baseline figures, each ``None`` when the
             timeline holds no anchoring measurement.
     """
-    anchors: list[tuple[str, dict[str, Any], str]] = []
-    for event in timeline:
-        if not isinstance(event, dict) or str(event.get("type") or "") != "baseline":
-            continue
-        for action in dict_rows(to_mapping(event.get("ext")).get("actions")):
-            if not _optional_bool(to_mapping(action.get("request")).get("establishes_quality_ref")):
-                continue
-            if str(action.get("status") or "").strip().lower() not in _ANCHORING_BASELINE_STATUSES:
-                continue
-            # A baseline re-measured after an enablement fix re-anchors the
-            # session, so the latest anchor wins. Ordered on the action's own
-            # stamps because the actions array is keyed by task id and carries
-            # no chronology of its own.
-            anchors.append(
-                (str(action.get("end_time") or action.get("start_time") or ""), action, str(event.get("id") or ""))
-            )
-    if not anchors:
+    anchor = anchoring_baseline_action(timeline)
+    if anchor is None:
         return {
             **dict.fromkeys(_BASELINE_OUTCOME_FIELDS),
             "perf": _graded_axes(None),
             "submission_valid": None,
             "submission_invalid_reasons": [],
         }
-    anchors.sort(key=lambda row: row[0])
-    if anchors[-1][2]:
-        source_ids.append(anchors[-1][2])
-    measurement = to_mapping(anchors[-1][1].get("measurement"))
+    if anchor.event_id:
+        source_ids.append(anchor.event_id)
+    measurement = to_mapping(anchor.action.get("measurement"))
     submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
@@ -478,7 +438,7 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # that produced the settled figure, falling back to the axis the adoptions were graded on for a session that
         # adopted but never validated -- and never from the session's configured axis, which says what was asked
         # for rather than what this figure was measured on.
-        "graded_on": str(settled.get("graded_objective") or ledger.get("objective") or "") or None,
+        "graded_on": first_str(settled.get("graded_objective"), ledger.get("objective")) or None,
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),

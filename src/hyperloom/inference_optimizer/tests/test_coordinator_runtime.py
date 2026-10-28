@@ -1350,6 +1350,7 @@ async def test_promote_explore_records_success_attempt(session_dir):
             "winners": [
                 {
                     "name": "v1",
+                    "fingerprint": "fp-v1",
                     "extra_server_args": "--foo",
                     "extra_envs": {"K": "1"},
                     "tput": 900.0,
@@ -1389,6 +1390,7 @@ async def test_promote_explore_updates_validated_gain(session_dir):
             "winners": [
                 {
                     "name": "kv_fp8",
+                    "fingerprint": "fp-kv-fp8",
                     "extra_server_args": "--kv-cache-fp8",
                     "extra_envs": {},
                     "tput": 1100.0,

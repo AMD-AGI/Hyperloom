@@ -13,6 +13,7 @@ import pytest
 
 from kernelforge.tracker import CampaignSegment, ExperimentSubject, ExperimentTracker
 
+from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.tests.conftest import SRC_ROOT
 
 
@@ -133,7 +134,6 @@ def test_log_iteration():
             config={"BLOCK_M": 128, "BLOCK_N": 128},
             snr_db=35.0,
             wall_ms=1.5,
-            wait_mfma_ratio=3.2,
             vgpr=240,
             decision="Try BLOCK_K=128",
         )
@@ -154,16 +154,6 @@ def test_log_iteration():
         loaded = tracker.get(exp.experiment_id)
         assert len(loaded.iterations) == 2
         assert loaded.iterations[1].wall_ms == 1.2
-
-
-def test_list_experiments():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tracker = ExperimentTracker(tmpdir)
-        tracker.create(ExperimentSubject(task_id="exp1", backend="ck"))
-        tracker.create(ExperimentSubject(task_id="exp2", backend="triton"))
-
-        exps = tracker.list_experiments()
-        assert len(exps) == 2
 
 
 def test_create_segment_persists_directly_in_experiments_root(tmp_path):
@@ -222,7 +212,7 @@ def test_create_segment_crash_retry_reuses_persisted_child(tmp_path):
     assert tracker.get(parent.experiment_id).ended_at == parent_ended_at
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
@@ -242,7 +232,7 @@ def test_create_segment_retry_rejects_parent_mismatch(tmp_path):
 
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
@@ -386,7 +376,7 @@ def test_concurrent_processes_create_one_campaign_segment(tmp_path):
     assert len(set(experiment_ids)) == 1
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [experiment_ids[0]]

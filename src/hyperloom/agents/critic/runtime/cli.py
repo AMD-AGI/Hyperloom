@@ -8,9 +8,11 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
-from hyperloom.common.subprocess_bridge import emit_json, read_json
+from hyperloom.common.jsonio import read_json_strict
+from hyperloom.common.subprocess_bridge import emit_json
 
 from .dead_letter import DeadLetter
 from .decision_reviewer import DecisionReviewer
@@ -41,7 +43,7 @@ def _resolve_reviewer() -> DecisionReviewer:
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
     """Handle ``prepare-review``: emit the phase-1 judge bundle."""
-    request = read_json(args.request)
+    request = read_json_strict(args.request, empty_value=None)
     reviewer = _resolve_reviewer()
     bundle = reviewer.prepare_review(request)
     emit_json(bundle.to_dict(), args.out)
@@ -49,8 +51,8 @@ def _cmd_prepare_review(args: argparse.Namespace) -> None:
 
 def _cmd_commit_review(args: argparse.Namespace) -> None:
     """Handle ``commit-review``: validate a review and emit the outcome."""
-    request = read_json(args.request)
-    review = read_json(args.review)
+    request = read_json_strict(args.request, empty_value=None)
+    review = read_json_strict(args.review, empty_value=None)
     if not isinstance(review, dict):
         raise RuntimeAdapterError("--review must be a JSON object")
     reviewer = _resolve_reviewer()
@@ -82,13 +84,13 @@ def _make_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     prep = sub.add_parser("prepare-review")
-    prep.add_argument("--request", required=True)
+    prep.add_argument("--request", type=Path, required=True)
     prep.add_argument("--out", default="-")
     prep.set_defaults(func=_cmd_prepare_review)
 
     commit = sub.add_parser("commit-review")
-    commit.add_argument("--request", required=True)
-    commit.add_argument("--review", required=True)
+    commit.add_argument("--request", type=Path, required=True)
+    commit.add_argument("--review", type=Path, required=True)
     commit.add_argument("--out", default="-")
     commit.set_defaults(func=_cmd_commit_review)
 

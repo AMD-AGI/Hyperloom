@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 
 import pytest
 
+from hyperloom.orchestrator.state.kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from hyperloom.orchestrator.state.shared_state import (
     ActionAttempt,
-    _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_LAST_FAILURES,
     SharedState,
     inject_stack_base_params,
@@ -216,25 +216,6 @@ class TestSessionBudget:
         assert state.extend_budget_minutes(30.0) == 0.0
         assert state.remaining_minutes() is None
 
-    def test_teardown_timings_accumulate_and_keep_a_total(self):
-        state = SharedState(session_id="s")
-        state.record_teardown_timing("final_json", 1.25)
-        state.record_teardown_timing("langfuse", 0.5)
-        assert state.teardown_timings_sec["final_json"] == 1.25
-        assert state.teardown_timings_sec["langfuse"] == 0.5
-        assert state.teardown_timings_sec["total"] == pytest.approx(1.75)
-
-    def test_timed_teardown_step_records_the_elapsed_wall(self, monkeypatch):
-        from hyperloom.orchestrator.state import shared_state as ss_mod
-        from hyperloom.orchestrator.state.shared_state import timed_teardown_step
-
-        clock = {"t": 0.0}
-        monkeypatch.setattr(ss_mod.time, "monotonic", lambda: clock["t"])
-        state = SharedState(session_id="s")
-        with timed_teardown_step(state, "final_md"):
-            clock["t"] = 2.5
-        assert state.teardown_timings_sec["final_md"] == 2.5
-
 
 class TestProfileWorkloadContext:
     def test_normalizes_state_and_payload_overrides(self):
@@ -409,7 +390,7 @@ class TestPolicyDenialAndPruned:
 
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
-        from hyperloom.orchestrator.kernel._kernel_decisions import _resolve_kernel_patch_identity
+        from hyperloom.orchestrator.kernel.kernel_decisions import _resolve_kernel_patch_identity
 
         kid, patch, target, args = _resolve_kernel_patch_identity(
             {
@@ -427,11 +408,13 @@ class TestKernelPatchIdentity:
         )
 
     def test_a_payload_without_a_patch_path_has_no_patch_identity(self):
-        from hyperloom.orchestrator.kernel._kernel_decisions import kernel_patch_key
+        from hyperloom.orchestrator.kernel.kernel_decisions import kernel_patch_key
 
         assert kernel_patch_key({"kernel_id": "k1"}) == ""
 
     def test_find_rejected_kernel_patch_lookup(self):
+        from hyperloom.orchestrator.kernel.kernel_decisions import find_rejected_kernel_patch
+
         s = SharedState()
         s.rejected_kernel_patches.append(
             {
@@ -439,17 +422,20 @@ class TestKernelPatchIdentity:
                 "reason": "no_e2e_gain",
             }
         )
-        hit = s.find_rejected_kernel_patch(
+        hit = find_rejected_kernel_patch(
+            s,
             {
                 "kernel_id": "k1",
                 "patch_path": "/srv/k1.py",
                 "extra_server_args": "--a 1",
-            }
+            },
         )
         assert hit and hit["reason"] == "no_e2e_gain"
 
     def test_find_rejected_kernel_patch_missing_returns_none(self):
-        assert SharedState().find_rejected_kernel_patch({"kernel_id": "x"}) is None
+        from hyperloom.orchestrator.kernel.kernel_decisions import find_rejected_kernel_patch
+
+        assert find_rejected_kernel_patch(SharedState(), {"kernel_id": "x"}) is None
 
 
 class TestPersistence:

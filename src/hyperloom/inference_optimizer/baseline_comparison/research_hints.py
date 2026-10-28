@@ -301,20 +301,24 @@ def gap_analysis(
         return None
     agentx = benchmark_mode == "agentx"
     row = _match_target_row(target, conc)
-    if row is None and not agentx:
-        return None
-    row = row or {}
+    if row is None:
+        if not agentx:
+            return None
+        row = {}
     throughput_gap_pct = _gap_pct(row.get("tput_per_gpu"), ours.tput_per_gpu)
+    tput_gap = throughput_gap_pct or 0
     if agentx:
         tpot_ratio = None
         interactivity_gap_pct = _gap_pct(row.get("e2e_norm_intvty_p90"), ours.e2e_norm_intvty_p90)
-        tput_gap, inter_gap = throughput_gap_pct or 0, interactivity_gap_pct or 0
+        inter_gap = interactivity_gap_pct or 0
         primary_gap = None if max(tput_gap, inter_gap) <= 0 else "latency" if inter_gap >= tput_gap else "throughput"
     else:
-        tgt_tpot, our_tpot_ms = to_float(row.get("tpot_ms")), ours.tpot_ms
-        tpot_ratio = our_tpot_ms / tgt_tpot if tgt_tpot and our_tpot_ms and tgt_tpot > 0 else None
-        interactivity_gap_pct = _gap_pct(row.get("interactivity"), 1000.0 / our_tpot_ms if our_tpot_ms else None)
-        latency_wins = tpot_ratio is not None and (tpot_ratio - 1.0) * 100.0 > (throughput_gap_pct or 0)
+        tgt_tpot, our_tpot_ms = to_float(row.get("tpot_ms"), 0.0), ours.tpot_ms
+        tpot_ratio = interactivity_gap_pct = None
+        if our_tpot_ms:
+            tpot_ratio = our_tpot_ms / tgt_tpot if tgt_tpot > 0 else None
+            interactivity_gap_pct = _gap_pct(row.get("interactivity"), 1000.0 / our_tpot_ms)
+        latency_wins = tpot_ratio is not None and (tpot_ratio - 1.0) * 100.0 > tput_gap
         primary_gap = "latency" if latency_wins else "throughput"
     gap: dict[str, Any] = {
         "throughput_gap_pct": throughput_gap_pct,
@@ -326,10 +330,11 @@ def gap_analysis(
     }
     if not agentx:
         return gap
-    available = throughput_gap_pct is not None or interactivity_gap_pct is not None
-    reason: ComparisonReason | None = (
-        None if available else "measurement_unavailable" if row else "concurrency_mismatch"
-    )
+    status = "ok"
+    reason: ComparisonReason | None = None
+    if throughput_gap_pct is None and interactivity_gap_pct is None:
+        status = "unavailable"
+        reason = "measurement_unavailable" if row else "concurrency_mismatch"
     if None in (throughput_gap_pct, interactivity_gap_pct):
         log.warning(
             "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
@@ -339,7 +344,7 @@ def gap_analysis(
             throughput_gap_pct,
             interactivity_gap_pct,
         )
-    gap.update(benchmark_mode="agentx", status="ok" if available else "unavailable", reason=reason)
+    gap.update(benchmark_mode="agentx", status=status, reason=reason)
     return gap
 
 
@@ -473,20 +478,17 @@ def match_variants_to_priors(
 ) -> dict[str, dict[str, Any]]:
     """Annotate which variants align with proven priors (advisory; informs ordering only). Returns ``{name: {hints, latency_aligned}}`` for variants matching a hint or a dominant latency gap; ``hints`` lists the most shared content words first."""
     out: dict[str, dict[str, Any]] = {}
-    latency_dominant = str(primary_gap or "").strip().lower() == "latency"
+    latency_dominant = primary_gap == "latency"
     hint_tokens: list[tuple[str, set[str]]] = []
-    for h in hints or []:
+    for h in hints:
         if not isinstance(h, dict):
             continue
         what = str(h.get("what") or "").strip()
-        if not what:
-            continue
         toks = _tokens(what)
         for tag in h.get("domain_tags") or []:
             toks |= _tokens(tag)
-        if toks:
-            hint_tokens.append((what, toks))
-    for variant in variants or []:
+        hint_tokens.append((what, toks))
+    for variant in variants:
         if not isinstance(variant, dict):
             continue
         name = str(variant.get("name") or "").strip()
@@ -500,7 +502,7 @@ def match_variants_to_priors(
         vtoks = _tokens(text)
         overlaps = [(len(vtoks & toks), what) for what, toks in hint_tokens]
         matched_hints = [what for shared, what in sorted(overlaps, key=lambda pair: -pair[0]) if shared]
-        latency_aligned = bool(latency_dominant and any(kw in vtoks for kw in _LATENCY_DIRECTION_KEYWORDS))
+        latency_aligned = latency_dominant and not vtoks.isdisjoint(_LATENCY_DIRECTION_KEYWORDS)
         if matched_hints or latency_aligned:
             out[name] = {
                 "hints": matched_hints,

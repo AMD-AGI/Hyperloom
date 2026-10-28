@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from kernelforge.tools.gpu_arch import canonical_gpu_type, detect_arch, product_arch
 
 from .model_analyzer import ModelProfile
 
@@ -38,20 +39,6 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Map known GPU type strings to their gfx architecture.
-_GPU_TYPE_TO_GFX = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-    "amd_instinct_mi300x": "gfx942",
-    "amd_instinct_mi355x": "gfx950",
-}
-_GFX_TO_CANONICAL_GPU = {
-    "gfx942": "mi300x",
-    "gfx950": "mi355x",
-}
-
 # Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 # How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
 # tier3's DEFAULT_MIN_MISSES, read off the same demand report.
@@ -62,46 +49,29 @@ _FP4_UNSUPPORTED_GFX = {"gfx942"}
 _FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
 
 
-def _detect_local_gfx_arch() -> str:
-    """Best-effort detect the local AMD gfx arch via ``rocminfo``."""
-    try:
-        out = subprocess.run(
-            ["rocminfo"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    m = re.search(r"\bgfx[0-9a-f]+\b", out, re.IGNORECASE)
-    return m.group(0).lower() if m else ""
+def _requests_detection(gpu_type: str) -> bool:
+    return str(gpu_type or "").strip().lower() in ("", "auto")
 
 
 def resolve_gpu_type(gpu_type: str) -> str:
     """Resolve a CLI GPU value to a stable KB-compatible identifier."""
-    key = str(gpu_type or "").strip().lower()
-    if key in ("", "auto"):
-        key = _detect_local_gfx_arch()
+    key = gpu_type
+    if _requests_detection(gpu_type):
+        key = detect_arch()
         if not key:
             raise ValueError(
                 "Unable to detect the local GPU with rocminfo; "
                 "pass --gpu-type explicitly (for example, mi300x or mi355x)."
             )
-    normalized = re.sub(r"[\s-]+", "_", key)
-    if normalized in _GPU_TYPE_TO_GFX:
-        return _GFX_TO_CANONICAL_GPU.get(_GPU_TYPE_TO_GFX[normalized], normalized)
-    return _GFX_TO_CANONICAL_GPU.get(normalized, normalized)
+    return canonical_gpu_type(key)
 
 
 def _resolve_gfx_arch(gpu_type: str) -> str:
     """Map a GPU type string (e.g. 'mi300x') to its gfx arch (e.g. 'gfx942')."""
+    if _requests_detection(gpu_type):
+        return detect_arch()
     key = gpu_type.strip().lower()
-    if key in ("", "auto"):
-        return _detect_local_gfx_arch()
-    if key.startswith("gfx"):
-        return key
-    return _GPU_TYPE_TO_GFX.get(key, "")
+    return key if key.startswith("gfx") else product_arch(key)
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:

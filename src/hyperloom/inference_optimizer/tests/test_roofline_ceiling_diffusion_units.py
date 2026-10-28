@@ -190,7 +190,7 @@ def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     )
     linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
     attn = 4.0 * kw["num_layers"] * kw["latent_tokens"] ** 2 * kw["hidden_size"]
-    peak = rc._resolve_achievable_tflops("mi300x", "bf16") * 1e12
+    peak = rc._compute_peak("mi300x", "bf16")[0] * 1e12
     assert _diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
 
 

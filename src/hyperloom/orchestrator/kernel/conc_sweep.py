@@ -1193,7 +1193,7 @@ def _decline_before_start(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from hyperloom.common.overlay import is_safe_path_entry
         from ..kernel.geak_config import geak_overlay_is_loadable
 
         if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
@@ -1327,10 +1327,7 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = resolve_session_model_path(
-        state_model_path=str(getattr(state, "model_path", "") or ""),
-        for_serving=True,
-    )
+    resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
     # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
     # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
