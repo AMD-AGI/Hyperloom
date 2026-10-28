@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.tools.gpu_arch import canon_arch, canonical_gpu_type, detect_arch
+from kernelforge.tools.gpu_arch import canonical_gpu_type, detect_arch, product_arch
 
 from .model_analyzer import ModelProfile
 
@@ -68,7 +68,10 @@ def resolve_gpu_type(gpu_type: str) -> str:
 
 def _resolve_gfx_arch(gpu_type: str) -> str:
     """Map a GPU type string (e.g. 'mi300x') to its gfx arch (e.g. 'gfx942')."""
-    return detect_arch() if _requests_detection(gpu_type) else canon_arch(gpu_type)
+    if _requests_detection(gpu_type):
+        return detect_arch()
+    key = gpu_type.strip().lower()
+    return key if key.startswith("gfx") else product_arch(key)
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:

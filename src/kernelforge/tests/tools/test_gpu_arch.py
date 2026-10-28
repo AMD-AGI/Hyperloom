@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from kernelforge.tools.gpu_arch import canon_arch, canonical_gpu_type, detect_arch
+from kernelforge.tools.gpu_arch import canon_arch, canonical_gpu_type, detect_arch, product_arch
 
 
 @pytest.mark.parametrize(
@@ -46,6 +46,33 @@ def test_canon_arch_names_no_target_rather_than_a_wrong_one(value):
 )
 def test_canonical_gpu_type_records_one_chip_under_one_name(value, expected):
     assert canonical_gpu_type(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("mi300x_vf", "mi300x_vf"),
+        ("gfx942:sramecc+:xnack-", "gfx942:sramecc+:xnack_"),
+        ("my-mi355x-box", "my_mi355x_box"),
+    ],
+)
+def test_canonical_gpu_type_keeps_a_spelling_that_only_contains_a_known_name(value, expected):
+    assert canonical_gpu_type(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("mi300x", "gfx942"),
+        (" MI355X ", "gfx950"),
+        ("amd_instinct_mi300x", "gfx942"),
+        ("mi300x_vf", ""),
+        ("amd instinct mi300x", ""),
+        ("gfx942", ""),
+    ],
+)
+def test_product_arch_maps_only_an_exact_product_name(value, expected):
+    assert product_arch(value) == expected
 
 
 def _rocminfo(monkeypatch, *, returncode=0, stdout=""):
