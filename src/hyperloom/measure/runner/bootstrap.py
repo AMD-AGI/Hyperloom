@@ -63,20 +63,48 @@ returns: it copies the manifest and ``bootstrap.sh`` out of the cache, checks th
 the copied script against the hash that manifest records (``sha256sum -c``), and only then runs the checked copy, so a
 file swapped after the check is never the one that runs. A missing pin, a missing file or a hash that differs ends the
 step with the same ``runner_start_failed`` status and exit 2 as a failing step of the script.
+
+A template step must return. A sandbox template's steps run before the sandbox service starts its own agent in the
+sandbox, the one that answers readiness and through which the application delivers the spec: a step that runs the runner
+in the foreground never ends, so the agent never starts, the sandbox never turns ready and the spec never arrives. Use
+:func:`runner_template_step`, which makes the directories, runs the template's own preparation and then starts the
+checked line in the background (``nohup ... &``) with its output in ``runner-boot.log`` next to the scratch directory,
+and returns at once. The runner then waits for the spec for ``--spec-wait-sec`` seconds, :data:`TEMPLATE_SPEC_WAIT_SEC`
+unless the step's arguments name another.
 """
 
 from __future__ import annotations
 
 import json
+import posixpath
+import re
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom.measure.runner import cache_layout
 
-__all__ = ["BOOTSTRAP_SCRIPT", "runner_start_command", "runner_start_shell_line"]
+__all__ = [
+    "BOOTSTRAP_SCRIPT",
+    "TEMPLATE_SPEC_WAIT_SEC",
+    "runner_start_command",
+    "runner_start_shell_line",
+    "runner_template_step",
+]
 
 #: ``$0`` of ``sh -c`` is a name for messages, ``$@`` are the runner's own arguments.
 _NAME = "hyperloom-runner-bootstrap"
+
+#: How long a runner a template step starts waits for its spec, unless the step's arguments say. The step returns before
+#: the sandbox is ready, and the application writes the spec only after the create, which a quota can hold for minutes,
+#: and the readiness wait; the runner's own default (600 s) is the wait of a sandbox whose spec is already on its way.
+#: Half an hour covers a create queued behind others (the joint runs used it, with no spec missed); a runner whose spec
+#: never comes ends the sandbox no later than that, and the application deletes a sandbox it gave up on anyway.
+TEMPLATE_SPEC_WAIT_SEC = 1800
+_SPEC_WAIT_ARG = "--spec-wait-sec"
+#: Where a template step's runner writes its output: next to the scratch directory, never inside the runner's own.
+_BOOT_LOG = "runner-boot.log"
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _SCRIPT = r"""#!/bin/sh
 set -eu
@@ -230,3 +258,42 @@ def runner_start_shell_line(*runner_args: str) -> str:
         .replace("@STATUS@", shlex.quote(_VERIFY_FAILED))
     )
     return line.replace("@ARGS@", "".join(f" {shlex.quote(arg)}" for arg in runner_args))
+
+
+def _with_spec_wait(runner_args: tuple[str, ...]) -> tuple[str, ...]:
+    named = any(arg == _SPEC_WAIT_ARG or arg.startswith(f"{_SPEC_WAIT_ARG}=") for arg in runner_args)
+    return runner_args if named else (*runner_args, _SPEC_WAIT_ARG, str(TEMPLATE_SPEC_WAIT_SEC))
+
+
+def runner_template_step(
+    *runner_args: str,
+    pre: str = "",
+    env: Mapping[str, str] | None = None,
+    in_dir: str = "/in",
+    out_dir: str = "/out",
+    scratch_dir: str = "/scratch",
+) -> str:
+    """The one-line start step of a measurement template; it starts the runner in the background and returns at once.
+
+    The line makes ``in_dir``, ``out_dir`` and ``scratch_dir`` (the template's ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR``
+    and ``HYPERLOOM_SCRATCH_DIR``, whose defaults the script's are), runs ``pre`` (the template's own preparation, one
+    line of ``sh``, run in the foreground and only when the directories were made), then starts
+    :func:`runner_start_shell_line` with ``runner_args`` under ``nohup`` in the background, with ``env`` set for it alone
+    and its output in ``runner-boot.log`` in the parent of ``scratch_dir``. A step that never returned would keep the
+    sandbox from ever turning ready (see the module's documentation). ``runner_args`` get ``--spec-wait-sec``
+    :data:`TEMPLATE_SPEC_WAIT_SEC` unless they name it.
+
+    Raises:
+        ValueError: ``pre`` spans lines, or a name in ``env`` is not a shell variable name.
+    """
+    if "\n" in pre or "\r" in pre:
+        raise ValueError("pre is one line of sh: a template step is a single line")
+    bad = sorted(name for name in env or {} if not _ENV_NAME.match(name))
+    if bad:
+        raise ValueError(f"not shell variable names: {', '.join(map(repr, bad))}")
+    assignments = "".join(f"{name}={shlex.quote(value)} " for name, value in (env or {}).items())
+    log = posixpath.join(posixpath.dirname(scratch_dir.rstrip("/")) or "/", _BOOT_LOG)
+    start = shlex.quote(runner_start_shell_line(*_with_spec_wait(runner_args)))
+    background = f"({assignments}nohup sh -c {start} >{shlex.quote(log)} 2>&1 &)"
+    made = "mkdir -p " + " ".join(shlex.quote(directory) for directory in (in_dir, out_dir, scratch_dir))
+    return " && ".join(part for part in (made, pre, background) if part)
