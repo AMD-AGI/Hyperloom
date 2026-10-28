@@ -1253,7 +1253,7 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
         return "optimize_phase_budget_exhausted", {
             **arms,
             "evidence": "no_round_fits",
-            "remaining_seconds": _number(budget.get("remaining_sec")),
+            "remaining_seconds": to_float(budget.get("remaining_sec")),
         }
     return _budget_exit(
         budget,
