@@ -734,16 +734,7 @@ class TestRoundServerTeardown:
 # _resolve_mn_effective_server_args: prefer the materialized variant YAML; fall back to recomposing from the base YAML
 # when the variant read fails.
 class TestResolveMnEffectiveServerArgs:
-    def _base(self, tmp_path: Path, *, args: str = "--tp 8") -> Path:
-        base = tmp_path / "base.yaml"
-        base.write_text(
-            yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": args}}}),
-            encoding="utf-8",
-        )
-        return base
-
-    def test_prefers_materialized_variant_yaml(self, tmp_path):
-        base = self._base(tmp_path)
+    def test_reads_the_materialized_variant_yaml(self, tmp_path):
         cfg = tmp_path / "variant.yaml"
         cfg.write_text(
             yaml.safe_dump(
@@ -751,59 +742,14 @@ class TestResolveMnEffectiveServerArgs:
             ),
             encoding="utf-8",
         )
-        variant = GridVariant(name="v1", extra_server_args="--should-not-be-composed")
 
-        out = gr._resolve_mn_effective_server_args(
-            cfg,
-            base,
-            variant,
-            base_extra_args="--base-extra",
-            base_args_mode="append",
-        )
-        # Read verbatim from the variant YAML; the variant/base extras are NOT re-composed on this happy path.
-        assert out == "--tp 8 --chunked-prefill 4096"
+        assert gr._resolve_mn_effective_server_args(cfg) == "--tp 8 --chunked-prefill 4096"
 
     def test_variant_env_absent_returns_empty(self, tmp_path):
-        base = self._base(tmp_path)
         cfg = tmp_path / "variant.yaml"
         cfg.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {}}}), encoding="utf-8")
-        variant = GridVariant(name="v1")
 
-        out = gr._resolve_mn_effective_server_args(cfg, base, variant, base_extra_args="", base_args_mode="append")
-        assert out == ""
-
-    def test_falls_back_to_base_compose_when_variant_missing(self, tmp_path):
-        base = self._base(tmp_path, args="--tp 8")
-        missing_cfg = tmp_path / "does_not_exist.yaml"
-        variant = GridVariant(name="v1", extra_server_args="--chunked-prefill 2048")
-
-        out = gr._resolve_mn_effective_server_args(
-            missing_cfg,
-            base,
-            variant,
-            base_extra_args="--mem-fraction-static 0.9",
-            base_args_mode="append",
-        )
-        # append mode: inherited base args + base_extra + variant extra all survive.
-        assert "--tp 8" in out
-        assert "--mem-fraction-static 0.9" in out
-        assert "--chunked-prefill 2048" in out
-
-    def test_fallback_replace_mode_drops_inherited_base_args(self, tmp_path):
-        base = self._base(tmp_path, args="--tp 8")
-        missing_cfg = tmp_path / "does_not_exist.yaml"
-        variant = GridVariant(name="v1", extra_server_args="--chunked-prefill 2048")
-
-        out = gr._resolve_mn_effective_server_args(
-            missing_cfg,
-            base,
-            variant,
-            base_extra_args="",
-            base_args_mode="replace",
-        )
-        # replace mode drops the inherited base env args.
-        assert "--tp 8" not in out
-        assert "--chunked-prefill 2048" in out
+        assert gr._resolve_mn_effective_server_args(cfg) == ""
 
 
 # Per-variant progress heartbeat

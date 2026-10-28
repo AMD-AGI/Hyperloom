@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_OUTPUT,
@@ -49,14 +50,11 @@ def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     Returns ``None`` when either side is missing or the baseline is not
     positive, so callers fall back to their existing value.
     """
-    try:
-        m = float(measured)
-        b = float(baseline)
-    except (TypeError, ValueError):
+    m = to_float(measured)
+    b = to_float(baseline)
+    if m is None or b is None:
         return None
-    if b <= 0.0:
-        return None
-    return (m - b) / b * 100.0
+    return incremental_gain_pct(m, b)
 
 
 def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:

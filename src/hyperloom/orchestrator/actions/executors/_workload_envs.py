@@ -66,13 +66,13 @@ from hyperloom.inference_optimizer.grid_server_args import (
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_watchdog_timeout,
-    server_args_env_name,
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps

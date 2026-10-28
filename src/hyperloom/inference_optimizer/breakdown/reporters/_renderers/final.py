@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from hyperloom.common.coerce import to_mapping
@@ -24,7 +25,6 @@ from ..base import (
     events_of,
     fmt_pct,
     md_kv_list,
-    measured_ms,
     outcome_of,
     register_renderer,
     session_of,
@@ -240,7 +240,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("stack_changed_after_validation", stack_changed),
             ("extra_server_args", extra_args),
             ("action_path", action_path),
-            ("ttft_mean_ms", measured_ms(f.get("ttft_mean_ms"))),
+            ("ttft_mean_ms", optional_positive_float(f.get("ttft_mean_ms"))),
             ("e2el_mean_ms", f.get("e2el_mean_ms")),
             ("ttft_e2el_source", validation.get("ttft_e2el_source")),
             ("extra_envs", f.get("extra_envs") or None),

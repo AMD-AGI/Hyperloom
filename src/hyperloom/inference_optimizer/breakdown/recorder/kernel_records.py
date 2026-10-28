@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
@@ -427,9 +428,7 @@ class GeakRebenchAttempt:
         verified = _as_dict(self.engagement)
         base = _float_or_none(self.base_tput)
         measured = _float_or_none(self.measured_tput)
-        delta = None
-        if base is not None and measured is not None and base > 0:
-            delta = round((measured - base) / base * 100.0, 4)
+        gain = None if base is None or measured is None else incremental_gain_pct(measured, base)
         return {
             "attempt_id": str(self.attempt_id or ""),
             "source_kind": str(self.source_kind),
@@ -438,7 +437,7 @@ class GeakRebenchAttempt:
             "task_id": _text(self.task_id),
             "base_tput": base,
             "measured_tput": measured,
-            "delta_pct": delta,
+            "delta_pct": None if gain is None else round(gain, 4),
             "decision": _text(self.decision),
             "decision_reason": _text(self.decision_reason),
             "status": _text(self.status),

@@ -22,9 +22,9 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import launch_flag_setting_name
-from hyperloom.inference_optimizer.grid_server_args import server_args_env_name
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from ._server_argv import config_server_argv
+from ._server_argv import _benchmark_envs, config_server_argv
 
 
 def config_envs(config_path: Path) -> dict[str, str]:
@@ -34,13 +34,12 @@ def config_envs(config_path: Path) -> dict[str, str]:
     which holds the launch argv rather than an env value, and a null value,
     which the launch leaves unset. Returns an empty dict when the file carries
     no ``benchmark.envs`` mapping.
+
+    Raises:
+        ConfigUnreadable: When the config cannot be read.
     """
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
-    envs = bench.get("envs") if isinstance(bench, Mapping) else None
-    if not isinstance(envs, Mapping):
-        return {}
-    args_env = server_args_env_name(str(bench.get("framework") or ""))
+    framework, envs = _benchmark_envs(config_path)
+    args_env = server_args_env_name(str(framework or ""))
     return {str(k): str(v) for k, v in envs.items() if str(k) != args_env and v is not None}
 
 
