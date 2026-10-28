@@ -88,8 +88,6 @@ def _compact_history_entry(r: IterationResult) -> str:
         parts.append(f"snr={r.snr_db:.1f}dB")
     if r.vgpr:
         parts.append(f"vgpr={r.vgpr}")
-    if r.pmc_diagnosis:
-        parts.append(f"pmc='{r.pmc_diagnosis[:40]}'")
     if rat:
         parts.append(f"rat='{rat}'")
     return " ".join(parts)

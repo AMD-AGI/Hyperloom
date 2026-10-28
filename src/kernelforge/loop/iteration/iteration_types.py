@@ -290,7 +290,6 @@ class IterationResult:
     wall_ms: float | None = None
     mean_case_speedup: float | None = None
     snr_db: float | None = None
-    pmc_diagnosis: str = ""
     vgpr: int | None = None
     kept: bool = False  # True if change was kept, False if reverted
     commit_hash: str = ""
@@ -303,11 +302,6 @@ class IterationResult:
     crashed: bool = False
     # Full measurement detail for the candidate archive (not just the scalars above).
     bench_detail: dict = field(default_factory=dict)
-    pmc_full: str = ""
-    # Structured profile metadata (backend, bottleneck, target kernels, roofline dtype/AI/HBM+compute pct, SoL
-    # metrics) for the candidate archive's meta.json, so the supervisor / next agent can consume it without parsing
-    # prose.
-    profile_meta: dict = field(default_factory=dict)
     # Why the agent session ended this iteration (from the in-session gate / SDK): converged / block_budget_exhausted
     # / block_cap / turn_cap / gate_error / agent_stopped / sdk_*. "" when no agent ran.
     session_end_reason: str = ""
