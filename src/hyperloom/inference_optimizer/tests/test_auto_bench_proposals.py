@@ -419,6 +419,20 @@ async def test_a_bundle_screen_waits_for_the_batch_on_the_lanes_and_a_cancelled_
     )
 
 
+async def test_a_bundle_replay_round_that_ended_without_running_is_enqueued_again(monkeypatch):
+    """GLM-5.3: recover cancelled a preempted pod's bundle round, and its spent key kept the bundle unmeasured."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _two_dormant_patches(_agentx_phase())
+    fp._coord.shared_state.cycle_bundle_screens = {_BUNDLE_KEY: "pass"}
+    fp._coord.tasks.ended = {_BUNDLE_KEY: "cancelled", f"{_BUNDLE_KEY}-a1": "failed"}
+
+    assert await fp.enqueue_dormant_lever_bundle() is True
+    fp._coord.tasks.ended[f"{_BUNDLE_KEY}-a2"] = "cancelled"
+    assert await fp.enqueue_dormant_lever_bundle() is False
+
+    assert [c["idempotency_key"] for c in _explores(fp)] == [f"{_BUNDLE_KEY}-a2"]
+
+
 async def test_a_bundle_off_the_cycle_screen_takes_its_replay_round_at_once(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
     closed = _two_dormant_patches(_agentx_phase())

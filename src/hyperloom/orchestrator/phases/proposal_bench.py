@@ -139,8 +139,11 @@ class ProposalBench(CoordinatorCollaborator):
         key = f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}"
         if not await self._bundle_screened(key, variant):
             return False
+        round_key = await self._fresh_batch_key(key)
+        if round_key is None:
+            return False
         task = await self._enqueue_coordinator_explore(
-            {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]}, idempotency_key=key
+            {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]}, idempotency_key=round_key
         )
         if task is not None:
             log.info(
@@ -255,7 +258,7 @@ class ProposalBench(CoordinatorCollaborator):
         return task is not None
 
     async def _fresh_batch_key(self, base: str) -> str | None:
-        """The key of the next cycle batch on ``base``: a new attempt only once the last ended without running."""
+        """The key of the next coordinator round on ``base``: a new attempt only once the last ended without running."""
         for attempt in range(_CYCLE_BATCH_ATTEMPTS):
             key = base if attempt == 0 else f"{base}-a{attempt}"
             task = await self.tasks.find_by_idempotency_key(key)
