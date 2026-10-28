@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.fusion.diagnose import categorize_kernel_name
-from kernelforge.serving_windows import StepWindow, step_windows
-from kernelforge.trace_events import KERNEL_CAT, load_trace_events
+from kernelforge.serving_windows import StepWindow, kernels_in, step_windows
+from kernelforge.trace_events import load_trace_events
 
 #: Above this a kernel is doing work worth its own launch. Anchored on the empty-kernel floor measured on this
 #: hardware, about 1.5 us: a call within a few multiples of it is mostly launch. At 10 us the census also caught
@@ -44,24 +44,6 @@ TOP_N: int = 8
 _REPORTED_PLACES: int = 3
 
 
-def _kernels_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
-    """Kernel events that started inside one window class, in launch order."""
-    spans = sorted((w.start_us, w.end_us) for w in windows)
-    out: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("cat") != KERNEL_CAT:
-            continue
-        start, duration = event.get("ts"), event.get("dur")
-        if isinstance(start, bool) or not isinstance(start, (int, float)):
-            continue
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
-            continue
-        if any(lo <= start < hi for lo, hi in spans):
-            out.append(event)
-    out.sort(key=lambda e: float(e["ts"]))
-    return out
-
-
 def _dominant(counter: Counter, total: int) -> dict[str, Any] | None:
     """The neighbour that holds at least :data:`MIN_NEIGHBOUR_SHARE` of the launches, or ``None``."""
     if not counter or total <= 0:
@@ -73,7 +55,7 @@ def _dominant(counter: Counter, total: int) -> dict[str, Any] | None:
 
 def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
     """Launch-bound kernels in one window class, costliest first."""
-    ordered = _kernels_in_class(events, windows)
+    ordered = sorted(kernels_in(events, windows), key=lambda e: float(e["ts"]))
     if not ordered:
         return []
     steps = max(1, len(windows))

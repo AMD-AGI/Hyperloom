@@ -19,8 +19,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from kernelforge.serving_windows import StepWindow, step_windows
-from kernelforge.trace_events import KERNEL_CAT, load_trace_events
+from kernelforge.serving_windows import StepWindow, kernels_in, step_windows
+from kernelforge.trace_events import load_trace_events
 
 #: Runtime calls that dispatch one kernel. A kernel whose correlation id matches one of these was launched for
 #: that call; a kernel with no match came out of a graph replay.
@@ -47,25 +47,17 @@ class _KernelTime(NamedTuple):
     eager_us: float
 
 
-def _kernel_time_in(events: list[dict[str, Any]], spans: list[tuple[float, float]], launched: set[Any]) -> _KernelTime:
-    """Kernel counts and time of the kernels starting inside *spans*, and the eagerly launched share of them."""
+def _kernel_time_in(events: list[dict[str, Any]], windows: list[StepWindow], launched: set[Any]) -> _KernelTime:
+    """Kernel counts and time of the kernels starting inside *windows*, and the eagerly launched share of them."""
     kernels = eager = 0
     total_us = eager_us = 0.0
-    for event in events:
-        if event.get("cat") != KERNEL_CAT:
-            continue
-        start, duration = event.get("ts"), event.get("dur")
-        if isinstance(start, bool) or not isinstance(start, (int, float)):
-            continue
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
-            continue
-        if not any(lo <= start < hi for lo, hi in spans):
-            continue
+    for event in kernels_in(events, windows):
+        duration = float(event["dur"])
         kernels += 1
-        total_us += float(duration)
+        total_us += duration
         if (event.get("args") or {}).get("correlation") in launched:
             eager += 1
-            eager_us += float(duration)
+            eager_us += duration
     return _KernelTime(kernels, eager, total_us, eager_us)
 
 
@@ -85,8 +77,7 @@ def graph_coverage(trace_path: str | Path | None) -> dict[str, dict[str, Any]]:
         by_class[window.window_class].append(window)
     out: dict[str, dict[str, Any]] = {}
     for window_class, members in by_class.items():
-        spans = sorted((w.start_us, w.end_us) for w in members)
-        kernels, eager, total_us, eager_us = _kernel_time_in(events, spans, launched)
+        kernels, eager, total_us, eager_us = _kernel_time_in(events, members, launched)
         if not kernels:
             continue
         eager_time_share = eager_us / total_us if total_us else 0.0

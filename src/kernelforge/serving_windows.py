@@ -102,20 +102,26 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def _kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> dict[str, float]:
-    """Total kernel microseconds per name, counting only kernels inside *windows*."""
+def kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> list[dict[str, Any]]:
+    """Timed kernel events that start inside *windows*, in trace order."""
     spans = sorted((w.start_us, w.end_us) for w in windows)
-    totals: dict[str, float] = defaultdict(float)
+    out: list[dict[str, Any]] = []
     for event in events:
-        if event.get("cat") != KERNEL_CAT:
-            continue
         start, duration = _number(event.get("ts")), _number(event.get("dur"))
-        name = str(event.get("name") or "")
-        if start is None or duration is None or duration <= 0 or not name:
+        if event.get("cat") != KERNEL_CAT or start is None or duration is None or duration <= 0:
             continue
         # A kernel belongs to the step it starts in; one that outlives its step is still that step's work.
         if any(lo <= start < hi for lo, hi in spans):
-            totals[name] += duration
+            out.append(event)
+    return out
+
+
+def _kernels_in(events: list[dict[str, Any]], windows: list[StepWindow]) -> dict[str, float]:
+    """Total kernel microseconds per name, counting only kernels inside *windows*."""
+    totals: dict[str, float] = defaultdict(float)
+    for event in kernels_in(events, windows):
+        if name := str(event.get("name") or ""):
+            totals[name] += float(event["dur"])
     return totals
 
 
@@ -232,6 +238,7 @@ __all__ = [
     "TOP_N",
     "StepWindow",
     "hot_kernels_by_class",
+    "kernels_in",
     "observed_decode_batch_sizes",
     "render_hot_kernels_by_class",
     "render_observed_decode_classes",
