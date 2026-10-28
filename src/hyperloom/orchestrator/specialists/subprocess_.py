@@ -29,6 +29,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +61,8 @@ from hyperloom.common.fs_utils import (
     write_text_nofollow,
 )
 from hyperloom.common.env_safety import RunAs, RunAsError
-from hyperloom.common.proctree import collect_tree, kill_tree
+from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids
+from ..actions.executors._subprocess_kill import REAP_MARK_ENV
 
 from .agent_cli_config import (
     SpecialistAgentUnavailableError,
@@ -488,6 +490,9 @@ class SpecialistSubprocessDispatcher:
         from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
+        # Unique to this launch, so every process the CLI starts can be found after it detaches.
+        reap_mark = uuid.uuid4().hex
+        env[REAP_MARK_ENV] = reap_mark
         # The child spends against the gateway, so tag it or its spend lands
         # under no component at all. The task tag is what attributes the
         # requests of a child that dies before its result row -- the only
@@ -632,6 +637,7 @@ class SpecialistSubprocessDispatcher:
                 self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
+                self._reap_marked(reap_mark)
                 if log_fh is not None:
                     log_fh.close()
                 try:
@@ -698,6 +704,15 @@ class SpecialistSubprocessDispatcher:
             trace=trace,
             error=outcome["error"],
         )
+
+    @staticmethod
+    def _reap_marked(mark: str) -> None:
+        """End every process that inherited this launch's reap mark, including one re-parented after the CLI exited."""
+        if not mark:
+            return
+        pids = marked_pids(REAP_MARK_ENV, mark)
+        if pids:
+            kill_tree(collect_tree(pids))
 
     def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
         """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""

@@ -152,6 +152,66 @@ async def test_specialist_scope_cancel_stops_before_harvest(monkeypatch, tmp_pat
             await asyncio.gather(run, return_exceptions=True)
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="procfs is Linux-only")
+async def test_natural_exit_reaps_detached_descendant(monkeypatch, tmp_path):
+    """A heartbeat loop detached before the CLI exits does not outlive the specialist."""
+    import os
+    import time
+    from hyperloom.common.proctree import running
+
+    pid_path = tmp_path / "heartbeat.pid"
+    child_code = (
+        "import pathlib, subprocess, sys\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(subprocess.run("
+        "['sh','-c','setsid nohup \"$0\" -c \"$1\" </dev/null >/dev/null 2>&1 & echo $!',"
+        "sys.executable,'import time; time.sleep(300)'],"
+        "capture_output=True,text=True,check=True).stdout.strip())\n"
+    )
+    real_popen = ss.subprocess.Popen
+
+    def spawn(cmd, *args, **kwargs):
+        child = real_popen(
+            [sys.executable, "-c", child_code],
+            env=kwargs["env"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        child.wait(timeout=5)
+        return child
+
+    monkeypatch.setattr(ss.subprocess, "Popen", spawn)
+    dispatcher = SpecialistSubprocessDispatcher(
+        ss.SpecialistSubprocessConfig(agent_backend="claude", poll_interval_seconds=0.05)
+    )
+    monkeypatch.setattr(dispatcher, "_build_claude_cmd", lambda **kw: ["unused"])
+    monkeypatch.setattr(dispatcher, "_collect_patches", lambda *args, **kwargs: ([], {}))
+    heartbeat_pid = 0
+    try:
+        result = await dispatcher.run(
+            SpecialistSpawn(
+                task_id="detached-heartbeat",
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+                max_turns=1,
+            )
+        )
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        heartbeat_pid = int(pid_path.read_text())
+    finally:
+        if heartbeat_pid and running(heartbeat_pid):
+            os.kill(heartbeat_pid, 9)
+    assert result.exit_code == 0
+    assert running(heartbeat_pid) is False
+
+
 def test_kill_exited_root_cannot_confirm_descendants(monkeypatch):
     proc = Mock(pid=4242)
     proc.poll.return_value = 0
