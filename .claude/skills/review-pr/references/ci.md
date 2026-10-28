@@ -16,7 +16,7 @@ table does not restate it, so the two cannot drift apart.
 | D12, D14 | the gate, except the question it cannot answer -- see each rule | the complexity and parameter ceilings |
 
 One fact applies to every row and belongs here rather than in any rule: a `baseline-raise` label
-waives the gate's design findings entirely. `code_metrics_report.py:136-138` puts `design` in
+waives the gate's design findings entirely. `code_metrics_report.py:132-134` puts `design` in
 `waivable_failed`, and `PRIVATE_REACH`, `FLAG_ARGUMENT` and `FORWARDER` are absent from
 `code_metrics_design.py`'s `ADVISORY`, so on a labelled PR the gate decides none of them and every
 split row returns to the reviewer in full.
@@ -38,10 +38,8 @@ quoted on the card. Read `ci.txt` before blaming the PR:
 - Infra shapes — runner acquisition, artifact upload, dependency resolution, expired logs — are
   flakes: ask for a rerun rather than quoting them as failures.
 - `mergeable: CONFLICTING` in `meta.txt` is blocking on its own; ask for the rebase.
-- An earlier round's green does not carry. A job that reads `main` — `code-metrics` against
-  `scripts/code_metrics_baseline.txt`, the import and architecture contracts — re-runs on a body
-  edit or a base move and can turn red at an unchanged head, because what it compares against
-  moved. Re-read `ci.txt` at the head you are publishing on, and when a check now fails, find what
-  landed on `main` between the two runs before attributing it to this PR: in PR #2102 the
-  `_ensure_ray` complexity entry #2189 added to the baseline made a stale-baseline failure out of a
-  branch whose own code had improved that number.
+- An earlier round's green does not carry. A job that reads `main` — `code-metrics` against the
+  tree at the base, the import and architecture contracts — re-runs on a body edit or a base move
+  and can turn red at an unchanged head, because what it compares against moved. Re-read `ci.txt`
+  at the head you are publishing on, and when a check now fails, find what landed on `main`
+  between the two runs before attributing it to this PR.
