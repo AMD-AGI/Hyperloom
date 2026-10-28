@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from ..mcp_tool_names import qualified_context_tool_name
 from . import read_rules_fragment as _read_rules_fragment
-from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines, reference_out_of_mode
+from .agentx_context import agentx_session_lines, reference_out_of_mode
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
@@ -213,18 +213,14 @@ def _section_session_context(session: SessionContext) -> list[str]:
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(session.benchmark_mode):
-        lines += [
-            "",
-            *corpus_lines(session.agentx_corpus_shape),
-            "",
-            *grading_lines(session.agentx_grading, session.agentx_backend),
-            *launch_ownership_lines(session.agentx_backend),
-        ]
+        lines += agentx_session_lines(session.agentx_corpus_shape, session.agentx_grading, session.agentx_backend)
     lines += [
         "",
-        "The Coordinator supplies the session context (Shared session state, KB hints,",
-        "advisories) and the per-tick blocks (Phase, Mission progress, Time budget,",
-        "Tick, inbox tail) every tick.",
+        "The Coordinator supplies the session context (resource pools,",
+        "constraints, advisories) first, then the per-tick blocks (Phase,",
+        "Mission progress, Time budget, Tick, Shared session state, recent",
+        "policy denials, Untested proposals, KB hints, Plateau advisory,",
+        "inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
