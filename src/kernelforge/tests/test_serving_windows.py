@@ -150,6 +150,50 @@ def test_a_templated_kernel_name_is_cut_for_the_reader(tmp_path):
     assert len(max(kernel_rows, key=len)) < len(long_name)
 
 
+def test_the_observed_decode_classes_are_listed_by_step_count_and_read_back(tmp_path):
+    events = [
+        step("step[EXTEND bs=1 toks=900]", 0.0, 600.0),
+        kernel("attention_prefill", 10.0, 400.0),
+        step("step[VERIFY bs=2]", 1000.0, 14.0),
+        kernel("moe_gemm", 1001.0, 9.0),
+        step("step[VERIFY bs=3]", 1100.0, 14.0),
+        kernel("moe_gemm", 1101.0, 9.0),
+        step("step[VERIFY bs=3]", 1200.0, 14.0),
+        kernel("moe_gemm", 1201.0, 9.0),
+    ]
+
+    rows = sw.render_observed_decode_classes(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
+    document = "\n".join(
+        [
+            "# Trace Evidence",
+            "",
+            sw.OBSERVED_DECODE_HEADING,
+            "",
+            *rows,
+            "",
+            "## Other",
+            "",
+            "- `VERIFY bs=10`: 9 step(s)",
+        ]
+    )
+
+    assert rows == [
+        "- `VERIFY bs=3`: 2 step(s), 66.7% of decode steps",
+        "- `VERIFY bs=2`: 1 step(s), 33.3% of decode steps",
+    ]
+    assert sw.observed_decode_batch_sizes(document) == frozenset({2, 3})
+
+
+def test_a_trace_without_decode_steps_lists_no_decode_class(tmp_path):
+    events = [step("step[EXTEND bs=1 toks=900]", 0.0, 600.0), kernel("attention_prefill", 10.0, 400.0)]
+
+    rows = sw.render_observed_decode_classes(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
+
+    assert rows == []
+    assert sw.observed_decode_batch_sizes(f"{sw.OBSERVED_DECODE_HEADING}\n\n- none\n") == frozenset()
+    assert sw.observed_decode_batch_sizes("# Trace Evidence\n\n- `VERIFY bs=3`: 2 step(s)\n") == frozenset()
+
+
 def test_nothing_renders_without_a_ranking():
     assert sw.render_hot_kernels_by_class({}) == []
     assert sw.render_hot_kernels_by_class(None) == []

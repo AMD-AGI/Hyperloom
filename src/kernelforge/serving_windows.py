@@ -213,13 +213,41 @@ def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, t
     return lines
 
 
+#: Heading of the decode-class list in a handoff; the task validator reads the batch sizes back from under it.
+OBSERVED_DECODE_HEADING = "## Observed Decode Classes"
+_OBSERVED_ROW_RE = re.compile(r"^- `[A-Z_]+ bs=(?P<bs>\d+)`:", re.MULTILINE)
+
+
+def render_observed_decode_classes(by_class: dict[str, dict[str, Any]] | None) -> list[str]:
+    """One row per decode class, most steps first, with its share of all decode steps."""
+    decode = sorted(
+        ((window_class, data["steps"]) for window_class, data in (by_class or {}).items() if data["is_decode"]),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    total = sum(steps for _class, steps in decode)
+    return [
+        f"- `{window_class}`: {steps} step(s), {steps / total * 100.0:.1f}% of decode steps"
+        for window_class, steps in decode
+    ]
+
+
+def observed_decode_batch_sizes(document: str) -> frozenset[int]:
+    """The batch sizes listed under ``OBSERVED_DECODE_HEADING`` in *document*; empty when it lists none."""
+    _before, heading, rest = document.partition(f"{OBSERVED_DECODE_HEADING}\n")
+    section = rest.split("\n## ", 1)[0] if heading else ""
+    return frozenset(int(match.group("bs")) for match in _OBSERVED_ROW_RE.finditer(section))
+
+
 __all__ = [
     "COLLECTIVE_NOTE",
     "DECODE_KINDS",
+    "OBSERVED_DECODE_HEADING",
     "TOP_N",
     "StepWindow",
     "hot_kernels_by_class",
+    "observed_decode_batch_sizes",
     "render_hot_kernels_by_class",
+    "render_observed_decode_classes",
     "step_kind",
     "step_windows",
 ]

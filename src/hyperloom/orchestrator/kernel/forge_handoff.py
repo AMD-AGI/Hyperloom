@@ -21,7 +21,12 @@ from hyperloom.orchestrator.measurement.jit_variants import render_jit_variants,
 from kernelforge.foldable_launches import foldable_launches, render_foldable_launches
 from kernelforge.graph_coverage import graph_coverage, render_graph_coverage
 from kernelforge.trace_events import resolve_capture
-from kernelforge.serving_windows import hot_kernels_by_class, render_hot_kernels_by_class
+from kernelforge.serving_windows import (
+    OBSERVED_DECODE_HEADING,
+    hot_kernels_by_class,
+    render_hot_kernels_by_class,
+    render_observed_decode_classes,
+)
 from hyperloom.orchestrator.measurement.runtime_findings import (
     AITER_TUNED_MISS,
     load_runtime_findings,
@@ -216,8 +221,11 @@ def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> s
     lines.extend(["", "## Recompiled Kernels", ""])
     lines.extend(_jit_variant_lines(session_dir))
     capture = resolve_capture(getattr(state, "last_profile_trace", ""))
+    by_class = hot_kernels_by_class(capture)
+    lines.extend(["", OBSERVED_DECODE_HEADING, ""])
+    lines.extend(_observed_decode_lines(by_class))
     lines.extend(["", "## Hot Kernels by Step Class", ""])
-    lines.extend(_hot_kernel_lines(capture))
+    lines.extend(_hot_kernel_lines(by_class))
     lines.extend(["", "## Launch-Bound Kernels", ""])
     lines.extend(_foldable_lines(capture))
     lines.extend(["", "## Graph Coverage", ""])
@@ -237,9 +245,17 @@ def _foldable_lines(capture: str) -> list[str]:
     return rendered or ["- no launch-bound kernel crossed the reporting floor in any step class"]
 
 
-def _hot_kernel_lines(capture: str) -> list[str]:
+def _observed_decode_lines(by_class: dict[str, dict[str, Any]]) -> list[str]:
+    """The decode classes the capture ran, which bound the batch sizes a decode shape case may use."""
+    rendered = render_observed_decode_classes(by_class)
+    return rendered or [
+        "- none: the raw capture carries no decode `step[...]` annotations, so decode shape cases are not "
+        "checked against it"
+    ]
+
+
+def _hot_kernel_lines(by_class: dict[str, dict[str, Any]]) -> list[str]:
     """Per-step-class kernel rankings read straight off the raw capture, without TraceLens."""
-    by_class = hot_kernels_by_class(capture)
     if not by_class:
         return [
             "- the raw capture carries no `step[...]` annotations, so no step class could be ranked "

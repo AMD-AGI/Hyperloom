@@ -293,6 +293,46 @@ def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None
     assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
 
 
+def test_trace_evidence_lists_the_decode_classes_the_capture_ran(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from kernelforge.serving_windows import observed_decode_batch_sizes
+    from kernelforge.tests.trace_fixtures import kernel, step, write_trace
+
+    trace = write_trace(
+        tmp_path / "rank0.trace.json.gz",
+        [
+            step("step[EXTEND bs=1 toks=900]", 0.0, 600.0),
+            kernel("attention_prefill", 10.0, 400.0),
+            step("step[VERIFY bs=2]", 1000.0, 14.0),
+            kernel("moe_gemm", 1001.0, 9.0),
+            step("step[VERIFY bs=3]", 1100.0, 14.0),
+            kernel("moe_gemm", 1101.0, 9.0),
+            step("step[VERIFY bs=3]", 1200.0, 14.0),
+            kernel("moe_gemm", 1201.0, 9.0),
+        ],
+    )
+
+    evidence = build_trace_evidence_md(_state(last_profile_trace=str(trace)))
+
+    assert _section(evidence, "Observed Decode Classes") == (
+        "- `VERIFY bs=3`: 2 step(s), 66.7% of decode steps\n- `VERIFY bs=2`: 1 step(s), 33.3% of decode steps\n"
+    )
+    assert observed_decode_batch_sizes(evidence) == frozenset({2, 3})
+
+
+def test_trace_evidence_without_a_capture_lists_no_decode_class() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from kernelforge.serving_windows import observed_decode_batch_sizes
+
+    evidence = build_trace_evidence_md(_state())
+
+    assert _section(evidence, "Observed Decode Classes") == (
+        "- none: the raw capture carries no decode `step[...]` annotations, so decode shape cases are not "
+        "checked against it\n"
+    )
+    assert observed_decode_batch_sizes(evidence) == frozenset()
+
+
 def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:
     from kernelforge.kernel_rewrite_controller.opportunity_agent import _system_prompt
 
