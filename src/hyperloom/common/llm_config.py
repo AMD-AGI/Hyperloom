@@ -331,6 +331,7 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
+_ANTHROPIC_MESSAGES_METHOD = "POST"
 # The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path this module owes the same.
 ANTHROPIC_CONNECT_RETRIES = 2
 # Waited before the second dial and doubled before the third, as the SDK's backoff does.
@@ -871,7 +872,9 @@ def _dial_anthropic_messages(
     body = {**params, "stream": True}
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
-            return dial.enter_context(client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag))  # type: ignore[union-attr]
+            return dial.enter_context(
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
         except connect_failures:
             # A dial begun at or past the deadline would send a POST the reader is already bound to drop.
             if deadline is not None and time.monotonic() + delay >= deadline:
@@ -879,7 +882,9 @@ def _dial_anthropic_messages(
             time.sleep(delay)
             delay *= 2
     # The last dial speaks for itself: its failure reaches the caller.
-    return dial.enter_context(client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag))  # type: ignore[union-attr]
+    return dial.enter_context(
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
 
 
 async def _adial_anthropic_messages(
@@ -892,13 +897,13 @@ async def _adial_anthropic_messages(
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
             return await dial.enter_async_context(
-                client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+                client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
             )
         except connect_failures:
             await asyncio.sleep(delay)
             delay *= 2
     return await dial.enter_async_context(
-        client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+        client.stream(_ANTHROPIC_MESSAGES_METHOD, _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
     )
 
 
