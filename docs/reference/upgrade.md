@@ -137,6 +137,13 @@ The top-level `robustness` key, `close.robustness` and the
 `robustness_escalated` stop reason are gone; they were always empty since the
 robustness agent was retired. Consumers that read them should stop.
 
+### Required: `session_breakdown.json` drops the latency roofline and `bypass` keys
+
+The schema stays `v6.1` but drops the keys only the diffusion latency roofline
+or the `bypass` route produced; read `ceiling_available` instead of
+`close.roofline_progress.ceiling_kind`. Each key and its disposition is under
+Versioning in [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
@@ -284,8 +291,8 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 three things inside the 6 major, a declared exception to the major-bump rule: it
 renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
 the `baseline` event's `measurement` to `output_throughput` (the old key is no
-longer written), removes keys no producer populated or that only carried a
-constant, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
+longer written), removes keys no producer populated, that only carried a
+constant or whose producer was removed, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
 the old key, so readers must accept both keys or migrate.
 Re-exporting a 6.0 session directory emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at
