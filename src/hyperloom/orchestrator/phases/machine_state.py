@@ -935,6 +935,15 @@ class PhaseFlags:
     enablement_enabled: bool = False
 
 
+@dataclass(frozen=True)
+class WorkInFlight:
+    """Which phases still have work of their own queued or running, as one decision sees it."""
+
+    enablement: bool = False
+    kernel: bool = False
+    prelude: bool = False
+
+
 def _base_workflow_predicate_inputs(
     state: Any,
     *,
@@ -1108,9 +1117,7 @@ def workflow_predicate_inputs(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
-    prelude_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1120,17 +1127,17 @@ def workflow_predicate_inputs(
         current=current,
         now_unix=frozen_now,
         flags=flags,
-        enablement_in_flight=enablement_in_flight,
+        enablement_in_flight=in_flight.enablement,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
-        inputs["pending_work"] = {"prelude_work_in_flight": bool(prelude_work_in_flight)}
+        inputs["pending_work"] = {"prelude_work_in_flight": bool(in_flight.prelude)}
     elif current == PHASE_ENABLEMENT:
         enablement = state.enablement
         inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
-            "enablement_in_flight": bool(enablement_in_flight),
+            "enablement_in_flight": bool(in_flight.enablement),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
@@ -1138,7 +1145,7 @@ def workflow_predicate_inputs(
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
             now_unix=frozen_now,
-            kernel_work_in_flight=kernel_work_in_flight,
+            kernel_work_in_flight=in_flight.kernel,
         )
     elif current == PHASE_SWEEP:
         inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
@@ -1376,19 +1383,10 @@ def compute_next_phase(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
-    prelude_work_in_flight: bool = False,
+    in_flight: WorkInFlight = WorkInFlight(),
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(
-        state,
-        flags=flags,
-        now_unix=now_unix,
-        enablement_in_flight=enablement_in_flight,
-        kernel_work_in_flight=kernel_work_in_flight,
-        prelude_work_in_flight=prelude_work_in_flight,
-    )
+    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, in_flight=in_flight)
     return replay_next_phase(inputs)
 
 
@@ -1845,6 +1843,7 @@ __all__ = [
     "LifecycleMark",
     "PhaseClock",
     "PhaseFlags",
+    "WorkInFlight",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",

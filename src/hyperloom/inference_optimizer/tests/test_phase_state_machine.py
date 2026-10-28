@@ -276,10 +276,12 @@ def test_a_plain_baseline_retry_in_flight_is_not_an_idle_prelude():
     state = _prelude_state(max_minutes=720, spent_sec=25_000.0, usable_sec=14_718.5, baseline_failure_streak=2)
     flags = phase_state.PhaseFlags(kernel_enabled=True)
 
-    assert phase_state.compute_next_phase(state, flags=flags, prelude_work_in_flight=True) is None
+    in_flight = phase_state.WorkInFlight(prelude=True)
+
+    assert phase_state.compute_next_phase(state, flags=flags, in_flight=in_flight) is None
 
     # The fact travels with the decision, so a replay of it refuses the terminal as well.
-    inputs = phase_state.workflow_predicate_inputs(state, flags=flags, prelude_work_in_flight=True)
+    inputs = phase_state.workflow_predicate_inputs(state, flags=flags, in_flight=in_flight)
     assert inputs["pending_work"] == {"prelude_work_in_flight": True}
     assert phase_state.replay_next_phase(inputs) is None
 
@@ -423,7 +425,9 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         )
         flags = phase_state.PhaseFlags(kernel_enabled=True)
 
-        assert phase_state.compute_next_phase(state, flags=flags, prelude_work_in_flight=True) is None
+        in_flight = phase_state.WorkInFlight(prelude=True)
+
+        assert phase_state.compute_next_phase(state, flags=flags, in_flight=in_flight) is None
 
         out = phase_state.compute_next_phase(state, flags=flags)
         assert out is not None and out[1] == "prelude_cold_anchor_low_budget"
@@ -1078,12 +1082,16 @@ def test_enablement_holds_while_work_is_in_flight():
     state = _enablement_state("ENABLEMENT", tput=1000.0)
     assert (
         phase_state.compute_next_phase(
-            state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+            state,
+            in_flight=phase_state.WorkInFlight(enablement=True),
+            flags=phase_state.PhaseFlags(enablement_enabled=True),
         )
         is None
     )
     inputs = phase_state.workflow_predicate_inputs(
-        state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+        state,
+        in_flight=phase_state.WorkInFlight(enablement=True),
+        flags=phase_state.PhaseFlags(enablement_enabled=True),
     )
     assert phase_state.replay_next_phase(inputs) is None
 
