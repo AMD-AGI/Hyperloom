@@ -178,3 +178,20 @@ def test_an_invalid_restart_setting_fails_before_the_cluster_is_touched(monkeypa
         asyncio.run(life.restart_server_for_round(life.RoundServer(framework="vllm", model_path="/model", tp=1, ep=1)))
 
     assert calls == []
+
+
+def test_a_crashed_worker_of_any_lws_rank_fails_fast(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The launcher names each pod's log after its LWS rank, so a rank-1 crash must be read like a rank-0 one."""
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(tmp_path))
+    (tmp_path / "mn_infera_server_10.0.0.2_r1.log").write_text(
+        "loading weights\nlaunch_server.py: error: unrecognized arguments: --bogus-flag\n", encoding="utf-8"
+    )
+    (tmp_path / "mn_infera_server_10.0.0.3_r2.log").write_text(
+        "Health check failed: detokenizer did not respond\n" * 15, encoding="utf-8"
+    )
+
+    crash = life._worker_fastfail_reason(["10.0.0.2"], elapsed=60, crash_grace=45, wedge_grace=420, timeout_s=900)
+    wedge = life._worker_fastfail_reason(["10.0.0.3"], elapsed=500, crash_grace=45, wedge_grace=420, timeout_s=900)
+
+    assert crash is not None and "unrecognized arguments: --bogus-flag" in crash
+    assert wedge is not None and "10.0.0.3" in wedge

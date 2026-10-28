@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import shlex
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from .server_args_safety import prepare_shell_safe_extra_args
@@ -68,10 +66,10 @@ def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).
-INFERA_BOOTSTRAP_PORT = 30001
+_INFERA_BOOTSTRAP_PORT = 30001
 
 
-def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = INFERA_BOOTSTRAP_PORT) -> str:
+def disagg_flags(mode: str, kv_transfer_backend: str) -> str:
     """sglang PD disaggregation flags for a prefill/decode group."""
     m = (mode or "").strip().lower()
     if m not in ("prefill", "decode"):
@@ -80,13 +78,13 @@ def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = I
     kv = (kv_transfer_backend or "").strip()
     if kv:
         parts.append(f"--disaggregation-transfer-backend {kv}")
-    parts.append(f"--disaggregation-bootstrap-port {int(bootstrap_port)}")
+    parts.append(f"--disaggregation-bootstrap-port {_INFERA_BOOTSTRAP_PORT}")
     return " ".join(parts)
 
 
-_INFERA_PID_FILE = str(Path(tempfile.gettempdir()) / "mn_infera_server.pid")
-_INFERA_LOG_FILE = str(Path(tempfile.gettempdir()) / "mn_infera_server.log")
-_INFERA_DIST_INIT_PORT = 5000
+# Paths on the GPU pod, not on the controller: every SSH session must agree on them across invocations.
+INFERA_POD_PID_FILE = "/tmp/mn_infera_server.pid"
+INFERA_POD_LOG_FILE = "/tmp/mn_infera_server.log"
 
 
 @dataclass(frozen=True)
@@ -105,7 +103,7 @@ class NodeLaunch:
 
 def build_node_kill_args(framework: str) -> str:
     """Build the launch_infera_node.py argv string that only kills the server behind the session PID file."""
-    parts = ["--framework", framework, "--kill-only", "--pid-file", _INFERA_PID_FILE]
+    parts = ["--framework", framework, "--kill-only", "--pid-file", INFERA_POD_PID_FILE]
     return " ".join(shlex.quote(x) for x in parts)
 
 
@@ -120,12 +118,10 @@ def build_node_launch_args(launch: NodeLaunch) -> str:
         str(launch.tp),
         "--nnodes",
         str(launch.nnodes),
-        "--dist-init-port",
-        str(_INFERA_DIST_INIT_PORT),
         "--pid-file",
-        _INFERA_PID_FILE,
+        INFERA_POD_PID_FILE,
         "--log-file",
-        _INFERA_LOG_FILE,
+        INFERA_POD_LOG_FILE,
     ]
     ep = launch.ep
     if ep and int(ep) > 1:

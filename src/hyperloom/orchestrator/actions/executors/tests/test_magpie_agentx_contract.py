@@ -15,6 +15,7 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.perf_metric import constraint_veto_reason, graded_axes_of
 from hyperloom.inference_optimizer.cli.benchmark_config import bind_benchmark, configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
+from hyperloom.orchestrator.actions.executors import _server_patcher
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
@@ -264,7 +265,7 @@ def test_rejected_report_cannot_be_salvaged(report, key, tmp_path):
 
 def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
     monkeypatch.delenv("PROFILE_OSL", raising=False)
     monkeypatch.delenv("HYPERLOOM_PROFILE_MAX_ITERS", raising=False)
     monkeypatch.delenv("HYPERLOOM_PROFILE_DELAY_ITERS", raising=False)
