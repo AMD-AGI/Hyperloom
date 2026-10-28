@@ -60,6 +60,10 @@ runtime = [
     "PyYAML>=6.0",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
+# What only a hosted run needs, on top of ``runtime``. Empty until the pieces that need
+# a dependency (the events writer, the MCP server, an E2B provider) land; the lock file
+# ``requirements/app.lock`` is compiled from ``runtime`` and ``hosted``.
+hosted = []
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
 # the ROCm build is supplied by the container image and a bare specifier would
 # resolve to the CUDA wheel from PyPI.
@@ -241,6 +245,9 @@ exclude = [
 
 [tool.setuptools.package-data]
 hyperloom = [
+    "plugs/profiles/*.json",
+    "contracts/*.json",
+    "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
 ]
@@ -269,7 +276,7 @@ hyperloom = [
     "assets/slurm/*.sh.in",
     "references/*.md",
 ]
-# Critic LLM skill assets, mounted by the A2A / Codex chat server host.
+# Critic LLM skill assets, loaded into the Critic prompt preamble by CriticAgentBackend.
 "hyperloom.agents.critic" = [
     "SKILL.md",
     "README.md",
@@ -425,6 +432,24 @@ omit = [
     "src/kernelforge/evaluation/benchmark/runner.py",
     "src/kernelforge/evaluation/profiling/registers.py",
     "src/kernelforge/loop/runner.py",
+    # ... and the per-job modules it was split into, which answer to the same hardware.
+    "src/kernelforge/loop/iteration/attempt_verdict.py",
+    "src/kernelforge/loop/iteration/best_publication.py",
+    "src/kernelforge/loop/iteration/campaign_report.py",
+    "src/kernelforge/loop/iteration/campaign_runtime.py",
+    "src/kernelforge/loop/iteration/case_coverage.py",
+    "src/kernelforge/loop/iteration/ceiling_runtime.py",
+    "src/kernelforge/loop/iteration/iteration_phases.py",
+    "src/kernelforge/loop/iteration/iteration_types.py",
+    "src/kernelforge/loop/iteration/keep_checkpoint.py",
+    "src/kernelforge/loop/iteration/lane_runtime.py",
+    "src/kernelforge/loop/iteration/locked_run.py",
+    "src/kernelforge/loop/iteration/outcome_runtime.py",
+    "src/kernelforge/loop/iteration/resume_recovery.py",
+    "src/kernelforge/loop/iteration/round_admission.py",
+    "src/kernelforge/loop/iteration/scoring_runtime.py",
+    "src/kernelforge/loop/iteration/supervisor_review.py",
+    "src/kernelforge/loop/iteration/workspace_git.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
@@ -521,13 +546,13 @@ cyclomatic-complexity = 20
 # limit: cognitive complexity weights nesting, so a value past 30 is a function
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
-# Physical lines, ``def`` through the last line, decorators excluded, comments
-# and docstrings included: a function no longer fits one screen past 80, and
-# most of this tree's functions stay well under (the review trigger is ~60).
-function-lines = 80
-# pylint R1702 default: past five nested blocks, the innermost line depends on
-# six conditions at once; extract the inner loop or invert a condition.
-nested-blocks = 5
+# Lines of code in the body: the ``def`` lines, decorators, blank, comment and
+# docstring lines do not count. Past 50 a function rarely does one thing; split
+# it along its steps.
+function-lines = 50
+# Past four nested blocks the innermost line depends on five conditions at
+# once; extract the inner loop or invert a condition.
+nested-blocks = 4
 # pylint R0913 default: past five, a call site no longer reads as a sentence and the
 # values travel together anyway -- pass the object they come from, or name them in a
 # dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
@@ -540,12 +565,17 @@ module-lines = 1200
 duplicated-lines = 0
 # Any vulture finding at dead-code-min-confidence counts.
 dead-code = 0
+# Entries directly in a directory: its modules and the subdirectories holding one.
+# Past 50 a reader can no longer scan the listing for the module they need;
+# group the modules into subpackages by responsibility.
+directory-entries = 50
 
 # Exact versions: the script refuses to measure with any other, because each
 # release can change what a metric counts. CI installs these same pins.
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
+radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
@@ -607,24 +637,23 @@ extend-select = [
     "LOG",  # correct logging API use
     "A",  # do not shadow builtins
     "C4",  # comprehension / collection-call idioms
+    "B006",  # no mutable default arguments
+    "B012",  # no return / break / continue inside finally
 ]
 # Still off pending a team decision -- each rewrites hundreds of lines that the
-# open PRs touch: "I" (import sorting), "UP" (pyupgrade). "B", "SIM" and the
-# rest of "RUF" carry a backlog and belong behind a ratchet, not a hard gate.
+# open PRs touch: "I" (import sorting), "UP" (pyupgrade). The rest of "B",
+# "SIM" and the rest of "RUF" carry a backlog and belong behind a ratchet, not a
+# hard gate.
 
 [tool.ruff.lint.flake8-builtins]
 # ``aiter`` is AMD's kernel library, imported under its own name throughout;
 # the builtin ``aiter`` (async iterator) is never used in this tree.
 ignorelist = ["aiter"]
 
-# C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: the tree carries a
-# backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. The code-metrics gate above measures it at 20 on the files a
-# change touches. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-# [tool.ruff.lint.mccabe]
-# max-complexity = 10
+# C901 (mccabe) stays off: the style guide's complexity trigger (10) and the
+# code-metrics gate's ceiling (20) are counted with radon, which also counts every
+# and / or, ternary, comprehension and assert. Measure on demand:
+#   radon cc -s -n C src/hyperloom src/kernelforge
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and

@@ -316,7 +316,7 @@ def test_prepare_agent_initializes_required_git_workspace(
             """Confirm the temporary baseline exists before execution."""
             nonlocal calls
             calls += 1
-            assert task_preparer._git_head(tmp_path)
+            assert task_preparer.git_head(tmp_path)
             return SimpleNamespace(text="prepared")
 
     def fake_factory(_runtime):
@@ -579,7 +579,7 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     monkeypatch.setattr(task_preparer, "_preflight_async", fake_preflight)
     monkeypatch.setattr(
         task_preparer,
-        "_git_head",
+        "git_head",
         lambda _workspace: "new-head" if git_state["committed"] else "base-head",
     )
     monkeypatch.setattr(task_preparer, "_git_untracked", lambda _workspace: set())

@@ -49,7 +49,14 @@ def file_reader(refs_dir):
             return f"(not found: {name!r}; available: {available})"
         return candidate.read_text(encoding="utf-8")
 
-    return ContextProvider(shared_state=None, reference_reader=_read)
+    return ContextProvider(
+        shared_state=None,
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
+        recent_outcomes_reader=lambda top_k: "",
+        running_tasks_reader=lambda: "",
+        reference_reader=_read,
+    )
 
 
 # Reference directory contract
@@ -176,9 +183,3 @@ def test_read_reference_unknown_name_returns_available_list(file_reader):
     result = file_reader.read_reference("nonexistent_reference_xyz")
     assert "not found" in result
     assert "available" in result
-
-
-def test_read_reference_not_wired_returns_marker():
-    """A ContextProvider with no reference_reader returns a clear marker string."""
-    provider = ContextProvider(shared_state=None)
-    assert "not wired" in provider.read_reference("anything")

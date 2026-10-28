@@ -28,6 +28,7 @@ from hyperloom.orchestrator.actions.executors import _integrate_results as integ
 
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors._integrate_results import _KbLesson
+from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors._patch_git import _detect_p_level, _git_reset_clean
 from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
@@ -355,8 +356,8 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
         extra_envs_applied={},
     )
 
-    assert captured["session_deadline_sec"] == 4242.0
-    assert captured["variant_expected_sec"] == 600.0
+    assert captured["stop"].session_deadline_sec == 4242.0
+    assert captured["stop"].variant_expected_sec == 600.0
 
 
 @pytest.mark.asyncio
@@ -684,7 +685,9 @@ def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
-    await ex._maybe_write_framework_kb_record(_KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    await ex._maybe_write_framework_kb_record(
+        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
+    )
 
 
 @pytest.mark.asyncio
@@ -711,7 +714,9 @@ async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypa
         "fa_pr_sha": "cafebabe",
         "proposal_set": [{"provenance": "specialist:serving:framework"}],
     }
-    await ex._maybe_write_framework_kb_record(_KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    await ex._maybe_write_framework_kb_record(
+        _KbLesson("integrated", 1.0), attempt=IntegrateAttempt("t", done_payload=payload)
+    )
     assert writes == []
 
 
@@ -1264,7 +1269,7 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
     )
     gated: list[str] = []
 
-    async def _gate(_self, attempt, _params, _extra):
+    async def _gate(_self, attempt, _params):
         assert runtime.exists()
         gated.append(attempt.pending["attempt_venv_root"])
         return {"status": verdict, "specialist_task_id": "spec"}

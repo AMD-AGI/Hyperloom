@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import as_dict, dict_rows, events_of
+from hyperloom.common.coerce import dict_rows, to_mapping
+
+from ..base import events_of
 
 __all__ = [
     "FORGE_SOURCES",
@@ -66,7 +68,7 @@ def _visits(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     Returns:
         list[dict[str, Any]]: One entry per ``kernel`` event.
     """
-    return [as_dict(event.get("ext")) for event in events_of(breakdown, "kernel")]
+    return [to_mapping(event.get("ext")) for event in events_of(breakdown, "kernel")]
 
 
 def _best(current: Any, candidate: Any) -> float | None:
@@ -113,7 +115,7 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
             continue
         totals["attempted"] += 1
         outcome = str(row.get("outcome") or "")
-        e2e = as_dict(row.get("e2e"))
+        e2e = to_mapping(row.get("e2e"))
         decision = str(e2e.get("decision") or "").upper()
         if decision == "REVERT":
             # A revoked keep is a revert whatever outcome the rebench settled on.
@@ -166,7 +168,7 @@ def _fold_discovered(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> No
         rows (dict[str, dict[str, Any]]): The rollup, updated in place.
         ext (dict[str, Any]): One kernel visit's ``ext``.
     """
-    for entry in dict_rows(as_dict(ext.get("forge")).get("discovered_kernels")):
+    for entry in dict_rows(to_mapping(ext.get("forge")).get("discovered_kernels")):
         kernel_id = str(entry.get("kernel_id") or "")
         if not kernel_id:
             continue
@@ -206,11 +208,11 @@ def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None
         summary = row.get(lane) or {"attempts": 0, "best_speedup": None, "decision": ""}
         summary["attempts"] = int(summary["attempts"]) + 1
         summary["best_speedup"] = _best(summary["best_speedup"], _measured_speedup(entry.get("speedup")))
-        decision = str(as_dict(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
+        decision = str(to_mapping(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
         if decision:
             summary["decision"] = decision
         row[lane] = summary
-        revoked = str(as_dict(entry.get("e2e")).get("decision") or "").upper() == "REVERT"
+        revoked = str(to_mapping(entry.get("e2e")).get("decision") or "").upper() == "REVERT"
         if revoked and row["final_decision"] in {"not_optimized", _ATTEMPTED, "rejected"}:
             row["final_decision"] = _REVERTED
         elif str(entry.get("outcome") or "") in _REJECTED_OUTCOMES and row["final_decision"] == "not_optimized":

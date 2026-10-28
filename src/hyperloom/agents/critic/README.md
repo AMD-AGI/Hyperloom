@@ -1,27 +1,11 @@
-# Hosting the Critic skill in an A2A / Codex chat server
+# Critic runtime
 
-The Critic does not need a dedicated long-running service. The intended
-delivery is:
-
-- A Codex-based **A2A chat server** owns the agent identity (allowlists,
-  rate limits, auth).
-- The Critic SKILL is mounted into that server.
-- The server permits exactly two Bash commands for Critic turns:
-  `python -m hyperloom.agents.critic.runtime.cli prepare-review` and
-  `python -m hyperloom.agents.critic.runtime.cli commit-review`.
-
-## Per-turn flow
-
-1. The host receives a request payload (Coordinator-style or
-   dialogue-style) and writes it to `${CRITIC_WORKDIR}/request.json`.
-2. Codex runs `prepare-review`, reads `judge_bundle.json` and the
-   Critic SKILL prompts, then writes `review.json`.
-3. Codex runs `commit-review` and uses `emit.json` as the response back
-   to the host.
-
-The host should consider `emit.json["intent_envelope"]` (when present)
-the canonical response for a Coordinator caller; for dialogue callers
-return `emit.json["critic_decision_review"]` instead.
+The Critic does not need a dedicated long-running service. Each turn,
+Hyperloom's `CriticAgentBackend` writes the Coordinator inbox prompt to
+`request.json`, runs `prepare-review` to build `judge_bundle.json`,
+reasons over the bundle with the Critic SKILL prompts, writes
+`review.json`, runs `commit-review`, and forwards
+`emit.json["intent_envelope"]` to the Coordinator.
 
 ## Required environment
 
@@ -51,7 +35,7 @@ default — you do not need to flip a flag when the KB service is down:
 2. While the breaker is open (`CRITIC_KB_BREAKER_COOLDOWN_SECONDS`):
    - `list_priors` returns `cache="kb_unreachable"` with empty priors and
      never makes another transport call.
-   - `write_verdict` and `write_kb_drafts` return
+   - `write_verdict` returns
      `WriteResult(status="disabled", reason="kb_unreachable")` so the
      review pipeline keeps emitting verdicts.
    - `prepare-review` reports `judge_bundle.kb_read_skipped_reason =
@@ -66,17 +50,6 @@ default — you do not need to flip a flag when the KB service is down:
 switches; the breaker is the automatic equivalent for transient
 outages.
 
-## Bash allowlist
-
-Configure the chat server's Bash gate to allow exactly:
-
-```text
-python3 -m hyperloom.agents.critic.runtime.cli prepare-review ...
-python3 -m hyperloom.agents.critic.runtime.cli commit-review ...
-```
-
-`replay-dead-letter` is an operator command (see the cron below), not for LLM use.
-
 ## Exit codes
 
 | Code | Meaning |
@@ -89,6 +62,8 @@ command, so the host can parse the response without regex.
 
 ## Recommended dead-letter cron
 
+`replay-dead-letter` is an operator command, not for LLM use.
+
 ```bash
 */15 * * * *  python -m hyperloom.agents.critic.runtime.cli replay-dead-letter \
                 --dir "$KB_DEAD_LETTER_DIR" \
@@ -97,11 +72,11 @@ command, so the host can parse the response without regex.
 
 ## Optional: local Cursor / IDE workflow
 
-When developing locally without the chat server, you can drive the same
-flow by hand:
+When developing locally without a Hyperloom session, you can drive the
+same flow by hand:
 
 ```bash
-echo '{"kind": "coordinator_inbox", ...}' > req.json
+echo '{"session_id": "local", "raw_prompt": "..."}' > req.json
 python -m hyperloom.agents.critic.runtime.cli prepare-review --request req.json --out judge.json
 # craft review.json based on judge.json + skill prompts
 python -m hyperloom.agents.critic.runtime.cli commit-review --request req.json --review review.json --out emit.json

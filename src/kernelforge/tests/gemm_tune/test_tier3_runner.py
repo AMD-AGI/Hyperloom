@@ -487,6 +487,29 @@ class TestShapesComeFromTheDemandDocument:
         assert int(seen["shapes"][0]["N"]) == 1536
 
 
+def test_a_crashed_tier3_attempt_is_reported_as_a_failed_tuner(tmp_path, monkeypatch):
+    """A crash must reach the report as a failed tuner, not read as "Tier3 not attempted"."""
+    from kernelforge.gemm_tune import cli, tier3
+    from kernelforge.gemm_tune.tuners.base import TuneResult
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError("generated tuner sandbox died")
+
+    monkeypatch.setattr(tier3, "attempt_generated_tuner", crash)
+
+    result = cli._attempt_tier3(
+        [_gap(table="a8w8_blockscale_tuned_gemm.csv")],
+        SimpleNamespace(profile=None, output_dir=tmp_path, demand_json="", gpu_type="MI355X", framework="sglang"),
+    )
+
+    assert result == TuneResult(
+        tuner_name="tier3_generated",
+        status="failed",
+        error="RuntimeError('generated tuner sandbox died')",
+        error_class="RuntimeError",
+    )
+
+
 class TestTheProviderCallMatchesTheProviderAPI:
     """The authoring call is only exercised with a real provider installed."""
 

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 class TestParseEvalResults:
@@ -36,6 +37,36 @@ class TestParseEvalResults:
         assert out["task"] == "gsm8k"
         assert out["metric"] == "exact_match,strict-match"
         assert out["source_file"].endswith("results.json")
+
+    @pytest.mark.parametrize(
+        ("recorded", "post_ready", "expected"),
+        [
+            ("450.0", 550.0, 100.0),
+            (450.0, 550.0, 100.0),
+            (550.0, 550.0, 550.0),
+            (900.0, 550.0, 550.0),
+            ("inf", 550.0, 550.0),
+            ("nan", 550.0, 550.0),
+            ("0", 550.0, 550.0),
+            ("n/a", 550.0, 550.0),
+            (None, 550.0, 550.0),
+            ("450.0", None, None),
+        ],
+        ids=["enclosed", "numeric", "equal", "oversized", "inf", "nan", "zero", "text", "unrecorded", "no-post-ready"],
+    )
+    def test_post_ready_time_drops_only_an_eval_it_encloses(self, tmp_path, recorded, post_ready, expected):
+        results = {"results": {"gsm8k": {"exact_match,strict-match": 0.845}}}
+        if recorded is not None:
+            results["total_evaluation_time_seconds"] = recorded
+        results_file = tmp_path / "results.json"
+        results_file.write_text(json.dumps(results))
+        round_result = {"post_ready_runtime_sec": post_ready, "accuracy_source": str(results_file)}
+        assert ag.post_ready_sec_without_eval(round_result) == expected
+
+    @pytest.mark.parametrize("source", ["", "eval_unavailable", None])
+    def test_post_ready_time_is_kept_without_a_readable_results_file(self, tmp_path, source):
+        round_result = {"post_ready_runtime_sec": 550.0, "accuracy_source": source}
+        assert ag.post_ready_sec_without_eval(round_result) == 550.0
 
     def test_falls_back_to_secondary_metric(self, tmp_path):
         eval_dir = tmp_path / "eval_002"
@@ -105,9 +136,8 @@ class TestGradeIntegrateAccuracy:
 
     @staticmethod
     def _grade(monkeypatch, tmp_path, *, bench: dict, baseline: float):
-        from hyperloom.orchestrator.kernel import request_handlers as krh
 
-        return krh._grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
+        return integrate_accuracy.grade_integrate_accuracy(bench, baseline_accuracy=baseline, workspace=tmp_path)
 
     def test_accuracy_within_tolerance_does_not_block(self, monkeypatch, tmp_path):
         out = self._grade(monkeypatch, tmp_path, bench={"accuracy": 0.78}, baseline=0.80)

@@ -4,7 +4,7 @@
 """The dense GEMM the runtime dispatches is not the one ``precision`` names."""
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import select_tuners
+from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
 
 def _mxfp4_moe_profile(**kwargs):
@@ -88,10 +88,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         profile = _mxfp4_moe_profile()
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
         )
         names = [s.name for s in specs if s.should_run]
         # a4w4 stays: this is only ever additive.
@@ -102,10 +104,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         profile = _mxfp4_moe_profile()
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="fp8",
-            quant_type="blockscale",
-            gpu_type="mi300x",
+            RoutingTarget(
+                framework="sglang",
+                precision="fp8",
+                quant_type="blockscale",
+                gpu_type="mi300x",
+            ),
         )
         names = [s.name for s in specs if s.should_run]
         assert "a8w8_blockscale" in names
@@ -116,10 +120,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         profile = _mxfp4_moe_profile(raw_config={})
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
         )
         names = [s.name for s in specs if s.should_run]
         assert "a4w4_blockscale" in names
@@ -138,10 +144,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         )
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="fp8",
-            quant_type="blockscale",
-            gpu_type="mi300x",
+            RoutingTarget(
+                framework="sglang",
+                precision="fp8",
+                quant_type="blockscale",
+                gpu_type="mi300x",
+            ),
         )
         by_name = {s.name: s for s in specs if s.should_run}
         assert "a8w8_blockscale" in by_name
@@ -163,10 +171,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         )
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="fp8",
-            quant_type="blockscale",
-            gpu_type="mi300x",
+            RoutingTarget(
+                framework="sglang",
+                precision="fp8",
+                quant_type="blockscale",
+                gpu_type="mi300x",
+            ),
         )
         by_name = {s.name: s for s in specs if s.should_run}
         assert "sglang_dense_bf16" in by_name
@@ -178,10 +188,12 @@ class TestQuantizedModelsStillTuneBf16Dense:
         profile = _mxfp4_moe_profile(model_dtype="float32")
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
         )
         assert "sglang_dense_bf16" not in [s.name for s in specs if s.should_run]
 
@@ -193,11 +205,15 @@ class TestDemandOverridesTheGuess:
         profile = _mxfp4_moe_profile(raw_config={})  # exclusion list unavailable
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
-            demand_report=_demand("sglang_dense_bf16", "bf16_tuned_gemm.csv"),
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
+            RoutingEvidence(
+                demand_report=_demand("sglang_dense_bf16", "bf16_tuned_gemm.csv"),
+            ),
         )
         names = [s.name for s in specs if s.should_run]
         assert "sglang_dense_bf16" in names
@@ -209,21 +225,27 @@ class TestDemandOverridesTheGuess:
             s.name
             for s in select_tuners(
                 profile,
-                framework="sglang",
-                precision="mxfp4",
-                quant_type="auto",
-                gpu_type="mi355x",
+                RoutingTarget(
+                    framework="sglang",
+                    precision="mxfp4",
+                    quant_type="auto",
+                    gpu_type="mi355x",
+                ),
             )
         }
         with_demand = {
             s.name
             for s in select_tuners(
                 profile,
-                framework="sglang",
-                precision="mxfp4",
-                quant_type="auto",
-                gpu_type="mi355x",
-                demand_report=_demand("sglang_dense_bf16", "bf16_tuned_gemm.csv"),
+                RoutingTarget(
+                    framework="sglang",
+                    precision="mxfp4",
+                    quant_type="auto",
+                    gpu_type="mi355x",
+                ),
+                RoutingEvidence(
+                    demand_report=_demand("sglang_dense_bf16", "bf16_tuned_gemm.csv"),
+                ),
             )
         }
         assert without <= with_demand
@@ -233,11 +255,15 @@ class TestDemandOverridesTheGuess:
         profile = _mxfp4_moe_profile()
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi300x",  # fp4 unsupported on gfx942
-            demand_report=_demand("a4w4_blockscale", "a4w4_blockscale_tuned_gemm.csv"),
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi300x",
+            ),
+            RoutingEvidence(
+                demand_report=_demand("a4w4_blockscale", "a4w4_blockscale_tuned_gemm.csv"),
+            ),
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"]
         assert len(a4w4) == 1
@@ -248,19 +274,23 @@ class TestDemandOverridesTheGuess:
         report = {"demands": [{"table": "something_tuned_gemm.csv", "tuner": None}]}
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
-            demand_report=report,
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
+            RoutingEvidence(
+                demand_report=report,
+            ),
         )
         assert all(s.name for s in specs)
 
     def test_no_demand_file_changes_nothing(self):
         profile = _mxfp4_moe_profile()
         args = dict(framework="sglang", precision="mxfp4", quant_type="auto", gpu_type="mi355x")
-        assert [s.name for s in select_tuners(profile, **args)] == [
-            s.name for s in select_tuners(profile, demand_report=None, **args)
+        assert [s.name for s in select_tuners(profile, RoutingTarget(**args))] == [
+            s.name for s in select_tuners(profile, RoutingTarget(**args), RoutingEvidence(demand_report=None))
         ]
 
     def test_fmoe_ck_from_demand_keeps_its_moe_priority(self):
@@ -268,11 +298,15 @@ class TestDemandOverridesTheGuess:
         profile = _mxfp4_moe_profile(is_moe=False, raw_config={})
         specs = select_tuners(
             profile,
-            framework="sglang",
-            precision="mxfp4",
-            quant_type="auto",
-            gpu_type="mi355x",
-            demand_report=_demand("fmoe_ck", "tuned_fmoe.csv"),
+            RoutingTarget(
+                framework="sglang",
+                precision="mxfp4",
+                quant_type="auto",
+                gpu_type="mi355x",
+            ),
+            RoutingEvidence(
+                demand_report=_demand("fmoe_ck", "tuned_fmoe.csv"),
+            ),
         )
         names = [s.name for s in specs]
         assert names.index("fmoe_ck") < names.index("a4w4_blockscale")

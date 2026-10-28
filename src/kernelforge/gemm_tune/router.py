@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from kernelforge.tools.gpu_arch import canonical_gpu_type, detect_arch, product_arch
 
 from .model_analyzer import ModelProfile
 
@@ -38,20 +39,6 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Map known GPU type strings to their gfx architecture.
-_GPU_TYPE_TO_GFX = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-    "amd_instinct_mi300x": "gfx942",
-    "amd_instinct_mi355x": "gfx950",
-}
-_GFX_TO_CANONICAL_GPU = {
-    "gfx942": "mi300x",
-    "gfx950": "mi355x",
-}
-
 # Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 # How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
 # tier3's DEFAULT_MIN_MISSES, read off the same demand report.
@@ -62,46 +49,29 @@ _FP4_UNSUPPORTED_GFX = {"gfx942"}
 _FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
 
 
-def _detect_local_gfx_arch() -> str:
-    """Best-effort detect the local AMD gfx arch via ``rocminfo``."""
-    try:
-        out = subprocess.run(
-            ["rocminfo"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    m = re.search(r"\bgfx[0-9a-f]+\b", out, re.IGNORECASE)
-    return m.group(0).lower() if m else ""
+def _requests_detection(gpu_type: str) -> bool:
+    return str(gpu_type or "").strip().lower() in ("", "auto")
 
 
 def resolve_gpu_type(gpu_type: str) -> str:
     """Resolve a CLI GPU value to a stable KB-compatible identifier."""
-    key = str(gpu_type or "").strip().lower()
-    if key in ("", "auto"):
-        key = _detect_local_gfx_arch()
+    key = gpu_type
+    if _requests_detection(gpu_type):
+        key = detect_arch()
         if not key:
             raise ValueError(
                 "Unable to detect the local GPU with rocminfo; "
                 "pass --gpu-type explicitly (for example, mi300x or mi355x)."
             )
-    normalized = re.sub(r"[\s-]+", "_", key)
-    if normalized in _GPU_TYPE_TO_GFX:
-        return _GFX_TO_CANONICAL_GPU.get(_GPU_TYPE_TO_GFX[normalized], normalized)
-    return _GFX_TO_CANONICAL_GPU.get(normalized, normalized)
+    return canonical_gpu_type(key)
 
 
 def _resolve_gfx_arch(gpu_type: str) -> str:
     """Map a GPU type string (e.g. 'mi300x') to its gfx arch (e.g. 'gfx942')."""
+    if _requests_detection(gpu_type):
+        return detect_arch()
     key = gpu_type.strip().lower()
-    if key in ("", "auto"):
-        return _detect_local_gfx_arch()
-    if key.startswith("gfx"):
-        return key
-    return _GPU_TYPE_TO_GFX.get(key, "")
+    return key if key.startswith("gfx") else product_arch(key)
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:
@@ -298,27 +268,39 @@ def _routed_formats(
     return moe, _with_quant_type(profile.dense_precision or precision)
 
 
+@dataclass(frozen=True)
+class RoutingTarget:
+    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
+
+    framework: str
+    precision: str
+    quant_type: str = "auto"
+    gpu_type: str = "auto"
+
+
+@dataclass(frozen=True)
+class RoutingEvidence:
+    """What the run supplies to route on: its serving log, which shape inputs exist, and its table demand."""
+
+    kernel_signature_log: str | None = None
+    has_untuned_csv: bool = False
+    has_shapes_json: bool = False
+    has_tunableop_input: bool = False
+    demand_report: dict[str, Any] | None = None
+
+
 def select_tuners(
-    profile: ModelProfile,
-    *,
-    framework: str,
-    precision: str,
-    quant_type: str = "auto",
-    gpu_type: str = "auto",
-    kernel_signature_log: str | None = None,
-    has_untuned_csv: bool = False,
-    has_shapes_json: bool = False,
-    has_tunableop_input: bool = False,
-    demand_report: dict[str, Any] | None = None,
+    profile: ModelProfile, target: RoutingTarget, evidence: RoutingEvidence = RoutingEvidence()
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision."""
-    resolved_precision = _normalize_precision(precision)
-    gfx_arch = _resolve_gfx_arch(gpu_type)
+    resolved_precision = _normalize_precision(target.precision)
+    gfx_arch = _resolve_gfx_arch(target.gpu_type)
+    kernel_signature_log = evidence.kernel_signature_log
     tuners: list[TunerSpec] = []
 
-    if framework in ("sglang", "vllm-aiter"):
+    if target.framework in ("sglang", "vllm-aiter"):
         (moe_precision, moe_quant_type), (dense_precision, dense_quant_type) = _routed_formats(
-            profile, resolved_precision, quant_type, kernel_signature_log
+            profile, resolved_precision, target.quant_type, kernel_signature_log
         )
         tuners.extend(_select_sglang_moe_tuners(profile, moe_precision, moe_quant_type, kernel_signature_log, gfx_arch))
         tuners.extend(
@@ -326,19 +308,18 @@ def select_tuners(
                 profile,
                 dense_precision,
                 dense_quant_type,
-                has_untuned_csv,
-                has_shapes_json,
+                evidence.has_untuned_csv or evidence.has_shapes_json,
                 gfx_arch,
             )
         )
-    elif framework == "vllm":
+    elif target.framework == "vllm":
         tuners.extend(
             _select_vllm_tuners(
                 profile,
                 resolved_precision,
-                _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log),
-                has_shapes_json,
-                has_tunableop_input,
+                _resolve_quant_type(resolved_precision, target.quant_type, profile, kernel_signature_log),
+                evidence.has_shapes_json,
+                evidence.has_tunableop_input,
             )
         )
         tuners.extend(
@@ -349,10 +330,10 @@ def select_tuners(
             )
         )
     else:
-        log.warning("Unknown framework %r; no tuners selected", framework)
+        log.warning("Unknown framework %r; no tuners selected", target.framework)
 
     # Last, so it sees everything the framework branch decided and can only widen it.
-    tuners.extend(_tuners_the_demand_says_are_needed(demand_report, tuners))
+    tuners.extend(_tuners_the_demand_says_are_needed(evidence.demand_report, tuners))
 
     # Sort by priority
     tuners.sort(key=lambda t: t.priority)
@@ -511,8 +492,7 @@ def _select_sglang_dense_tuners(
     profile: ModelProfile,
     precision: str,
     quant_type: str,
-    has_untuned_csv: bool,
-    has_shapes_json: bool,
+    has_gemm_shapes: bool,
     gfx_arch: str,
 ) -> list[TunerSpec]:
     """Select the dense GEMM tuners for the sglang framework."""
@@ -522,7 +502,7 @@ def _select_sglang_dense_tuners(
     # Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is supplied they derive GEMM shapes
     # from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
-        if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
+        if has_gemm_shapes or _profile_can_derive_dense(profile):
             return TunerSpec(name, priority=20, estimated_minutes=20)
         return TunerSpec(
             name,

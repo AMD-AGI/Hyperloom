@@ -39,10 +39,10 @@ _MODEL_FAMILY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
-_UNKNOWN_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
+UNKNOWN_SCOPE_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
 
 
-def _normalise(value: Any) -> str:
+def normalise_scope_value(value: Any) -> str:
     """Apply contract G-3 normalisation: trim + lowercase, stringified."""
     if value is None:
         return ""
@@ -51,8 +51,8 @@ def _normalise(value: Any) -> str:
 
 def _is_present(value: Any) -> bool:
     """Report whether a value is a meaningful (non-unknown) scope value."""
-    text = _normalise(value)
-    return text not in _UNKNOWN_VALUES
+    text = normalise_scope_value(value)
+    return text not in UNKNOWN_SCOPE_VALUES
 
 
 def _pick(
@@ -64,13 +64,13 @@ def _pick(
         if not src:
             continue
         if key in src and _is_present(src[key]):
-            return _normalise(src[key])
+            return normalise_scope_value(src[key])
     return ""
 
 
 def derive_model_family(model: str) -> str:
     """Best-effort family extractor for ``model`` strings."""
-    text = _normalise(model)
+    text = normalise_scope_value(model)
     if not text:
         return ""
     for pat, family in _MODEL_FAMILY_RULES:
@@ -104,9 +104,9 @@ def build_scope(
 
     for key in OPTIONAL_SCOPE_KEYS:
         if _is_present(pc.get(key)):
-            scope[key] = _normalise(pc[key])
+            scope[key] = normalise_scope_value(pc[key])
         elif _is_present(sc.get(key)):
-            scope[key] = _normalise(sc[key])
+            scope[key] = normalise_scope_value(sc[key])
 
     if require_critical:
         missing_critical = [k for k in ("model", "framework") if scope[k] == "unknown"]
@@ -121,6 +121,11 @@ def build_scope(
     return scope
 
 
+def scope_key(scope: Mapping[str, Any]) -> str:
+    """Stable string identity of a scope dict, ordered by key."""
+    return "|".join(f"{k}={scope[k]}" for k in sorted(scope))
+
+
 def scope_cache_key(
     scope: Mapping[str, Any],
     *,
@@ -129,11 +134,11 @@ def scope_cache_key(
     limit: int = 10,
 ) -> str:
     """Stable, hashable representation of a ``list_priors`` query."""
-    parts = [f"{k}={scope[k]}" for k in sorted(scope.keys())]
+    parts = [scope_key(scope)] if scope else []
     if topic:
-        parts.append(f"topic={_normalise(topic)}")
+        parts.append(f"topic={normalise_scope_value(topic)}")
     if kind:
-        parts.append(f"kind={_normalise(kind)}")
+        parts.append(f"kind={normalise_scope_value(kind)}")
     parts.append(f"limit={limit}")
     return "|".join(parts)
 
@@ -142,7 +147,10 @@ __all__ = [
     "CRITICAL_SCOPE_KEYS",
     "OPTIONAL_SCOPE_KEYS",
     "ORG_DEFAULT",
+    "UNKNOWN_SCOPE_VALUES",
     "build_scope",
     "derive_model_family",
+    "normalise_scope_value",
     "scope_cache_key",
+    "scope_key",
 ]

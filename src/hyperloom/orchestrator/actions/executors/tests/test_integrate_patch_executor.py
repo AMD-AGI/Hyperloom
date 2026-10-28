@@ -2081,11 +2081,11 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+    result = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
 
-    assert ok is False
-    assert "escapes framework root" in err
-    assert backups == []
+    assert result.ok is False
+    assert "escapes framework root" in result.error
+    assert result.backups == []
     assert outside.read_text(encoding="utf-8") == "SAFE\n"
     assert len(calls) == 1
 
@@ -2133,7 +2133,7 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
     captured: dict[str, Any] = {}
 
     async def fake_run_grid(*args, **kwargs):
-        captured["serving_lease"] = kwargs.get("serving_lease")
+        captured["serving_lease"] = kwargs["launch"].serving_lease
         return [VariantResult(name="v", extra_server_args="", extra_envs={}, status="succeeded")]
 
     lease = MagicMock()
@@ -2201,8 +2201,8 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
         )
 
     variant = captured["grid"][0]
-    assert captured["base_extra_args"] == "--base-flag value"
-    assert captured["base_extra_envs"] == {"BASE_ENV": "1"}
+    assert captured["recipe"].base.extra_server_args == "--base-flag value"
+    assert captured["recipe"].base.extra_envs == {"BASE_ENV": "1"}
     assert variant.extra_server_args == extra_args
     # Variant carries only the proposal envs; base envs go to run_grid.
     assert variant.extra_envs == {"VLLM_ROCM_USE_AITER": "1"}

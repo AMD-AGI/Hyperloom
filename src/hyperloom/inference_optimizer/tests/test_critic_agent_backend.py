@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import json
-import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.roles.critic_agent import (
     CRITIC_AGENT_MAX_COMPLETION_TOKENS,
     CRITIC_AGENT_TRUNCATION_RETRY_FACTOR,
     _REVIEW_OUTPUT_INSTRUCTIONS,
+    _default_runtime_caller,
     _extract_review_json,
     _is_truncated_finish,
     _reviewed_msg_ids_from_bundle,
@@ -144,14 +146,12 @@ def _make_fake_runtime(
             request = json.loads(call.request_path.read_text(encoding="utf-8"))
             bundle = dict(judge_bundle)
             bundle.setdefault("session_id", request.get("session_id"))
-            bundle.setdefault("kind", request.get("kind"))
             call.out_path.write_text(json.dumps(bundle), encoding="utf-8")
         elif call.phase == "commit-review":
             request = json.loads(call.request_path.read_text(encoding="utf-8"))
             review = json.loads(call.review_path.read_text(encoding="utf-8"))
             envelope = _build_envelope_from_review(review, request["session_id"])
             emit = {
-                "kind": "coordinator_inbox",
                 "session_id": request["session_id"],
                 "decision_id": None,
                 "kb_writes": [],
@@ -189,6 +189,16 @@ def fake_session_dir(tmp_path: Path) -> Path:
     return sd
 
 
+@pytest.fixture
+def recorded_iterations(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Capture the critic iterations the backend records instead of writing them."""
+    from hyperloom.inference_optimizer.breakdown.recorder import critic_out
+
+    iterations: list[Any] = []
+    monkeypatch.setattr(critic_out, "record_critic_iteration", lambda _session_dir, it: iterations.append(it))
+    return iterations
+
+
 def _make_backend(
     fake_critic_root: Path,
     fake_session_dir: Path,
@@ -198,8 +208,6 @@ def _make_backend(
     fail_phase: str | None = None,
     runtime_calls: list[RuntimeCall] | None = None,
     kb_mode: str = "inmemory",
-    kb_env: dict[str, str] | None = None,
-    known_actions: tuple[str, ...] = (),
 ) -> tuple[CriticAgentBackend, FakeOpenAIClient]:
     fake_client = FakeOpenAIClient(codex_replies)
     fake_caller = _make_fake_runtime(
@@ -213,9 +221,7 @@ def _make_backend(
         codex_model="gpt-5.4",
         codex_client_factory=lambda: fake_client,
         kb_mode=kb_mode,
-        kb_env=kb_env,
         runtime_caller_factory=lambda: fake_caller,
-        known_actions=known_actions,
     )
     return backend, fake_client
 
@@ -242,62 +248,6 @@ def test_extract_review_json_bare():
 def test_extract_review_json_returns_none_on_empty():
     assert _extract_review_json("") is None
     assert _extract_review_json("just prose") is None
-
-
-@pytest.mark.asyncio
-async def test_run_writes_known_actions_into_request_options(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-) -> None:
-    runtime_calls: list[RuntimeCall] = []
-    judge_bundle = {
-        "kind": "coordinator_inbox",
-        "session_id": fake_session_dir.name,
-        "proposals": [],
-        "review_constraints": {},
-    }
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[],
-        judge_bundle=judge_bundle,
-        runtime_calls=runtime_calls,
-        known_actions=("baseline", "validate_stack"),
-    )
-    await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")
-
-    assert runtime_calls
-    request = json.loads(
-        runtime_calls[0].request_path.read_text(encoding="utf-8"),
-    )
-    assert request["options"]["known_actions"] == ["baseline", "validate_stack"]
-
-
-@pytest.mark.asyncio
-async def test_run_omits_options_when_known_actions_empty(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-) -> None:
-    runtime_calls: list[RuntimeCall] = []
-    judge_bundle = {
-        "kind": "coordinator_inbox",
-        "session_id": fake_session_dir.name,
-        "proposals": [],
-        "review_constraints": {},
-    }
-    backend, _ = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=[],
-        judge_bundle=judge_bundle,
-        runtime_calls=runtime_calls,
-    )
-    await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")
-
-    request = json.loads(
-        runtime_calls[0].request_path.read_text(encoding="utf-8"),
-    )
-    assert "options" not in request
 
 
 def test_extract_review_json_returns_none_when_key_absent():
@@ -471,7 +421,6 @@ async def test_single_proposal_yields_matching_verdict(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "missing_context": [],
         "required_context": [],
@@ -558,7 +507,6 @@ async def test_multiple_proposals_yield_one_verdict_each(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -609,7 +557,6 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [],
         "kb_priors_by_proposal": {},
@@ -642,7 +589,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
 ):
     """Proposals were reviewed and no verdict came back — that is a failure."""
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -672,7 +618,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
 
 def _single_proposal_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -747,9 +692,9 @@ async def test_openai_review_truncated_twice_fails_the_turn(
 async def test_missing_critical_context_yields_needs_review(
     fake_critic_root: Path,
     fake_session_dir: Path,
+    recorded_iterations: list[Any],
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [
             {
@@ -786,8 +731,7 @@ async def test_missing_critical_context_yields_needs_review(
     p = res.intents[0].payload
     assert p["verdict"] == "needs_review"
     assert p["source"] == "critic_unavailable"
-    # Backend surfaces the runtime's reason in metadata for the Coordinator.
-    assert res.metadata["kb_read_skipped_reason"] == "missing_critical_context"
+    assert recorded_iterations[0].judge_bundle["kb_read_skipped_reason"] == "missing_critical_context"
 
 
 # Case 6: subprocess exit code 2 -> BackendError
@@ -814,7 +758,6 @@ async def test_commit_review_subprocess_failure_raises(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -849,9 +792,10 @@ async def test_commit_review_subprocess_failure_raises(
 async def test_kb_unreachable_still_emits_verdict(
     fake_critic_root: Path,
     fake_session_dir: Path,
+    recorded_iterations: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -881,6 +825,7 @@ async def test_kb_unreachable_still_emits_verdict(
    "notes": ["KB unreachable"]}
 ]}
 ```"""
+    monkeypatch.setenv("KB_BASE_URL", "http://127.0.0.1:1")
     runtime_calls: list[RuntimeCall] = []
     backend, _ = _make_backend(
         fake_critic_root,
@@ -889,13 +834,12 @@ async def test_kb_unreachable_still_emits_verdict(
         judge_bundle=judge_bundle,
         runtime_calls=runtime_calls,
         kb_mode="live",
-        kb_env={"KB_BASE_URL": "http://127.0.0.1:1"},
     )
     res = await backend.run("prompt")
 
     assert len(res.intents) == 1
     assert res.intents[0].payload["verdict"] == "advise"
-    assert res.metadata["kb_read_skipped_reason"] == "kb_unreachable"
+    assert recorded_iterations[0].judge_bundle["kb_read_skipped_reason"] == "kb_unreachable"
     # KB env passed through to the subprocess
     env = runtime_calls[0].env
     assert env["CRITIC_KB_CLIENT_MODE"] == "live"
@@ -906,6 +850,7 @@ async def test_kb_unreachable_still_emits_verdict(
 async def test_kb_live_without_url_raises(
     fake_critic_root: Path,
     fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {"proposals": []}
     backend, _ = _make_backend(
@@ -914,16 +859,87 @@ async def test_kb_live_without_url_raises(
         codex_replies=[],
         judge_bundle=judge_bundle,
         kb_mode="live",
-        kb_env={},
     )
-    # No KB_BASE_URL in env either: ensure it's truly absent.
-    saved = os.environ.pop("KB_BASE_URL", None)
-    try:
-        with pytest.raises(BackendError, match="KB_BASE_URL"):
-            await backend.run("prompt")
-    finally:
-        if saved is not None:
-            os.environ["KB_BASE_URL"] = saved
+    monkeypatch.delenv("KB_BASE_URL", raising=False)
+    with pytest.raises(BackendError, match="KB_BASE_URL"):
+        await backend.run("prompt")
+
+
+# Default runtime caller: real subprocess command shape and the operator-matched failure texts
+def _runtime_call(tmp_path: Path, phase: str, review_path: Path | None = None) -> RuntimeCall:
+    return RuntimeCall(
+        phase=phase,
+        request_path=tmp_path / "req.json",
+        out_path=tmp_path / "out.json",
+        cwd=tmp_path,
+        env={"X": "1"},
+        review_path=review_path,
+    )
+
+
+def test_default_runtime_caller_builds_the_cli_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    review = tmp_path / "review.json"
+    _default_runtime_caller(_runtime_call(tmp_path, "commit-review", review))
+
+    assert captured["cmd"] == [
+        sys.executable,
+        "-m",
+        "hyperloom.agents.critic.runtime.cli",
+        "commit-review",
+        "--request",
+        str(tmp_path / "req.json"),
+        "--out",
+        str(tmp_path / "out.json"),
+        "--review",
+        str(review),
+    ]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["env"] == {"X": "1"}
+
+
+def test_default_runtime_caller_commit_review_requires_review_path(tmp_path: Path):
+    with pytest.raises(BackendError, match="missing --review path"):
+        _default_runtime_caller(_runtime_call(tmp_path, "commit-review"))
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            subprocess.TimeoutExpired(cmd="x", timeout=30),
+            r"critic-agent runtime\.cli prepare-review timed out after 30s",
+        ),
+        (FileNotFoundError("python gone"), r"critic-agent runtime\.cli prepare-review could not start .*python gone"),
+    ],
+)
+def test_default_runtime_caller_wraps_launch_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: Exception, message: str
+):
+    def fake_run(cmd, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(BackendError, match=message):
+        _default_runtime_caller(_runtime_call(tmp_path, "prepare-review"))
+
+
+def test_default_runtime_caller_truncates_stderr_on_nonzero_rc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 3, stdout="", stderr="boom" + "x" * 1000),
+    )
+    with pytest.raises(BackendError, match=r"prepare-review exited rc=3: stderr='boom") as excinfo:
+        _default_runtime_caller(_runtime_call(tmp_path, "prepare-review"))
+    assert len(str(excinfo.value)) < 600
 
 
 # Multi-turn: counter increments, workdirs scoped per-turn
@@ -933,7 +949,6 @@ async def test_per_turn_workdirs_are_isolated(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -971,7 +986,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1017,7 +1031,6 @@ def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
 def _bundle_reviewing(action_name: str) -> dict[str, Any]:
     """A judge bundle whose single proposal proposes ``action_name``."""
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1084,7 +1097,7 @@ async def test_a_review_the_rule_cannot_apply_to_is_not_handed_the_rule(
     assert "quantitative_claim_rule" not in constraints
 
 
-# Static context propagation — backend sources model/framework from manifest.json or explicit static_context.
+# Static context propagation — backend sources model/framework from manifest.json.
 def _write_manifest(session_dir: Path, payload: dict[str, Any]) -> Path:
     """Write a minimal manifest.json the backend can ingest."""
     target = session_dir / "manifest.json"
@@ -1117,7 +1130,6 @@ async def test_run_populates_request_context_from_manifest(
         },
     )
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
         "proposals": [
             {
@@ -1161,43 +1173,26 @@ async def test_run_populates_request_context_from_manifest(
 
 
 @pytest.mark.asyncio
-async def test_static_context_override_wins_over_manifest(
+async def test_trace_context_is_stamped_onto_request_context(
     fake_critic_root: Path,
     fake_session_dir: Path,
 ):
-    # Manifest says sglang, but the explicit static_context overrides it.
     _write_manifest(
         fake_session_dir,
-        {
-            "schema_version": 1,
-            "model_name": "ignored-by-test",
-            "framework": "sglang",
-        },
+        {"schema_version": 1, "model_name": "m", "framework": "vllm", "gpu_type": "mi355x"},
     )
-    judge_bundle = {
-        "kind": "coordinator_inbox",
-        "merged_context": {},
-        "proposals": [],
-        "kb_priors_by_proposal": {},
-        "kb_read_skipped_reason": None,
-        "review_constraints": {},
-        "notes": [],
-        "missing_context": [],
-        "required_context": [],
-    }
-    fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
-    backend = CriticAgentBackend(
-        critic_agent_root=fake_critic_root,
-        session_dir=fake_session_dir,
-        codex_client_factory=lambda: FakeOpenAIClient([]),
-        runtime_caller_factory=lambda: fake_caller,
-        static_context={"model": "explicit-m", "framework": "vllm", "gpu_type": "mi355x"},
+    judge_bundle = {"proposals": [], "review_constraints": {}}
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle=judge_bundle,
     )
     backend.set_trace_context(tick=8, phase="FRAMEWORK_AGENT", macro_cycle=3)
     await backend.run("prompt")
     request = json.loads((fake_session_dir / "critic-workdir" / "000000" / "request.json").read_text(encoding="utf-8"))
     assert request["context"] == {
-        "model": "explicit-m",
+        "model": "m",
         "framework": "vllm",
         "gpu_type": "mi355x",
         "phase": "FRAMEWORK_AGENT",
@@ -1213,7 +1208,6 @@ async def test_missing_manifest_falls_back_to_empty_context(
 ):
     # No manifest written: backend must not raise; request.context = {} + a WARNING is logged.
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [],
         "kb_priors_by_proposal": {},
@@ -1287,14 +1281,14 @@ def test_load_static_context_skips_unknown_and_empty_fields(
     assert ctx == {"model": "m", "workload": {"isl": 1024}}
 
 
-# Diagnostic plumbing — required_context surfaces in metadata + log line.
+# Diagnostic plumbing — required_context reaches the recorded judge bundle.
 @pytest.mark.asyncio
-async def test_required_context_surfaces_in_metadata(
+async def test_required_context_reaches_recorded_judge_bundle(
     fake_critic_root: Path,
     fake_session_dir: Path,
+    recorded_iterations: list[Any],
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [
             {
@@ -1324,9 +1318,8 @@ async def test_required_context_surfaces_in_metadata(
         codex_replies=[reply],
         judge_bundle=judge_bundle,
     )
-    res = await backend.run("prompt")
-    assert res.metadata["required_context"] == ["model", "framework"]
-    assert backend.calls[-1]["required_context"] == ["model", "framework"]
+    await backend.run("prompt")
+    assert recorded_iterations[0].judge_bundle["required_context"] == ["model", "framework"]
 
 
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
@@ -1587,7 +1580,6 @@ def test_build_kb_priors_trace_counts_and_reference():
             "requests": [{"msg_id": "p1", "count": 2}],
         },
         "kb_priors_by_proposal": {"p1": [{"slug": "a"}, {"slug": "b"}]},
-        "kb_priors_for_decision": [],
         "kb_read_skipped_reason": None,
     }
     review = {"review_verdicts": [{"verdict": "approve", "kb_evidence": ["k"]}]}
@@ -1602,7 +1594,6 @@ def test_build_kb_priors_trace_carries_skip_reason():
     judge_bundle = {
         "kb_priors_trace": {},
         "kb_priors_by_proposal": {},
-        "kb_priors_for_decision": [],
         "kb_read_skipped_reason": "kb_unreachable",
     }
     trace = CriticAgentBackend._build_kb_priors_trace(judge_bundle, None)
@@ -1612,7 +1603,6 @@ def test_build_kb_priors_trace_carries_skip_reason():
 
 def _kb_trace_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1624,7 +1614,6 @@ def _kb_trace_judge_bundle() -> dict[str, Any]:
             },
         ],
         "kb_priors_by_proposal": {"p1": []},
-        "kb_priors_for_decision": [],
         "kb_priors_trace": {
             "configured": True,
             "mode": "per_proposal",
@@ -1760,7 +1749,6 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "missing_context": [],
         "required_context": [],
@@ -1832,7 +1820,6 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
 
 def _minimal_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
@@ -1874,18 +1861,15 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     def respond(request):
         assert request.url.path == "/v1/messages"
         observed.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-opus-4-8",
-                "content": [{"type": "text", "text": reply}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 20, "output_tokens": 10},
-            },
+        message = {"id": "msg_test", "model": "claude-opus-4-8", "content": [], "usage": {"input_tokens": 20}}
+        events = (
+            {"type": "message_start", "message": message},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}},
+            {"type": "message_stop"},
         )
+        return httpx.Response(200, content="".join(f"data: {json.dumps(event)}\n\n" for event in events).encode())
 
     async def query(*, prompt, options):
         observed.append(prompt)
@@ -1909,7 +1893,6 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     view = {
         key: bundle.get(key)
         for key in (
-            "kind",
             "session_id",
             "decision_id",
             "phase",
@@ -1918,7 +1901,6 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
             "required_context",
             "proposals",
             "kb_priors_by_proposal",
-            "kb_priors_for_decision",
             "kb_read_skipped_reason",
             "review_constraints",
             "notes",
@@ -2212,7 +2194,7 @@ def test_anthropic_protocol_builds_no_review_client(
 
 
 @pytest.mark.asyncio
-async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypatch):
+async def test_max_turns_is_floored_by_the_real_backend(monkeypatch):
     """ClaudeBackend raises a literal max_turns=1 to its floor — Claude Code counts the model's own message as a turn, so 1 trips before any output."""
     from hyperloom.orchestrator.roles import claude as claude_mod
 
@@ -2223,41 +2205,12 @@ async def test_raw_completion_max_turns_is_floored_by_the_real_backend(monkeypat
         raise RuntimeError("stop after options")
 
     monkeypatch.setattr(claude_mod.ClaudeBackend, "_build_options", fake_build_options)
-    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8", raw_completion=True)
+    backend = claude_mod.ClaudeBackend(model="claude-opus-4-8")
     with pytest.raises(Exception):
         await backend.run("prompt", system_prompt="critic system", tools=[], max_turns=1)
 
-    assert seen["max_turns"] == claude_mod._RAW_COMPLETION_MIN_MAX_TURNS
+    assert seen["max_turns"] == claude_mod._MIN_MAX_TURNS
     assert seen["max_turns"] > 1
-
-
-def test_accumulate_anthropic_usage_folds_tokens_and_tolerates_garbage():
-    acc = {"input_tokens": 0, "output_tokens": 0}
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": 3, "output_tokens": 4})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, {"input_tokens": "x", "output_tokens": None})
-    CriticAgentBackend._accumulate_anthropic_usage(acc, None)
-    assert acc["input_tokens"] == 3
-    assert acc["output_tokens"] == 4
-
-
-def test_accumulate_anthropic_usage_keeps_cache_counters_in_their_own_columns():
-    """The judge bundle repeats across turns, so most of the input side arrives as cache reads."""
-    acc = {"input_tokens": 0, "output_tokens": 0}
-    CriticAgentBackend._accumulate_anthropic_usage(
-        acc,
-        {
-            "input_tokens": 12,
-            "cache_read_input_tokens": 4000,
-            "cache_creation_input_tokens": 300,
-            "output_tokens": 500,
-        },
-    )
-    assert acc == {
-        "input_tokens": 12,
-        "output_tokens": 500,
-        "cache_read_input_tokens": 4000,
-        "cache_creation_input_tokens": 300,
-    }
 
 
 @pytest.mark.asyncio
@@ -2319,7 +2272,6 @@ async def test_a_failing_iteration_record_propagates_from_the_turn(
 
     monkeypatch.setattr(critic_out, "record_critic_iteration", _boom)
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "session_id": fake_session_dir.name,
         "proposals": [],
         "review_constraints": {},

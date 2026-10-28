@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,8 @@ from ._kernel_roofline import (
     kernel_roofline_path_for_run,
 )
 from ._trace_inputs import TraceInputs
-from .tracelens_skill_runner import aggregate_by_source_function, tracelens_analysis_mode
+from .tracelens_skill_runner import aggregate_by_source_function
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 log = logging.getLogger(__name__)
 
@@ -226,8 +228,8 @@ def write_reports(
         candidates,
         AuditSubject(
             trace_input=str(Path(args.trace_input).resolve()),
-            framework=str(args.framework or ""),
-            target_platform=str(args.target_platform or ""),
+            framework=args.framework,
+            target_platform=args.target_platform,
         ),
         task_groups=task_groups,
         trace_health_warnings=outcome.health_warnings,
@@ -236,9 +238,7 @@ def write_reports(
     atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
 
     missing_trace_report = existing_report_path is None or not existing_report_path.exists()
-    trace_quality_blocked = any(
-        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (outcome.health_warnings or [])
-    )
+    trace_quality_blocked = any(w.get("code") == "trace_split_no_steady_state" for w in (outcome.health_warnings or []))
     if missing_trace_report:
         if not getattr(args, "dry_run", False):
             if trace_quality_blocked:
@@ -273,75 +273,7 @@ def write_reports(
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline_payload, fmt=JsonFormat(trailing_newline=True))
 
-    # Diffusion / scriptable workload-level roofline: aggregate the per-kernel
-    # roofline into an end-to-end workload roofline. Best-effort sidecar; never
-    # blocks the per-kernel report.
-    diffusion_roofline_path = ""
-    if framework_registry.is_scriptable(getattr(args, "framework", "")):
-        try:
-            from .diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
-            from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
-
-            # Per-step divisor: an operator-declared count wins over the one
-            # inferred from the trace, matching the bypass route.
-            _num_steps = resolve_perstep_divisor(
-                requested_steps=int(getattr(args, "num_denoise_steps", 0) or 0),
-                inferred_steps=count_profiler_steps(getattr(args, "trace_input", "") or ""),
-            )
-            _diff_report = _build_diffusion_roofline(
-                tracelens_dir / "perf_report_csvs",
-                _num_steps,
-                int(getattr(args, "top_k", 10) or 10),
-            )
-            # A-priori analytic compute ceiling (config/safetensors derived),
-            # giving the workload roofline an absolute ideal-ms floor. Best-effort,
-            # and only for frameworks whose denoiser config Hyperloom can read --
-            # the trace-derived totals above need no such config and always ship.
-            if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
-                try:
-                    _model_dir = str(getattr(args, "model_path", "") or "").strip()
-                    if not _model_dir:
-                        _mn = str(getattr(args, "model_name", "") or "").strip()
-                        if _mn:
-                            for _cfg in _candidate_model_config_paths(_mn):
-                                if Path(_cfg).is_file():
-                                    _model_dir = str(Path(_cfg).parent)
-                                    break
-                    if _model_dir and Path(_model_dir).is_dir():
-                        from . import diffusion_flops as _dflops  # noqa: WPS433
-
-                        _gpu = str(getattr(args, "target_platform", "") or "mi355x").strip() or "mi355x"
-                        _prec = str(getattr(args, "precision", "") or "bf16").strip() or "bf16"
-                        _est = _dflops.analytic_ceiling(
-                            _model_dir,
-                            gpu_type=_gpu,
-                            precision=_prec,
-                            num_steps=_num_steps or None,
-                        )
-                        if _est:
-                            _diff_report["analytic_ceiling"] = _est
-                            _actual_us = float(_diff_report.get("totals", {}).get("sigma_actual_kernel_us", 0.0) or 0.0)
-                            if _est.get("ideal_ms") and _actual_us > 0:
-                                _diff_report["analytic_within_pct"] = round(
-                                    _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
-                                )
-                except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
-                    log.warning("diffusion analytic ceiling failed: %s", _exc)
-                    _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
-            out = run_dir / "diffusion_roofline.json"
-            atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
-            diffusion_roofline_path = str(out)
-            print(
-                "[diffusion_roofline] "
-                f"kernel_eff={_diff_report['totals']['kernel_roofline_efficiency']:.3f} "
-                f"gpu_busy_ratio={_diff_report.get('gpu_busy_ratio')} "
-                f"-> {out}"
-            )
-        except FileNotFoundError as exc:
-            print(f"[diffusion_roofline] skipped: {exc}")
-        except Exception as exc:  # noqa: BLE001 - best-effort sidecar
-            log.warning("diffusion roofline sidecar failed: %s", exc)
-            print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
+    diffusion_roofline_path = _write_diffusion_roofline(run_dir, tracelens_dir, args)
 
     artifact_paths = {
         "trace_input_manifest": str(run_dir / "trace_input_manifest.json"),
@@ -355,3 +287,75 @@ def write_reports(
     if diffusion_roofline_path:
         artifact_paths["diffusion_roofline"] = diffusion_roofline_path
     return artifact_paths
+
+
+def _write_diffusion_roofline(run_dir: Path, tracelens_dir: Path, args: argparse.Namespace) -> str:
+    """Write the scriptable workload-level roofline sidecar; return its path, or ``""`` when skipped.
+
+    Aggregates the per-kernel roofline into an end-to-end workload roofline.
+    Best-effort sidecar; never blocks the per-kernel report.
+    """
+    diffusion_roofline_path = ""
+    if not framework_registry.is_scriptable(getattr(args, "framework", "")):
+        return diffusion_roofline_path
+    try:
+        from .diffusion_roofline import build_report as _build_diffusion_roofline  # noqa: WPS433
+        from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
+
+        # Per-step divisor: an operator-declared count wins over the one
+        # inferred from the trace, matching the bypass route.
+        _num_steps = resolve_perstep_divisor(
+            requested_steps=getattr(args, "num_denoise_steps", 0),
+            inferred_steps=count_profiler_steps(args.trace_input),
+        )
+        _diff_report = _build_diffusion_roofline(tracelens_dir / "perf_report_csvs", _num_steps, top_k=10)
+        # Only for frameworks whose denoiser config Hyperloom can read -- the
+        # trace-derived totals above need no such config and always ship.
+        if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
+            _attach_analytic_ceiling(_diff_report, args, _num_steps)
+        out = run_dir / "diffusion_roofline.json"
+        atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
+        diffusion_roofline_path = str(out)
+        print(
+            "[diffusion_roofline] "
+            f"kernel_eff={_diff_report['totals']['kernel_roofline_efficiency']:.3f} "
+            f"gpu_busy_ratio={_diff_report.get('gpu_busy_ratio')} "
+            f"-> {out}"
+        )
+    except FileNotFoundError as exc:
+        print(f"[diffusion_roofline] skipped: {exc}")
+    except (OSError, EOFError, ValueError, csv.Error) as exc:
+        log.warning("diffusion roofline sidecar failed: %s", exc)
+        print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
+    return diffusion_roofline_path
+
+
+def _attach_analytic_ceiling(diff_report: dict[str, Any], args: argparse.Namespace, num_steps: int | None) -> None:
+    """Add the a-priori analytic compute ceiling (config/safetensors derived) to the workload roofline.
+
+    Gives the workload roofline an absolute ideal-ms floor. Best-effort: a failure is recorded on the report.
+    """
+    try:
+        _model_dir = getattr(args, "model_path", "").strip()
+        if not _model_dir:
+            for _cfg in _candidate_model_config_paths(args.model_name):
+                if Path(_cfg).is_file():
+                    _model_dir = str(Path(_cfg).parent)
+                    break
+        if _model_dir and Path(_model_dir).is_dir():
+            from . import diffusion_flops as _dflops  # noqa: WPS433
+
+            _est = _dflops.analytic_ceiling(
+                _model_dir,
+                gpu_type=args.target_platform or "mi355x",
+                precision=getattr(args, "precision", "").strip() or "bf16",
+                num_steps=num_steps,
+            )
+            if _est:
+                diff_report["analytic_ceiling"] = _est
+                _actual_us = diff_report["totals"]["sigma_actual_kernel_us"]
+                if _est.get("ideal_ms") and _actual_us > 0:
+                    diff_report["analytic_within_pct"] = round(_est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2)
+    except Exception as _exc:  # isolation boundary: the analytic ceiling, recorded as analytic_ceiling_error
+        log.warning("diffusion analytic ceiling failed: %s", _exc, exc_info=True)
+        diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"

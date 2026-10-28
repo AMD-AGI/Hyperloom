@@ -38,7 +38,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | moves a call, an export or an assignment relative to another, or adds one that has to run after an existing one: a re-ordered projection, a guard that must see a restored value, a seed that must follow a resolver | T5 P5 D8 V8 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
-| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
+| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
 | touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
@@ -122,7 +122,7 @@ file-shaped row would miss.
 
 **Severity:** blocking
 **Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch.
-**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. `AGENTS.md` already bans new broad catches; this rule is about the narrow ones that still swallow.
+**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. S8 covers the broad ones; this rule is about the narrow ones that still swallow.
 **Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success.
 **Not a finding when:** the suppressed call is genuinely advisory (best-effort telemetry, cache warm) and the caller has an independent signal for the same condition, or the handler logs and re-raises.
 **Evidence:** `$WORK/diff.txt` -- the guarded region, the position of the log, and the caller's use of the return value.
@@ -187,6 +187,16 @@ file-shaped row would miss.
 **Not a finding when:** the producers cannot emit the empty or degenerate value (a schema default, a constructor that raises), or the fallback is still reached by another caller that does not pass through the guard.
 **Evidence:** `$WORK/diff.txt` -- the inserted guard, the fallback below it, and the producer sites in the same diff.
 **Report as:** `S7 <file>:<line> -- new guard makes <fallback> unreachable for <value>`
+
+### S8 -- A broad except must re-raise, or sit at the boundary that owns the failure and record it
+
+**Severity:** blocking
+**Fires when:** the diff adds an `except Exception`, `except BaseException` or bare `except`, or changes what an existing one does with the error.
+**The rule:** a broad handler has one of three shapes. It re-raises -- directly, through a helper that always raises, or by keeping the error and raising it after cleanup. Or it is the outermost handler on its path (a task, thread or process entry, a CLI `main`, a dispatcher tick, an atexit or signal handler, a telemetry sink that must never break its caller) and logs the error with its traceback. Or it isolates one item a loop or tick must survive (one candidate, sweep point, pod, profile) and does all three: logs the error with its traceback, puts the failure in a status or field the caller reads and a legitimate result never carries, and names what it isolates in a comment on the `except` line (`# isolation boundary: one sweep point`; as the `# noqa: BLE001` reason where Ruff still flags the line, which it does not once the handler logs with `exc_info`). Anything else -- a mid-path handler that logs and returns a fallback, a fallback a caller cannot tell from a real result, a handler that records nothing -- is narrowed to what the body raises or removed so the error reaches the boundary that owns it. The `code-metrics` gate refuses an added broad handler that records nothing; whether it sits at the right boundary is this rule's question.
+**Seen in:** PR #2168 -- broad handlers in the KERNEL fusion path swallowed failed `state.json` saves, and others turned errors into plausible return values; 49 of them were narrowed, removed or left to the boundary that records them.
+**Not a finding when:** the handler is only moved or re-indented; it is in a test; it re-raises; or the boundary is named and verified -- nothing above it records the failure, or the caller reads the per-item failure status.
+**Evidence:** `$WORK/diff.txt` -- the try body and the handler, the callers (`rg` the function name), and the status or field the caller reads.
+**Report as:** `S8 <file>:<line> -- broad except <is mid-path | records nothing | falls back to a value indistinguishable from <real result>>; <narrow to <types> | remove so <boundary> records it>`
 
 ---
 
@@ -255,7 +265,7 @@ file-shaped row would miss.
 ### X7 -- An external-component pin moves in all four places at once
 
 **Severity:** blocking
-**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_deps.py`, `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
+**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
 **The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
@@ -775,7 +785,7 @@ backend registration outside `agent_backends/registry.py`; tier, path or schema 
 the code that reads them; a private re-implementation of a `hyperloom.common` helper --
 `common/io.py` (`atomic_write_*`, `safe_mtime`, `append_jsonl`), `common/jsonio.py`
 (`read_json`, `read_jsonl`), `common/timeutil.py` (`now_iso`), `common/proctree.py`
-(`group_alive`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
+(`group_members`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
 second `def` whose body matches an exported one.
 **The rule:** a second home for a concern means two answers to the same question, and the one
 the reader is looking at is not necessarily the one that runs. Import from the owner. If the
@@ -846,17 +856,16 @@ function that reads long is not the same claim. Run the ceiling against the chan
 head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
+  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/' -e 'kb_store/remote_client.py')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise "$WORK/base-<name>.py"
+radon cc -s -n D "$WORK/base-<name>.py"
 ```
 
-`--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
-out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
-outside the tree. Present at head and absent at base, or a higher number at head than at base,
+radon (6.0.1, as the gate pins) counts every `and` / `or`, ternary, comprehension and `assert` as a
+branch, as the gate and the code-health report do; `-n D` lists the functions above 20, and the
+`grep -v` keeps Ruff's `extend-exclude` trees (vendored SDK copies, `src/kernelforge/examples`) out. Present at head and absent at base, or a higher number at head than at base,
 fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
 the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
 question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design
@@ -868,7 +877,7 @@ above 20 when it was introduced, which is the backlog the comparison exists to k
 finding.
 **Not a finding when:** the base number equals the head number (the unit was already over and
 this diff did not grow it); the file is a test, or sits in `extend-exclude`, which
-`--force-exclude` already settles; the added branches are a flat dispatch or validation table
+the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
 **Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
@@ -998,7 +1007,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Severity:** blocking for (i) and (ii) below: blocking by owner decision 2026-10-12 on a 1/1 replay; demote back to advisory on the first confirmed false-positive block (`AGENTS.md` *Code shape*: "A business-agnostic helper that more than one module needs lives in `hyperloom.common` and names no business concept"). Every other shape of this rule is advisory: 1/1 real in a 30-PR replay, 2026-10-11, below the two real findings promotion needs (for a business rule added to a generic utility module, *Clean design*: "A module should read as one job: cohesive inside"). A private copy of a helper `hyperloom.common` already exports is D10's case, reported under D10, not here.
 **Fires when:** blocking: (i) the diff adds, in a business package, a new business-agnostic helper of a kind `hyperloom.common` already hosts (file io beside `common/io.py`, JSON io beside `common/jsonio.py`, process-group handling beside `common/proctree.py`, timestamps beside `common/timeutil.py`); (ii) the diff introduces a business concept -- a framework, model, backend or phase name, constant or import -- into a business-agnostic module: one under `hyperloom/common/` whose existing functions name no business concept (`io.py`, `jsonio.py`, `proctree.py`, `timeutil.py`, `fs_utils.py`, `coerce.py`), or one whose name says utility. A `common` module already named for one business concept (`framework_arm.py`, `llm_config.py`, `model_paths.py`, `workload_defaults.py`) is not one, and adding to its own concept does not fire. Advisory: the diff adds a business rule -- a business constant or threshold, an import of a business module, a function whose job is a business decision (benchmark timeouts, server readiness, recipe or KEEP handling) -- to a module whose name says utility (`*_utils.py`, `io.py`, `jsonio.py`, `timeutil.py`, `proctree.py`, `_subprocess_kill.py`) and whose other functions are generic, so the module now holds two jobs; or adds, in a business package, a second caller-facing copy of a stdlib-only generic helper (atomic write, JSON io, stat, hashing, process group, retry, timestamp, truncation) that has no owner yet.
 **The rule:** code that would read the same in any project is a utility, and a utility has one home, `hyperloom.common`, for both `hyperloom` and `kernelforge`. A generic helper that gets its second caller moves there, not beside the first caller, because a utility parked in an upper-layer business package forces every lower-layer reuser into an upward import (A2). The converse holds too: once a module named for a mechanism also knows benchmark timeouts and server-log markers, it is a business module with a misleading name, and lower layers that need the business half end up importing a "utility" module from the orchestrator. Lift the generic half into `common`, and give the business half a module named for its job, at the lowest layer that needs it.
-**Seen in:** PR #1611 -- "move the unified-diff parser out of the framework agent ... The canonical location is now common/ since the module has no framework-agent imports" (`common/unified_diff.py`). PR #1655 -- "common/github_urls.py: new module with public repo_slug() extracted from sources/_shared._repo_slug. The function was a pure GitHub-URL parser with no dependency on the PR-source backend layer". `orchestrator/actions/executors/_subprocess_kill.py` -- named for process killing, it holds `_subprocess_kill.py::new_session_kwargs`, `::_process_group_alive` and `::_signal_group` next to `::resolve_benchmark_timeouts`, `::server_log_death_excerpt` and `::stamp_server_ready`, and imports `_subprocess_kill.py::parse_server_log_throughput` from `.bypass_analysis`. `inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics` and `inference_optimizer/cli/__init__.py::_run_optimize` import the business function `resolve_benchmark_timeouts` upward out of it. PR #1348 (`orchestrator/kernel/gemm_shape_coverage.py::_safe_mtime`) and PR #1408 (`orchestrator/kernel/controller_submit.py::_read_json`) added copies beside `common/io.py::safe_mtime` and `common/jsonio.py::read_json` -- the D10 half, cited to show the drift this rule prevents.
+**Seen in:** PR #1611 -- "move the unified-diff parser out of the framework agent ... The canonical location is now common/ since the module has no framework-agent imports" (`common/unified_diff.py`). PR #1655 -- "common/github_urls.py: new module with public repo_slug() extracted from sources/_shared._repo_slug. The function was a pure GitHub-URL parser with no dependency on the PR-source backend layer". `orchestrator/actions/executors/_subprocess_kill.py` -- named for process killing, it holds `_subprocess_kill.py::kill_my_spawned_server` next to `::resolve_benchmark_timeouts`, `::server_log_death_excerpt` and `::stamp_server_ready`, and imports `_subprocess_kill.py::parse_server_log_throughput` from `.bypass_analysis`. `inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics` and `inference_optimizer/cli/__init__.py::_run_optimize` import the business function `resolve_benchmark_timeouts` upward out of it. PR #1348 (`orchestrator/kernel/gemm_shape_coverage.py::_safe_mtime`) and PR #1408 (`orchestrator/kernel/controller_submit.py::_read_json`) added copies beside `common/io.py::safe_mtime` and `common/jsonio.py::read_json` -- the D10 half, cited to show the drift this rule prevents.
 **Not a finding when:** the helper must run standalone on a remote node or be injected as source text (`multi_node/scripts/`, `assets/host_probe/`, patcher payloads); the local version has a different contract and its name says so (`orchestrator/actions/executors/_magpie_patcher.py::atomic_write_text` adds a log prefix and returns bool); the helper's semantics depend on business constants; it is a private three-line helper with a single caller and no `common` equivalent; the module is named for one business mechanism and every function serves it (`enablement/runtime/build_utils.py`); the business word appears only in a message or docstring.
 **Evidence:** `$WORK/diff.txt` for the added function or import; `git grep` over `src/hyperloom/common` for an existing export of the same shape; the module's other importers for which layer needs it.
 **Report as:** `A3 <file>:<line> -- <generic helper|business code> in <utility|business> module <module>; move <name> to <common module|module named for its job>`
@@ -1219,8 +1228,9 @@ reviewed around the markers.
 **Seen in:** PR #703 -- at head `7881d481` only `Analyze (python)` passed and ReadTheDocs
 failed, while the `Tests with Coverage` and `Lint` successes belonged to older heads and did
 not cover the later `apply_and_bench` rewrite.
-**Not a finding when:** the unreported workflows are path-filtered out by the doc-only
-`paths-ignore` contract and the diff is genuinely doc-only.
+**Not a finding when:** the diff is genuinely doc-only and the missing runs are the ones the
+doc-only contract in CONTRIBUTING.md skips (CodeQL does not start; the test shards and the
+non-ruff lint jobs are skipped while `coverage (Python 3.x)` and `ruff` still report).
 **Evidence:** `$WORK/ci.txt` for the check runs and their head, `$WORK/meta.txt` for
 `mergeable`, `$WORK/commits.txt` for what landed after the last green run.
 **Report as:** `V5: <check> passed at <old sha>, current head is <sha>; <what landed since>

@@ -225,8 +225,8 @@ async def run_port_loop(
                 if integrity_error := restore_integrity(sink):
                     log.warning("port attempt %d restored protected inputs after timeout: %s", attempt, integrity_error)
                 raise _ReserveReached(attempt, _RESERVE_REACHED) from None
-            except Exception as e:  # noqa: BLE001 - a session crash is one failed attempt
-                log.warning("port attempt %d: agent session error: %s", attempt, e)
+            except Exception as e:  # isolation boundary: one PORT agent attempt
+                log.warning("port attempt %d: agent session error: %s", attempt, e, exc_info=True)
                 integrity_error = restore_integrity(sink)
                 history = f"Previous attempt crashed the session: {e}\n"
                 if integrity_error:

@@ -10,14 +10,13 @@ the ledger is uploaded to Langfuse, and ``conversations.jsonl`` already owns ful
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from .parse_usage import _summarize_tool_input
+from .parse_usage import _summarize_tool_input, iter_json_events
 from .trajectory_trace import (
     EVENT_TOOL,
     STATUS_CANCELLED,
@@ -25,8 +24,6 @@ from .trajectory_trace import (
     STATUS_FAILED,
     record_event,
 )
-
-log = logging.getLogger(__name__)
 
 _ERROR_PREVIEW_CHARS = 240
 
@@ -95,57 +92,45 @@ def stream_json_tool_events(log_path: str | Path) -> list[dict[str, Any]]:
     """Pair ``tool_use`` blocks with their ``tool_result`` blocks in a Claude CLI stream-json log, in call order."""
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    try:
-        with Path(log_path).open("r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                if not isinstance(obj, dict) or obj.get("type") not in ("assistant", "user"):
-                    continue
-                message = obj.get("message")
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_use" and block.get("id") and block.get("name"):
-                        tool_use_id = str(block["id"])
-                        if tool_use_id not in calls:
-                            order.append(tool_use_id)
-                        calls[tool_use_id] = {
-                            "name": str(block["name"]),
-                            "tool_use_id": tool_use_id,
-                            "tool_input": block.get("input"),
-                            "message_id": message.get("id"),
-                            "parent_tool_use_id": obj.get("parent_tool_use_id"),
-                        }
-                    elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
-                        call = calls[str(block["tool_use_id"])]
-                        call["result_seen"] = True
-                        call["result_content"] = block.get("content")
-                        call["is_error"] = block.get("is_error")
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        log.warning("tool_events: failed reading stream-json log %s: %r", log_path, exc)
-        return []
+    for obj in iter_json_events(log_path, "stream-json"):
+        if obj.get("type") not in ("assistant", "user"):
+            continue
+        message = obj.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("id") and block.get("name"):
+                tool_use_id = str(block["id"])
+                if tool_use_id not in calls:
+                    order.append(tool_use_id)
+                calls[tool_use_id] = {
+                    "name": str(block["name"]),
+                    "tool_use_id": tool_use_id,
+                    "tool_input": block.get("input"),
+                    "message_id": message.get("id"),
+                    "parent_tool_use_id": obj.get("parent_tool_use_id"),
+                }
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
+                call = calls[str(block["tool_use_id"])]
+                call["result_seen"] = True
+                call["result_content"] = block.get("content")
+                call["is_error"] = block.get("is_error")
     return [calls[tool_use_id] for tool_use_id in order]
 
 
-def record_stream_json_tools(log_path: str | Path) -> int:
-    """Put every tool call of a finished stream-json log on the trajectory; returns how many rows were written.
+def record_stream_json_tools(log_path: str | Path) -> None:
+    """Put every tool call of a finished stream-json log on the trajectory.
 
     The log has no per-line timestamps, so these rows are untimed (``timing_source="none"``).
     """
-    written = 0
     for call in stream_json_tool_events(log_path):
         result_seen = bool(call.get("result_seen"))
-        span_id = record_event(
+        record_event(
             EVENT_TOOL,
             status=tool_status(result_seen=result_seen, is_error=call.get("is_error")),
             attributes=tool_attributes(
@@ -162,8 +147,6 @@ def record_stream_json_tools(log_path: str | Path) -> int:
                 timing_source=TIMING_NONE,
             ),
         )
-        written += span_id is not None
-    return written
 
 
 __all__ = [

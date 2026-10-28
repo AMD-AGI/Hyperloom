@@ -556,7 +556,7 @@ class SpecialistAgent:
                 message=f"{type(error).__name__}: {error}",
                 probe_setup=probe_setup,
             )
-        except Exception as error:
+        except Exception as error:  # isolation boundary: one specialist assignment
             log.exception(
                 "specialist %s failed unexpectedly",
                 assignment.role_id,

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from kernelforge.loop.experiments_layout import ExperimentsLayout, tagged_iteration
 from kernelforge.tools.durable_io import atomic_write_text
 
 
@@ -78,11 +79,12 @@ class HandoffStore:
 
     def __init__(self, workspace_dir: str) -> None:
         self.workspace = Path(workspace_dir).resolve()
-        self.root = self.workspace / "forge_experiments" / "handoffs"
+        self._layout = ExperimentsLayout.of(self.workspace)
+        self.root = self._layout.handoffs
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}.json"
+        return self._layout.handoff(iteration)
 
     @staticmethod
     def _without_timestamp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -167,11 +169,11 @@ class HandoffStore:
 
     def latest(self) -> tuple[Path, dict[str, Any]] | None:
         """Return the latest complete handoff."""
-        for path in sorted(self.root.glob("iter_*.json"), reverse=True):
-            stem = path.stem.removeprefix("iter_")
-            if not stem.isdigit():
+        for path in sorted(self.root.glob("*.json"), reverse=True):
+            iteration = tagged_iteration(path.stem)
+            if iteration is None:
                 continue
-            payload = self.read(int(stem))
+            payload = self.read(iteration)
             if payload:
                 return path, payload
         return None

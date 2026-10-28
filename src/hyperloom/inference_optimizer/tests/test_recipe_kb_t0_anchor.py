@@ -16,19 +16,23 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
     _donor_is_trustworthy,
     _experience_rows,
+    T0AnchorRequest,
     _warm_recipe_source,
     run_t0_anchor,
 )
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
+    RecipeUpsert,
     LocalRecipeStore,
+    LocalRecipeStoreError,
     RecipeKB,
     recipe_canonical_id,
 )
 
 
-def test_warm_recipe_source_is_local_recipe_kb() -> None:
-    assert _warm_recipe_source({}, kb=object()) == "recipe-kb"
-    assert _warm_recipe_source(None, kb=object()) == "recipe-kb"
+def test_warm_recipe_source_is_local_recipe_kb(kb: RecipeKB) -> None:
+    assert _warm_recipe_source(kb=object()) == "recipe-kb"
+    assert _warm_recipe_source(kb=kb) == "local-json"
 
 
 def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
@@ -92,11 +96,13 @@ def kb(tmp_path: Path) -> RecipeKB:
 
 def _expected_cid(state: _FakeSharedState, workload: str, hw: str) -> str:
     return recipe_canonical_id(
-        model=workload,
-        hardware=hw,
-        framework_name=state.framework_name,
-        framework_version=state.framework_version,
-        precision=state.precision,
+        RecipeIdentity(
+            model=workload,
+            hardware=hw,
+            framework_name=state.framework_name,
+            framework_version=state.framework_version,
+            precision=state.precision,
+        )
     )
 
 
@@ -110,18 +116,18 @@ def test_t0_anchor_accepts_legacy_framework_extra_attr(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework": "sglang"}),
         session_dir=session_dir,
     )
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.5.11",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.5.11",
+            precision="fp8",
+        )
     )
     assert kb.local.get_recipe(canonical_id=cid) is not None
     assert "unknown_framework" not in state.warm_start_recipe.get("workload", "")
@@ -137,14 +143,16 @@ def test_t0_anchor_writes_recipe_row_with_arbor_schema(
     run_t0_anchor(
         kb,
         state,
-        workload="DeepSeek-R1",
-        hw="MI300X",
-        image_digest="img-sha-abc",
-        stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
-        extra_attrs={
-            "framework_name": "sglang",
-            "model_class": "moe",
-        },
+        T0AnchorRequest(
+            workload="DeepSeek-R1",
+            hw="MI300X",
+            image_digest="img-sha-abc",
+            stack_fingerprint={"vllm": "0.6.0", "rocm": "7.2", "aiter": "abc1234"},
+            extra_attrs={
+                "framework_name": "sglang",
+                "model_class": "moe",
+            },
+        ),
         session_dir=session_dir,
     )
     cid = _expected_cid(state, "DeepSeek-R1", "MI300X")
@@ -168,15 +176,40 @@ def test_t0_anchor_sets_warm_start_recipe_on_state(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     # Bare T0 anchor row is classified seed_only/conf 0.0 (not actionable).
     assert state.warm_start_recipe.get("tier") == "seed_only"
     assert state.warm_start_recipe.get("confidence") == 0.0
     assert state.warm_start_context.get("status") == "seed_only"
+
+
+def test_t0_anchor_closes_its_warm_start_event_failed_when_the_lookup_raises(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising lookup still propagates, and its event names the exception instead of being left open."""
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+
+    def _broken_lookup(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("kb offline")
+
+    monkeypatch.setattr(recipe_kb_t0, "_warm_start_lookup", _broken_lookup)
+    with session_scope(session_dir), pytest.raises(RuntimeError, match="kb offline"):
+        run_t0_anchor(
+            kb,
+            _FakeSharedState(),
+            T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
+            session_dir=session_dir,
+        )
+
+    (event,) = [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_start"]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
 
 
 # warm-start surfacing pitfalls / lessons embedded in the recipe row
@@ -188,22 +221,22 @@ def test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row(
     state = _FakeSharedState()
     cid = _expected_cid(state, "M", "MI300X")
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        pitfalls=[{"description": "watch for X"}],
-        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            pitfalls=[{"description": "watch for X"}],
+            lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     run_t0_anchor(
         kb,
         state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     assert len(state.warm_start_pitfalls) == 1
@@ -234,14 +267,16 @@ def test_t0_anchor_drops_an_unparseable_row_on_disk_and_says_so(
     state = _FakeSharedState()
     cid = _expected_cid(state, "M", "MI300X")
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        lessons=[{"statement": "placeholder", "measured_impact": "+1%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            lessons=[{"statement": "placeholder", "measured_impact": "+1%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     recipe_path = next((tmp_path / "kb").rglob("recipe.json"))
     row = json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -252,9 +287,7 @@ def test_t0_anchor_drops_an_unparseable_row_on_disk_and_says_so(
         run_t0_anchor(
             kb,
             state,
-            workload="M",
-            hw="MI300X",
-            extra_attrs={"framework_name": "sglang"},
+            T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
             session_dir=session_dir,
         )
     assert state.warm_start_lessons == []
@@ -317,9 +350,7 @@ def test_t0_anchor_no_prior_recipe_means_warm_miss(
     run_t0_anchor(
         kb,
         state,
-        workload="cold-model",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="cold-model", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     assert state.warm_start_pitfalls == []
@@ -339,11 +370,8 @@ def test_t0_anchor_short_circuits_when_already_anchored(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}, resume=False),
         session_dir=session_dir,
-        resume=False,
     )
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is None
@@ -361,11 +389,8 @@ def test_t0_anchor_resume_does_not_short_circuit(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}, resume=True),
         session_dir=session_dir,
-        resume=True,
     )
     cid = _expected_cid(state, "m", "mi300x")
     assert kb.get_recipe(canonical_id=cid) is not None
@@ -380,9 +405,7 @@ def test_t0_anchor_uses_existing_recipe_kb_session_id_when_present(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     assert state.recipe_kb_session_id == "prior-sid-from-resume"
@@ -397,9 +420,7 @@ def test_t0_anchor_falls_back_to_session_dir_basename_for_sid(
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     assert state.recipe_kb_session_id == session_dir.name
@@ -414,26 +435,32 @@ def test_t0_anchor_preserves_existing_best_config_on_metadata_stamp(
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"tp": "16", "ep": "8"},
-        best_throughput=12345.6,
-        sessions=[
-            {"date": "2026-05-25", "throughput_before": 1.0, "throughput_after": 12345.6, "actions_taken": ["tp+ep"]}
-        ],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_config={"tp": "16", "ep": "8"},
+            best_throughput=12345.6,
+            sessions=[
+                {
+                    "date": "2026-05-25",
+                    "throughput_before": 1.0,
+                    "throughput_after": 12345.6,
+                    "actions_taken": ["tp+ep"],
+                }
+            ],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        image_digest="new-img-digest",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(
+            workload="m", hw="mi300x", image_digest="new-img-digest", extra_attrs={"framework_name": "sglang"}
+        ),
         session_dir=session_dir,
     )
     after = kb.get_recipe(canonical_id=cid)
@@ -452,21 +479,21 @@ def test_t0_anchor_increments_version_on_existing_row(
     state = _FakeSharedState()
     cid = _expected_cid(state, "m", "mi300x")
     kb.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="mi300x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="mi300x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
     assert kb.get_recipe(canonical_id=cid)["version"] == 1  # type: ignore[index]
     run_t0_anchor(
         kb,
         state,
-        workload="m",
-        hw="mi300x",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="m", hw="mi300x", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
     after = kb.get_recipe(canonical_id=cid)
@@ -480,21 +507,7 @@ def test_t0_anchor_tolerates_missing_extra_attrs(
     session_dir: Path,
 ) -> None:
     state = _FakeSharedState()
-    run_t0_anchor(
-        kb,
-        state,
-        workload="m",
-        hw="mi300x",
-        session_dir=session_dir,
-    )
-
-
-def test_t0_anchor_requires_explicit_session_dir(
-    kb: RecipeKB,
-) -> None:
-    state = _FakeSharedState()
-    with pytest.raises(ValueError):
-        run_t0_anchor(kb, state, workload="m", hw="mi300x")
+    run_t0_anchor(kb, state, T0AnchorRequest(workload="m", hw="mi300x"), session_dir=session_dir)
 
 
 # _cascade_warm_start_search: the L1-L4 warm-start tier resolution.
@@ -511,18 +524,20 @@ _ACTIONABLE = {
 class _FakeKB:
     """Minimal KB double exposing only get_recipe + search."""
 
-    def __init__(self, *, get_result=None, search_by_labels=None, get_raises=False):
+    def __init__(self, *, get_result=None, search_by_labels=None, raises=""):
         self._get_result = get_result
         self._search = search_by_labels or []
-        self._get_raises = get_raises
+        self._raises = raises
         self.search_calls: list[dict] = []
 
-    def get_recipe(self, *, canonical_id, prefer=None):
-        if self._get_raises:
-            raise RuntimeError("boom")
+    def get_recipe(self, *, canonical_id):
+        if self._raises == "get_recipe":
+            raise LocalRecipeStoreError("failed to read recipe.json")
         return self._get_result
 
     def search(self, *, label_match, limit=5):
+        if self._raises == "search":
+            raise LocalRecipeStoreError("failed to read recipe.json")
         self.search_calls.append(dict(label_match))
         # Pop the next queued result list per search invocation.
         if self._search:
@@ -544,16 +559,15 @@ def _cascade(kb, cid="CID:target"):
             "precision": "fp8",
         },
         shape={},
-        warm_prefer=None,
     )
 
 
-def test_cascade_l1_get_recipe_exception_is_swallowed():
-    # A raising get_recipe degrades to search-based tiers, not a crash.
-    kb = _FakeKB(get_raises=True, search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]])
-    point, tier, conf = _cascade(kb)
-    assert tier == "same_arch_class"
-    assert conf == 0.95
+@pytest.mark.parametrize("failing", ["get_recipe", "search"])
+def test_cascade_kb_read_failure_is_not_a_warm_start_miss(failing: str) -> None:
+    # A KB that cannot be read must not read as a miss or fall through to a weaker tier's donor.
+    kb = _FakeKB(raises=failing, search_by_labels=[[{"canonical_id": "CID:l2", **_ACTIONABLE}]])
+    with pytest.raises(LocalRecipeStoreError, match="failed to read recipe.json"):
+        _cascade(kb)
 
 
 def test_cascade_l2_skips_same_cid_and_nonactionable():
@@ -602,9 +616,7 @@ def test_t0_anchor_records_its_own_lookup_as_a_timeline_event(
         run_t0_anchor(
             kb,
             state,
-            workload="DeepSeek-R1",
-            hw="MI300X",
-            extra_attrs={"framework_name": "sglang"},
+            T0AnchorRequest(workload="DeepSeek-R1", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
             session_dir=session_dir,
         )
 
@@ -631,9 +643,7 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
         run_t0_anchor(
             kb,
             state,
-            workload="DeepSeek-R1",
-            hw="MI300X",
-            extra_attrs={"framework_name": "sglang"},
+            T0AnchorRequest(workload="DeepSeek-R1", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
             session_dir=session_dir,
         )
         cid = _expected_cid(state, "DeepSeek-R1", "mi300x")
@@ -664,16 +674,18 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
 def _seed_actionable_row(kb: RecipeKB, cid: str) -> None:
     """Seed a row carrying a replayable config plus priors, under one exact identity."""
     kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"extra_server_args": "--from-an-spx-pod"},
-        pitfalls=[{"description": "watch for X"}],
-        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
-        provenance={"source": "seed", "generator": "ut"},
+        RecipeUpsert(
+            canonical_id=cid,
+            model="M",
+            hardware="MI300X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+            best_config={"extra_server_args": "--from-an-spx-pod"},
+            pitfalls=[{"description": "watch for X"}],
+            lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
+            provenance={"source": "seed", "generator": "ut"},
+        )
     )
 
 
@@ -690,9 +702,7 @@ def test_a_partitioned_pod_does_not_reach_a_whole_card_row_at_all(
     run_t0_anchor(
         kb,
         state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
 
@@ -715,9 +725,7 @@ def test_a_whole_card_pod_still_reaches_the_row_it_recorded(
     run_t0_anchor(
         kb,
         state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
 
@@ -739,12 +747,37 @@ def test_spx_is_not_a_different_machine_from_an_unrecorded_mode(
     run_t0_anchor(
         kb,
         state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
+        T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
         session_dir=session_dir,
     )
 
     assert state.warm_start_recipe["hw"] == "MI300X"
     assert state.warm_start_recipe["tier"] == "exact"
     assert state.warm_start_recipe["confidence"] == 1.0
+
+
+def test_t0_anchor_failed_authority_read_leaves_the_live_row_unchanged(
+    kb: RecipeKB,
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stamp replaces the whole row, so a read it could not make must not be written back as an empty row."""
+    state = _FakeSharedState()
+    cid = _expected_cid(state, "M", "MI300X")
+    _seed_actionable_row(kb, cid)
+    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
+    before = kb.local.get_recipe(canonical_id=cid)
+
+    def _unreadable(**_kwargs: Any) -> None:
+        raise LocalRecipeStoreError("failed to read recipe.json")
+
+    monkeypatch.setattr(kb, "get_authoritative_recipe", _unreadable)
+    with pytest.raises(LocalRecipeStoreError, match="failed to read recipe.json"):
+        run_t0_anchor(
+            kb,
+            state,
+            T0AnchorRequest(workload="M", hw="MI300X", extra_attrs={"framework_name": "sglang"}),
+            session_dir=session_dir,
+        )
+
+    assert kb.local.get_recipe(canonical_id=cid) == before

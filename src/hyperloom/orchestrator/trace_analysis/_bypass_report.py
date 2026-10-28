@@ -35,9 +35,6 @@ from ._task_group_contract import (
     legacy_operator_identity_keys,
     operator_identity_key,
 )
-from hyperloom.common.kernel_shape_contract import (
-    DISPATCHABLE_SHAPE_PROVENANCE as _DISPATCHABLE_SHAPE_PROVENANCE,
-)
 
 # Category-appropriate optimization guidance (structured, not LLM prose).
 _ACTION_BY_CATEGORY: dict[str, str] = {
@@ -57,6 +54,8 @@ _ACTION_BY_CATEGORY: dict[str, str] = {
 }
 
 _UNKNOWN_BOUND = "\u2014"  # em dash "unknown bound" marker.
+# Shape provenances read out of the trace, which the kernel-opt dispatch gate accepts.
+_DISPATCHABLE_SHAPE_PROVENANCE = frozenset({"torch_trace", "capture_backfill"})
 _REUSABLE_BACKENDS = ["forge", "geak"]
 
 # Bound-type display prefixes for the (deterministic) per-kernel suggestion.
@@ -979,36 +978,34 @@ def build_workload_roofline_totals(
         if dur <= 0:
             continue
         sigma_actual += dur
-        kc = classify_kernel(k.get("name", "") or "", op_name=k.get("op_name", "") or "")
-        _count = k.get("count") or 0
+        kc = classify_kernel(k.get("name", ""), op_name=k.get("op_name", ""))
+        _count = k.get("count")
         # Match the candidate-side waterfall for dispatch-grade shapes: own cpu_op dims, then the same-name
         # capture-time backfill.
-        shape_entries = _trace_shape_entries(k.get("op_shapes") or [], k.get("op_dtypes") or [], _count)
+        shape_entries = _trace_shape_entries(k.get("op_shapes"), k.get("op_dtypes"), _count)
         if not shape_entries:
-            shape_entries = _trace_shape_entries(k.get("backfill_shapes") or [], k.get("backfill_dtypes") or [], _count)
+            shape_entries = _trace_shape_entries(k.get("backfill_shapes"), k.get("backfill_dtypes"), _count)
         rl = (
             compute_roofline(
                 KernelAggregate(
                     category=kc.category,
-                    shape_str=shape_entries[0]["shape"] if shape_entries else "",
+                    shape_str=shape_entries[0]["shape"],
                     gpu_time_us=dur,
-                    call_count=int(k.get("count") or 1),
+                    call_count=_count,
                 ),
                 gpu_type=target_platform,
             )
             if shape_entries
             else None
         )
-        attain = rl.get("roofline_attainment_pct") if rl else None
-        if rl and isinstance(attain, (int, float)) and attain > 0:
+        # compute_roofline sets the attainment only when numeric, and bound_type is compute_bound or memory_bound.
+        attain = rl.get("roofline_attainment_pct", 0.0) if rl else 0.0
+        if rl and attain > 0:
             sigma_ideal += dur * (float(attain) / 100.0)
-            bound = str(rl.get("bound_type") or "").upper()
-            if "COMPUTE" in bound:
+            if rl["bound_type"] == "compute_bound":
                 compute_us += dur
-            elif "MEMORY" in bound:
-                memory_us += dur
             else:
-                no_model_us += dur
+                memory_us += dur
         else:
             no_model_us += dur
     kernel_eff = (sigma_ideal / sigma_actual) if sigma_actual > 0 else 0.0

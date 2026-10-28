@@ -9,11 +9,14 @@ import time
 import pytest
 
 from hyperloom.common.coerce import (
+    dict_rows,
     first_float,
     first_int,
     first_str,
+    optional_positive_float,
     optional_positive_int,
     recorded_float,
+    text_or_none,
     to_float,
     to_int,
     to_list,
@@ -162,6 +165,21 @@ class TestOptionalPositiveInt:
         assert optional_positive_int(0, default=1) == 1
 
 
+class TestOptionalPositiveFloat:
+    @pytest.mark.parametrize("value,expected", [(5, 5.0), (2.5, 2.5), ("5", 5.0), (" 0.25 ", 0.25)])
+    def test_positive(self, value, expected):
+        assert optional_positive_float(value) == expected
+
+    @pytest.mark.parametrize(
+        "value", [0, 0.0, -1.5, "0", "-2", None, True, False, "x", "", math.inf, -math.inf, math.nan, "inf"]
+    )
+    def test_non_positive_non_finite_or_invalid_to_default(self, value):
+        assert optional_positive_float(value) is None
+
+    def test_custom_default(self):
+        assert optional_positive_float(0, default=1.0) == 1.0
+
+
 class TestToUnix:
     def test_numeric_epoch(self):
         assert to_unix(1_700_000_000) == 1_700_000_000.0
@@ -247,3 +265,27 @@ class TestToList:
     def test_non_sequence_is_empty(self):
         for value in (None, {}, 42, object()):
             assert to_list(value) == []
+
+
+class TestTextOrNone:
+    def test_none_stays_none(self):
+        assert text_or_none(None) is None
+
+    def test_blank_reads_as_none(self):
+        assert text_or_none("   ") is None
+
+    def test_stripped(self):
+        assert text_or_none("  hi  ") == "hi"
+
+    def test_scalar_coerced(self):
+        assert text_or_none(42) == "42"
+
+
+class TestDictRows:
+    def test_keeps_only_dict_entries_in_order(self):
+        first, second = {"a": 1}, {"b": 2}
+        assert dict_rows([first, "x", None, second]) == [first, second]
+
+    def test_non_list_is_empty(self):
+        for value in (None, {"a": 1}, ({"a": 1},), "ab"):
+            assert dict_rows(value) == []

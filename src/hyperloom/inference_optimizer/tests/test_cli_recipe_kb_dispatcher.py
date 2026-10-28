@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import pytest
@@ -31,15 +30,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
         "KNOWLEDGE_STORE_MODE",
     ):
         monkeypatch.delenv(key, raising=False)
-
-
-def _ns(**overrides: object) -> argparse.Namespace:
-    """Build a Namespace with the KB-related fields the helpers read; per-test overrides win."""
-    fields: dict[str, object] = {
-        "degraded_kb": False,
-    }
-    fields.update(overrides)
-    return argparse.Namespace(**fields)  # type: ignore[arg-type]
 
 
 def test_default_local_root_is_user_data_path_knowledge(
@@ -77,19 +67,10 @@ def test_build_dispatcher_returns_recipe_kb(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    args = _ns()
-    kb = _build_recipe_kb_dispatcher(args)
+    kb = _build_recipe_kb_dispatcher()
     assert isinstance(kb, RecipeKB)
     assert isinstance(kb.local, LocalRecipeStore)
     assert kb.local.root == tmp_path
-
-
-def test_build_dispatcher_no_remote_when_degraded_kb(
-    env_clean: None,
-) -> None:
-    """``--degraded-kb`` short-circuits remote regardless of configuration."""
-    args = _ns(degraded_kb=True)
-    assert _build_recipe_kb_dispatcher(args) is None
 
 
 def test_build_dispatcher_is_local_without_remote_credentials(
@@ -99,8 +80,7 @@ def test_build_dispatcher_is_local_without_remote_credentials(
 ) -> None:
     """Local mode wires only the local store."""
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    args = _ns()
-    kb = _build_recipe_kb_dispatcher(args)
+    kb = _build_recipe_kb_dispatcher()
     assert kb.mode == "local"
 
 
@@ -114,8 +94,7 @@ def test_build_dispatcher_remote_returns_none(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    args = _ns()
-    kb = _build_recipe_kb_dispatcher(args)
+    kb = _build_recipe_kb_dispatcher()
     assert kb is None
 
 
@@ -124,11 +103,10 @@ def test_build_dispatcher_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Two builds with the same args produce equivalent but distinct dispatchers (no shared mutable state)."""
+    """Two builds produce equivalent but distinct dispatchers (no shared mutable state)."""
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
-    args = _ns()
-    a = _build_recipe_kb_dispatcher(args)
-    b = _build_recipe_kb_dispatcher(args)
+    a = _build_recipe_kb_dispatcher()
+    b = _build_recipe_kb_dispatcher()
     assert a is not b
     assert a.local.root == b.local.root
     assert a.mode == b.mode == "local"

@@ -163,7 +163,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     from hyperloom.common.llm_config import (
         claude_sdk_env_options,
         derive_openai_base_url,
-        resolve_openai_client_config,
     )
     from hyperloom.common.llm_headers import parse_custom_headers
 
@@ -177,20 +176,6 @@ def test_llm_config_parse_and_derive_edges() -> None:
     assert derive_openai_base_url("https://gw.example/Unified") == "https://gw.example/Unified/v1"
     assert derive_openai_base_url("https://gw.example/custom") == "https://gw.example/custom"
 
-    cfg = resolve_openai_client_config(
-        api_key_env="CUSTOM_KEY",
-        base_url_env="CUSTOM_BASE",
-        env={
-            "CUSTOM_KEY": " key ",
-            "CUSTOM_BASE": " https://base.example/v1 ",
-            "OPENAI_CUSTOM_HEADERS": '{"X-Trace": " 1 "}',
-        },
-    )
-    assert cfg.as_kwargs() == {
-        "api_key": "key",
-        "base_url": "https://base.example/v1",
-        "default_headers": {"X-Trace": "1"},
-    }
     assert claude_sdk_env_options(env={}) == {}
 
 
@@ -408,7 +393,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
 # inference_optimizer.cli.multi_node / multi_node commands
 
 
-def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_multi_node_backend_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
@@ -417,30 +402,6 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(SystemExit) as exc:
         mn._resolve_mn_backend(argparse.Namespace(mn_backend=None))
     assert exc.value.code == 2
-
-    session = tmp_path / "sess"
-    ws = session / "kernel-agent-workspace" / "attempt"
-    ws.mkdir(parents=True)
-    patch_path = ws / "change.patch"
-    patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
-    (ws / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "target_file": "/remote/x.py",
-                "patch_path": str(patch_path),
-                "kernel_id": "kernel-a",
-                "multinode": {"backup_dir_on_pod": "/backups"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (ws / "bad.json").write_text("{", encoding="utf-8")
-    calls: list[list[str]] = []
-    monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
-    monkeypatch.setattr(mn.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Completed(returncode=0))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-    assert calls and calls[0][1:5] == ["-m", "hyperloom", "multi-node", "apply-patch"]
 
 
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:
@@ -998,60 +959,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
     assert inf.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
 
 
-def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as mn
-
-    session = tmp_path / "sess"
-    monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=1))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-    ws = session / "kernel-agent-workspace"
-    (ws / "empty").mkdir(parents=True)
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-    manifests = ws / "attempt"
-    manifests.mkdir()
-    (manifests / "manifest.json").write_text("{bad", encoding="utf-8")
-    (manifests / "skip_status" / "manifest.json").parent.mkdir()
-    (manifests / "skip_status" / "manifest.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
-    (manifests / "skip_mn" / "manifest.json").parent.mkdir()
-    (manifests / "skip_mn" / "manifest.json").write_text(json.dumps({"status": "applied"}), encoding="utf-8")
-    (manifests / "skip_fields" / "manifest.json").parent.mkdir()
-    (manifests / "skip_fields" / "manifest.json").write_text(
-        json.dumps({"status": "applied", "multinode": {"backup_dir_on_pod": "/b"}}), encoding="utf-8"
-    )
-    (manifests / "missing_patch" / "manifest.json").parent.mkdir()
-    (manifests / "missing_patch" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "multinode": {"backup_dir_on_pod": "/b"},
-                "target_file": "/x",
-                "patch_path": str(tmp_path / "missing.diff"),
-            }
-        ),
-        encoding="utf-8",
-    )
-    patch = tmp_path / "p.diff"
-    patch.write_text("diff", encoding="utf-8")
-    (manifests / "failed" / "manifest.json").parent.mkdir()
-    (manifests / "failed" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "multinode": {"backup_dir_on_pod": "/b"},
-                "target_file": "/x",
-                "patch_path": str(patch),
-                "kernel_id": "k",
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(mn.subprocess, "run", lambda *a, **kw: _Completed(returncode=5, stderr="failed patch"))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-
 # agents.framework helpers
 
 
@@ -1061,7 +968,7 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     from hyperloom.common.env import EnvValueError
 
     repo_url = "https://github.com/sgl-project/sglang.git"
-    candidate = Candidate(ref="PR:42", repo=repo_url)
+    candidate = Candidate(ref="PR:42")
     assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
     assert isolation.checkout_ref(candidate.ref) == "refs/pull/42/head"
     assert isolation.checkout_ref("main") == "main"
@@ -1084,7 +991,7 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert isolation.prepare_repo_cache(repo_url, tmp_path) == repo_dir
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
 
-    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main", repo=repo_url))
+    isolation._fetch_candidate_ref(repo_dir, Candidate(ref="main"))
     assert git_calls[-1][0] == ["git", "fetch", "--all", "--tags", "--prune"]
     isolation._fetch_candidate_ref(repo_dir, candidate)
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
@@ -1136,55 +1043,6 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(base.random, "uniform", lambda _lo, _hi: 0.25)
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25
-
-
-# orchestrator.roles._runtime_bridge
-
-
-def test_runtime_bridge_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    def fake_run(cmd, **kwargs):
-        raise rb.subprocess.TimeoutExpired(cmd=cmd, timeout=5.0)
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run)
-    call = rb.RuntimeCall(
-        phase="prepare-review",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="critic", timeout_sec=5.0)
-
-
-def test_runtime_bridge_not_found_and_nonzero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    call = rb.RuntimeCall(
-        phase="tick",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-
-    def fake_run_missing(cmd, **kwargs):
-        raise FileNotFoundError("python gone")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_missing)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
-
-    def fake_run_rc(cmd, **kwargs):
-        return SimpleNamespace(returncode=3, stderr="boom")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_rc)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
 
 
 # orchestrator.state.objective
@@ -1515,14 +1373,3 @@ def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
     assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
-
-
-# orchestrator.bus.gpu_pool._parse_gpu_list
-
-
-def test_parse_gpu_list() -> None:
-    from hyperloom.orchestrator.bus.gpu_pool import _parse_gpu_list
-
-    assert _parse_gpu_list("0, 1 ; 2, x, 1, -3") == [0, 1, 2]
-    assert _parse_gpu_list("") == []
-    assert _parse_gpu_list(None) == []  # type: ignore[arg-type]

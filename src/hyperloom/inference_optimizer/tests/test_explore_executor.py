@@ -21,10 +21,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    apply_compatibility_filter,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridVariant
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -33,30 +31,29 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
+    restates_the_baseline_launch,
 )
-from hyperloom.orchestrator.actions.executors._launch_restatement import (
-    config_launch_restated_by,
-    restates_the_baseline,
-)
+from hyperloom.orchestrator.actions.executors._launch_restatement import Launch, launch_change, named_settings
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 from .conftest import make_coordinator
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 def _eval_off(value: object) -> bool:
@@ -137,7 +134,7 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, flo
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     runner = SubAgentRunner(locks, tr)
     yield runner, tr, tmp_path
@@ -195,19 +192,13 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
         encoding="utf-8",
     )
-    kwargs = {
-        "framework": "sglang",
-        "base_yaml_path": base_yaml,
-        "base_extra_args": "",
-        "base_extra_envs": {},
-        "base_remove_args": [],
-        "base_unset_envs": [],
-        "base_args_mode": "append",
-        "model_path": None,
-        "gpu_type": None,
-        "benchmark_script": None,
-    }
+    kwargs = {"base_yaml_path": base_yaml}
     kwargs.update(overrides)
+    kwargs["recipe"] = GridRecipe(
+        base_yaml_path=kwargs.pop("base_yaml_path"),
+        base=LaunchLayer(extra_server_args="", extra_envs={}, remove_args=[], unset_envs=[], args_mode="append"),
+        target=BenchmarkTarget(model_path=None, gpu_type=None, benchmark_script=None),
+    )
     kwargs["observed"] = (
         kwargs.pop("observed_server_config", _stack_config()),
         kwargs.pop("observed_server_env", _stack_env()),
@@ -288,19 +279,70 @@ def test_variant_that_is_not_known_to_be_the_stack_is_kept(tmp_path, variant, ov
     assert dropped == []
 
 
-def test_a_removal_is_never_a_restatement_of_the_stack(tmp_path):
-    """chaojhou 3: the materialized config cannot show a subtraction, so it must not read as a noop.
-
-    ``unset_envs`` also pops the process env at run time, which the probe's
-    YAML never sees; ``remove_args`` leaves no trace in the merged argv.
-    """
+def test_a_removal_changes_the_launch_only_when_the_stack_passes_what_it_removes(tmp_path):
+    """The materialized argv shows a removal; an unset also pops the process env, which no config shows."""
     grid = [
-        GridVariant("removes-an-arg", remove_args=["--enable-dp-attention"]),
+        GridVariant("removes-a-passed-arg", remove_args=["--mem-fraction-static"]),
+        GridVariant("removes-an-absent-arg", remove_args=["--enable-dp-attention"]),
         GridVariant("unsets-an-env", unset_envs=["HIP_FORCE_DEV_KERNARG"]),
     ]
     kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
-    assert [gv.name for gv in kept] == ["removes-an-arg", "unsets-an-env"]
-    assert dropped == []
+    assert [gv.name for gv in kept] == ["removes-a-passed-arg", "unsets-an-env"]
+    assert dropped == [("removes-an-absent-arg", "launches the server the stack already runs (baseline noop)")]
+
+
+def test_a_row_claiming_a_revalidation_provenance_is_still_judged(tmp_path):
+    """Only a stack revalidation round is exempt; a grid row's own provenance cannot buy it a measurement."""
+    variant = _variant(_RESTATES_ARGV)
+    variant.provenance = "geak_revalidate"  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_noop_filter_kwargs(tmp_path))
+    assert kept == []
+    assert dropped == [(_CANDIDATE, "launches the server the stack already runs (baseline noop)")]
+
+
+def _agentx_noop_filter_kwargs(tmp_path: Path) -> dict:
+    workload = tmp_path / "agentx.yaml"
+    workload.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical"},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    kwargs = _noop_filter_kwargs(
+        tmp_path, observed_server_config={"kv_cache_dtype": "fp8", "max_running_requests": 512}
+    )
+    kwargs["recipe"] = GridRecipe(
+        base_yaml_path=workload,
+        base=LaunchLayer(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"}),
+        target=BenchmarkTarget(model_path=None, gpu_type=None, benchmark_script=None),
+    )
+    return kwargs
+
+
+def test_an_agentx_variant_is_judged_on_its_launch_overrides(tmp_path):
+    """AgentX carries the server argv in ``launch_overrides``, not in ``benchmark.envs``."""
+    grid = [
+        GridVariant("restates-the-stack-arg", "--kv-cache-dtype fp8"),
+        GridVariant("restates-the-engine-default", "--max-running-requests 512"),
+        GridVariant("restates-the-stack-env", extra_envs={"SGLANG_TEST": "1"}),
+        GridVariant("changes-an-arg", "--chunked-prefill-size 2048"),
+        GridVariant("changes-an-env", extra_envs={"SGLANG_TEST": "0"}),
+        GridVariant("removes-a-recipe-arg", remove_args=["--disable-radix-cache"]),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_agentx_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["changes-an-arg", "changes-an-env", "removes-a-recipe-arg"]
+    assert [name for name, _ in dropped] == [
+        "restates-the-stack-arg",
+        "restates-the-engine-default",
+        "restates-the-stack-env",
+    ]
 
 
 def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
@@ -321,11 +363,11 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
         f"{ {'mem_fraction_static': 0.9, 'max_running_requests': 512, 'dp_size': 8}!r}\n",
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    evidence = build_launch_evidence(RequestedLaunch(config, "sglang"), actual_server_log=str(log), slot=tmp_path)
     assert evidence["observed_server_launch_flags"] == ""
     assert evidence["observed_server_config"]["max_running_requests"] == 512
     # The env is stamped from the recipe; the argv key holds the launch command, not an env value.
-    assert evidence["observed_server_env"] == _RECIPE_ENV
+    assert evidence["requested_server_env"] == _RECIPE_ENV
 
     # chaojhou 4: last_baseline is an attempt entry that never carries launch_evidence,
     # so a stack with no current best is unknown rather than read from it.
@@ -334,6 +376,7 @@ def test_the_engines_own_record_is_what_makes_the_filter_fire(tmp_path):
 
     state = SimpleNamespace(current_best_measurement={"launch_evidence": evidence})
     observed_config, observed_env = observed_launch_from_state(state)
+    assert observed_env == _RECIPE_ENV
     kwargs = _noop_filter_kwargs(tmp_path, observed_server_config=observed_config, observed_server_env=observed_env)
 
     _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
@@ -367,7 +410,7 @@ def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
         f"[2026-09-18 19:11:50] server_args={record!r}\n",
         encoding="utf-8",
     )
-    evidence = build_launch_evidence(config_path=config, actual_server_log=str(log), framework="sglang", slot=tmp_path)
+    evidence = build_launch_evidence(RequestedLaunch(config, "sglang"), actual_server_log=str(log), slot=tmp_path)
     assert evidence["engine_adjusted_settings"] == {"chunked_prefill_size": {"requested": "65536", "resolved": "8192"}}
 
     for engine_report in (evidence["engine_adjusted_settings"], {}):
@@ -406,7 +449,6 @@ def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
     )
     return _noop_filter_kwargs(
         tmp_path,
-        framework="vllm",
         base_yaml_path=base_yaml,
         observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
         observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
@@ -453,16 +495,29 @@ def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
     assert dropped == []
 
 
-def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
-    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+def _vllm_baseline_state(tmp_path: Path, base_argv: str = _VLLM_BASE_ARGV, **envs: object) -> SimpleNamespace:
     config = tmp_path / "baseline.yaml"
     config.write_text(
-        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", **envs, "EXTRA_VLLM_ARGS": base_argv},
+                }
+            }
+        ),
         encoding="utf-8",
     )
-    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
-    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
-    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+    return SimpleNamespace(baseline_config_path=str(config), current_best_measurement={})
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    state = _vllm_baseline_state(tmp_path, FOO=None)
+    assert restates_the_baseline_launch(state, "", {"FOO": "None"}) is False
+    assert restates_the_baseline_launch(state, "--kv-cache-dtype fp8", {}) is True
+    missing = SimpleNamespace(baseline_config_path=str(tmp_path / "missing.yaml"), current_best_measurement={})
+    assert restates_the_baseline_launch(missing, "--kv-cache-dtype fp8", {}) is False
 
 
 @pytest.mark.parametrize(
@@ -471,33 +526,71 @@ def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
         pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
         pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
-        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, True, id="empty_request"),
         pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
         pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
         pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
         pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
         pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
         pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param("--no-enable-prefix-caching", {}, _VLLM_BASE_ARGV, False, id="negates_a_baseline_flag"),
         pytest.param(
             "--enable-prefix-caching",
             {},
             "--enable-prefix-caching --no-enable-prefix-caching",
-            False,
-            id="negated_spelling_in_the_baseline",
+            True,
+            id="dedupe_keeps_the_negation_last",
         ),
         pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
         pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
     ],
 )
-def test_restates_the_baseline(argv, envs, base_argv, expected):
-    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
-    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
+def test_restates_the_baseline_launch(tmp_path, argv, envs, base_argv, expected):
+    """Only a request that leaves the materialized launch as it was restates it; anything unreadable does not."""
+    assert restates_the_baseline_launch(_vllm_baseline_state(tmp_path, base_argv), argv, envs) is expected
+
+
+def test_the_baseline_observation_counts_only_for_the_config_it_was_made_on(tmp_path):
+    """``--max-num-seqs 256`` is the observed engine default, but only on the launch that was observed."""
+    state = _vllm_baseline_state(tmp_path)
+    observed = {"launch_evidence": {"observed_server_config": {"max_num_seqs": 64, "block_size": 16}}}
+    state.current_best_measurement = observed
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is False
+    observed["launch_evidence"]["materialized_config_path"] = state.baseline_config_path
+    assert restates_the_baseline_launch(state, "--block-size 16", {}) is True
+
+
+def test_named_settings_resolve_like_the_engine():
+    """The last spelling of a boolean flag wins, negated or not; an argv it cannot account for raises."""
+    assert named_settings("--enable-prefix-caching --no-enable-prefix-caching", "vllm") == {
+        "enable_prefix_caching": ["false"]
+    }
+    assert named_settings("--no-enable-prefix-caching --enable-prefix-caching", "vllm") == {"enable_prefix_caching": []}
+    for argv in ("fp8 --kv-cache-dtype fp8", "--kv-cache-dtype 'fp8"):
+        with pytest.raises(ValueError):
+            named_settings(argv, "vllm")
+
+
+def test_launch_change_names_every_change_and_discounts_what_the_server_resolved():
+    base = Launch({"enable_x": [], "kv_cache_dtype": ["fp8"]}, {"A": "1"}, {"unset_envs": []})
+    launch = Launch({"enable_x": ["false"], "block_size": ["128"]}, {"B": "2"}, {"unset_envs": ["C"]})
+    assert launch_change(base, launch, ({}, {})) == {
+        "settings": {"enable_x": ["false"], "block_size": ["128"]},
+        "removed": ["kv_cache_dtype"],
+        "envs": {"B": "2"},
+        "unset_envs": ["A"],
+        "controls": ["unset_envs"],
+    }
+    same_server = Launch({**base.settings, "block_size": ["128"], "enable_y": ["false"]}, {"A": "1", "B": "2"}, {})
+    observed = ({"block_size": 128, "no_enable_y": True}, {"B": "2"})
+    assert launch_change(Launch(base.settings, base.envs, {}), same_server, observed) == {}
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
         "name": "vllm_kv_fp8",
+        "fingerprint": "cc" * 8,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {},
         "output_throughput": 1500.0,
@@ -507,7 +600,6 @@ def test_record_explore_accepted_dedup_by_fingerprint():
     state.record_explore_accepted(variant)
     state.record_explore_accepted(variant)
     assert len(state.explore_search["accepted"]) == 1
-    assert len(state.explore_search["winners_history"]) == 2
 
 
 def test_apply_explore_search_update_preserves_accepted():
@@ -523,7 +615,6 @@ def test_apply_explore_search_update_preserves_accepted():
     # Update arrives with tested/rejected but NOT accepted; the bucket survives the merge.
     state.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "bb" * 8: {
                     "name": "b",
@@ -539,7 +630,6 @@ def test_apply_explore_search_update_preserves_accepted():
                     "reason": "not_keep",
                 }
             ],
-            "name_index": {"b": "bb" * 8},
             "cursor": 1,
             "last_round": {"round_id": "explore-001"},
         }
@@ -552,10 +642,8 @@ def test_apply_explore_search_update_preserves_accepted():
 def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
     """One round's worth of executor ledger writes."""
     return {
-        "schema_version": 1,
         "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
         "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
-        "name_index": {name: fingerprint},
         "last_round": {"round_id": f"explore-{round_no:03d}"},
     }
 
@@ -569,7 +657,6 @@ def test_apply_explore_search_update_accumulates_across_rounds():
     search = state.explore_search
     assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
     assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
-    assert search["name_index"] == {"a": "aa" * 8, "b": "bb" * 8}
 
 
 def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
@@ -647,15 +734,17 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
             "provenance": "llm_direct",
         },
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-        },
-        idempotency_key="ex-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": grid,
+            },
+            idempotency_key="ex-1",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -683,7 +772,9 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert rejected_provenance == {"llm_direct"}
 
 
-async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited=""):
+async def _explore_on_an_observed_fp8_stack(
+    sub_agent_runner, tmp_path, monkeypatch, grid, tputs, inherited="", **params
+):
     """Run one explore round whose stack was observed launching with ``--kv-cache-dtype fp8``."""
     sub, tr, _ = sub_agent_runner
     _force_cold_decision(monkeypatch)
@@ -706,10 +797,18 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
         _fake_workspace(slot, tput=tputs[name])
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={"config_path": str(base), "output_dir": str(tmp_path / "out"), "base_tput": 800.0, "grid": grid},
-        idempotency_key="ex-noop-stack",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "out"),
+                "base_tput": 800.0,
+                "grid": grid,
+                **params,
+            },
+            idempotency_key="ex-noop-stack",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -718,6 +817,76 @@ async def _explore_on_an_observed_fp8_stack(sub_agent_runner, tmp_path, monkeypa
     ):
         res = await sub.run_task(task)
     return res.result, launched
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_runs_although_it_restates_the_stack(sub_agent_runner, tmp_path, monkeypatch):
+    """A stack revalidation exists to re-measure the stack, so restating it is the point."""
+    grid = [{"name": "stack_revalidate", "extra_args": "--kv-cache-dtype fp8", "provenance": "stack_revalidate"}]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner, tmp_path, monkeypatch, grid, {"stack_revalidate": 800.0}, source="stack_revalidate"
+    )
+
+    assert launched == ["stack_revalidate"]
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_rows_that_launch_the_same_server_are_benched_once(sub_agent_runner, tmp_path, monkeypatch):
+    """Restating the stack's fp8 beside the same change launches the server the first row already measured."""
+    grid = [
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256", "extra_envs": {}},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256", "extra_envs": {}},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        grid,
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+
+    assert launched == ["v_seqs"]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8_seqs", "round_dup")]
+
+
+@pytest.mark.asyncio
+async def test_rows_answered_without_measuring_leave_the_proposal_queue(sub_agent_runner, tmp_path, monkeypatch):
+    """Restatements and duplicates are decided, so the auto-bench queue moves on to the proposal behind them."""
+    proposals = [
+        {"name": "v_noop_a", "extra_args": "--max-running-requests 512"},
+        {"name": "v_noop_b", "extra_args": "--kv-cache-dtype fp8"},
+        {"name": "v_seqs", "extra_args": "--max-num-seqs 256"},
+        {"name": "v_fp8_seqs", "extra_args": "--kv-cache-dtype fp8 --max-num-seqs 256"},
+        {"name": "v_lpm", "extra_args": "--schedule-policy lpm"},
+    ]
+    out, launched = await _explore_on_an_observed_fp8_stack(
+        sub_agent_runner,
+        tmp_path,
+        monkeypatch,
+        [{**row, "extra_envs": {}} for row in proposals[:4]],
+        {"v_seqs": 800.4, "v_fp8_seqs": 800.4},
+        inherited="--kv-cache-dtype fp8",
+    )
+    assert launched == ["v_seqs"]
+    tested = out["explore_search_update"]["tested"]
+    seqs_fp = next(fp for fp, row in tested.items() if row["name"] == "v_seqs")
+    skipped = {
+        row["name"]: (row["outcome"], row["reason"], row.get("duplicate_of", ""))
+        for row in tested.values()
+        if row["outcome"] == "SKIPPED_DEDUP"
+    }
+    assert skipped == {
+        "v_noop_a": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_noop_b": ("SKIPPED_DEDUP", "baseline_noop", ""),
+        "v_fp8_seqs": ("SKIPPED_DEDUP", "round_dup", seqs_fp),
+    }
+
+    state = SharedState()
+    state.specialist_rounds = [{"task_id": "s1", "domain": "serving_specialist", "cycle": 0, "proposal_set": proposals}]
+    state.apply_explore_search_update(out["explore_search_update"])
+    assert [row["name"] for row in state.untested_proposal_rows()] == ["v_lpm"]
 
 
 @pytest.mark.asyncio
@@ -756,7 +925,8 @@ async def test_a_variant_that_is_the_stack_is_skipped_while_the_stack_has_not_mo
     assert launched == ["v_revert"]
     noop = {sd["name"] for sd in out["skipped_dup"] if sd.get("reason") == "baseline_noop"}
     assert noop == {"v_noop_first", "v_noop_after"}
-    assert {row["name"] for row in out["explore_search_update"]["tested"].values()} == {"v_revert"}
+    outcomes = {row["name"]: row["outcome"] for row in out["explore_search_update"]["tested"].values()}
+    assert outcomes == {"v_noop_first": "SKIPPED_DEDUP", "v_revert": "REVERT", "v_noop_after": "SKIPPED_DEDUP"}
 
 
 @pytest.mark.asyncio
@@ -855,7 +1025,10 @@ async def test_a_restatement_left_leading_by_the_skip_list_is_skipped_at_its_tur
 async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_to_replace_mode(
     sub_agent_runner, tmp_path, monkeypatch
 ):
-    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag."""
+    """A KEEP that removes a flag persists the stack's launched args in replace mode, which moves only that flag.
+
+    ``fp8`` then launches the server ``v_drop`` just measured, so it is that round's duplicate.
+    """
     grid = [
         {
             "name": "v_drop",
@@ -877,7 +1050,7 @@ async def test_a_restatement_stays_skipped_after_a_keep_that_switches_the_stack_
     assert launched == ["v_drop"]
     (keep,) = out["winners"]
     assert keep["args_mode"] == "replace"
-    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "round_dup")]
 
 
 @pytest.mark.asyncio
@@ -975,6 +1148,32 @@ async def test_a_round_of_measured_and_restated_variants_is_answered_not_failed(
 
 
 @pytest.mark.asyncio
+async def test_a_skip_never_replaces_a_measured_ledger_row(sub_agent_runner, tmp_path, monkeypatch):
+    """fp8 measured before the stack was observed running it; restating it later leaves the measurement in place."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.observed_launch_from_state",
+        lambda _state: (dict(observed), {}),
+    )
+    grid = [{"name": "v_fp8", "extra_args": "--kv-cache-dtype fp8"}]
+    await _run_explore_round(sub, tr, tmp_path, state, key="round-1", grid=grid, base_args="", bench_calls=[])
+    measured = dict(state.explore_search["tested"])
+    assert [row["outcome"] for row in measured.values()] == ["REVERT"]
+
+    observed["kv_cache_dtype"] = "fp8"
+    out = await _run_explore_round(sub, tr, tmp_path, state, key="round-2", grid=grid, base_args="", bench_calls=[])
+
+    assert [(sd["name"], sd["reason"]) for sd in out["skipped_dup"]] == [("v_fp8", "baseline_noop")]
+    assert out["explore_search_update"]["tested"] == {}
+    assert state.explore_search["tested"] == measured
+
+
+@pytest.mark.asyncio
 async def test_restatements_left_leading_by_a_filter_are_dropped_before_the_serving_lease(
     sub_agent_runner, tmp_path, monkeypatch
 ):
@@ -1066,18 +1265,20 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
     fingerprint = canonical_fingerprint("--test-flag", {})
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "axis-rejection"),
-            "base_tput": 110.0,
-            "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
-            "source": "stack_revalidate",
-            "geak_fallback": True,
-            "expected_cfg_hash": fingerprint,
-        },
-        idempotency_key="geak-axis-rejection",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "axis-rejection"),
+                "base_tput": 110.0,
+                "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
+                "source": "stack_revalidate",
+                "geak_fallback": True,
+                "expected_cfg_hash": fingerprint,
+            },
+            idempotency_key="geak-axis-rejection",
+        ),
     )
     state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
@@ -1178,15 +1379,17 @@ async def test_explore_missing_axes_fails_closed(
         _fake_workspace(slot, tput=output, perf_axes=candidate_axes)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-missing-axes"),
-            "base_tput": base_tput,
-            "grid": [{"name": "v_incomplete", "extra_args": "--incomplete-flag"}],
-        },
-        idempotency_key="ex-missing-axes",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-missing-axes"),
+                "base_tput": base_tput,
+                "grid": [{"name": "v_incomplete", "extra_args": "--incomplete-flag"}],
+            },
+            idempotency_key="ex-missing-axes",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1206,7 +1409,6 @@ async def test_explore_missing_axes_fails_closed(
     assert out["winners"] == []
     assert out["best_variant"] is None
     assert out["output_throughput"] is None
-    assert out["running_base_tput"] == base_tput
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
@@ -1255,15 +1457,17 @@ async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-guard-revert"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
-        },
-        idempotency_key="ex-guard-revert",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-guard-revert"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
+            },
+            idempotency_key="ex-guard-revert",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1344,19 +1548,21 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
         _fake_workspace(slot, tput=output, perf_axes=axes)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-anchor-sequence"),
-            "base_tput": 200.0,
-            "grid": [
-                {"name": "v_good", "extra_args": "--good-flag"},
-                {"name": "v_incomplete", "extra_args": "--incomplete-flag"},
-                {"name": "v_next", "extra_args": "--next-flag"},
-            ],
-        },
-        idempotency_key="ex-anchor-sequence",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-anchor-sequence"),
+                "base_tput": 200.0,
+                "grid": [
+                    {"name": "v_good", "extra_args": "--good-flag"},
+                    {"name": "v_incomplete", "extra_args": "--incomplete-flag"},
+                    {"name": "v_next", "extra_args": "--next-flag"},
+                ],
+            },
+            idempotency_key="ex-anchor-sequence",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1390,7 +1596,7 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    assert out["output_throughput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
     # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
     # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
     for row in (*out["winners"], tested["v_good"]):
@@ -1442,15 +1648,17 @@ async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner,
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-promote"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
-        },
-        idempotency_key="ex-promote",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-promote"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
+            },
+            idempotency_key="ex-promote",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1502,15 +1710,17 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         _fake_workspace(slot, tput=output, perf_axes={})
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-output-mode"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_output", "extra_args": "--output-flag"}],
-        },
-        idempotency_key="ex-output-mode",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-output-mode"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_output", "extra_args": "--output-flag"}],
+            },
+            idempotency_key="ex-output-mode",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1531,7 +1741,7 @@ async def test_explore_required_axes_output_modes_keep_legacy_behavior(
         assert tested["gain_pct"] is None
         assert out["losers"][0]["reason"] == "gain_below_threshold"
     assert bool(out["winners"]) is (expected_outcome == "KEEP")
-    assert out["running_base_tput"] == (output if expected_outcome == "KEEP" else 200.0)
+    assert out["output_throughput"] == (output if expected_outcome == "KEEP" else None)
 
 
 @pytest.mark.asyncio
@@ -1562,16 +1772,18 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
             "provenance": "llm_direct",
         }
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "accuracy_baseline": 0.80,
-            "grid": grid,
-        },
-        idempotency_key="ex-acc-revert",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "accuracy_baseline": 0.80,
+                "grid": grid,
+            },
+            idempotency_key="ex-acc-revert",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1620,23 +1832,25 @@ async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_a
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     extra_args = '--online_quant_config {"global_quant_config":"ptpc_fp8"}'
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-uncatalogued"),
-            "base_tput": 800.0,
-            "accuracy_baseline": 0.80,
-            "grid": [
-                {
-                    "name": "v_quant",
-                    "extra_args": extra_args,
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-uncatalogued-acc",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-uncatalogued"),
+                "base_tput": 800.0,
+                "accuracy_baseline": 0.80,
+                "grid": [
+                    {
+                        "name": "v_quant",
+                        "extra_args": extra_args,
+                        "extra_envs": {},
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-uncatalogued-acc",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1669,22 +1883,24 @@ async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-shared-acc"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_risky",
-                    "extra_args": "--attention-backend ROCM_AITER_FA",
-                    "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-shared-acc",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-shared-acc"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_risky",
+                        "extra_args": "--attention-backend ROCM_AITER_FA",
+                        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-shared-acc",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1720,23 +1936,25 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
             stderr="",
         )
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-out"),
-            "base_tput": 800.0,
-            "base_extra_args": "--bad-base 1 --keep-base 2",
-            "grid": [
-                {
-                    "name": "remove_bad_base",
-                    "extra_args": "--variant 4",
-                    "remove_args": ["--bad-base"],
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-remove-keep",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-out"),
+                "base_tput": 800.0,
+                "base_extra_args": "--bad-base 1 --keep-base 2",
+                "grid": [
+                    {
+                        "name": "remove_bad_base",
+                        "extra_args": "--variant 4",
+                        "remove_args": ["--bad-base"],
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-remove-keep",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1787,15 +2005,17 @@ async def test_explore_executor_recovers_base_tput_from_shared_state(
             "provenance": "default_grid",
         }
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            # base_tput intentionally omitted to exercise SharedState recovery.
-            "grid": grid,
-        },
-        idempotency_key="ex-base-tput-recovery",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                # base_tput intentionally omitted to exercise SharedState recovery.
+                "grid": grid,
+            },
+            idempotency_key="ex-base-tput-recovery",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1839,25 +2059,27 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
         _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_keep",
-                    "extra_args": "--keep-flag",
-                    "extra_envs": {},
-                    "remove_args": ["--old-flag"],
-                    "unset_envs": ["OLD_ENV"],
-                    "args_mode": "replace",
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-verdict-carry",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_keep",
+                        "extra_args": "--keep-flag",
+                        "extra_envs": {},
+                        "remove_args": ["--old-flag"],
+                        "unset_envs": ["OLD_ENV"],
+                        "args_mode": "replace",
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-verdict-carry",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1921,14 +2143,16 @@ async def test_explore_executor_prefers_current_best_over_baseline_for_recovery(
             "provenance": "default_grid",
         }
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "grid": grid,
-        },
-        idempotency_key="ex-cb-recovery",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "grid": grid,
+            },
+            idempotency_key="ex-cb-recovery",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -1992,17 +2216,19 @@ async def test_explore_executor_supersedes_stale_params_base_tput(
             "provenance": "specialist:research_scout",
         }
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            # Snapshotted when the task was queued, before the warm replay landed.
-            "base_tput": 2192.52,
-            "grid": grid,
-            **({"source": source} if source else {}),
-        },
-        idempotency_key="ex-stale-anchor",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                # Snapshotted when the task was queued, before the warm replay landed.
+                "base_tput": 2192.52,
+                "grid": grid,
+                **({"source": source} if source else {}),
+            },
+            idempotency_key="ex-stale-anchor",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2045,24 +2271,26 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
         _fake_workspace(Path(cmd[out_idx + 1]), tput=1100.0)  # +10% vs the live 1000
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-live-base"),
-            # Snapshotted together at dispatch, before the newer layer landed.
-            "base_tput": 800.0,
-            "base_extra_args": "--stale-layer 1",
-            "grid": [
-                {
-                    "name": "on_live_stack",
-                    "extra_args": "--variant 2",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-live-base-args",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-live-base"),
+                # Snapshotted together at dispatch, before the newer layer landed.
+                "base_tput": 800.0,
+                "base_extra_args": "--stale-layer 1",
+                "grid": [
+                    {
+                        "name": "on_live_stack",
+                        "extra_args": "--variant 2",
+                        "extra_envs": {},
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-live-base-args",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2113,29 +2341,30 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
         # Exact same-grid duplicate of v_prior_revert — collapsed to round_dup.
         {"name": "v_same_again", "extra_args": "--dup-flag", "extra_envs": {}, "provenance": "llm_direct"},
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "explore_search": {
-                "tested": {
-                    fp_dup: {
-                        "fingerprint": fp_dup,
-                        "name": "previous_run_name",
-                        "extra_server_args": "--dup-flag",
-                        "extra_envs": {},
-                        "outcome": "REVERT",
-                    }
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": grid,
+                "explore_search": {
+                    "tested": {
+                        fp_dup: {
+                            "fingerprint": fp_dup,
+                            "name": "previous_run_name",
+                            "extra_server_args": "--dup-flag",
+                            "extra_envs": {},
+                            "outcome": "REVERT",
+                        }
+                    },
+                    "rejected": [],
+                    "accepted": [],
                 },
-                "rejected": [],
-                "accepted": [],
-                "name_index": {},
             },
-        },
-        idempotency_key="ex-dedup",
+            idempotency_key="ex-dedup",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2180,24 +2409,26 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "warm_keep",
-                    "extra_args": "--warm-flag",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-            "baseline_runtime_sec": 10.0,
-            "baseline_warm_runtime_sec": 5.0,
-        },
-        idempotency_key="ex-warm",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "warm_keep",
+                        "extra_args": "--warm-flag",
+                        "extra_envs": {},
+                        "provenance": "llm_direct",
+                    }
+                ],
+                "baseline_runtime_sec": 10.0,
+                "baseline_warm_runtime_sec": 5.0,
+            },
+            idempotency_key="ex-warm",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2249,24 +2480,26 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "noeval_keep",
-                    "extra_args": "--warm-flag",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-            "baseline_runtime_sec": 10.0,
-            "baseline_warm_runtime_sec": 5.0,
-        },
-        idempotency_key="ex-noeval",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "noeval_keep",
+                        "extra_args": "--warm-flag",
+                        "extra_envs": {},
+                        "provenance": "llm_direct",
+                    }
+                ],
+                "baseline_runtime_sec": 10.0,
+                "baseline_warm_runtime_sec": 5.0,
+            },
+            idempotency_key="ex-noeval",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2303,23 +2536,25 @@ async def test_explore_cold_decision_keeps_eval(
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "cold_keep",
-                    "extra_args": "--cold-flag",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-            "baseline_runtime_sec": 10.0,
-        },
-        idempotency_key="ex-coldeval",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "cold_keep",
+                        "extra_args": "--cold-flag",
+                        "extra_envs": {},
+                        "provenance": "llm_direct",
+                    }
+                ],
+                "baseline_runtime_sec": 10.0,
+            },
+            idempotency_key="ex-coldeval",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2355,16 +2590,18 @@ async def test_explore_decision_stays_cold_when_the_session_skips_the_double_run
         _fake_workspace(slot, tput=920.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-singleround"),
-            "base_tput": 800.0,
-            "baseline_double_run": False,
-            "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
-        },
-        idempotency_key="ex-no-double-run",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-singleround"),
+                "base_tput": 800.0,
+                "baseline_double_run": False,
+                "grid": [{"name": "v", "extra_args": "--flag", "extra_envs": {}, "provenance": "llm_direct"}],
+            },
+            idempotency_key="ex-no-double-run",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2397,23 +2634,25 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
         # Warmup boot fails (nonzero) — no workspace written.
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "warmfail",
-                    "extra_args": "--warmfail-flag",
-                    "extra_envs": {},
-                    "reasoning": "Test whether this launch flag enables the scheduler fast path.",
-                    "provenance": "llm_direct",
-                }
-            ],
-        },
-        idempotency_key="ex-warmfail",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "warmfail",
+                        "extra_args": "--warmfail-flag",
+                        "extra_envs": {},
+                        "reasoning": "Test whether this launch flag enables the scheduler fast path.",
+                        "provenance": "llm_direct",
+                    }
+                ],
+            },
+            idempotency_key="ex-warmfail",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2454,7 +2693,7 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
     received_deadlines: list[float | None] = []
 
     def _fake_kill(cmd, *args, **kwargs):
-        received_deadlines.append(kwargs.get("silence_timeout_sec"))
+        received_deadlines.append(kwargs["watch"].silence_timeout_sec)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _fake_workspace(slot, tput=820.0)  # +2.5% KEEP
@@ -2465,23 +2704,25 @@ async def test_explore_executor_overtime_disabled_when_ratio_zero(
             stderr="",
         )
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "fast_variant",
-                    "extra_args": "--fast-flag",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "baseline_runtime_sec": 10.0,
-        },
-        idempotency_key="ex-overtime-off",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "fast_variant",
+                        "extra_args": "--fast-flag",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    }
+                ],
+                "baseline_runtime_sec": 10.0,
+            },
+            idempotency_key="ex-overtime-off",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2522,28 +2763,30 @@ async def test_explore_variant_cap_is_clamped_to_the_session_budget(
         # counting it would make this order-dependent.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["timeout"]))
+        granted.append(int(kwargs["watch"].timeout))
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-clamp"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_fits",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key="ex-budget-clamp",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-clamp"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_fits",
+                        "extra_args": "--max-num-seqs 256",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    }
+                ],
+                "baseline_runtime_sec": 20.0,
+            },
+            idempotency_key="ex-budget-clamp",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2578,28 +2821,30 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     def _fake_run(cmd, *args, **kwargs):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        granted.append(int(kwargs["timeout"]))
+        granted.append(int(kwargs["watch"].timeout))
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-nofit"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_too_long",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "baseline_runtime_sec": 600.0,
-        },
-        idempotency_key="ex-budget-nofit",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-nofit"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_too_long",
+                        "extra_args": "--max-num-seqs 256",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    }
+                ],
+                "baseline_runtime_sec": 600.0,
+            },
+            idempotency_key="ex-budget-nofit",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2612,7 +2857,7 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     # Measuring nothing because the budget ran out is not the same as variants failing, and it must not be reported as
     # a bare, unattributed failure.
     assert res.result["error_class"] == "session_time_exhausted"
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
     # Untested variants stay out of the ledger so a resume can retry them.
     assert res.result["losers"] == []
     assert res.result["explore_search_update"]["tested"] == {}
@@ -2631,7 +2876,7 @@ async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_
     def _fake_run(cmd, *args, **kwargs):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        started.append(int(kwargs["timeout"]))
+        started.append(int(kwargs["watch"].timeout))
         _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -2639,16 +2884,18 @@ async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_
         {"name": f"v{i}", "extra_args": f"--max-num-seqs {64 << i}", "extra_envs": {}, "provenance": "default_grid"}
         for i in range(variants)
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-phase"),
-            "base_tput": 800.0,
-            "grid": grid,
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key=f"ex-phase-{variants}",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-phase"),
+                "base_tput": 800.0,
+                "grid": grid,
+                "baseline_runtime_sec": 20.0,
+            },
+            idempotency_key=f"ex-phase-{variants}",
+        ),
     )
     remaining = iter(phase_left_sec)
     phase_deadline = SimpleNamespace(remaining=lambda: next(remaining))
@@ -2675,7 +2922,6 @@ async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_
 
     assert len(started) == 1
     assert result["status"] == "succeeded"
-    assert result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -2729,29 +2975,31 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
             stderr="reaped",
         )
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-reaped"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_measured",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                },
-                {
-                    "name": "v_reaped",
-                    "extra_args": "--max-num-seqs 512",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                },
-            ],
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key="ex-budget-reaped",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-reaped"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_measured",
+                        "extra_args": "--max-num-seqs 256",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    },
+                    {
+                        "name": "v_reaped",
+                        "extra_args": "--max-num-seqs 512",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    },
+                ],
+                "baseline_runtime_sec": 20.0,
+            },
+            idempotency_key="ex-budget-reaped",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2765,7 +3013,6 @@ async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     # KB a clock's verdict.
     assert [t["name"] for t in tested.values()] == ["v_measured"]
     assert [lr["name"] for lr in res.result["losers"]] == []
-    assert res.result["session_budget_untested"] == 1
 
 
 @pytest.mark.asyncio
@@ -2812,23 +3059,25 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
         _fake_workspace(slot, tput=840.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-warmup-reaped"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_warmup_reaped",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key="ex-budget-warmup-reaped",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-warmup-reaped"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_warmup_reaped",
+                        "extra_args": "--max-num-seqs 256",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    }
+                ],
+                "baseline_runtime_sec": 20.0,
+            },
+            idempotency_key="ex-budget-warmup-reaped",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2841,7 +3090,7 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     assert res.result["explore_search_update"]["tested"] == {}
     assert res.result["losers"] == []
     assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
-    assert res.result["session_budget_untested"] == 1
+    assert "1 variant(s) went unmeasured" in res.result["error"]
 
 
 @pytest.mark.asyncio
@@ -2872,23 +3121,25 @@ async def test_explore_attributes_a_round_the_run_reaped_before_anything_measure
             stderr="cancelled",
         )
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-cancelled"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_cancelled",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key="ex-budget-cancelled",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-cancelled"),
+                "base_tput": 800.0,
+                "grid": [
+                    {
+                        "name": "v_cancelled",
+                        "extra_args": "--max-num-seqs 256",
+                        "extra_envs": {},
+                        "provenance": "default_grid",
+                    }
+                ],
+                "baseline_runtime_sec": 20.0,
+            },
+            idempotency_key="ex-budget-cancelled",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -2907,14 +3158,16 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
     _write_baseline_yaml(base)
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "base_tput": 800.0,
-            "grid": [],
-        },
-        idempotency_key="ex-empty",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "base_tput": 800.0,
+                "grid": [],
+            },
+            idempotency_key="ex-empty",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
@@ -2931,8 +3184,6 @@ def test_atom_default_grid_mla_moe_model_emits_all_gated_variants():
     grid = _atom_default_grid(
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     names = _names(grid)
     assert len(grid) >= 5, f"too few variants: {names}"
@@ -2951,8 +3202,6 @@ def test_atom_default_grid_dense_model_omits_moe_mla_mtp():
     grid = _atom_default_grid(
         model_class="dense",
         conc=8,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_ep" not in names
@@ -2968,8 +3217,6 @@ def test_atom_default_grid_fp8_model_emits_kv_fp8():
     grid = _atom_default_grid(
         model_class="moe_fp8",
         conc=16,
-        isl=512,
-        osl=512,
     )
     names = _names(grid)
     assert "atom_kv_fp8" in names
@@ -3015,8 +3262,6 @@ def test_default_grid_for_framework_atom_returns_seeded_grid():
         "atom",
         model_class="moe_mla",
         conc=64,
-        isl=1024,
-        osl=1024,
     )
     assert grid, "atom framework should produce a non-empty default grid"
     assert any(v.name == "atom_level_2" for v in grid)
@@ -3083,15 +3328,17 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
 
     monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "base_tput": 800.0,
-            "grid": [],
-            "model_class": "moe_mla",
-        },
-        idempotency_key="ex-atom-empty-seeded",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "base_tput": 800.0,
+                "grid": [],
+                "model_class": "moe_mla",
+            },
+            idempotency_key="ex-atom-empty-seeded",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
 
@@ -3116,14 +3363,16 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_sglang.yaml"
     _write_baseline_yaml(base)
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "base_tput": 800.0,
-            "grid": [],
-        },
-        idempotency_key="ex-sglang-empty-still-fails",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "base_tput": 800.0,
+                "grid": [],
+            },
+            idempotency_key="ex-sglang-empty-still-fails",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
@@ -3172,14 +3421,16 @@ async def test_explore_executor_measures_and_attributes_authored_levers(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", _fake_run)
     grid = [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}] if with_llm_proposal else []
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "base_tput": 800.0,
-            "grid": grid,
-        },
-        idempotency_key="ex-fwlever-seeded-with-llm-grid",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "base_tput": 800.0,
+                "grid": grid,
+            },
+            idempotency_key="ex-fwlever-seeded-with-llm-grid",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
@@ -3244,49 +3495,51 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
         _fake_workspace(slot, tput=800.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "baseline_double_run": False,
-            "grid": [
-                {
-                    "name": "unified",
-                    "extra_envs": {
-                        "SGLANG_USE_AITER": "1",
-                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "baseline_double_run": False,
+                "grid": [
+                    {
+                        "name": "unified",
+                        "extra_envs": {
+                            "SGLANG_USE_AITER": "1",
+                            "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                        },
                     },
-                },
-                {
-                    "name": "unified_combo",
-                    "extra_args": "--chunked-prefill-size 32768",
-                    "extra_envs": {
-                        "SGLANG_USE_AITER": "1",
-                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
-                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    {
+                        "name": "unified_combo",
+                        "extra_args": "--chunked-prefill-size 32768",
+                        "extra_envs": {
+                            "SGLANG_USE_AITER": "1",
+                            "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                        },
                     },
-                },
-                {"name": "master", "extra_envs": {"SGLANG_USE_AITER": "1"}},
-                {
-                    "name": "per_token",
-                    "extra_envs": {
-                        "SGLANG_USE_AITER": "1",
-                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    {"name": "master", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+                    {
+                        "name": "per_token",
+                        "extra_envs": {
+                            "SGLANG_USE_AITER": "1",
+                            "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                        },
                     },
-                },
-                {
-                    "name": "unified_page16",
-                    "extra_args": "--page-size 16",
-                    "extra_envs": {
-                        "SGLANG_USE_AITER": "1",
-                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    {
+                        "name": "unified_page16",
+                        "extra_args": "--page-size 16",
+                        "extra_envs": {
+                            "SGLANG_USE_AITER": "1",
+                            "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                        },
                     },
-                },
-            ],
-        },
-        idempotency_key="ex-unified-attn-filter",
+                ],
+            },
+            idempotency_key="ex-unified-attn-filter",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3320,10 +3573,7 @@ async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
     )
     kept, dropped = apply_compatibility_filter(
         [other_variant],
-        framework="sglang",
-        model_path=str(model),
-        gpu_type="mi355x",
-        stack_fingerprint=other_stack,
+        serving=ServingStack("sglang", str(model), gpu_type="mi355x", stack_fingerprint=other_stack),
         base_server_args="--page-size 1 --kv-cache-dtype auto",
     )
     assert ([variant.name for variant in kept], dropped) == (["other_stack_unified"], [])
@@ -3351,15 +3601,17 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
     )
     kept, dropped = apply_compatibility_filter(
         [GridVariant("unified", extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"})],
-        framework="sglang",
-        model_path=str(model),
-        gpu_type="mi355x",
-        stack_fingerprint={
-            "sglang": "0.5.20.dev20260920+gc610c40399",
-            # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
-            "aiter": "0.1.21.dev48+g4ad998328.d20260920",
-            "rocm": "10.0.0",
-        },
+        serving=ServingStack(
+            "sglang",
+            str(model),
+            gpu_type="mi355x",
+            stack_fingerprint={
+                "sglang": "0.5.20.dev20260920+gc610c40399",
+                # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
+                "aiter": "0.1.21.dev48+g4ad998328.d20260920",
+                "rocm": "10.0.0",
+            },
+        ),
         base_server_args="--page-size 1 --kv-cache-dtype auto",
     )
     assert ([variant.name for variant in kept], dropped) == (
@@ -3377,7 +3629,7 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
 def test_atom_default_grid_survives_compatibility_filter():
     """``apply_compatibility_filter`` drops no atom seed variant."""
     grid = _atom_default_grid(model_class="moe_mla", conc=64)
-    kept, dropped = apply_compatibility_filter(grid, framework="atom", model_path="")
+    kept, dropped = apply_compatibility_filter(grid, serving=ServingStack("atom", ""))
     assert kept == grid, f"compatibility filter dropped seed variants; dropped={dropped}"
 
 
@@ -3495,39 +3747,40 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
         {"name": "rerun_failed", "extra_args": "--prev-failed", "extra_envs": {}, "provenance": "llm_direct"},
         {"name": "rerun_kept", "extra_args": "--prev-kept", "extra_envs": {}, "provenance": "llm_direct"},
     ]
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": grid,
-            "explore_search": {
-                "tested": {
-                    fp_failed: {
-                        "fingerprint": fp_failed,
-                        "name": "rerun_failed",
-                        "extra_server_args": "--prev-failed",
-                        "extra_envs": {},
-                        "outcome": "FAILED",
-                        "gain_pct": None,
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(output_dir),
+                "base_tput": 800.0,
+                "grid": grid,
+                "explore_search": {
+                    "tested": {
+                        fp_failed: {
+                            "fingerprint": fp_failed,
+                            "name": "rerun_failed",
+                            "extra_server_args": "--prev-failed",
+                            "extra_envs": {},
+                            "outcome": "FAILED",
+                            "gain_pct": None,
+                        },
                     },
+                    "rejected": [],
+                    "accepted": [
+                        {
+                            "fingerprint": fp_accepted,
+                            "name": "rerun_kept",
+                            "extra_server_args": "--prev-kept",
+                            "extra_envs": {},
+                            "outcome": "KEEP",
+                            "gain_pct": 5.0,
+                        }
+                    ],
                 },
-                "rejected": [],
-                "accepted": [
-                    {
-                        "fingerprint": fp_accepted,
-                        "name": "rerun_kept",
-                        "extra_server_args": "--prev-kept",
-                        "extra_envs": {},
-                        "outcome": "KEEP",
-                        "gain_pct": 5.0,
-                    }
-                ],
-                "name_index": {},
             },
-        },
-        idempotency_key="ex-rerun-all",
+            idempotency_key="ex-rerun-all",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3582,16 +3835,18 @@ async def test_explore_refuses_an_over_budget_winner_in_the_round_that_measured_
         _fake_workspace(slot, tput=20000.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / f"explore-latency-{budget_ms:g}"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_slow_but_fast", "extra_args": "--split 8"}],
-            "variant_timeout_sec": 10,
-        },
-        idempotency_key=f"ex-latency-{budget_ms:g}",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / f"explore-latency-{budget_ms:g}"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_slow_but_fast", "extra_args": "--split 8"}],
+                "variant_timeout_sec": 10,
+            },
+            idempotency_key=f"ex-latency-{budget_ms:g}",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3645,16 +3900,18 @@ async def test_an_explore_winner_inside_the_budget_is_promoted_by_writeback(sub_
         _fake_workspace(slot, tput=20000.0)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-latency-promote"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_in_budget", "extra_args": "--split 8"}],
-            "variant_timeout_sec": 10,
-        },
-        idempotency_key="ex-latency-promote",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-latency-promote"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_in_budget", "extra_args": "--split 8"}],
+                "variant_timeout_sec": 10,
+            },
+            idempotency_key="ex-latency-promote",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3696,15 +3953,17 @@ async def _mlperf_round(
         _fake_workspace(slot, tput=candidate["output_throughput"], perf_axes=candidate)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / f"explore-{name}"),
-            "base_tput": 200.0,
-            "grid": [{"name": name, "extra_args": f"--{name}"}],
-        },
-        idempotency_key=f"ex-{name}",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / f"explore-{name}"),
+                "base_tput": 200.0,
+                "grid": [{"name": name, "extra_args": f"--{name}"}],
+            },
+            idempotency_key=f"ex-{name}",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3804,16 +4063,18 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
         )
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-power"),
-            "base_tput": 200.0,
-            "grid": [{"name": "v_power", "extra_args": "--power-lever"}],
-            "variant_timeout_sec": 10,
-        },
-        idempotency_key="ex-power",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / "explore-power"),
+                "base_tput": 200.0,
+                "grid": [{"name": "v_power", "extra_args": "--power-lever"}],
+                "variant_timeout_sec": 10,
+            },
+            idempotency_key="ex-power",
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
@@ -3870,17 +4131,19 @@ async def _run_explore_round(
     base = tmp_path / "base.yaml"
     if not base.exists():
         _write_baseline_yaml(base)
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / key),
-            "base_tput": 800.0,
-            "base_extra_args": base_args,
-            "grid": grid,
-            **(extra_params or {}),
-        },
-        idempotency_key=key,
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "output_dir": str(tmp_path / key),
+                "base_tput": 800.0,
+                "base_extra_args": base_args,
+                "grid": grid,
+                **(extra_params or {}),
+            },
+            idempotency_key=key,
+        ),
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(

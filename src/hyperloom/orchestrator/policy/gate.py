@@ -24,20 +24,17 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
+from hyperloom.common.coerce import first_text
 from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
-from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
     KERNEL_AGENT_OWNED_ACTIONS,
 )
-from ..mcp_tool_names import (
-    CONTEXT_TOOL_QUALIFIED_NAMES,
-    EMIT_INTENT_TOOL_QUALIFIED,
-    qualified_context_tool_name,
-)
+from ..mcp_tool_names import agent_tool_grant, qualified_context_tool_name
 from .projection import (
     RULE_GPU_EXCEEDS_CAPACITY,
     RULE_GPU_POOL_DISABLED,
@@ -174,17 +171,6 @@ REQUEST_ROUTING: dict[str, frozenset[str]] = {
 # Critic-only: REVIEW_VERDICT
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
 
-# Verdict vocabulary for review_verdict
-REVIEW_VERDICTS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "reject",
-        "redirect",
-        "advise",
-        "needs_review",
-    }
-)
-
 
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
 # ``queued`` only drains the backlog and leaves the family usable.
@@ -217,7 +203,6 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "json_path",
         "md_path",
         "session_dir",
-        "backup_root",
         "manifest_path",
     }
 )
@@ -375,9 +360,9 @@ class PolicyGate:
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
 
-        Every name is the one the runtime registers, so MCP tools carry their
-        ``mcp__<server>__<tool>`` prefix (as :data:`PR_MONITOR_TOOL_NAMES`
-        already does): this list is also the grant the prompt snapshot records.
+        The names come from :func:`agent_tool_grant`, so MCP tools carry the
+        ``mcp__<server>__<tool>`` prefix the runtime registers them under (as
+        :data:`PR_MONITOR_TOOL_NAMES` already does).
 
         Args:
             agent_name (str): the name of the agent whose tool list is
@@ -392,12 +377,7 @@ class PolicyGate:
             return []
         if role.no_tools:
             return []
-        tools = [EMIT_INTENT_TOOL_QUALIFIED]
-        if agent_name == "orchestration":
-            tools.extend(CONTEXT_TOOL_QUALIFIED_NAMES)
-            tools.append("Read")
-            tools.extend(["WebSearch", "WebFetch"])
-        return tools
+        return agent_tool_grant(agent_name)
 
     # Per-intent validators
     def _validate_delegate(self, role: "AgentRole", payload: dict[str, Any]) -> None:
@@ -632,7 +612,7 @@ class PolicyGate:
         ``target_proposal_msg_id`` is present, and that exactly one of the
         single ``verdict`` field or the per-variant ``verdict_map`` is
         supplied. Every verdict string (single or per-variant) must belong
-        to the closed :data:`REVIEW_VERDICTS` vocabulary.
+        to the closed :data:`ALLOWED_VERDICTS` vocabulary.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -646,7 +626,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: if the role is not a Critic, the target id is
                 missing, neither/both verdict forms are present, or a
-                verdict string is outside ``REVIEW_VERDICTS``.
+                verdict string is outside ``ALLOWED_VERDICTS``.
         """
         if role.name not in REVIEW_VERDICT_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -677,23 +657,23 @@ class PolicyGate:
             )
         if has_single:
             verdict = str(payload.get("verdict", "")).strip()
-            if verdict not in REVIEW_VERDICTS:
+            if verdict not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
-                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(REVIEW_VERDICTS)!r}",
+                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint="use one of approve/reject/redirect/advise/needs_review",
+                    hint=f"use one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
             return
         # verdict_map path — every entry's verdict must be in the closed vocab.
         for vname, entry in verdict_map.items():
             v = str((entry or {}).get("verdict") or "").strip()
-            if v not in REVIEW_VERDICTS:
+            if v not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
                     f"review_verdict.verdict_map[{vname!r}].verdict="
                     f"{v!r} not in allowed set "
-                    f"{sorted(REVIEW_VERDICTS)!r}",
+                    f"{sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
+                    hint=f"every per-variant verdict must be one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
 
     # GEMM tuning ownership
@@ -1053,7 +1033,7 @@ class PolicyGate:
 
         # Build the anchor candidate set the gap's domain_hint may name.
         candidates: set[str] = set()
-        domain_key = str(params.get("domain") or "").strip()
+        domain_key = first_text(params.get("domain"))
         if domain_key:
             candidates.add(domain_key.lower())
             d = get_domain(domain_key)
@@ -1075,15 +1055,15 @@ class PolicyGate:
             g
             for g in gaps
             if isinstance(g, dict)
-            and str(g.get("canonical_id") or "").strip()
-            and str(g.get("domain_hint") or "").strip().lower() in candidates
+            and first_text(g.get("canonical_id"))
+            and first_text(g.get("domain_hint")).lower() in candidates
         ]
         if not matches:
             return ""
         matches.sort(key=gap_actionability_key)
-        chosen = str(matches[0].get("canonical_id") or "").strip()
-        if chosen:
-            params["gap_canonical_id"] = chosen
+        # Every match carries a non-empty canonical id.
+        chosen = first_text(matches[0].get("canonical_id"))
+        params["gap_canonical_id"] = chosen
         return chosen
 
     def _validate_freeform_specialist_dispatch(
@@ -1578,7 +1558,6 @@ __all__ = [
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
-    "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",

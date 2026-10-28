@@ -23,11 +23,10 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.session_paths import (
     agent_prompt_snapshot,
     manifest_path,
@@ -411,7 +410,7 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
     captured: dict = {}
 
@@ -422,10 +421,12 @@ async def test_sub_agent_runner_premkdirs_workspace(tmp_path, monkeypatch):
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("baseline", runner)
-    task = await tasks.create(
-        kind="baseline",
-        params={},
-        idempotency_key="ws-test-1",
+    task, _ = await tasks.create_or_return_existing(
+        TaskSpec(
+            kind="baseline",
+            params={},
+            idempotency_key="ws-test-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -441,7 +442,7 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tasks = TaskRegistry(db)
     captured: dict = {}
 
@@ -452,10 +453,12 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
 
     sub = SubAgentRunner(locks, tasks, session_dir=sd)
     sub.register_executor("target_analysis", runner)
-    task = await tasks.create(
-        kind="target_analysis",
-        params={},
-        idempotency_key="target-analysis-test-1",
+    task, _ = await tasks.create_or_return_existing(
+        TaskSpec(
+            kind="target_analysis",
+            params={},
+            idempotency_key="target-analysis-test-1",
+        ),
     )
     await sub.run_task(task)
     db.close()

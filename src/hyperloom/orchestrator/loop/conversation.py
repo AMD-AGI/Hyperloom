@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
@@ -15,16 +16,17 @@ from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
+from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
+from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -64,6 +66,30 @@ _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
 _BENCH_LANE_KINDS = ("integrate_patch", "explore")
+# Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
+_KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
+
+
+@dataclass(frozen=True)
+class ComposedPrompt:
+    """One agent's prompt: ``context`` holds what changes rarely, ``turn`` what changes every tick."""
+
+    context: str
+    turn: str
+
+    @property
+    def text(self) -> str:
+        """The whole prompt as one string."""
+        return f"{self.context}\n{self.turn}"
+
+
+@dataclass(frozen=True)
+class TurnPrompt:
+    """What one reactor turn hands its backend; ``context`` is the part of the prompt carried in ``system_prompt``."""
+
+    system_prompt: str
+    prompt: str
+    context: str
 
 
 def _fit_to_budget(lines: list[str], budget_chars: int) -> list[str]:
@@ -256,8 +282,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
         self.kb_last_read: ExperienceKBEvidence | None = None
-        # Per-agent (seq, msg_id) of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        # Per-agent seq of the last message its prompt rendered.
+        self._rendered_cursor: dict[str, int] = {}
+        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn, and when it was admitted.
+        self._admitted_kernel_fingerprint = ""
+        self._admitted_at = 0.0
 
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
@@ -375,7 +404,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
             gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
-            started = parse_iso_unix_or_zero(task.updated_at)
+            started = to_unix(task.updated_at, 0.0)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
             parts = [
                 f"  - task_id={task.task_id}",
@@ -392,7 +421,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
             if expires_at:
-                exp_unix = parse_iso_unix_or_zero(expires_at)
+                exp_unix = to_unix(expires_at, 0.0)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
             if lanes:
@@ -436,34 +465,26 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
-        """Age of a specialist's freshest liveness file, mirroring the reaper."""
+        """Age of a specialist's freshest liveness signal, read from the same paths the reaper polls."""
         if (task.kind or "").strip() != "specialist":
             return None
-        ws = runs_dir(self.session_dir, "specialist", task.task_id)
-        newest = 0.0
-        for name in ("heartbeat.json", "process.log"):
-            try:
-                mtime = (ws / name).stat().st_mtime
-            except OSError:
-                continue
-            newest = max(newest, mtime)
-        if newest <= 0:
+        newest = newest_activity(specialist_activity_paths(runs_dir(self.session_dir, "specialist", task.task_id)))
+        if newest is None:
             return None
         return max(0.0, now_unix - newest)
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text."""
-        blob = self.shared_state._format_analysis_md_full()
-        if blob and blob.strip():
-            return blob
-        # Fallback: read the path recorded on last_trace_analyze.
         lta = self.shared_state.last_trace_analyze or {}
+        text = lta.get("analysis_md_text") or ""
+        if text:
+            return strip_base64_data_urls(text)
         path = str(lta.get("analysis_md_path") or "")
         if path:
             try:
                 from pathlib import Path as _Path
 
-                return _Path(path).read_text(encoding="utf-8")
+                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
             except OSError as exc:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"
@@ -472,8 +493,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self,
         agent_name: str,
         result: BackendTurnResult,
+        *,
+        context: str = "",
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a reactor turn."""
+        """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
         response = metadata.get("response")
@@ -489,7 +512,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             tick=int(self.shared_state.tick or 0),
             phase=(self.shared_state.phase or "") or None,
             model=metadata.get("model"),
-            prompt=prompt or "",
+            prompt=f"{context}\n{prompt}" if context else prompt or "",
             response=response or "",
         )
         append_conversation(session_dir=self.session_dir, record=record)
@@ -505,6 +528,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
             for variant in (task.params or {}).get("grid") or ()
             if isinstance(variant, dict)
         }
+
+    def trajectory_digest(self) -> str:
+        """The deterministic trajectory digest, or "" when building it fails."""
+        from ..knowledge import trajectory_reviewer
+
+        try:
+            return trajectory_reviewer.build_trajectory_digest(self.session_dir, self.shared_state)
+        except (OSError, ValueError, TypeError):
+            log.exception("Coordinator: trajectory review digest failed")
+            return ""
 
     async def _orchestration_sections(self) -> list[str]:
         """The denial summary, proposal queue and advisories only the orchestration agent reads."""
@@ -534,16 +567,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append("=== Plateau advisory ===")
             sections.append(plateau_block)
             # Candidate directions are worth the digest's cost only once the session has stopped gaining.
-            try:
-                from ..knowledge import trajectory_reviewer as _trajectory_reviewer
-
-                trajectory_block = _trajectory_reviewer.build_trajectory_digest(
-                    self.session_dir,
-                    self.shared_state,
-                )
-            except Exception:
-                log.exception("Coordinator: trajectory review failed")
-                trajectory_block = ""
+            trajectory_block = self.trajectory_digest()
             if trajectory_block:
                 sections.append("=== Trajectory review (advisory) ===")
                 sections.append(trajectory_block)
@@ -569,7 +593,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
-            self._rendered_cursor[agent_name] = (last_seq, str(read[-1].msg_id))
+            self._rendered_cursor[agent_name] = last_seq
         if not inbox_lines:
             return [f"=== Inbox for {agent_name} ===", "(no new messages)"]
         sections = [f"=== Inbox for {agent_name} (newest last) ===", *inbox_lines]
@@ -579,60 +603,81 @@ class ConversationCollaborator(CoordinatorCollaborator):
             )
         return sections
 
-    async def compose_prompt(self, agent_name: str) -> str:
-        """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
-        # SESSION_DIR contract — literal path for every agent.
-        sections: list[str] = [f"SESSION_DIR={self.session_dir}"]
+    async def compose_prompt(self, agent_name: str) -> ComposedPrompt:
+        """Compose the prompt for *agent_name*: the session context, and the per-tick blocks ending with the inbox tail."""
+        context: list[str] = [f"SESSION_DIR={self.session_dir}"]
+        turn: list[str] = []
 
-        # Per-tick phase block for every agent, high in the prompt.
         phase_block = _phase_state.phase_status_summary(self.shared_state)
         if phase_block:
-            sections.append("=== Phase ===")
-            sections.append(phase_block)
+            turn.append("=== Phase ===")
+            turn.append(phase_block)
 
         if agent_name == "orchestration":
-            sections.append("=== Mission progress ===")
-            sections.append(self.shared_state.to_mission_summary())
+            turn.append("=== Mission progress ===")
+            turn.append(self.shared_state.to_mission_summary())
             deadline = self._coord.run_deadline
             started = self._coord.run_started_monotonic
             if deadline is not None and started is not None:
                 remaining_min = max(0.0, deadline.remaining() / 60.0)
-                sections.append("=== Time budget ===")
-                sections.append(
+                turn.append("=== Time budget ===")
+                turn.append(
                     f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
                     f"budget={self.shared_state.max_minutes or 0}min  "
                     f"closing_phase={self.shared_state.closing_phase}"
                 )
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
-                    sections.append(
+                    turn.append(
                         "WARNING: < 5 min remaining. Avoid new `explore` rounds "
                         "(which bench every variant on the stack) — they will "
                         "likely be cut by the deadline. The Coordinator will "
                         "auto-enqueue `report` when the session closes."
                     )
+        turn.append("=== Tick ===")
+        turn.append(self.shared_state.to_tick_summary())
 
-        sections.append("=== Shared session state ===")
-        sections.append(self.shared_state.to_prompt_summary())
-        sections.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
+        context.append("=== Shared session state ===")
+        context.append(self.shared_state.to_prompt_summary())
+        context.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.
-        sections.extend(self.shared_state.to_constraint_sections())
-        sections.append("=== Resource pools ===")
-        sections.append(resource_pools_summary(self.shared_state))
+        context.extend(self.shared_state.to_constraint_sections())
+        context.append("=== Resource pools ===")
+        context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
-            sections.extend(await self._orchestration_sections())
+            context.extend(await self._orchestration_sections())
 
-        sections.extend(await self._render_inbox_sections(agent_name))
-        return "\n".join(sections)
+        turn.extend(await self._render_inbox_sections(agent_name))
+
+        return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
+
+    def admit_turn(self, agent_name: str, now_unix: float) -> bool:
+        """Whether ``agent_name`` takes a turn this tick; in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
+        state = self.shared_state
+        if agent_name != "orchestration" or (state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return True
+        fingerprint = state.kernel_progress_fingerprint
+        last_turn = state.agent_last_active.get("orchestration", 0.0)
+        handled = fingerprint == self._admitted_kernel_fingerprint and last_turn >= self._admitted_at
+        if handled and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC:
+            return False
+        self._admitted_kernel_fingerprint, self._admitted_at = fingerprint, now_unix
+        return True
+
+    async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
+        """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
+        system_prompt = await self.load_system_prompt(agent_name)
+        composed = await self.compose_prompt(agent_name)
+        if getattr(backend, "system_prompt_cached", False):
+            return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
+        return TurnPrompt(system_prompt, composed.text, "")
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
-        entry = self._rendered_cursor.get(agent_name)
-        if entry is None:
-            return
-        seq, msg_id = entry
-        await self.cursors.advance(agent_name, seq=seq, msg_id=msg_id)
+        seq = self._rendered_cursor.get(agent_name)
+        if seq is not None:
+            await self.cursors.advance(agent_name, seq=seq)
 
     async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
         """Ensure every undecided proposal awaiting a Critic verdict is present."""
@@ -661,8 +706,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if override is not None:
             return override
         role = self.role_registry[agent_name]
-        if not role.prompt_driven:
-            return ""
         try:
             return role.load_system_prompt()
         except FileNotFoundError:
@@ -802,33 +845,25 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lines.extend(f"  {name}: prior gain {g:+.2f}% < {keep:.2f}%" for name, g in below_bar[:5])
         return "\n".join(lines)
 
-    def target_gap_advisory_block(self) -> str:
-        """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
-        state = self.shared_state
-        if not bool(state.target_advisory_enabled):
-            return ""
+    def _current_target_gap(self) -> dict[str, Any] | None:
+        """Current-best vs the competitor target; None when the advisory is off or no target is set."""
+        if not self.shared_state.target_advisory_enabled:
+            return None
         from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         target = _research_hints.load_competitor_target(self.session_dir)
-        if not target:
-            return ""
-        gap = _research_hints.gap_for_state(target, state)
-        return _research_hints.full_gap_summary(gap)
+        return _research_hints.gap_for_state(target, self.shared_state) if target else None
+
+    def target_gap_advisory_block(self) -> str:
+        """Build the advisory \"External target gap\" prompt block (current-best vs competitor target; never gates)."""
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+
+        return _research_hints.full_gap_summary(self._current_target_gap())
 
     def _current_primary_gap(self) -> str | None:
         """Resolve latency/throughput; None when advisory is off or no competitor target is set."""
-        state = self.shared_state
-        if not bool(state.target_advisory_enabled):
-            return None
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-        target = _research_hints.load_competitor_target(self.session_dir)
-        if not target:
-            return None
-        gap = _research_hints.gap_for_state(target, state)
-        if not isinstance(gap, dict):
-            return None
-        return str(gap.get("primary_gap") or "").strip() or None
+        gap = self._current_target_gap()
+        return str((gap or {}).get("primary_gap") or "").strip() or None
 
     def _recent_proposed_variants(
         self,
@@ -901,26 +936,19 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering).
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering)."""
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-        A failure is logged and the prompt goes out without this block.
-        """
-        try:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-            variants = self._recent_proposed_variants()
-            if not variants:
-                return ""
-            hints = _research_hints.load_hints(self.session_dir)
-            primary_gap = self._current_primary_gap()
-            return _research_hints.priors_match_summary(
-                variants,
-                hints,
-                primary_gap=primary_gap,
-            )
-        except Exception:
-            log.exception("Coordinator: priors-match advisory failed")
+        variants = self._recent_proposed_variants()
+        if not variants:
             return ""
+        hints = _research_hints.load_hints(self.session_dir)
+        primary_gap = self._current_primary_gap()
+        return _research_hints.priors_match_summary(
+            variants,
+            hints,
+            primary_gap=primary_gap,
+        )
 
     def _discarded_escalate_hint_advisory_block(self) -> str:
         """Render the advisory for an escalate_strategy_change hint that was discarded.

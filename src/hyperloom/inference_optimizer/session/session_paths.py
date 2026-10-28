@@ -117,6 +117,19 @@ def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     return Path(session_dir) / "patches" / kid
 
 
+_KERNEL_PATCH_BACKUPS: str = "backup"
+
+
+def kernel_patch_backup_root(session_dir: Path, kernel_id: str) -> Path:
+    """``<sd>/patches/<kernel_id>/backup/`` — one subdirectory per kernel-patch apply, holding its manifest and backups."""
+    return patches_dir(session_dir, kernel_id) / _KERNEL_PATCH_BACKUPS
+
+
+def kernel_patch_backup_roots(session_dir: Path) -> list[Path]:
+    """Every :func:`kernel_patch_backup_root` in the session."""
+    return sorted((Path(session_dir) / "patches").glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
+
+
 # Session-breakdown record fragments (recorder write-side spool).
 def breakdown_parts_dir(session_dir: Path) -> Path:
     """``<sd>/runtime/breakdown/parts/`` — per-producer breakdown record fragments."""
@@ -366,11 +379,6 @@ def recipe_snapshot_dir(session_dir: Path) -> Path:
 def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_snapshot/.audit.jsonl`` — append-only audit of local Recipe operations and remote KB Store publish attempts."""
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
-
-
-def pr_monitor_status_json(session_dir: Path) -> Path:
-    """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor reachability snapshot."""
-    return recipe_kb_dir(session_dir) / ".pr_monitor_status.json"
 
 
 def _prune_old_workdirs(root: Path, *, keep: int) -> None:

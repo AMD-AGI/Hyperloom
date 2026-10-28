@@ -11,6 +11,7 @@ import logging
 from typing import Any, Callable, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
+    ALLOWED_VERDICTS,
     EXTEND_LEASE_MAX_SEC,
     IntentType,
     IntentValidationError,
@@ -22,7 +23,8 @@ from hyperloom.orchestrator.mcp_tool_names import (
     EMIT_INTENT_TOOL_QUALIFIED,
     MCP_SERVER_NAME,
 )
-from .mcp_context_tools import _resolve_sdk
+
+from .mcp_sdk import build_sdk_mcp_server
 
 
 log = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ log = logging.getLogger(__name__)
 # Vocabulary a required-field name cannot carry on its own: closed value sets, numeric bounds, and the optional dials
 # each type honours.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
-    IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
+    IntentType.REVIEW_VERDICT: (f"verdict ∈ {'|'.join(sorted(ALLOWED_VERDICTS))}",),
     IntentType.EXTEND_LEASE: (
         f"extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call, repeatable while the task runs",
         "reason is optional",
@@ -225,14 +227,6 @@ def is_unparsed_tool_wrapper(raw_input: Any) -> bool:
     return isinstance(wrapped, dict) and isinstance(wrapped.get("raw"), str)
 
 
-def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
-    """Return native emit_intent input, decoding the wrapper only as fallback."""
-    if not isinstance(raw_input, dict):
-        return {}
-    coerced, _ = decode_emit_intent_input(raw_input)
-    return coerced
-
-
 def validate_emit_intent_input(
     payload: dict[str, Any],
     *,
@@ -300,37 +294,24 @@ def build_emit_intent_server(
     sdk_module: Any | None = None,
     tool_factory: Callable[..., Any] | None = None,
     server_factory: Callable[..., Any] | None = None,
-    handler: Callable[[dict[str, Any]], Any] | None = None,
     allowed_intents: Iterable[IntentType] | None = None,
 ) -> Any | None:
     """Build the in-process MCP server config exposing ``emit_intent``.
 
     ``allowed_intents`` scopes the tool to the emitting role: the schema offers
-    only those types and the default handler refuses any other. ``None`` offers
+    only those types and the handler refuses any other. ``None`` offers
     every type.
     """
-    sdk = _resolve_sdk(sdk_module)
     allowed = frozenset(IntentType if allowed_intents is None else allowed_intents)
-    handler = handler or functools.partial(_emit_intent_handler, allowed_intents=allowed)
-
-    if tool_factory is None:
-        tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
-    if server_factory is None:
-        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-    if tool_factory is None or server_factory is None:
-        log.info(
-            "emit_intent MCP server unavailable (sdk=%s).",
-            getattr(sdk, "__name__", "<none>"),
-        )
-        return None
-
-    decorator = tool_factory(
+    tool = (
         EMIT_INTENT_TOOL_NAME,
         EMIT_INTENT_TOOL_DESCRIPTION,
         build_emit_intent_tool_input_schema(allowed),
+        functools.partial(_emit_intent_handler, allowed_intents=allowed),
     )
-    decorated = decorator(handler)
-    return server_factory(MCP_SERVER_NAME, "1.0.0", [decorated])
+    return build_sdk_mcp_server(
+        MCP_SERVER_NAME, [tool], sdk_module=sdk_module, tool_factory=tool_factory, server_factory=server_factory
+    )
 
 
 __all__ = [
@@ -341,7 +322,6 @@ __all__ = [
     "build_emit_intent_server",
     "build_emit_intent_tool_input_schema",
     "build_intent_envelope_schema",
-    "coerce_emit_intent_input",
     "decode_emit_intent_input",
     "is_unparsed_tool_wrapper",
     "payload_contract",

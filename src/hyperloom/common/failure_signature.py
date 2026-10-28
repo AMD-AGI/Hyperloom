@@ -16,6 +16,10 @@ from typing import Any, Callable, Pattern
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
+# A HIP call that failed while the program ran: a kernel faulted on an out-of-bounds address, a graph capture was
+# invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
+HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
 SHAPE_MISMATCH = "shape_mismatch"
 MISSING_WEIGHT = "missing_weight"
@@ -71,35 +75,6 @@ class FailureSignature:
         """
         signature = cls(**raw)
         return replace(signature, secondary_kinds=tuple(signature.secondary_kinds))
-
-
-# --- CapabilityGap projection -----------------------------------------------
-
-
-@dataclass(frozen=True)
-class CapabilityGap:
-    """Thin overlay on FailureSignature exposing code-acquisition semantics."""
-
-    kind: str
-    bridge_layer: str = ""
-    requires_code_acquisition: bool = True
-
-    @classmethod
-    def from_signature(cls, sig: FailureSignature) -> "CapabilityGap":
-        """Project a :class:`FailureSignature` onto a :class:`CapabilityGap`."""
-        return cls(
-            kind=sig.kind,
-            bridge_layer=sig.bridge_layer,
-            requires_code_acquisition=(sig.kind != RESOURCE_CONSTRAINT),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a plain dict."""
-        return {
-            "kind": self.kind,
-            "bridge_layer": self.bridge_layer,
-            "requires_code_acquisition": self.requires_code_acquisition,
-        }
 
 
 # --- Rule table ------------------------------------------------------------
@@ -168,7 +143,7 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # A kernel over the device's per-launch budget. Ordered ahead of both
-        # neighbours it would otherwise be swallowed by: the HIP rule matches
+        # neighbours it would otherwise be swallowed by: the HIP rules match
         # any ``hipError`` token, and ``hipErrorLaunchOutOfResources`` carries
         # exactly this text; the resource-constraint rule means the host is too
         # small and marks the gap as needing no code, while this is a launch
@@ -197,12 +172,21 @@ _RULES: tuple[_Rule, ...] = (
         kind=HIP_KERNEL_MISSING,
         bridge_layer="rocm_hip",
         patterns=(
-            re.compile(r"hipError[A-Za-z]*"),
             re.compile(r"no kernel image is available"),
             re.compile(r"hipErrorNoBinaryForGpu"),
             re.compile(r"undefined symbol:\s*([A-Za-z0-9_:]+)"),
             re.compile(r"HSA_STATUS_ERROR[A-Za-z_]*"),
         ),
+        confidence=0.85,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
+        # that failed, not a kernel that is absent. It shares the ``rocm_hip`` bridge layer with ``hip_kernel_missing``,
+        # so the ladder and the enablement rung route both alike.
+        kind=HIP_RUNTIME_ERROR,
+        bridge_layer="rocm_hip",
+        patterns=(re.compile(r"hipError[A-Za-z]*"),),
         confidence=0.85,
         symbol_from=_grp,
     ),
@@ -248,10 +232,7 @@ _RULES: tuple[_Rule, ...] = (
     _Rule(
         kind=NOT_IMPLEMENTED,
         bridge_layer="framework",
-        patterns=(
-            re.compile(r"NotImplementedError:?\s*(.*)"),
-            re.compile(r"raise\s+NotImplementedError"),
-        ),
+        patterns=(re.compile(r"NotImplementedError:?\s*(.*)"),),
         confidence=0.75,
         symbol_from=_grp,
     ),
@@ -264,13 +245,11 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # Resource constraints: OOM, insufficient GPU count, TP requirements. bridge_layer="" means no bridge repo is
-        # searched and CapabilityGap marks requires_code_acquisition=False — do not try to patch for these.
+        # searched and the gap needs no code acquisition — do not try to patch for these.
         kind=RESOURCE_CONSTRAINT,
         bridge_layer="",
         patterns=(
             re.compile(r"[Oo]ut\s+of\s+memory"),
-            re.compile(r"[Hh][Ii][Pp]\s+out\s+of\s+memory"),
-            re.compile(r"[Cc][Uu][Dd][Aa]\s+out\s+of\s+memory"),
             re.compile(r"no\s+GPU\s+memory\s+(?:for|left\s+for)\s+the\s+KV\s+[Cc]ache", re.IGNORECASE),
             re.compile(r"[Cc]annot\s+allocate\s+(?:memory|cuda|hip)"),
             re.compile(r"[Oo]ut[Oo]f[Mm]emory[Ee]rror"),
@@ -367,11 +346,6 @@ class _RuleHit:
     rule: _Rule
     match: re.Match[str]
 
-    @property
-    def rule_index(self) -> int:
-        """Position of ``rule`` in :data:`_RULES` (lower == more specific)."""
-        return _RULES.index(self.rule)
-
 
 def _collect_hits(text: str) -> list[_RuleHit]:
     """Return the first matching pattern per rule, in :data:`_RULES` order."""
@@ -400,8 +374,8 @@ def classify_failure(log_text: str) -> FailureSignature:
             confidence=0.0,
         )
 
-    primary = min(hits, key=lambda h: (h.rule_index, h.match.start()))
-    secondary = tuple(h.rule.kind for h in sorted(hits, key=lambda h: h.rule_index) if h.rule.kind != primary.rule.kind)
+    primary = hits[0]
+    secondary = tuple(h.rule.kind for h in hits[1:])
 
     symbol = ""
     if primary.rule.symbol_from is not None:
@@ -432,26 +406,6 @@ class EnablementRequest:
     repo_url: str
     gpu_type: str = ""
     max_search_candidates: int = 5
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "EnablementRequest":
-        """Parse a JSON payload into an :class:`EnablementRequest`."""
-        framework = str(raw.get("framework") or "").strip().lower()
-        if not framework:
-            raise ValueError("framework is required")
-        model = str(raw.get("model") or "").strip()
-        if not model:
-            raise ValueError("model is required")
-        repo_url = str(raw.get("repo_url") or "").strip()
-        if not repo_url:
-            raise ValueError("repo_url is required")
-        return cls(
-            framework=framework,
-            model=model,
-            repo_url=repo_url,
-            gpu_type=str(raw.get("gpu_type") or "").strip().lower(),
-            max_search_candidates=int(raw.get("max_search_candidates", 5)),
-        )
 
 
 # --- Runnable gate ---------------------------------------------------------
@@ -499,8 +453,6 @@ def is_targeted_build_candidate(
     launch_log: str = "",
 ) -> bool:
     """Whether a residual gap is a *compiled* component miss."""
-    if signature is None:
-        return False
     if signature.bridge_layer in ("build", "rocm_hip"):
         return True
     if signature.kind == HIP_KERNEL_MISSING:
@@ -517,6 +469,7 @@ __all__ = [
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
     "HIP_KERNEL_MISSING",
+    "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
@@ -528,7 +481,6 @@ __all__ = [
     "TOKENIZER_ERROR",
     "UNKNOWN",
     "UNSUPPORTED_DTYPE",
-    "CapabilityGap",
     "EnablementRequest",
     "FailureSignature",
     "classify_failure",

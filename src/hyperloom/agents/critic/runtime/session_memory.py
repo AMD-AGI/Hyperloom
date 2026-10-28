@@ -18,6 +18,7 @@ from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom.common.timeutil import now_iso
 
 from .errors import SessionMemoryError
+from .scope_builder import UNKNOWN_SCOPE_VALUES
 
 
 DEFAULT_SESSION_MEMORY_DIR = "/var/lib/critic-session-memory"
@@ -38,14 +39,12 @@ _MERGEABLE_CONTEXT_KEYS: tuple[str, ...] = (
     "session_label",
 )
 
-_MISSING_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
-
 
 def _is_missing(value: Any) -> bool:
     """Return ``True`` if value should be treated as absent."""
     if value is None:
         return True
-    if isinstance(value, str) and value.strip().lower() in _MISSING_VALUES:
+    if isinstance(value, str) and value.strip().lower() in UNKNOWN_SCOPE_VALUES:
         return True
     return False
 
@@ -56,18 +55,7 @@ class MergeResult:
     """Result of merging an incoming context against stored memory."""
 
     merged: dict[str, Any] = field(default_factory=dict)
-    explicit_keys: list[str] = field(default_factory=list)
-    from_memory_keys: list[str] = field(default_factory=list)
     missing_keys: list[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serialisable copy of this merge result."""
-        return {
-            "merged": dict(self.merged),
-            "explicit_keys": list(self.explicit_keys),
-            "from_memory_keys": list(self.from_memory_keys),
-            "missing_keys": list(self.missing_keys),
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -136,46 +124,17 @@ class SessionMemory:
             options=WriteOptions(),
         )
 
-    def merge_context(
-        self,
-        session_id: str,
-        incoming: dict[str, Any],
-        *,
-        persist: bool = True,
-    ) -> MergeResult:
-        """Merge ``incoming`` against stored context with explicit-wins semantics."""
+    def merge_context(self, session_id: str, incoming: dict[str, Any]) -> MergeResult:
+        """Merge ``incoming`` against stored context with explicit-wins semantics, and persist the result."""
         if not isinstance(incoming, dict):
             raise SessionMemoryError(f"incoming context must be a dict, got {type(incoming).__name__}")
-        stored = self.load_context(session_id)
-        merged: dict[str, Any] = dict(stored)
-        explicit: list[str] = []
-        from_memory: list[str] = []
+        merged: dict[str, Any] = dict(self.load_context(session_id))
         for key, value in incoming.items():
-            if _is_missing(value):
-                continue
-            merged[key] = value
-            explicit.append(key)
-        for key in _MERGEABLE_CONTEXT_KEYS:
-            if key in explicit:
-                continue
-            if key in stored and not _is_missing(stored.get(key)):
-                merged[key] = stored[key]
-                from_memory.append(key)
-
-        missing: list[str] = []
-        for key in _MERGEABLE_CONTEXT_KEYS:
-            if _is_missing(merged.get(key)):
-                missing.append(key)
-
-        result = MergeResult(
-            merged=merged,
-            explicit_keys=explicit,
-            from_memory_keys=from_memory,
-            missing_keys=missing,
-        )
-        if persist:
-            self.save_context(session_id, merged)
-        return result
+            if not _is_missing(value):
+                merged[key] = value
+        missing = [key for key in _MERGEABLE_CONTEXT_KEYS if _is_missing(merged.get(key))]
+        self.save_context(session_id, merged)
+        return MergeResult(merged=merged, missing_keys=missing)
 
     # Decisions
     def append_decision(self, session_id: str, decision_review: dict[str, Any]) -> None:
@@ -190,13 +149,7 @@ class SessionMemory:
         _common_append_jsonl(self._decisions_path(session_id), record, fmt=JsonLineFormat(ensure_ascii=False))
 
     # KB priors cache (per-scope+topic)
-    def get_cached_priors(
-        self,
-        session_id: str,
-        cache_key: str,
-        *,
-        now: float | None = None,
-    ) -> list[dict[str, Any]] | None:
+    def get_cached_priors(self, session_id: str, cache_key: str) -> list[dict[str, Any]] | None:
         """Return cached KB priors for a key if present and not expired."""
         cache = _read_object(self._priors_cache_path(session_id), default={})
         entry = cache.get(cache_key)
@@ -206,7 +159,7 @@ class SessionMemory:
         priors = entry.get("priors")
         if not isinstance(priors, list) or not isinstance(ts, (int, float)):
             return None
-        if (now or time.time()) - float(ts) > self.prior_cache_ttl:
+        if time.time() - float(ts) > self.prior_cache_ttl:
             return None
         return priors
 

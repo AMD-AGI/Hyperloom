@@ -119,47 +119,33 @@ def _export_nongit(repo_root: str, files: FusionFiles, patch_path: Path, pristin
                 return p.resolve().relative_to(root).as_posix()
         return p.name
 
-    # 1) every edited framework file: pristine snapshot vs current.
+    # Every edited framework file, then the fused modules beside the source: pristine snapshot vs current.
     edited = [source_file, *files.extra_files]
-    seen_rel: set[str] = set()
+    first_by_rel: dict[str, Path] = {}
     for path in edited:
-        if not path or not Path(path).is_file():
-            continue
-        rel = _rel(Path(path))
-        if rel in seen_rel:
-            continue
-        seen_rel.add(rel)
-        snap = pristine_dir / rel
-        created = not snap.is_file()
-        old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
-        new_text = Path(path).read_text(encoding="utf-8", errors="replace")
-        d = _unified_file_diff(rel, old_text, new_text, created=created)
-        if d:
-            parts.append(d)
-            names.append(rel)
-
-    # 2) fused modules beside the source: diff snapshot-vs-current.
+        if path and Path(path).is_file():
+            first_by_rel.setdefault(_rel(Path(path)), Path(path))
+    targets = list(first_by_rel.items())
     edited_resolved = {Path(p).resolve() for p in edited if p and Path(p).is_file()}
     for f in _fused_module_candidates(source_file, files.fused_module):
-        if f.resolve() in edited_resolved:
-            continue  # an edited framework file is handled by (1)
-        rel = _rel(f)
+        if f.resolve() not in edited_resolved:
+            targets.append((_rel(f), f))
+    for rel, path in targets:
         snap = pristine_dir / rel
         created = not snap.is_file()
         old_text = "" if created else snap.read_text(encoding="utf-8", errors="replace")
-        new_text = f.read_text(encoding="utf-8", errors="replace")
+        new_text = path.read_text(encoding="utf-8", errors="replace")
         d = _unified_file_diff(rel, old_text, new_text, created=created)
         if d:
             parts.append(d)
             names.append(rel)
 
-    diff = "\n".join(p.rstrip("\n") for p in parts if p)
+    diff = "\n".join(p.rstrip("\n") for p in parts)
     if diff:
         patch_path.write_text(diff.rstrip("\n") + "\n", encoding="utf-8")
         arts.patch = str(patch_path)
-    arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
-    if arts.patch:
         arts.repo_root = str(root) if root else ""
+    arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
     log.info(
         "exported %d fusion file(s) (non-git); patch=%s repo_root=%s", len(arts.changes), arts.patch, arts.repo_root
     )

@@ -23,31 +23,39 @@ from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
+    compose_server_args,
     dedup_vllm_server_args,
     remove_server_args,
 )
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import _parse_skip_spec
+from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
+    _parse_skip_spec,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
+    resolve_skip_spec,
+)
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
     _run_magpie,
-    apply_runtime_benchmark_overrides,
-    apply_user_skip_list,
-    reorder_grid_for_multi_node,
-    resolve_skip_spec,
     run_grid,
+    MagpieRound,
+    GridRecipe,
+    GridLaunch,
+    GridStop,
 )
 
 from .conftest import enable_multi_node, launches_by_round_slot
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget, LaunchLayer
 
 
 # Section 1: _write_variant_abort_marker
@@ -639,10 +647,9 @@ async def test_run_grid_rejects_stale_leak_from_previous_run(
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert len(results) == 1
@@ -675,10 +682,9 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert len(results) == 1
@@ -714,12 +720,10 @@ async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("reused")],
             output_root=output_root,
-            server_already_ready=True,
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, warmup_before_measure=False),
         )
 
     result = results[0]
@@ -765,13 +769,10 @@ async def test_run_grid_scans_the_ready_server_log_named_by_the_caller(tmp_path)
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("kv")],
             output_root=output_root,
-            server_already_ready=True,
-            ready_server_log=str(warm_log),
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, ready_server_log=str(warm_log), warmup_before_measure=False),
         )
 
     result = results[0]
@@ -807,12 +808,10 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("reused_failure")],
             output_root=output_root,
-            server_already_ready=True,
-            warmup_before_measure=False,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(server_already_ready=True, warmup_before_measure=False),
         )
 
     result = results[0]
@@ -920,12 +919,9 @@ def test_build_variant_yaml_propagates_benchmark_script(tmp_path):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     out = _build_variant_yaml(
-        base,
-        base_extra_args="",
-        variant=GridVariant("vA", "--attention-backend aiter"),
+        GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x", benchmark_script="sglang_mi300x.sh")),
+        GridVariant("vA", "--attention-backend aiter"),
         output_subdir=tmp_path / "vA",
-        gpu_type="mi300x",
-        benchmark_script="sglang_mi300x.sh",
     )
     cfg = yaml.safe_load(out.read_text())
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
@@ -943,9 +939,8 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     out = _build_variant_yaml(
-        base,
-        base_extra_args="--enable-bar --block-size 128",
-        variant=GridVariant(
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--enable-bar --block-size 128")),
+        GridVariant(
             "without_user_foo",
             "--max-num-seqs 256",
             {"SGLANG_KEEP": "1"},
@@ -976,9 +971,8 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     out = _build_variant_yaml(
-        base,
-        base_extra_args="",
-        variant=GridVariant(
+        GridRecipe(base_yaml_path=base),
+        GridVariant(
             "unset_the_world",
             unset_envs=["TP", "CONC", "ROCR_VISIBLE_DEVICES", "SGLANG_ENABLE_FOO"],
         ),
@@ -990,6 +984,19 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     assert envs["CONC"] == 64
     # A plain tuning knob is still removable; only the pins are protected.
     assert "SGLANG_ENABLE_FOO" not in envs
+
+
+def _slot_round(tmp_path: Path, result_dir: str | None = None) -> MagpieRound:
+    """The Magpie round the ``_run_magpie`` env tests launch into ``tmp_path / "slot"``."""
+    return MagpieRound(
+        magpie_python="/opt/venv/bin/python",
+        config_path=tmp_path / "config.yaml",
+        output_dir=tmp_path / "slot",
+        timeout_sec=5,
+        silence_timeout_sec=600,
+        cwd=str(tmp_path),
+        result_dir=result_dir,
+    )
 
 
 def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
@@ -1005,14 +1012,7 @@ def test_run_magpie_default_result_dir_is_output_dir(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-        )
+        _run_magpie(_slot_round(tmp_path))
     assert captured["env"]["RESULT_DIR"] == str(tmp_path / "slot")
 
 
@@ -1031,14 +1031,7 @@ def test_run_magpie_does_not_forward_llm_credentials(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-        )
+        _run_magpie(_slot_round(tmp_path))
 
     assert "OPENAI_API_KEY" not in captured["env"]
     assert "ANTHROPIC_API_KEY" not in captured["env"]
@@ -1057,15 +1050,7 @@ def test_run_magpie_explicit_result_dir_overrides_default(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        _run_magpie(
-            magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
-            output_dir=tmp_path / "slot",
-            timeout_sec=5,
-            silence_timeout_sec=600,
-            cwd=str(tmp_path),
-            result_dir="/tmp/redirect_leak",
-        )
+        _run_magpie(_slot_round(tmp_path, result_dir="/tmp/redirect_leak"))
     assert captured["env"]["RESULT_DIR"] == "/tmp/redirect_leak"
 
 
@@ -1087,12 +1072,11 @@ async def test_run_grid_forwards_benchmark_script_per_variant(tmp_path):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
-            gpu_type="mi300x",
-            benchmark_script="sglang_mi300x.sh",
+            recipe=GridRecipe(
+                base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x", benchmark_script="sglang_mi300x.sh")
+            ),
         )
 
     assert len(results) == 2
@@ -1122,11 +1106,10 @@ async def test_run_grid_forwards_result_dir_to_subprocess_env(tmp_path):
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
-            result_dir="/tmp/redirect",
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(result_dir="/tmp/redirect"),
         )
 
     assert len(captured_envs) == 2
@@ -1155,10 +1138,9 @@ async def test_run_grid_default_result_dir_is_per_variant_slot(tmp_path):
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=grid,
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     for slot_path, result_dir in captured_envs:
@@ -1187,10 +1169,9 @@ async def test_run_grid_benchmark_runs_inside_the_session_that_owns_it(tmp_path)
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("vA"), GridVariant("vB")],
             output_root=output_root,
+            recipe=GridRecipe(base_yaml_path=base),
         )
 
     assert captured_cwds
@@ -1212,8 +1193,8 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     monkeypatch.setattr(mne, "is_multi_node", lambda: True)
     captured_restart: dict = {}
 
-    async def fake_restart_server_for_round(**kwargs):
-        captured_restart.update(kwargs)
+    async def fake_restart_server_for_round(server, **kwargs):
+        captured_restart.update(kwargs, extra_server_args=server.extra_server_args)
 
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
@@ -1230,8 +1211,6 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
         side_effect=fake_run,
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="--base-extra 3",
             grid=[
                 GridVariant(
                     "remove_inherited",
@@ -1242,6 +1221,7 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
                 )
             ],
             output_root=tmp_path / "out",
+            recipe=GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--base-extra 3")),
         )
 
     args = captured_restart["extra_server_args"]
@@ -1292,7 +1272,7 @@ async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatc
         return result
 
     monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
-    await run_grid(base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out")
+    await run_grid(grid=[variant], output_root=tmp_path / "out", recipe=GridRecipe(base_yaml_path=base))
     assert observed
     expected_args = "" if case in {"replace-empty", "remove-all"} else "--ambient-flag 1"
     expected_env = None if case == "unset" else ("accepted" if case == "unset-and-reassign" else "recipe")
@@ -1379,12 +1359,13 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
 
     monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
     with session_scope(session):
-        materialized = materialize_config_with_envs(base, tmp_path / "materialized", model_path="/models/test")
+        materialized = materialize_config_with_envs(
+            base, tmp_path / "materialized", target=BenchmarkTarget(model_path="/models/test")
+        )
         await run_grid(
-            base_yaml_path=materialized,
-            base_extra_args="",
             grid=[GridVariant("reference")],
             output_root=tmp_path / "out",
+            recipe=GridRecipe(base_yaml_path=materialized),
         )
     assert observed
     for child in observed:
@@ -1542,11 +1523,10 @@ async def test_run_grid_skips_all_variants_when_budget_already_exhausted(tmp_pat
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=time.monotonic() - 1.0,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=time.monotonic() - 1.0),
         )
 
     assert ran == []
@@ -1573,12 +1553,10 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=time.monotonic() + 5.0,
-            variant_expected_sec=10.0,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=time.monotonic() + 5.0, variant_expected_sec=10.0),
         )
 
     assert ran == []
@@ -1603,11 +1581,10 @@ async def test_run_grid_runs_all_when_no_session_deadline(tmp_path):
         side_effect=fake_run,
     ):
         results = await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
-            session_deadline_sec=None,
+            recipe=GridRecipe(base_yaml_path=base),
+            stop=GridStop(session_deadline_sec=None),
         )
 
     assert len(ran) == 2
@@ -1621,7 +1598,7 @@ def _capture_launches(recorded: list[dict]):
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
         slot = Path(cmd[cmd.index("--output-dir") + 1])
-        recorded.append({"round_slot": slot.name, **kwargs})
+        recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -1660,13 +1637,11 @@ async def _launch_every_pass_of_one_variant(
         ),
     ):
         await run_grid(
-            base_yaml_path=base,
-            base_extra_args="",
             grid=[GridVariant("v0")],
             output_root=tmp_path / "out",
-            session_deadline_sec=session_deadline_sec,
-            variant_expected_sec=30.0,
-            warmup_before_measure=True,
+            recipe=GridRecipe(base_yaml_path=base),
+            launch=GridLaunch(warmup_before_measure=True),
+            stop=GridStop(session_deadline_sec=session_deadline_sec, variant_expected_sec=30.0),
         )
     return recorded
 
@@ -1749,12 +1724,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert [r.status for r in results] == ["succeeded"]
@@ -1771,12 +1744,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 10.0,
-                variant_expected_sec=300.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 10.0, variant_expected_sec=300.0),
             )
 
         assert recorded == []
@@ -1794,12 +1765,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=None,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=None),
             )
 
         assert len(recorded) == 1
@@ -1823,12 +1792,10 @@ class TestSessionBudgetAdmission:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 700.0,
-                variant_expected_sec=None,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 700.0, variant_expected_sec=None),
             )
 
         assert len(recorded) == 1
@@ -1862,12 +1829,10 @@ class TestSessionBudgetIndependentWatchdog:
 
         with patch.object(gr, "run_with_session_kill", side_effect=fake_run):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("policy")],
                 output_root=tmp_path / "out",
-                warmup_before_measure=False,
-                magpie_python=sys.executable,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=False, magpie_python=sys.executable),
             )
 
         assert [result.status for result in results] == ["succeeded"]
@@ -1890,12 +1855,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert len(recorded) == 1
@@ -1914,12 +1877,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 36000.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 36000.0, variant_expected_sec=30.0),
             )
 
         assert _granted_timeouts(recorded) == [7800]
@@ -1935,12 +1896,10 @@ class TestSessionBudgetIndependentWatchdog:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=None,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=None, variant_expected_sec=30.0),
             )
 
         assert _granted_timeouts(recorded) == [7800]
@@ -1962,12 +1921,10 @@ class TestSessionKillAttribution:
             side_effect=fake_run,
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 120.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 120.0, variant_expected_sec=30.0),
             )
 
         assert [r.status for r in results] == ["skipped"]
@@ -1975,6 +1932,36 @@ class TestSessionKillAttribution:
         # Never the overtime label, which asserts the variant is abnormally slow.
         assert not getattr(results[0], "killed_overtime", False)
         assert results[0].output_throughput is None
+
+    @pytest.mark.asyncio
+    async def test_a_reaped_round_names_the_server_log_its_workspace_holds(self, tmp_path):
+        """The log of a round reaped before its server was ready sits in the round's ``benchmark_*`` directory."""
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        log_lines = "[aiter] import [module_aiter_core] under /sgl-workspace/aiter/aiter/jit/module_aiter_core.so\n"
+
+        def fake_run(cmd, *args, **kwargs):
+            if "--output-dir" in cmd:
+                workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_sglang_20261021_063727"
+                workspace.mkdir(parents=True)
+                (workspace / "server.log").write_text(log_lines, encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, ORCHESTRATOR_CANCELLED_RETURNCODE, "", "")
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            results = await run_grid(
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(variant_expected_sec=30.0),
+            )
+
+        assert [r.status for r in results] == ["skipped"]
+        assert results[0].server_log_path == str(
+            tmp_path / "out" / "variant_00_v0" / "benchmark_sglang_20261021_063727" / "server.log"
+        )
 
     @pytest.mark.asyncio
     async def test_session_deadline_reaches_the_watchdog_without_becoming_its_timeout(self, tmp_path):
@@ -1988,12 +1975,10 @@ class TestSessionKillAttribution:
             side_effect=_capture_launches(recorded),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 60.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 60.0, variant_expected_sec=30.0),
             )
 
         assert len(recorded) == 1
@@ -2066,13 +2051,11 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("cand0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0),
             )
 
         assert launched == ["warmup_round"], "the measured round must not run after the warmup was reaped"
@@ -2098,14 +2081,13 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1"), GridVariant("c2")],
                 output_root=tmp_path / "out",
-                keep_going_on_failure=True,
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(
+                    keep_going_on_failure=True, session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0
+                ),
             )
 
         assert launched == ["warmup_round"], f"a cancelled action kept launching rounds: {launched}"
@@ -2123,7 +2105,7 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
 
-        async def fake_restart_server_for_round(**_kwargs):
+        async def fake_restart_server_for_round(_server, **_kwargs):
             return None
 
         monkeypatch.setattr(mnsl, "restart_server_for_round", fake_restart_server_for_round)
@@ -2134,13 +2116,12 @@ class TestEveryRoundCarriesTheStopThatEndedIt:
             side_effect=fake_run,
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("c0"), GridVariant("c1")],
                 output_root=tmp_path / "out",
-                keep_going_on_failure=True,
-                session_deadline_sec=time.monotonic() + 600.0,
-                variant_expected_sec=30.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(
+                    keep_going_on_failure=True, session_deadline_sec=time.monotonic() + 600.0, variant_expected_sec=30.0
+                ),
             )
 
         assert launched == ["mn_warmup"], f"a cancelled action kept launching rounds: {launched}"
@@ -2168,13 +2149,11 @@ class TestSessionBudgetWarmupRounds:
             ),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 40.0,
-                variant_expected_sec=30.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 40.0, variant_expected_sec=30.0),
             )
 
         assert recorded == []
@@ -2196,7 +2175,7 @@ class TestSessionBudgetWarmupRounds:
         monkeypatch.setattr(mne, "mn_bench_warmup_enabled", lambda: True)
         restarts: list[float] = []
 
-        async def slow_restart(**_kwargs):
+        async def slow_restart(_server, **_kwargs):
             restarts.append(time.monotonic())
             await asyncio.sleep(3.0)
 
@@ -2208,12 +2187,10 @@ class TestSessionBudgetWarmupRounds:
             side_effect=_capture_launches(recorded),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 6.0,
-                variant_expected_sec=2.0,
+                recipe=GridRecipe(base_yaml_path=base),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 6.0, variant_expected_sec=2.0),
             )
 
         assert restarts, "the restart never ran, so this is not the case under test"
@@ -2239,13 +2216,11 @@ class TestSessionBudgetWarmupRounds:
             ),
         ):
             await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 300.0,
-                variant_expected_sec=60.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0),
             )
 
         by_round = launches_by_round_slot(recorded)
@@ -2269,8 +2244,8 @@ class TestSessionBudgetWarmupRounds:
             if "--output-dir" not in cmd:
                 return subprocess.CompletedProcess(cmd, 0, "ok", "")
             slot = Path(cmd[cmd.index("--output-dir") + 1])
-            recorded.append({"round_slot": slot.name, **kwargs})
-            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 0.0))
+            recorded.append({"round_slot": slot.name, **kwargs, **vars(kwargs["watch"])})
+            raise subprocess.TimeoutExpired(cmd, float(kwargs["watch"].timeout or 0.0))
 
         with (
             patch(
@@ -2284,13 +2259,11 @@ class TestSessionBudgetWarmupRounds:
             caplog.at_level("WARNING"),
         ):
             results = await run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
-                session_deadline_sec=time.monotonic() + 300.0,
-                variant_expected_sec=60.0,
-                warmup_before_measure=True,
+                recipe=GridRecipe(base_yaml_path=base),
+                launch=GridLaunch(warmup_before_measure=True),
+                stop=GridStop(session_deadline_sec=time.monotonic() + 300.0, variant_expected_sec=60.0),
             )
 
         granted = int(recorded[0]["timeout"])
@@ -2306,23 +2279,20 @@ class TestCompactJsonServerArgs:
     """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
-        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
+        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}')
         assert out == '--compilation-config {"full_cuda_graph":true}'
         # the JSON value is now a single shell word under bash word-splitting
         assert len(out.split()) == 2
 
     def test_speculative_config_multikey(self):
-        out = compact_json_server_args(
-            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
-            "vllm",
-        )
+        out = compact_json_server_args('--speculative-config {"method": "eagle", "num_speculative_tokens": 3}')
         assert out == ('--speculative-config {"method":"eagle","num_speculative_tokens":3}')
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
         # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
         # unquoted expansion; this flag shape is unsupported.
-        out = compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
+        out = compact_json_server_args('--speculative-config {"model": "draft model name"}')
         # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
         # ...but it still splits into MORE than the ideal 2 words: the two internal spaces of "draft model name"
@@ -2335,8 +2305,7 @@ class TestCompactJsonServerArgs:
         # boot (observed: shape_capture server never boots -> shape_capture_failed). compact must repair the barewords
         # back to valid JSON.
         out = compact_json_server_args(
-            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}",
-            "vllm",
+            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}"
         )
         assert out == (
             "--speculative-config "
@@ -2348,8 +2317,7 @@ class TestCompactJsonServerArgs:
     def test_quote_stripped_json_with_path_value_repaired(self):
         # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id) must also be re-quoted.
         out = compact_json_server_args(
-            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}",
-            "vllm",
+            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}"
         )
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
@@ -2358,10 +2326,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_quote_stripped_nested_json_is_repaired(self):
-        out = compact_json_server_args(
-            "--compilation-config {method:ngram,nested:{a:1}}",
-            "vllm",
-        )
+        out = compact_json_server_args("--compilation-config {method:ngram,nested:{a:1}}")
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
             "method": "ngram",
@@ -2369,10 +2334,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_shell_single_quote_wrappers_are_removed(self):
-        out = compact_json_server_args(
-            """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
-            "vllm",
-        )
+        out = compact_json_server_args("""--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """)
         assert out.strip() == ('--speculative-config {"method":"ngram","num_speculative_tokens":7}')
         json.loads(out.split(" ", 1)[1].strip())
 
@@ -2380,38 +2342,36 @@ class TestCompactJsonServerArgs:
         # Genuinely broken blobs that cannot be repaired to valid JSON are left verbatim (no worse than before), never
         # raising.
         raw = "--compilation-config {this is : not ] json"
-        out = compact_json_server_args(raw, "vllm")
+        out = compact_json_server_args(raw)
         assert "{this is" in out
 
     def test_other_flags_around_json_untouched(self):
-        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
+        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}')
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
     def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
+        assert compact_json_server_args(raw) == ('--speculative-config {"method":"eagle"}')
 
-    def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
+    def test_legacy_shell_wrappers_removed(self):
         raw = """--json-model-override-args '{"rope_scaling":null}'"""
-        expected = '--json-model-override-args {"rope_scaling":null}'
-        assert compact_json_server_args(raw, "sglang") == expected
-        assert compact_json_server_args(raw, None) == expected
+        assert compact_json_server_args(raw) == '--json-model-override-args {"rope_scaling":null}'
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
         raw = "--compilation-config '{not json}'"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_empty_is_noop(self):
-        assert compact_json_server_args("", "vllm") == ""
-        assert compact_json_server_args(None, "vllm") == ""
+        assert compact_json_server_args("") == ""
+        assert compact_json_server_args(None) == ""
 
 
 class TestRemoveServerArgsPreservesJson:
@@ -2463,12 +2423,12 @@ class TestRemoveServerArgsPreservesJson:
             {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
             {"base_extra_args": base, "args_mode": "replace"},
         ):
-            out = _grid_runner.compose_server_args(**kwargs)
+            out = compose_server_args(**kwargs)
             assert _blob(out, "--compilation-config") == json.loads(cc)
             assert _blob(out, "--speculative-config") == json.loads(sc)
         # Removing the JSON flag and supplying a variant replacement.
         repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
-        out = _grid_runner.compose_server_args(
+        out = compose_server_args(
             inherited_args=base,
             remove_args=["--compilation-config"],
             variant_extra_args=f"--compilation-config {repl}",
@@ -2576,18 +2536,18 @@ class TestServerArgTokenizerOnTheSyntheticPath:
     def test_a_plain_synthetic_arg_string_round_trips(self, monkeypatch):
         self._off(monkeypatch)
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
-        assert _grid_runner.compose_server_args(base_extra_args=args) == args
+        assert compose_server_args(base_extra_args=args) == args
 
     def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
         """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
         assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
         assert out == "--quantization fp8 --max-num-seqs 512"
 
     def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):

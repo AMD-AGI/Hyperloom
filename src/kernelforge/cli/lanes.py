@@ -185,14 +185,18 @@ def _make_lane_agent_factory(
         # and each one measures a kernel it did not write.
         lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
 
-        async def session(kernel_path: str, plan: str) -> str:
+        async def session(kernel_path: str, plan: str, *, session_sink: dict | None = None) -> str:
             _assert_lane_session_cwd(
                 kernel_path=kernel_path,
                 workspace=lane_config.workspace,
                 lane_dir=lane_dir,
             )
-            with session_environment(lane_env):
-                return await lane_agent(kernel_path, plan)
+            try:
+                with session_environment(lane_env):
+                    return await lane_agent(kernel_path, plan, session_sink=session_sink)
+            finally:
+                # The backend was built for this one session and nothing resumes it once the lane returns.
+                lane_agent.close()
 
         return session
 

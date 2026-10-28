@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
@@ -245,7 +246,7 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``_kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
+    # ``kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%
@@ -290,7 +291,7 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),
@@ -325,7 +326,7 @@ def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path)
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),

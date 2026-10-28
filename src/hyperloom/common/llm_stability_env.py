@@ -10,13 +10,7 @@ from typing import MutableMapping
 __all__ = ["apply_llm_stability_env"]
 
 
-def apply_llm_stability_env(
-    env: MutableMapping[str, str],
-    *,
-    api_timeout_ms: str | None = None,
-) -> None:
-    """Inject client-side LLM-transport timeout/stability knobs into ``env``."""
-    if api_timeout_ms is not None:
-        env.setdefault("API_TIMEOUT_MS", str(api_timeout_ms))
+def apply_llm_stability_env(env: MutableMapping[str, str]) -> None:
+    """Inject client-side LLM-transport stability knobs into ``env``."""
     env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     env.setdefault("DISABLE_AUTOUPDATER", "1")

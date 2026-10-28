@@ -250,7 +250,7 @@ def diagnose_from_shares(
 ) -> Diagnosis:
     """Turn category busy-shares into a fusion-candidate verdict."""
     busy_fraction_of_wall = profile.busy_fraction_of_wall
-    shares = {str(k).strip().lower(): float(v) for k, v in (profile.category_shares or {}).items() if v is not None}
+    shares = {str(k).strip().lower(): float(v) for k, v in profile.category_shares.items() if v is not None}
     bytes_share = {
         str(k).strip().lower(): float(v) for k, v in (profile.category_bytes_share or {}).items() if v is not None
     }
@@ -259,14 +259,9 @@ def diagnose_from_shares(
     # share; otherwise fall back to the flat launch-share discount (mem_share=None keeps the legacy behavior).
     lb_mem_share = sum(v for k, v in bytes_share.items() if k in LAUNCH_BOUND_CATEGORIES) if bytes_share else None
     predicted = predict_cuda_graph_on_gain(lb_share, decode_batch=decode_batch, mem_share=lb_mem_share)
-    dominant = [
-        k
-        for k, _ in sorted(
-            ((k, v) for k, v in shares.items() if k in LAUNCH_BOUND_CATEGORIES and v > 0),
-            key=lambda kv: kv[1],
-            reverse=True,
-        )
-    ]
+    dominant = sorted(
+        (k for k, v in shares.items() if k in LAUNCH_BOUND_CATEGORIES and v > 0), key=shares.get, reverse=True
+    )
 
     def _diag(is_candidate: bool, reason: str) -> Diagnosis:
         return Diagnosis(

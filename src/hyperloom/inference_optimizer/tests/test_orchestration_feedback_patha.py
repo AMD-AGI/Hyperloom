@@ -121,15 +121,14 @@ def test_context_tool_names_match_the_mounted_specs():
     assert tuple(spec[0] for spec in CONTEXT_TOOL_SPECS) == CONTEXT_TOOL_NAMES
 
 
-def test_context_provider_recent_outcomes_not_wired_message():
-    provider = ContextProvider(shared_state=object())
-    assert "not wired" in provider.recent_outcomes()
-
-
 def test_context_provider_recent_outcomes_delegates_to_reader():
     provider = ContextProvider(
         shared_state=object(),
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda k: f"outcomes(top_k={k})",
+        running_tasks_reader=lambda: "",
+        reference_reader=lambda name: "",
     )
     assert provider.recent_outcomes(5) == "outcomes(top_k=5)"
 
@@ -376,7 +375,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "failure:" in prompt
     finally:
         await c.stop()
@@ -410,7 +409,7 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation.compose_prompt("critic")
+        prompt = (await c.conversation.compose_prompt("critic")).text
         assert "failure:" not in prompt
     finally:
         await c.stop()

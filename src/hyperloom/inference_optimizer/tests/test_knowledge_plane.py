@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,6 @@ def test_plane_disabled_pr_returns_empty_mcp_url():
     )
     assert plane.pr_monitor_enabled is False
     assert plane.specialist_mcp_url() == ""
-    assert plane.config is not None and plane.config.pr_monitor_enabled is False
 
 
 def test_plane_enabled_pr_returns_mcp_url():
@@ -73,22 +71,8 @@ def _build_args(**overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
-def test_bootstrap_writes_status_marker_when_disabled(tmp_path: Path):
+def test_bootstrap_reports_ir3_auto_degrade(monkeypatch, capsys):
     from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
-    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
-
-    args = _build_args(pr_monitor_enabled=False)
-    _bootstrap_knowledge_plane(args, recipe_kb_client=None, session_dir=tmp_path)
-    marker = pr_monitor_status_json(tmp_path)
-    assert marker.exists()
-    payload = json.loads(marker.read_text())
-    assert payload["enabled"] is False
-    assert payload["reachable"] is False
-
-
-def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
-    from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
-    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
 
     class _Stub:
@@ -101,10 +85,9 @@ def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
         classmethod(lambda cls, **kw: _Stub(enabled=kw.get("enabled", True))),
     )
     args = _build_args(pr_monitor_enabled=False, pr_degraded_reason="ir3_auto")
-    _bootstrap_knowledge_plane(args, recipe_kb_client=None, session_dir=tmp_path)
-    payload = json.loads(pr_monitor_status_json(tmp_path).read_text())
-    assert payload["enabled"] is False
-    assert "ir3_auto" in payload.get("status_text", "")
+    plane = _bootstrap_knowledge_plane(args, recipe_kb_client=None)
+    assert "PR Monitor       : DISABLED (ir3_auto)" in capsys.readouterr().out
+    assert plane.pr_monitor_enabled is False
 
 
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:
@@ -133,10 +116,7 @@ def test_removed_independent_pr_endpoint_flags_are_rejected(flag: str):
         _parse_optimize_args([flag, "https://legacy.example/pr-monitor"])
 
 
-def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
-    tmp_path: Path,
-    monkeypatch,
-):
+def test_cli_args_round_trip_into_bootstrap_knowledge_plane(monkeypatch):
     """Argparse ``args`` values propagate into the KnowledgePlane."""
     from hyperloom.inference_optimizer.cli.kb import _bootstrap_knowledge_plane
     from hyperloom.orchestrator.knowledge import pr_monitor as pr_mod
@@ -162,10 +142,6 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
 
     args = _parse_optimize_args([])
-    plane = _bootstrap_knowledge_plane(
-        args,
-        recipe_kb_client=None,
-        session_dir=tmp_path,
-    )
+    plane = _bootstrap_knowledge_plane(args, recipe_kb_client=None)
     assert constructed_enabled[-1] is True
     assert plane.pr_monitor_mcp_url == "https://kb.example/knowledge-base/pr-monitor/mcp/"

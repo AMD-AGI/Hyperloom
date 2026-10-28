@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
 )
-from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -29,7 +29,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, RecipeUpsert, recipe_canonical_id
 from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -54,7 +54,6 @@ _SEVERITY_REGRESS: str = "regress"
 # Use an exact lookup so a reason token cannot collide with the same text inside
 # an exception name or explanatory message.
 _REMOTE_RESULT_TYPES: dict[str, str] = {
-    "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
     "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,
     "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
     "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
@@ -845,7 +844,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one Recipe finalize attempt, settled as transport_failed
             log.exception("Recipe finalize raised")
             outcome = {
                 "status": "error",
@@ -997,11 +996,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
         canonical_id = ""
-        from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
+        from ..knowledge.remote_recipe import KBStoreError, RemoteRecipeClient, write_final_remote_recipe
 
         try:
             canonical_id = self.workload_canonical_id()
-            written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
+            written = write_final_remote_recipe(state, canonical_id, session_id, client=RemoteRecipeClient.from_env())
         except (KBStoreError, OSError, ValueError) as exc:
             self._record_remote_recipe_audit(
                 source,
@@ -1127,7 +1126,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
         ss = self.shared_state
-        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", **resolve_kb_topology())
+        return kb_hardware_slug(ss.gpu_type or "unknown_gpu", resolve_kb_topology())
 
     def workload_canonical_id(self) -> str:
         """Return the workload's canonical seven-dimension Recipe identity."""
@@ -1135,7 +1134,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         from hyperloom.common.perf_metric import agentx_active
 
-        return recipe_canonical_id(
+        rid = RecipeIdentity(
             model=state.model_name or "unknown_model",
             hardware=self._kb_hardware_slug(),
             framework_name=identity.name,
@@ -1143,8 +1142,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             precision=identity.precision,
             model_type=str(state.model_type or ""),
             architectures=state.model_architectures or [],
-            scheme=("agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference"),
         )
+        return recipe_canonical_id(rid, "agentx" if agentx_active(benchmark_mode=state.benchmark_mode) else "inference")
 
     def read_local_recipe_row(self) -> dict[str, Any]:
         """Load the selected store's exact authority row for writes."""
@@ -1244,25 +1243,25 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         identity = _framework_identity(state)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
         overrides = dict(recipe_overrides or {})
-        put_kwargs: dict[str, Any] = {
-            "canonical_id": canonical_id,
-            "model": state.model_name or "unknown_model",
-            "hardware": self._kb_hardware_slug(),
-            "framework_name": identity.name,
-            "framework_version": identity.version,
-            "precision": identity.precision,
-            "pitfalls": appended(live.get("pitfalls"), append_pitfall),
-            "lessons": appended(live.get("lessons"), append_lesson),
-            "extras": amended_recipe_extras(live, overrides, state),
-            "provenance": {
+        upsert = RecipeUpsert(
+            canonical_id=canonical_id,
+            model=state.model_name or "unknown_model",
+            hardware=self._kb_hardware_slug(),
+            framework_name=identity.name,
+            framework_version=identity.version,
+            precision=identity.precision,
+            pitfalls=appended(live.get("pitfalls"), append_pitfall),
+            lessons=appended(live.get("lessons"), append_lesson),
+            extras=amended_recipe_extras(live, overrides, state),
+            provenance={
                 "source": "hyperloom-inference-optimizer",
                 "generator": "coordinator",
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                 "details": dict(provenance_details or {}),
             },
             **amended_recipe_fields(live, overrides),
-        }
-        self.recipe_kb.put_recipe(**put_kwargs)
+        )
+        self.recipe_kb.put_recipe(upsert)
         self._local_recipe_cache = None
 
 

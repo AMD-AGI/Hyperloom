@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level``, ``--apply-gpu-power-settings``,
-``--node-power-management`` and ``--node-power-limit-w``."""
+"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level``, ``--gpu-sclk-max-mhz``,
+``--apply-gpu-power-settings``, ``--node-power-management``, ``--node-power-limit-w`` and
+``--allow-shared-npm-node``."""
 
 from __future__ import annotations
 
@@ -13,11 +14,22 @@ from hyperloom.common.gpu_power_settings import NPM_STATES, PERF_LEVELS
 from .constraint_args import positive_watts_arg
 
 
+def _positive_mhz_arg(value: str) -> int:
+    """A positive whole number of MHz, the only clock limit ``amd-smi set -L`` takes."""
+    try:
+        mhz = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a whole number of MHz, got {value!r}") from exc
+    if mhz <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of MHz, got {value!r}")
+    return mhz
+
+
 def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
     """Add the power-settings flags to the optimize command.
 
-    By default the cap and perf level are assertions an operator satisfies before launch; the apply flag lets the
-    session set them itself, on its masked cards only, for its whole lifetime.
+    By default every setting is an assertion an operator satisfies before launch; the apply flag lets the session set
+    the cap and perf level itself, on its masked cards only, for its whole lifetime.
     """
     opt.add_argument(
         "--gpu-power-cap-w",
@@ -42,6 +54,18 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
         ),
     )
     opt.add_argument(
+        "--gpu-sclk-max-mhz",
+        type=_positive_mhz_arg,
+        default=None,
+        metavar="MHZ",
+        help=(
+            "Declare the graphics clock (sclk) maximum the GPUs are limited to, in MHz, as `amd-smi metric --clock` "
+            "reports it. Always an assertion: set it with `amd-smi set -L sclk max MHZ` before launch; "
+            "--apply-gpu-power-settings does not set it. A ceiling, not a locked clock: under load the cards may run "
+            "below it. The observed limit is recorded whether or not this flag is passed."
+        ),
+    )
+    opt.add_argument(
         "--apply-gpu-power-settings",
         action="store_true",
         default=False,
@@ -61,6 +85,11 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
             "again on resume."
         ),
     )
+    _add_node_power_arguments(opt)
+
+
+def _add_node_power_arguments(opt: argparse._ActionsContainer) -> None:
+    """The node power management flags: assertions, since NPM is set on the BMC, and the permission to share a node."""
     opt.add_argument(
         "--node-power-management",
         type=str.lower,
@@ -81,5 +110,15 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
         help=(
             "Declare the node power limit (W) firmware enforces under NPM, as `amd-smi node -p` reports it; this can "
             "sit below the limit the BMC was asked for. Asserted like --node-power-management."
+        ),
+    )
+    opt.add_argument(
+        "--allow-shared-npm-node",
+        action="store_true",
+        help=(
+            "Measure on a node with Node Power Management enabled even though the session's visible-device mask "
+            "leaves some of its GPUs out. Without it such a launch is refused: firmware shares one power budget "
+            "across every card, so work on the other cards moves this session's measurements. The cards left out are "
+            "recorded with the session. Not kept: pass it again on resume."
         ),
     )

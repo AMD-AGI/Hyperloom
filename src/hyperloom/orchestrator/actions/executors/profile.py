@@ -10,7 +10,6 @@ import gzip
 import json
 import logging
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -35,7 +34,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
+from .benchmark_result import round_succeeded
 from .baseline import BenchmarkRunExecutor
 
 
@@ -652,7 +651,7 @@ def _validate_trace_structure(
 
 # Fold the composite's base overrides into the caller's profile params.
 def _merge_profile_params(params: dict[str, Any]) -> None:
-    from ._grid_runner import merge_server_args
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 
     merged_args = merge_server_args(
         _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip()),
@@ -680,16 +679,15 @@ def _merge_profile_params(params: dict[str, Any]) -> None:
 
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
-    from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+    from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     try:
         await restart_server_for_round(
-            extra_server_args=str(params.get("extra_server_args") or ""),
+            RoundServer.from_env(
+                str(params.get("extra_server_args") or ""),
+                str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
+            ),
             torch_profiler_dir=round_trace_root,
-            framework=os.environ.get("FRAMEWORK") or None,
-            model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
-            tp=int(os.environ.get("TP") or 0) or None,
-            ep=int(os.environ.get("EP") or 0) or None,
         )
     except ServerRestartFailed as exc:
         return {
@@ -983,6 +981,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
     runs_accuracy_eval = False
+    default_timeout_sec = PROFILE_DEFAULT_TIMEOUT_SEC
 
     def __init__(
         self,
@@ -990,16 +989,12 @@ class ProfileExecutor(BenchmarkRunExecutor):
         magpie_python: str | None = None,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        default_timeout_sec: int = PROFILE_DEFAULT_TIMEOUT_SEC,
-        cwd: Path | str | None = None,
     ):
         """Initialize the profile executor with profile-specific defaults."""
         super().__init__(
             magpie_python=magpie_python,
             default_config_path=default_config_path,
             session_dir=session_dir,
-            default_timeout_sec=default_timeout_sec,
-            cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
         # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
@@ -1122,7 +1117,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1159,9 +1154,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            if str(framework or "").strip().lower() == "xdit":
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
-                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):
@@ -1243,7 +1235,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,
@@ -1322,8 +1314,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             result["trace_input_ready"] = True
         return result
 
-    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
-        return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
+    _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
         """Collect Magpie-owned captures and certify each time window separately."""

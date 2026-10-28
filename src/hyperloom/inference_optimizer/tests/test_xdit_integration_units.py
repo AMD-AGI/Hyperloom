@@ -14,6 +14,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 from hyperloom.orchestrator.actions.executors import explore as ex
 
@@ -79,14 +80,14 @@ class TestFormatPrimaryMetric:
 
 class TestServerArgsEnvName:
     def test_exact(self):
-        assert gr.server_args_env_name("xdit") == "EXTRA_XDIT_ARGS"
-        assert gr.server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
-        assert gr.server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
-        assert gr.server_args_env_name(None) == "EXTRA_SGLANG_ARGS"
+        assert fr.server_args_env_name("xdit") == "EXTRA_XDIT_ARGS"
+        assert fr.server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
+        assert fr.server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
+        assert fr.server_args_env_name(None) == "EXTRA_SGLANG_ARGS"
 
     def test_version_suffix_substring(self):
-        assert gr.server_args_env_name("vllm@0.21") == "EXTRA_VLLM_ARGS"
-        assert gr.server_args_env_name("xdit-rocm") == "EXTRA_XDIT_ARGS"
+        assert fr.server_args_env_name("vllm@0.21") == "EXTRA_VLLM_ARGS"
+        assert fr.server_args_env_name("xdit-rocm") == "EXTRA_XDIT_ARGS"
 
 
 class TestXditBlacklist:
@@ -109,7 +110,7 @@ class TestXditBlacklist:
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
         bad = gr.GridVariant(name="xdit_fp4", extra_server_args="", extra_envs={"XDIT_USE_FP4_GEMMS": "1"})
-        kept, dropped = gr.apply_compatibility_filter([good, bad], framework="xdit", model_path="")
+        kept, dropped = vf.apply_compatibility_filter([good, bad], serving=ServingStack("xdit", ""))
         kept_names = {v.name for v in kept}
         dropped_names = {d["name"] for d in dropped}
         assert "xdit_ok" in kept_names
@@ -264,9 +265,7 @@ class TestExploreGrid:
             ("xdit", "dit", {}),
             ("xdit", "moe_mla", {}),
             ("xdit", "dit", {"conc": 32}),
-            ("xdit", "dit", {"isl": 2048}),
-            ("xdit", "dit", {"osl": 256}),
-            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+            (" XDiT ", "", {"conc": 1}),
         ],
     )
     def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
@@ -287,7 +286,7 @@ class TestExploreGrid:
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
-        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32) == []
 
     @pytest.mark.parametrize(
         "model_class,conc,model_variants",
@@ -310,7 +309,7 @@ class TestExploreGrid:
         expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
         if conc:
             expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
-        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc)
         assert [(v.name, v.extra_server_args) for v in grid] == expected
         for v in grid:
             assert v.extra_envs == {}

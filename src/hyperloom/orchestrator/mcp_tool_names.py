@@ -61,6 +61,24 @@ def qualified_context_tool_name(tool_name: str) -> str:
     return qualified_tool_name(CONTEXT_MCP_SERVER_NAME, tool_name)
 
 
+# The built-in tools orchestration gets on top of the MCP ones: a sandboxed read and web search.
+ORCHESTRATION_BUILTIN_TOOL_NAMES: tuple[str, ...] = ("Read", "WebSearch", "WebFetch")
+
+
+def agent_tool_grant(agent_name: str) -> list[str]:
+    """Return the registered tool names an agent with tools may call.
+
+    Every reactor gets ``emit_intent``; orchestration also gets the read-only
+    context pulls and the built-in tools. The caller decides whether the role
+    has tools at all; this is only what the names are.
+    """
+    tools = [EMIT_INTENT_TOOL_QUALIFIED]
+    if agent_name == "orchestration":
+        tools.extend(CONTEXT_TOOL_QUALIFIED_NAMES)
+        tools.extend(ORCHESTRATION_BUILTIN_TOOL_NAMES)
+    return tools
+
+
 __all__ = [
     "CONTEXT_MCP_SERVER_NAME",
     "CONTEXT_TOOL_NAMES",
@@ -68,6 +86,8 @@ __all__ = [
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
+    "ORCHESTRATION_BUILTIN_TOOL_NAMES",
+    "agent_tool_grant",
     "qualified_context_tool_name",
     "qualified_tool_name",
 ]

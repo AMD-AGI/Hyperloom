@@ -96,7 +96,7 @@ booked. A phase budget never cancels running work -- the last action in
 flight, such as a GEAK rebench, completes and settles its result. Running
 work is cancelled only when the run is already over: a terminal transition to
 CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
-convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+convergence), an exhausted session budget, a shutdown or an
 operator interrupt. Each
 phase therefore starts on quiet GPUs, and its entry hook runs on the
 transition itself.
@@ -282,16 +282,39 @@ serving card power throttled for at least 10% of the phase is listed in
 throttled share and mean clock: its throughput was set by the power cap, not by
 its clock limit. This is only reported; nothing changes the cards.
 
-The optimizer never changes power settings during a session. The power cap and
-DPM performance level decide how much of the card's throughput is available at
-what power, so they are part of the measurement contract, and setting them is
-privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
-`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+Node Power Management (MI350 series) holds the node to its own limit by
+lowering every card's power, and the cards' throttle accumulators do not count
+that: on an MI350X node held to 2600 W, every card ran near 430 W against a
+1000 W cap with a `power_throttle_fraction` under 1%. So while NPM is enabled,
+each sample also reads the node's power and the limit firmware enforces on it
+(`board/node_power` and `board/cur_node_power_limit` in sysfs; amdgpu publishes
+them on one card of an XGMI hive, so on one card of an MI350 node, and on every
+card of a node without a hive), and `gpu_power.json` carries a `node` block: `limit_w`
+(unread when the limit changed during the phase), `avg_power_w`, `max_power_w`,
+`samples` and `limited_fraction`, the share of samples at 99% of the limit or
+above. A held node reads at its limit, or above it once every card is down at
+its minimum power. When that share is at least 10%, the round logs a warning
+naming the limit and the share. The block is `null` on a node without NPM or
+with it disabled. Failed reads, and a reading that reports NPM enabled with no
+limit, are counted in `node_query_errors`. Where
+the node limit equals the sum of the cards' caps (8000 W against eight 1000 W
+caps), both limits are reached together and both are reported.
+
+The optimizer never changes power settings during a session. The power cap, the
+DPM performance level and the graphics clock's maximum (sclk) decide how much of
+the card's throughput is available at what power, so they are part of the
+measurement contract, and setting them is privileged and card-wide. By default,
+set them with `amd-smi set --power-cap` / `--perf-level` / `-L sclk max` before
+launch; `--gpu-power-cap-w`, `--gpu-perf-level` and `--gpu-sclk-max-mhz` then
 assert them, the way `--compute-partition-mode` asserts a partition mode: the
 session refuses to start (and to resume) if a card it uses is at a different
-value. The observed cap and perf level are recorded in the platform
-fingerprint whether or not they are asserted. Neither can be checked on a
-multi-node session, so asserting one there refuses.
+value. The observed cap, perf level and sclk limit are recorded in the platform
+fingerprint whether or not they are asserted. None can be checked on a
+multi-node session, so asserting one there refuses. The sclk limit is read from
+`amd-smi metric --clock`, where a limit set with `-L` shows; it is a ceiling,
+not a locked clock, so under load a card may run below it. The limit is only
+ever asserted: `--apply-gpu-power-settings` sets the cap and perf level, not the
+limit.
 
 Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
 is enabled, firmware holds the sum of every card's power to a node limit and
@@ -305,6 +328,20 @@ read. They are only ever asserted: NPM is enabled and its limit set on the
 BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
 can sit below the one the BMC was asked for, since firmware clamps it to the
 node's maximum, so assert the value `amd-smi` reports.
+
+Because NPM moves power between cards, a session on part of an NPM-enabled node
+is measured against whatever runs on the rest of it. So when `amd-smi` reports
+NPM enabled, a launch or resume whose visible-device mask leaves any of the
+node's GPUs out is refused, naming the cards left out, whether or not they are
+busy at that moment: an idle neighbour at launch says nothing about the hours
+after it. A mask that is set but whose cards cannot be named is refused the same
+way. The check is on the mask: a session with no mask counts as having every
+card, as everywhere else, even if its tensor parallelism uses fewer.
+`--allow-shared-npm-node` measures anyway and records the cards left out as a
+list of amd-smi indices under `shared_npm_node` (`null` when the mask's cards
+cannot be named). Like `--apply-gpu-power-settings`, the permission is not kept:
+pass it again on resume. A node with NPM disabled, or without it, and a
+multi-node session are not checked.
 
 ### Applying the power settings (opt-in)
 
@@ -494,7 +531,10 @@ One phase, two levers worked in parallel:
   a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
   that a `candidate_discovery_specialist` found, ranked and judged. Both
   serialise on the `workspace_mutation` lane: one landing at a time,
-  independent of how fast proposals arrive.
+  independent of how fast proposals arrive. A candidate whose every patch
+  reverse-applies cleanly, and that changes nothing else, is not benchmarked:
+  it ends `already_present`, and a candidate with an upstream PR identity is
+  recorded so in the framework KB.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An

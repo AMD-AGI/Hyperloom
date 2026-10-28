@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from hyperloom.common.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    RoundWatch,
     run_with_session_kill,
 )
 
@@ -175,8 +176,7 @@ def run_controller_subprocess(
         completed = run_with_session_kill(
             command,
             env=_controller_environment(),
-            timeout=max(1, int(hard_timeout_sec)),
-            text=True,
+            watch=RoundWatch(timeout=max(1, int(hard_timeout_sec))),
             on_output=on_output,
         )
         returncode = int(completed.returncode)

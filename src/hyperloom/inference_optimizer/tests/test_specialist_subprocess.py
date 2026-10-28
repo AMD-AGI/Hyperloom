@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import time
@@ -16,16 +17,22 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.git_safety import worktree_head
+from hyperloom.common.env_safety import specialist_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
     SpecialistRunner,
 )
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
+from hyperloom.orchestrator.specialists import launch_env
+from hyperloom.orchestrator.specialists.launch_env import prepare_demote
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
@@ -656,7 +663,6 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     workspace.mkdir()
     process_log = workspace / "process.log"
     process_log.write_text("start\n", encoding="utf-8")
-    heartbeat_file = workspace / "heartbeat.json"  # never written
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=1.0,
@@ -675,7 +681,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     writer = asyncio.create_task(_keep_streaming())
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -695,7 +701,6 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
-    heartbeat_file = workspace / "heartbeat.json"
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=0.5,
@@ -719,7 +724,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -759,7 +764,7 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-base"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-base"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )
@@ -780,9 +785,7 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
     loop = asyncio.create_task(
         disp._reap_loop(
             proc,
-            ReapWatch(
-                workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-live"
-            ),
+            ReapWatch(workspace=workspace, done_files=(), task_id="task-live"),
             deadline=Deadline.after(0.3),
             started=time.monotonic(),
         )
@@ -813,7 +816,7 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-mine"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-mine"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )
@@ -873,27 +876,17 @@ class _FakeGpuSpecialistLease:
         self.alive = True
         self.stopped = False
 
-    def start_async(
-        self,
-        cmd,
-        *,
-        env=None,
-        cwd=None,
-        log_path=None,
-        env_mode="merge",
-        stdin_path=None,
-    ) -> None:
+    def start_async(self, launch) -> None:
         # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
         # immediately on the next tick.
         self.started = {
-            "cmd": cmd,
-            "cwd": cwd,
-            "log_path": log_path,
-            "env_mode": env_mode,
-            "stdin_path": stdin_path,
+            "cmd": launch.cmd,
+            "cwd": launch.cwd,
+            "log_path": launch.log_path,
+            "stdin_path": launch.stdin_path,
         }
-        self.env = dict(env or {})
-        Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
+        self.env = dict(launch.env or {})
+        Path(launch.log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
         (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
@@ -968,6 +961,84 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
     assert result.exit_code == 0
+
+
+class _RayActorError(Exception):
+    """Stand-in for ``ray.exceptions.RayActorError``; ray is not a test dependency."""
+
+
+class _InfeasibleGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.fault = RayInfeasibleError("ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested")
+        raise self.fault
+
+
+class _DeadActorGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.started = {"cmd": launch.cmd}
+
+    def poll_started(self) -> int | None:
+        self.fault = _RayActorError("The actor died unexpectedly before finishing this task.")
+        raise self.fault
+
+
+@pytest.mark.parametrize(
+    ("lease_cls", "message", "error"),
+    [
+        (
+            _InfeasibleGpuLease,
+            "specialist GPU actor submit failed: ",
+            "failed to submit specialist GPU actor: "
+            "RayInfeasibleError('ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested')",
+        ),
+        (
+            _DeadActorGpuLease,
+            "specialist GPU actor start failed: ",
+            "specialist GPU actor start failed: "
+            "_RayActorError('The actor died unexpectedly before finishing this task.')",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lease_cls,
+    message,
+    error,
+):
+    workspace = tmp_path / "ws"
+    lease = lease_cls(workspace)
+    monkeypatch.setattr(
+        subprocess_.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=subprocess_.log.name):
+        result = await SpecialistSubprocessDispatcher(
+            config=SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+        ).run(
+            SpecialistSpawn(
+                task_id="t-gpu-fail",
+                workspace=workspace,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="sys",
+                user_prompt="usr",
+                disallowed_tools=frozenset(),
+                max_turns=1,
+                deadline=Deadline.after(60.0),
+                gpu_lease=lease,
+            )
+        )
+
+    assert (result.done_payload, result.exit_code, result.elapsed_seconds) == (None, None, 0.0)
+    assert result.process_log_path == str(workspace / "process.log")
+    assert result.error == error
+    (record,) = [r for r in caplog.records if r.getMessage().startswith(message)]
+    assert record.exc_info[1] is lease.fault
 
 
 @pytest.mark.asyncio
@@ -1322,3 +1393,739 @@ async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, mo
     env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
     assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
     assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env
+
+
+async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kwargs: Any) -> tuple[Any, list[dict]]:
+    """Run one local spawn against a ``Popen`` that records its kwargs and refuses to start."""
+    popen_kwargs: list[dict] = []
+
+    def _popen(_cmd, **kwargs):
+        popen_kwargs.append(kwargs)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-user",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+        **spawn_kwargs,
+    )
+    return await disp.run(spawn), popen_kwargs
+
+
+async def test_specialist_user_unset_spawns_exactly_as_before(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert "spawn refused by test" in (result.error or "")
+    assert len(popen_kwargs) == 1
+    assert not {"user", "group", "extra_groups", "umask"} & popen_kwargs[0].keys()
+
+
+@pytest.mark.parametrize(
+    ("user", "needle"),
+    [("no-such-user-d16", "no such user"), ("root", "uid 0")],
+)
+async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawning(tmp_path, monkeypatch, user, needle):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert popen_kwargs == []
+    assert "specialist user refused" in (result.error or "")
+    assert needle in (result.error or "")
+
+
+async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", "nobody")
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert popen_kwargs == []
+    assert "Ray GPU actor" in (result.error or "")
+
+
+_DEMOTE_USER = "nobody"
+
+
+@pytest.fixture
+def restore_umask():
+    """Naming a specialist user sets the app's umask; do not leak that into other tests."""
+    saved = os.umask(0o022)
+    yield
+    os.umask(saved)
+
+
+def _account_exists(name: str) -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
+_demote_skip = pytest.mark.skipif(
+    os.geteuid() != 0 or not _account_exists(_DEMOTE_USER),
+    reason=f"demoting needs root and an existing {_DEMOTE_USER!r} account; the test creates no users",
+)
+
+_DEMOTED_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+echo "$HOME" > proof_home.txt
+echo edited >> src.py
+cat {secret} > proof_secret.txt 2> proof_secret.err; echo $? > proof_secret.rc
+git status --porcelain > proof_git.txt 2> proof_git.err; echo $? > proof_git.rc
+echo '{{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_files(monkeypatch, restore_umask):
+    import pwd
+    import shutil
+    import tempfile
+
+    entry = pwd.getpwnam(_DEMOTE_USER)
+    base = Path(tempfile.mkdtemp(prefix="d16."))
+    try:
+        base.chmod(0o755)  # the demoted account must be able to traverse to the fake CLI and the checkout
+        repo = base / "framework"
+        init_git_repo(repo)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        private_file = base / "app_private"
+        private_file.write_text("private-marker", encoding="utf-8")
+        private_file.chmod(0o600)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.write_text(_DEMOTED_ROLE.format(secret=private_file), encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        session_dir.mkdir()
+        session_dir.chmod(0o755)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+
+        result = await runner.run(_make_runner_ctx("t-demoted"))
+
+        workspace = session_dir / "runs" / "specialist" / "t-demoted"
+        worktree = workspace / "worktree"
+        proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+        assert result.status == "succeeded", result.error
+        assert proof["proof_uid.txt"] == str(entry.pw_uid)
+        assert proof["proof_home.txt"] == entry.pw_dir
+        assert "private-marker" not in proof["proof_secret.txt"]
+        assert proof["proof_secret.rc"] != "0"
+        assert "Permission denied" in proof["proof_secret.err"]
+        # It edited its own worktree and git there still answers (no "dubious ownership").
+        assert (worktree / "src.py").read_text(encoding="utf-8").endswith("edited\n")
+        assert proof["proof_git.rc"] == "0", proof["proof_git.err"]
+        # The app's prompt and log stay private to it.
+        assert (workspace / "prompt.md").stat().st_mode & 0o077 == 0
+        assert (workspace / "process.log").stat().st_mode & 0o077 == 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    request = SpecialistSpawn(
+        task_id="t-outside",
+        workspace=tmp_path / "ws",
+        worktree=tmp_path / "elsewhere",
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+    )
+    request.workspace.mkdir()
+    request.worktree.mkdir()
+    (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
+    run_as = specialist_run_as()
+
+    kwargs = prepare_demote(run_as, request.workspace, request.worktree, {}, (request.workspace / "prompt.md",))
+
+    assert request.worktree.stat().st_gid == kwargs["group"]
+    assert request.worktree.stat().st_mode & 0o2070 == 0o2070
+    assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert os.umask(0o022) == 0o022
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_that_names_a_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o022
+
+
+async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o022
+
+
+# ---- review fixes: the app never follows a link the child planted ------------------------------
+def test_harvest_through_a_symlinked_patches_dir_writes_nothing_outside(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (wt / "patches").symlink_to(outside)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    assert patches == []
+    assert list(outside.iterdir()) == []
+
+
+def test_harvest_over_a_symlinked_patch_name_does_not_truncate_its_target(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    victim = tmp_path / "app_state.json"
+    victim.write_text("precious", encoding="utf-8")
+    (wt / "patches").mkdir()
+    (wt / "patches" / "_worktree_diff.patch").symlink_to(victim)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert len(patches) == 1 and "mod.py" in Path(patches[0]).read_text(encoding="utf-8")
+
+
+def test_a_symlinked_patch_file_is_not_collected(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "patches").mkdir(parents=True)
+    target = tmp_path / "secret.patch"
+    target.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (ws / "patches" / "good.patch").write_text("--- a/y\n+++ b/y\n", encoding="utf-8")
+    (ws / "patches" / "link.patch").symlink_to(target)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
+    assert [Path(p).name for p in patches] == ["good.patch"]
+
+
+def test_a_symlinked_done_file_is_not_read(tmp_path: Path):
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": "value"}', encoding="utf-8")
+    done = tmp_path / "specialist_done.json"
+    done.symlink_to(app_only)
+    assert SpecialistSubprocessDispatcher._read_done(done) is None
+    done.unlink()
+    done.write_text('{"summary": "ok"}', encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(done) == {"summary": "ok"}
+
+
+def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.agent_cli_config import _write_private_codex_config
+
+    home = tmp_path / ".codex"
+    home.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    (home / "config.toml.tmp").symlink_to(victim)
+    _write_private_codex_config(codex_home=home, developer_instructions="d", mcp_lines=[])
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert "developer_instructions" in (home / "config.toml").read_text(encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        _write_private_codex_config(codex_home=linked, developer_instructions="d", mcp_lines=[])
+
+
+# ---- review fixes: a demoted child needs the capability to be stopped, its MCP config and its git ----------
+async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    monkeypatch.setattr(launch_env, "missing_launch_capabilities", lambda: ["CAP_KILL"])
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-nocap",
+        workspace=tmp_path / "ws2",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+    )
+    refused = await disp.run(spawn)
+    assert "specialist user refused" in (refused.error or "")
+    assert "CAP_KILL" in (refused.error or "")
+    assert os.umask(0o022) == 0o022
+
+
+def test_the_capability_mask_names_what_is_missing():
+    from hyperloom.common.env_safety import missing_capabilities
+
+    assert missing_capabilities(0xFFFFFFFFFF) == []
+    assert missing_capabilities(0xFFFFFFFFFF & ~(1 << 5)) == ["CAP_KILL"]
+    assert missing_capabilities(0) == ["CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
+
+
+def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path: Path):
+    from hyperloom.common.env_safety import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    source = tmp_path / "runtime" / "specialist_mcp.json"
+    source.parent.mkdir()
+    source.write_text('{"mcpServers": {}}', encoding="utf-8")
+    source.chmod(0o600)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cmd = ["claude", "--mcp-config", str(source), "--print"]
+    launch_env.stage_mcp_config(run_as, workspace, cmd)
+    staged = workspace / "specialist_mcp.json"
+    assert cmd == ["claude", "--mcp-config", str(staged), "--print"]
+    assert staged.read_text(encoding="utf-8") == '{"mcpServers": {}}'
+    untouched = ["claude", "--mcp-config", str(source)]
+    launch_env.stage_mcp_config(None, workspace, untouched)
+    launch_env.stage_mcp_config(run_as, workspace, ["claude"])
+    assert untouched == ["claude", "--mcp-config", str(source)]
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        launch_env.stage_mcp_config(run_as, workspace, ["claude", "--mcp-config", str(tmp_path / "missing.json")])
+
+
+def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
+    from hyperloom.common.env_safety import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    target = tmp_path / "private"
+    target.mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+    (target / "gitdir").write_text(str(wt / ".git"), encoding="utf-8")  # points back, but is not under worktrees/
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+
+
+_TWO_TASK_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mcp-config ]; then cat "$2" > proof_mcp.txt 2> proof_mcp.err; echo $? > proof_mcp.rc; fi
+  shift
+done
+echo edited >> src.py
+git status --porcelain > proof_git_status.txt 2> proof_git_status.err; echo $? > proof_git_status.rc
+git diff > proof_git_diff.txt 2> proof_git_diff.err; echo $? > proof_git_diff.rc
+git log --oneline -1 > proof_git_log.txt 2> proof_git_log.err; echo $? > proof_git_log.rc
+echo '{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_app_umask_007(monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16b."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)  # what the first launch leaves behind: every later worktree is made under it
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.parent.chmod(0o755)
+        role.write_text(_TWO_TASK_ROLE, encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        (session_dir / "runtime").mkdir(parents=True)
+        for parent in (session_dir, session_dir / "runs", session_dir / "runs" / "specialist"):
+            parent.mkdir(exist_ok=True)
+            parent.chmod(0o755)  # the account traverses these; the app never changes their modes
+        mcp = session_dir / "runtime" / "specialist_mcp.json"
+        mcp.write_text('{"mcpServers": {"pr_monitor": {"type": "http", "url": "http://x"}}}', encoding="utf-8")
+        mcp.chmod(0o600)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+                mcp_config_path=str(mcp),
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+        for task_id in ("t-one", "t-two"):
+            result = await runner.run(_make_runner_ctx(task_id))
+            worktree = session_dir / "runs" / "specialist" / task_id / "worktree"
+            proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+            assert result.status == "succeeded", result.error
+            for tool in ("status", "diff", "log"):
+                assert proof[f"proof_git_{tool}.rc"] == "0", (task_id, tool, proof[f"proof_git_{tool}.err"])
+            assert proof["proof_mcp.rc"] == "0", (task_id, proof["proof_mcp.err"])
+            assert "pr_monitor" in proof["proof_mcp.txt"]
+        assert mcp.stat().st_mode & 0o077 == 0  # the original stays the app's
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_path, monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16c."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)
+        worktree = base / "ws" / "worktree"
+        worktree.parent.mkdir(parents=True)
+        worktree.parent.chmod(0o755)
+        # The shape the review reproduced: the app's own git, under its own umask, makes the worktree.
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sp", str(worktree)], check=True)
+        assert (worktree / ".git").stat().st_mode & 0o004 == 0
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, worktree.parent, worktree, {}, ())
+        for args in (["status", "--porcelain"], ["diff"]):
+            done = subprocess.run(
+                ["git", *args],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    "PATH": os.environ["PATH"],
+                    "HOME": run_as.home,
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "safe.directory",
+                    "GIT_CONFIG_VALUE_0": str(worktree),
+                },
+                **kwargs,
+            )
+            assert done.returncode == 0, (args, done.stderr)
+        # Read-only: the child cannot write the admin dir it was shown.
+        admin = Path((worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        # ... nor rename or add siblings in the directory above it.
+        for move in (f"mv {admin} {admin}.moved", f"touch {admin.parent}/planted"):
+            blocked = subprocess.run(["/bin/sh", "-c", move], capture_output=True, check=False, **kwargs)
+            assert blocked.returncode != 0, move
+        for victim in (admin / "planted", admin / "HEAD"):
+            blocked = subprocess.run(
+                ["/bin/sh", "-c", f"echo x >> {victim}"], capture_output=True, check=False, **kwargs
+            )
+            assert blocked.returncode != 0, victim
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_done_file_the_integrator_reads_is_not_followed_through_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors._patch_sources import _read_done_payload
+
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": 1}', encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(app_only)
+    assert _read_done_payload(tmp_path) is None
+
+
+def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import _archive_copy
+
+    class _Archive:
+        recorded: list = []
+
+        def record(self, role, dest):
+            self.recorded.append((role, dest))
+
+    secret = tmp_path / "secret"
+    secret.write_text("s", encoding="utf-8")
+    (tmp_path / "specialist_done.json").symlink_to(secret)
+    dest = tmp_path / "out" / "specialist_done.json"
+    _archive_copy(_Archive(), "r", tmp_path / "specialist_done.json", dest, child_written=True)
+    assert not dest.exists() and _Archive.recorded == []
+
+
+def test_a_claimed_patch_path_through_a_planted_directory_link_is_not_accepted(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.runner import _resolve_claimed_patch
+
+    wt = tmp_path / "wt"
+    (wt / "real").mkdir(parents=True)
+    (wt / "real" / "a.patch").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (wt / "patches").symlink_to(wt / "real")
+    assert _resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
+    assert _resolve_claimed_patch("patches/a.patch", [wt]) is None
+    assert _resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
+
+
+def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import snapshot_round
+
+    secret = tmp_path / "app_secret"
+    secret.write_text("secret", encoding="utf-8")
+    patch = tmp_path / "001_fix.patch"
+    patch.symlink_to(secret)
+    archive = snapshot_round(
+        tmp_path, {"specialist_task_id": "t1", "patches_applied": [str(patch)], "enablement_round": 1}
+    )
+    leaked = [
+        p
+        for p in tmp_path.rglob("*")
+        if p.is_file() and not p.is_symlink() and p != secret and p.read_text(encoding="utf-8") == "secret"
+    ]
+    assert leaked == []
+    assert archive is not None
+
+
+# ---- review r2: the snapshot's objects stay readable, and no app write follows a child's link -------------
+@_demote_skip
+def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(monkeypatch, restore_umask):
+    import shutil
+    import tempfile
+
+    from hyperloom.orchestrator.specialists.tree_snapshot import snapshot_tree
+
+    base = Path(tempfile.mkdtemp(prefix="d16s."))
+    try:
+        base.chmod(0o755)
+        tree = base / "installed"
+        tree.mkdir()
+        (tree / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        repo = base / "snap.git"
+        os.umask(0o077)  # an app that runs under a strict umask must not hide the objects it commits
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        git_env = {
+            "PATH": os.environ["PATH"],
+            "HOME": run_as.home,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "safe.directory",
+        }
+        for number in (1, 2):
+            if number == 2:
+                (tree / "mod.py").write_text("x = 2\n", encoding="utf-8")  # a kept integrate changed the tree
+            assert snapshot_tree(tree, repo, refresh=True) == (repo, "")
+            workspace = base / f"ws{number}"
+            worktree, err = subprocess_._setup_worktree(repo, workspace / "worktree", f"task-{number}")
+            assert worktree is not None, err
+            kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+            for args in (["status", "--porcelain"], ["log", "--oneline", "-1"], ["diff"]):
+                done = subprocess.run(
+                    ["git", *args],
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={**git_env, "GIT_CONFIG_VALUE_0": str(worktree)},
+                    **kwargs,
+                )
+                assert done.returncode == 0, (number, args, done.stderr)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_a_symlink_left_at_the_prompt_name_is_not_written_through(tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("app only", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "prompt.md").symlink_to(victim)
+    (workspace / "process.log").symlink_to(victim)
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path, default_max_turns=1)
+    runner._write_prompt(workspace, "sys", "user")
+    assert victim.read_text(encoding="utf-8") == "app only"
+    assert "sys" in (workspace / "prompt.md").read_text(encoding="utf-8")
+    assert not (workspace / "prompt.md").is_symlink()
+
+
+async def test_the_dispatcher_does_not_write_the_prompt_or_log_through_a_planted_link(tmp_path, monkeypatch):
+    victim = tmp_path / "victim"
+    victim.write_text("app only", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for name in ("prompt.md", "process.log", "process.log.redacting"):
+        (workspace / name).symlink_to(victim)
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert victim.read_text(encoding="utf-8") == "app only"
+    assert not (workspace / "prompt.md").is_symlink()
+
+
+def test_the_dsh_home_is_not_written_through_a_link_the_account_left(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    victim_dir.mkdir()
+    victim_dir.chmod(0o755)
+    (victim_dir / "AGENTS.md").write_text("app only", encoding="utf-8")
+    home = tmp_path / "ws" / ".dsh"
+    home.parent.mkdir()
+    home.symlink_to(victim_dir)
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        dsh_launch._prepare_home(home, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert victim_dir.stat().st_mode & 0o777 == 0o755
+    real = tmp_path / "ws2" / ".dsh"
+    real.mkdir(parents=True)
+    (real / "AGENTS.md").symlink_to(victim_dir / "AGENTS.md")
+    dsh_launch._prepare_home(real, instructions="i", patch="p")
+    assert (victim_dir / "AGENTS.md").read_text(encoding="utf-8") == "app only"
+    assert (real / "AGENTS.md").read_text(encoding="utf-8") == "i"
+
+
+def test_dsh_profiles_are_not_removed_through_a_linked_home(tmp_path):
+    from hyperloom.orchestrator.specialists import dsh_launch
+
+    victim_dir = tmp_path / "elsewhere"
+    (victim_dir / "profiles").mkdir(parents=True)
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".dsh").symlink_to(victim_dir)
+    dsh_launch.remove_dsh_profiles(tmp_path / "ws")
+    assert (victim_dir / "profiles").is_dir()
+
+
+def test_the_dsh_trace_does_not_read_a_session_log_through_a_link(tmp_path):
+    from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
+
+    outside = tmp_path / "outside"
+    (outside / "x").mkdir(parents=True)
+    (outside / "x" / "session.v3.jsonl").write_text('{"type": "session"}\n', encoding="utf-8")
+    home = tmp_path / ".dsh"
+    (home / "sessions").mkdir(parents=True)
+    (home / "sessions" / "a").symlink_to(outside)
+    trace = parse_dsh_session_trace(home)
+    assert "no session log" in trace.error
+
+
+# ---- review r2: the app's own git never runs what a child planted in the worktree ----------------
+_FSMONITOR_HOOK = "#!/bin/sh\necho ran > {marker}\nprintf ''\n"
+
+
+def _plant_hostile_repo(where: Path, marker: Path) -> None:
+    """Make ``where`` a repository whose config starts a program on every index read."""
+    hook = where.parent / "hook.sh"
+    hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(where)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.fsmonitor", str(hook)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.hooksPath", str(where.parent)], check=True)
+
+
+def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_git(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / ".git").unlink()
+    _plant_hostile_repo(wt, marker)  # `.git` becomes a directory with its own config
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
+    marker.unlink(missing_ok=True)
+    assert SpecialistSubprocessDispatcher._harvest_worktree_diff(wt) == ""
+    assert worktree_head(wt) == ""
+    assert not marker.exists()
+
+
+@_demote_skip
+def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16g."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        workspace = base / "ws"
+        worktree, err = subprocess_._setup_worktree(repo, workspace / "worktree", "task-g")
+        assert worktree is not None, err
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+        marker = base / "executed"
+        marker.write_text("", encoding="utf-8")
+        marker.unlink()
+        hook = workspace / "hook.sh"
+        hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+        hook.chmod(0o770)
+        planted = f"""set -e
+cd {worktree}
+rm -f .git
+git init -q .
+git config core.fsmonitor {hook}
+echo '* filter=evil diff=evil' > .gitattributes
+echo changed >> mod.py
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", planted],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
+        assert worktree_head(worktree) == ""
+        assert not marker.exists()
+        # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
+        forged = f"""set -e
+cd {worktree}
+rm -rf .git
+mkdir -p {workspace}/fake/.git/worktrees/w
+cd {workspace}/fake && git init -q . && git config core.fsmonitor {hook}
+cd {worktree}
+echo "{worktree}/.git" > {workspace}/fake/.git/worktrees/w/gitdir
+echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", forged],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
+        assert worktree_head(worktree) == ""
+        assert not marker.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+    assert len(worktree_head(wt)) == 40

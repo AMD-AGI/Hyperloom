@@ -23,7 +23,8 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -42,7 +43,7 @@ def _bound_session(tmp_path):
 
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext
