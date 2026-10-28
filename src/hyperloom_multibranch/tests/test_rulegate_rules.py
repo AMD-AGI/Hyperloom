@@ -146,7 +146,8 @@ async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked()
         (1, None, False),
         (1, short_prompt_check(0, 9, complete=False), False),
         (1, short_prompt_check(0, complete=False), False),
-        (1, short_prompt_check(0, 9, 0, 0), False),
+        (1, short_prompt_check(9, 0, 0, 0), False),
+        (1, short_prompt_check(0, 9, 0, 0), True),
     ],
     ids=[
         "above",
@@ -157,7 +158,8 @@ async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked()
         "no-check",
         "incomplete",
         "nothing-compared",
-        "more-processes-than-the-floor",
+        "an-older-process-than-the-floor-reads",
+        "a-larger-pool-read-down-to-the-floor",
     ],
 )
 async def test_an_inferencex_candidate_is_refused_only_above_the_baseline_short_prompt_floor(floor, check, refused):
