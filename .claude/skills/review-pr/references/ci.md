@@ -14,7 +14,8 @@ Two cautions before reading any gate as total coverage. First, scope: `private_r
 resolves ownership with `Packages.unit()`, built from `.importlinter`, which makes
 `hyperloom.orchestrator` a single unit -- a private import between two of its subpackages is
 reported by nobody, which is A1's. Second, the waiver: `code_metrics_report.py:136-138` puts
-`design` in `waivable_failed`, and `PRIVATE_REACH` and `FORWARDER` are not in `ADVISORY`, so a
+`design` in `waivable_failed`, and `PRIVATE_REACH`, `FLAG_ARGUMENT` and `FORWARDER` are not in
+`ADVISORY`, so a
 `baseline-raise` label turns both into listed-but-passing findings. On a labelled PR the gate
 decides none of them. A8 is the partial case. `flag_argument_problems`
 reports a flag argument, but only on a function absent from the base tree, so the flag added to a

@@ -1063,9 +1063,12 @@ decided mechanically by the
 `code-metrics` job, which runs `tuple_return_problems`, `raw_vocabulary_problems`,
 `global_write_problems`, `forwarder_problems` and `single_implementation_problems` in
 `scripts/code_metrics_design.py` under those same rule ids. A9, A10, A11 and A12's
-single-implementation case were advisory here anyway. A1, A8 and A12 stay, each narrowed to the
-part of its shape the gate's own code does not reach: a unit coarser than the rule's package, an
-empty parameter list, a new function. Matching rule ids are not matching coverage -- #2227 got that
+single-implementation case were advisory here anyway. A1, A8 and A12 stay, each narrowed to the part of
+its shape the gate's own code does not reach: A1 to an import crossing a package boundary finer
+than the `.importlinter` unit, A8 to a flag added to a function that already existed and to a
+parameter only tests vary, A12 to a forwarder with an empty parameter list. A new function is the
+gate's own territory for both A8 and A12 -- `flag_argument_problems` and `forwarder_problems` each
+walk `change.new_functions()`. Matching rule ids are not matching coverage -- #2227 got that
 wrong four times, once per rule, and every time the gate function existed and carried the right id. A review that adjudicated them was re-deciding what a gate had already
 decided, and in 23 recorded reviews the whole family produced 119 verdict lines and no finding.
 A8 stays, narrowed to the two shapes `flag_argument_problems` and vulture cannot see. Re-flagging a
@@ -1156,7 +1159,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 ### A8 -- No parameter only tests vary, and no flag argument added to a function that already exists
 
 **Severity:** blocking (`AGENTS.md` *Code shape*: "no flag argument that selects between two bodies"; "no parameter that is derivable, unread or set only by tests"). Narrowed to what no gate measures, which is not the same scope for both shapes. The flag argument is reported by `scripts/code_metrics_design.py::flag_argument_problems`, but only on a function absent from the base tree (it walks `change.new_functions()`), so this rule keeps the flag added to a function that already existed. The test-only parameter is measured by nothing, on any function: `pyproject.toml` selects no `ARG` rule; vulture reports a parameter no body reads, not a read one whose only non-default caller is a test; and `_selecting_flag` (`code_metrics_design.py:405-410`) matches only a body whose first statement is `if <flag>:` ending in `return` or `raise`, which a test seam usually is not. So the two shapes below carry different triggers -- do not read the first one's limit onto the second.
-**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to one, and the parameter is either (a) a `bool` or two-value `Literal` whose first use is `if <param>:` ending in `return`, with a production caller that also passes dummies (`""`, `0`, `None`) for parameters only the other body reads -- this shape only where the function exists at the merge base, the gate having the rest; or (b) one that only tests set to a non-default value, on any function, new or widened alike.
+**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to one, and the parameter is either (a) a `bool` or two-value `Literal` whose first use is `if <param>:` ending in `return`, with a production caller that also passes dummies (`""`, `0`, `None`) for parameters only the other body reads -- this shape where the function exists at the merge base, the gate having the rest, or on any function when `meta.txt` carries a `label: baseline-raise` line, which waives the gate's finding; or (b) one that only tests set to a non-default value, on any function, new or widened alike.
 **The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. A parameter varied only by tests is plumbing the change introduced -- the production path has one value, so the parameter is a seam for the test rather than an input, and the branch it guards is untested in the shape production runs. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameter goes.
 **Seen in:** PR #1660 -- "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests", both on functions that already existed; the same PR's 28-parameter `_sweep_one_arm_single_server` is D14's and A4's, not this rule's.
 **Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; or, for shape (a) alone, the function is new at this head on a PR with no `baseline-raise` label, where `flag_argument_problems` decides it -- a labelled PR waives that finding (`FLAG_ARGUMENT` is not in the gate's `ADVISORY` set), so shape (a) returns here; shape (b) has no exemption either way.
@@ -1386,8 +1389,9 @@ and the card states its scope.
 the second is a caller the diff did not visit. Run it once per reshaped symbol and once for the function a moved
 call now sits inside: a test driving the entry point names neither half of a split. For a moved or deleted
 symbol, run it again against the merge:
-`git merge-tree $(git merge-base origin/main HEAD) HEAD origin/main` writes the merged tree, and
-`git grep -l '<symbol>' <tree-sha>` is the list that matters.
+`git merge-tree --write-tree HEAD origin/main` prints the merged tree's sha on its first line, and
+`git grep -l '<symbol>' <tree-sha>` is the list that matters. The three-argument
+`git merge-tree <base> <ours> <theirs>` is the deprecated form: it prints a diff listing, not a sha.
 **Report as:** `V8 -- <symbol> changed shape; <file>:<line> still calls the old one` / `V8 -- callers were not
 enumerated: <N> files reference <symbol>, <M> of them untouched by this PR` / `V8 -- <symbol> moved to <module>;
 <file>:<line>, added to main by #<N>, still imports it from <old module>`
