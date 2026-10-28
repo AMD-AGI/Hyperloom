@@ -12,8 +12,10 @@ import pytest
 
 from hyperloom.inference_optimizer.speculative_capability import (
     CAPABILITY_UNSUPPORTED,
+    DraftKernelCapability,
     SpeculativeCapabilityUnsupportedError,
     refuse_unrunnable_speculative_stack,
+    speculative_capability,
     speculative_capability_lines,
     speculative_capability_reason,
     speculative_descriptor,
@@ -112,10 +114,28 @@ def test_drafts_the_pinned_stack_can_run_keep_running(tmp_path, framework, heads
 
 
 def test_the_heads_come_from_the_drafter_checkpoint(tmp_path):
-    # A nested text_config declares them too; an unreadable checkpoint is not guessed at, so not refused.
+    # The checkpoint summary reads a nested text tower as the engine does, so the shape is the decoder's.
     nested = _spec_args(_draft_model(tmp_path / "nested", nested=True))
-    assert speculative_capability_reason(nested, framework="vllm") is not None
-    assert speculative_capability_reason(_spec_args(str(tmp_path / "missing")), framework="vllm") is None
+    status, _ = speculative_capability(nested, framework="vllm")
+    assert status is DraftKernelCapability.UNSUPPORTED
+
+
+def test_a_drafter_whose_heads_cannot_be_read_is_refused_rather_than_launched(tmp_path):
+    # An unreadable checkpoint leaves the one shape this gate owns undecided, and undecided is not runnable.
+    unreadable = _spec_args(str(tmp_path / "missing"))
+    status, reason = speculative_capability(unreadable, framework="vllm")
+    assert status is DraftKernelCapability.UNKNOWN
+    assert "could not be read from its config" in reason and "TRITON_MLA" in reason
+    with pytest.raises(SpeculativeCapabilityUnsupportedError) as excinfo:
+        refuse_unrunnable_speculative_stack(unreadable, framework="vllm")
+    assert excinfo.value.error_class == CAPABILITY_UNSUPPORTED
+    # The grid refuses it at admission too, so no variant is built from a draft nobody can vouch for.
+    unknown = GridVariant(name="spec_aiter_fp8_k2_unknown", extra_server_args=unreadable)
+    kept, dropped = apply_compatibility_filter([unknown], serving=ServingStack("vllm", ""))
+    assert not kept and [d["source"] for d in dropped] == [CAPABILITY_UNSUPPORTED]
+    # Only the combination with no kernel is held to that bar: an unreadable drafter at another K keeps running.
+    other_k = _spec_args(str(tmp_path / "missing"), num_speculative_tokens=5)
+    assert speculative_capability(other_k, framework="vllm")[0] is DraftKernelCapability.SUPPORTED
 
 
 def test_the_sixteen_head_fp8_draft_is_refused_with_the_capability_error_class(tmp_path):

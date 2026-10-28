@@ -7,6 +7,10 @@ The keys that decide whether a draft has a kernel at all -- its backend, its KV 
 inside ``--speculative-config``, so a filter reading flag names never sees them. This module merges both spellings of
 that config into one descriptor and states the stack's kernel coverage as data, so the grid can refuse an unrunnable
 draft rather than spend a measurement on it, and the prompt can name the same constraint.
+
+Coverage is decided by what is known to be good, so the answer has three values: a shape inside the combination a rule
+owns is supported only when the drafter's own metadata puts it among the shapes that rule ships. A drafter whose heads
+cannot be read is unknown, and unknown is refused -- a launch that may well die in profiling is not a measurement.
 """
 
 from __future__ import annotations
@@ -14,10 +18,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from .grid_server_args import tokenize_server_args_preserving_json
-from .model_config_utils import _load_model_config_dict
+from .model_config_utils import summarize_model_config
 
 CAPABILITY_UNSUPPORTED = "capability_unsupported"
 _SPEC_CONFIG_FLAG = "speculative-config"
@@ -30,6 +35,18 @@ class SpeculativeCapabilityUnsupportedError(ValueError):
     """The pinned stack ships no kernel for the draft a launch composes."""
 
     error_class = CAPABILITY_UNSUPPORTED
+
+
+class DraftKernelCapability(Enum):
+    """What is known about the kernel a draft needs: that it is there, that it is not, or neither.
+
+    ``UNKNOWN`` is a verdict of its own because only a shape read off the drafter can be matched against the
+    coverage: a draft whose shape the metadata does not establish is not a draft the stack is known to run.
+    """
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
 
 
 def _is_flag(token: str) -> bool:
@@ -85,12 +102,12 @@ class SpeculativeDescriptor:
     tensor_parallel_size: int
 
     def draft_query_heads_per_rank(self) -> int | None:
-        """Query heads the draft's attention kernel sees on one rank, or ``None`` when the model does not say."""
-        config = _load_model_config_dict(self.model) or {}
-        nested = config.get("text_config")
-        heads = _as_int(config.get("num_attention_heads"))
-        if heads is None and isinstance(nested, Mapping):
-            heads = _as_int(nested.get("num_attention_heads"))
+        """Query heads the draft's attention kernel sees on one rank, or ``None`` when the model does not say.
+
+        The count comes from the checkpoint summary the rest of the tree reads models with, so a nested text tower
+        and a path the resolver has to resolve are read exactly as the engine's own launch would read them.
+        """
+        heads = _as_int(summarize_model_config(self.model).get("num_attention_heads"))
         ranks = self.tensor_parallel_size
         return heads // ranks if heads and heads > 0 and not heads % ranks else None
 
@@ -133,19 +150,31 @@ class DraftKernelCoverage:
     query_heads_by_draft_length: Mapping[int, frozenset[int]]
     remedy: str
 
-    def unsupported_reason(self, descriptor: SpeculativeDescriptor, *, framework: str) -> str | None:
-        """Why this stack cannot run ``descriptor``, or ``None`` when the shape is covered or not ours to judge."""
+    def capability(self, descriptor: SpeculativeDescriptor, *, framework: str) -> tuple[DraftKernelCapability, str]:
+        """What this coverage knows about ``descriptor``, and the reason when it is not a draft it vouches for.
+
+        A draft outside the combination this coverage owns is ``SUPPORTED``: that is this rule not standing in the
+        way, not a claim about kernels it says nothing about. Inside the combination the shape decides, and a shape
+        the drafter's metadata does not give is ``UNKNOWN`` -- the one case this coverage owns and cannot answer.
+        """
         if framework.strip().lower() != self.framework:
-            return None
+            return DraftKernelCapability.SUPPORTED, ""
         if descriptor.attention_backend != self.draft_backend or descriptor.kv_cache_dtype not in self.kv_cache_dtypes:
-            return None
+            return DraftKernelCapability.SUPPORTED, ""
         covered = self.query_heads_by_draft_length.get(descriptor.draft_length or -1)
         if covered is None:
-            return None
+            return DraftKernelCapability.SUPPORTED, ""
         heads = descriptor.draft_query_heads_per_rank()
-        if heads is None or heads in covered:
-            return None
-        return (
+        if heads is None:
+            return DraftKernelCapability.UNKNOWN, (
+                f"{self.draft_backend} ships a {descriptor.kv_cache_dtype} kernel for a "
+                f"{descriptor.draft_length}-token draft only at {_head_counts(covered)} query heads per rank, and the "
+                f"query heads of drafter {descriptor.model!r} over {descriptor.tensor_parallel_size} rank(s) could "
+                f"not be read from its config; {self.remedy}"
+            )
+        if heads in covered:
+            return DraftKernelCapability.SUPPORTED, ""
+        return DraftKernelCapability.UNSUPPORTED, (
             f"{self.draft_backend} has no {descriptor.kv_cache_dtype} kernel for a "
             f"{descriptor.draft_length}-token draft at {heads} query heads per rank "
             f"(the pinned {self.framework} stack ships {_head_counts(covered)}); {self.remedy}"
@@ -181,13 +210,34 @@ PINNED_DRAFT_KERNELS: tuple[DraftKernelCoverage, ...] = (
 )
 
 
-def speculative_capability_reason(server_args: str, *, framework: str) -> str | None:
-    """Why the pinned stack cannot launch the draft ``server_args`` composes, or ``None`` when it can."""
+def speculative_capability(server_args: str, *, framework: str) -> tuple[DraftKernelCapability, str]:
+    """What the pinned stack knows about the draft ``server_args`` composes, and the reason when it is not runnable."""
     descriptor = speculative_descriptor(server_args)
     if descriptor is None:
-        return None
-    reasons = (coverage.unsupported_reason(descriptor, framework=framework) for coverage in PINNED_DRAFT_KERNELS)
-    return next((reason for reason in reasons if reason), None)
+        return DraftKernelCapability.SUPPORTED, ""
+    verdicts = (coverage.capability(descriptor, framework=framework) for coverage in PINNED_DRAFT_KERNELS)
+    unsupported, unknown = [], []
+    for status, reason in verdicts:
+        if status is DraftKernelCapability.UNSUPPORTED:
+            unsupported.append(reason)
+        elif status is DraftKernelCapability.UNKNOWN:
+            unknown.append(reason)
+    if unsupported:
+        return DraftKernelCapability.UNSUPPORTED, unsupported[0]
+    if unknown:
+        return DraftKernelCapability.UNKNOWN, unknown[0]
+    return DraftKernelCapability.SUPPORTED, ""
+
+
+def speculative_capability_reason(server_args: str, *, framework: str) -> str | None:
+    """Why the pinned stack cannot launch the draft ``server_args`` composes, or ``None`` when it can.
+
+    A draft whose shape is unknown is refused with the same voice as one that is known to be unrunnable: the launch
+    this answers for is the one combination AITER has no kernel for, so a shape nobody can establish is not spent as
+    a measurement. Naming a drafter whose config can be read keeps every other draft running.
+    """
+    status, reason = speculative_capability(server_args, framework=framework)
+    return reason if status is not DraftKernelCapability.SUPPORTED else None
 
 
 def refuse_unrunnable_speculative_stack(server_args: str, *, framework: str) -> None:
