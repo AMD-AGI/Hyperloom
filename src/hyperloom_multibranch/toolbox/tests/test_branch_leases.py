@@ -456,7 +456,7 @@ async def test_a_lease_under_a_guard_that_only_observes_takes_a_card_a_process_h
         lease = await box.lease_branch_sandbox("agent", 1, wait_sec=0)
 
     assert lease.gpu_ids == (0,), "the held card was handed out as a plain pool would"
-    assert [r.getMessage() for r in caplog.records] == [
+    assert [r.getMessage() for r in caplog.records if r.name == "hyperloom.sandbox.gated_pool"] == [
         "cards a process holds were handed out (the card guard observes only): "
         "held card 0 by pid 4242 (python3 -c import torch)"
     ]
