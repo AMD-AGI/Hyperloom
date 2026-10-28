@@ -26,8 +26,10 @@ from kernelforge.agent_backends import (
     create_registered_backend,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON, ResumePolicy, run_session_with_api_resume
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
     EvidenceRef,
@@ -1343,6 +1345,7 @@ class AnalysisAgentService:
                             max_turns=self.max_turns,
                         ),
                         hooks=hooks,
+                        protected_path_rules=FORGE_PROTECTED_PATHS,
                     ),
                     usage=usage,
                     policy=ResumePolicy(deadline_sec=timeout_sec),
@@ -1940,7 +1943,7 @@ def make_analysis_agent_service(
     profiling_enabled: bool = True,
 ) -> AnalysisAgentService:
     """Build the Analysis Agent through the configured provider."""
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     backend = create_registered_backend(
         runtime,
         probe_cwd=config.workspace,

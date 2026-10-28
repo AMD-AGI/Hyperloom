@@ -23,6 +23,7 @@ from kernelforge.agent_backends import (
     register_agent_provider,
     resolve_agent_runtime,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 
 
@@ -467,13 +468,25 @@ def test_config_accepts_external_provider_without_core_choice_list() -> None:
         agent_fallback_provider="",
         agent_options={"temperature": 0},
     )
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
 
     assert runtime.provider == "configcli"
     assert runtime.model == "selected-model"
     assert runtime.executable == "/usr/bin/configcli"
     assert runtime.timeout_sec == 12
     assert runtime.options == {"temperature": 0}
+
+
+@pytest.mark.parametrize(
+    ("backend", "fallback"),
+    [("nosuchcli", ""), ("claude", "nosuchcli")],
+)
+def test_an_unregistered_provider_is_refused_when_its_runtime_is_resolved(backend, fallback) -> None:
+    """Config holds the names as data; resolving the runtime is where an unknown one is refused."""
+    config = Config(agent_backend=backend, agent_fallback_provider=fallback)
+
+    with pytest.raises(ValueError, match="unknown agent provider 'nosuchcli'"):
+        agent_runtime(config)
 
 
 def test_explicit_agent_options_do_not_parse_environment(monkeypatch) -> None:

@@ -20,8 +20,10 @@ from pathlib import Path
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec, with_writable_sandbox
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.tools.git import ensure_commit_identity, git, git_head
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
@@ -400,7 +402,7 @@ async def _run_prepare_agent(
     progress_log: list[str] | None = None,
 ) -> str:
     """Run one sandboxed driver-authoring turn through the selected backend."""
-    runtime = with_writable_sandbox(config.agent_runtime())
+    runtime = with_writable_sandbox(agent_runtime(config))
     backend = create_registered_backend(runtime)
     if backend.capabilities.requires_workspace_cwd:
         _ensure_agent_git_workspace(turn.workspace)
@@ -415,6 +417,7 @@ async def _run_prepare_agent(
         additional_directories=[directory for directory in (turn.additional_dirs or []) if directory],
         target_files=list(turn.target_files or []),
         # Deliberately no driver_script.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=protected_globs,
         allow_dirty_targets=True,
         allow_untracked=True,

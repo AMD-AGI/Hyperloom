@@ -20,7 +20,9 @@ from kernelforge.agent_backends import (
     create_registered_backend,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.orchestrator.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
@@ -1117,6 +1119,7 @@ class OrchestrationAgent:
                 shell=False,
                 max_turns=(self.max_turns if turn.max_turns is None else turn.max_turns),
             ),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=["*"],
         )
 
@@ -1681,7 +1684,7 @@ def make_orchestration_service(
     resolved_definitions = dict(default_specialist_definitions() if definitions is None else definitions)
     if not resolved_definitions:
         raise ValueError("definitions must not be empty")
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     orchestration_backend = create_registered_backend(
         runtime,
         probe_cwd=config.workspace,

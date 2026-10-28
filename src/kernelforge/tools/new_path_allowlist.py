@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The allowlist that decides which agent-created files a KEEP may carry."""
+"""The allowlist of workspace-relative patterns that decides which agent-created files a session may keep."""
 
 from __future__ import annotations
 

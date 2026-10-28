@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.workspace.edit_policy import (
-    is_protected_path,
+    FORGE_PROTECTED_PATHS,
     tracked_editable_paths,
 )
 from kernelforge.tools.git import git, git_bytes, git_head
@@ -116,7 +116,7 @@ def _editable_workspace_paths(
             relative = absolute.relative_to(workspace).as_posix()
         except ValueError:
             continue
-        if not is_protected_path(
+        if not FORGE_PROTECTED_PATHS.is_protected(
             relative,
             workspace=workspace,
             exact_paths=protected,

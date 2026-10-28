@@ -102,6 +102,7 @@ def generate_tuner(
             select_default_agent_provider,
         )
         from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
+        from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
     except ImportError as exc:
         return GeneratedTuner(
             False,
@@ -141,6 +142,7 @@ def generate_tuner(
         tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=MAX_AUTHORING_TURNS),
         target_files=[str(script_path)],
         allow_untracked=True,
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
 
     try:

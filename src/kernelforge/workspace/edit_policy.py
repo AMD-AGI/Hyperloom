@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical workspace edit policy shared by Forge agent backends and the loop."""
+"""Canonical workspace edit policy Forge's sessions and the loop are held to."""
 
 from __future__ import annotations
 
-import fnmatch
-import os
 from pathlib import Path
-import stat
 from typing import Iterable
+
 from kernelforge.tools.git import git_bytes
+from kernelforge.tools.protected_paths import ProtectedPathRules
 
 
 PROTECTED_GLOBS = (
@@ -46,8 +45,6 @@ TOOL_OWNED_UNTRACKED_GLOBS = (
 
 FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
 
-_BOOKKEEPING_DIRNAMES = frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME})
-
 PROTECTED_DIRS = frozenset(
     {
         "benchmark",
@@ -58,6 +55,14 @@ PROTECTED_DIRS = frozenset(
         "tests",
         "perf",
     }
+)
+
+# The authoritative measurement surface of a Forge workspace. The repository's own bookkeeping is not part of it, and
+# it moves on its own: git rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
+FORGE_PROTECTED_PATHS = ProtectedPathRules(
+    globs=PROTECTED_GLOBS,
+    dirs=PROTECTED_DIRS,
+    unscanned_dirs=frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME}),
 )
 
 
@@ -71,103 +76,6 @@ def hide_forge_loop_output(workspace: str | Path) -> Path:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / ".gitignore").write_text("*\n", encoding="utf-8")
     return output_root
-
-
-def is_protected_path(
-    path: str | Path,
-    *,
-    workspace: str | Path | None = None,
-    exact_paths: Iterable[str | Path] = (),
-    extra_globs: Iterable[str] = (),
-) -> bool:
-    """Return whether ``path`` belongs to the authoritative measurement surface."""
-
-    raw = Path(path).expanduser()
-    root = Path(workspace).expanduser().resolve() if workspace else None
-    absolute = raw.resolve() if raw.is_absolute() else ((root / raw).resolve() if root else raw.resolve())
-    protected_abs: set[Path] = set()
-    for item in exact_paths:
-        if not str(item or "").strip():
-            continue
-        candidate = Path(item).expanduser()
-        protected_abs.add(
-            candidate.resolve()
-            if candidate.is_absolute()
-            else ((root / candidate).resolve() if root else candidate.resolve())
-        )
-    if absolute in protected_abs:
-        return True
-
-    relative = raw
-    if root is not None:
-        try:
-            relative = absolute.relative_to(root)
-        except ValueError:
-            relative = raw
-    if any(part.lower() in PROTECTED_DIRS for part in relative.parts[:-1]):
-        return True
-    patterns = (*PROTECTED_GLOBS, *tuple(extra_globs))
-    relative_posix = relative.as_posix()
-    return any(
-        fnmatch.fnmatch(relative.name, pattern) or fnmatch.fnmatch(relative_posix, pattern) for pattern in patterns
-    )
-
-
-def protected_path_inventory(
-    workspace: str | Path,
-    *,
-    exact_paths: Iterable[str | Path] = (),
-    extra_globs: Iterable[str] = (),
-) -> tuple[Path, ...]:
-    """Return every protected filesystem entry under ``workspace`` recursively."""
-
-    root = Path(workspace).expanduser().resolve()
-    if not root.is_dir():
-        raise OSError(f"protected inventory workspace is not a directory: {root}")
-    globs = tuple(extra_globs)
-    exact = {
-        (
-            Path(item).expanduser().resolve()
-            if Path(item).expanduser().is_absolute()
-            else (root / Path(item).expanduser()).resolve()
-        )
-        for item in exact_paths
-        if str(item or "").strip()
-    }
-    inventory = set(exact)
-
-    def raise_walk_error(error: OSError) -> None:
-        raise error
-
-    for directory, dirnames, filenames in os.walk(
-        root,
-        topdown=True,
-        followlinks=False,
-        onerror=raise_walk_error,
-    ):
-        # The repository's own bookkeeping is not part of the measurement surface, and it moves on its own: git
-        # rewrites the index whenever a stat cache goes cold, which a build alone is enough to cause.
-        dirnames[:] = [name for name in dirnames if name not in _BOOKKEEPING_DIRNAMES]
-        parent = Path(directory)
-        entries = [*filenames]
-        for dirname in dirnames:
-            candidate = parent / dirname
-            metadata = candidate.lstat()
-            if stat.S_ISLNK(metadata.st_mode):
-                entries.append(dirname)
-        for name in entries:
-            candidate = parent / name
-            metadata = candidate.lstat()
-            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
-                continue
-            if is_protected_path(
-                candidate,
-                workspace=root,
-                exact_paths=exact,
-                extra_globs=globs,
-            ):
-                inventory.add(Path(os.path.abspath(candidate)))
-    return tuple(sorted(inventory, key=str))
 
 
 def tracked_editable_paths(
@@ -187,7 +95,7 @@ def tracked_editable_paths(
         if not encoded:
             continue
         relative = encoded.decode(errors="surrogateescape")
-        if not is_protected_path(
+        if not FORGE_PROTECTED_PATHS.is_protected(
             relative,
             workspace=root,
             exact_paths=exact_protected_paths,

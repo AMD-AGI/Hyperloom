@@ -216,9 +216,10 @@ def make_supervisor_fn(
         create_registered_backend,
         resolve_agent_runtime,
     )
+    from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_settings
 
     config = config or Config.from_env()
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     if backend and backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             backend,
@@ -226,7 +227,7 @@ def make_supervisor_fn(
             # re-reading it. Leaving it out ran the supervisor on the registry
             # default no matter what ``CODEX_MODEL``/``CLAUDE_MODEL`` said.
             model=resolve_agent_model(backend),
-            settings=replace(config.agent_runtime_settings(), executable="", options={}),
+            settings=replace(agent_runtime_settings(config), executable="", options={}),
         )
     supervisor_model = str(runtime.options.get("supervisor_model") or runtime.model)
     if supervisor_model != runtime.model:

@@ -396,12 +396,10 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
-    kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
     kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
     kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
-    kernelforge.knowledge.kb_store.recipe -> kernelforge.config
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
     kernelforge.orchestrator.specialists -> kernelforge.loop.fanout

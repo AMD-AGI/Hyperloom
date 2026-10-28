@@ -41,6 +41,7 @@ from .llm_failure import (
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
 from kernelforge.tools.git import git_bytes
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 log = logging.getLogger("forge_fusion")
 
@@ -1136,8 +1137,9 @@ def _run_author_session(
         # The author phase runs in a worktree a long campaign has already left dirty in ways it never touches, so the
         # backend has to judge this turn against the pre-run snapshot rather than against a clean HEAD.
         allow_dirty_baseline=True,
-        # Keep the backend's built-in measurement protections; the outer provider-neutral transaction enforces the
-        # exact target allowlist.
+        # Forge's measurement protections, and nothing beyond them; the outer provider-neutral transaction enforces
+        # the exact target allowlist.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=[],
         hooks=_target_file_hooks(guard.target_files, workdir, allows_new_path=guard.permits_new_path),
         progress_log=progress,
