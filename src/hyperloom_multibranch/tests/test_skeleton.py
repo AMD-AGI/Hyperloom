@@ -921,15 +921,30 @@ async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside
     toolbox = stage.toolbox
     assert isinstance(toolbox, LeasingToolbox)
     assert (toolbox.leased, toolbox.released) == ([("prelude", WORKLOAD.tp)], ["lease-1"])
-    beside = sorted(
-        purpose.value for purpose, held in toolbox.beside_a_lease if held and purpose is not Purpose.CONFIRM
-    )
-    assert beside == sorted([Purpose.BASELINE.value] * BASELINE_TESTS + [Purpose.INTEGRATION.value])
+    beside = sorted(purpose.value for purpose, held in toolbox.beside_a_lease if held)
+    prelude = [Purpose.BASELINE] * BASELINE_TESTS + [Purpose.INTEGRATION, Purpose.CONFIRM]
+    assert beside == sorted(purpose.value for purpose in prelude)
     assert stage.processes.env is not None and stage.processes.env[CHILD_CARDS_ENV] == "6"
     baseline = await stage.handle(Role.OBSERVER).baseline()
     assert sorted(baseline.request_ids) == sorted(
         request_id for request_id, request in toolbox.requests.items() if request.purpose is Purpose.BASELINE
     )
+
+
+async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgement(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child, DEFAULT_BASELINE, runtime_seconds=AGENTX_CHILD_RUN_SECONDS)
+    stage = _stage(tmp_path, child=child)
+    stage.settings = replace(SETTINGS, workload=AGENTX)
+    stage.recipe_kb = OneChampionKB()
+    stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    requests = stage.toolbox.requests
+    [replay] = [request_id for request_id, request in requests.items() if request.purpose is Purpose.INTEGRATION]
+    assert not [request for request in requests.values() if request.retest_of == replay]
 
 
 async def test_a_child_whose_baseline_failed_fails_prelude_at_once_with_its_reason(tmp_path: Path) -> None:

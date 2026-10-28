@@ -639,7 +639,8 @@ class Integrator:
 
         The replay is submitted at once and judged, by the rule every candidate is judged by, once ``anchored`` -- the
         anchoring of ``root``'s baseline -- has ended, so EXPLORE opens on it only where it improved on that baseline,
-        and every later gain is still measured from ``root``. It is
+        and every later gain is still measured from ``root``. Its confirm is asked for together with it
+        (:meth:`_confirm_ahead`) and taken back once the judgement did not need it. It is
         no specialist's commit: nothing offered it, so no merge attempt records it, and the regression set it would
         run is empty before EXPLORE. A champion whose recipe ``root`` carries already, whose test did not measure,
         that the toolbox refuses or that the rule gate does not stack leaves the head at ``root``: the session
@@ -656,6 +657,23 @@ class Integrator:
             return self._record_champion(root, champion.canonical_id, f"the toolbox refused the replay: {exc.reason}")
 
     async def _stack_champion(self, replay: WarmReplay, anchored: Awaitable[object], request_id: str) -> str:
+        confirm = await self._confirm_ahead(request_id)
+        try:
+            return await self._judge_champion(replay, anchored, request_id)
+        finally:
+            if confirm:
+                await asyncio.shield(self._tests.withdraw(confirm))
+
+    async def _confirm_ahead(self, request_id: str) -> str:
+        """Ask for the confirm of ``request_id`` before it has a result, where the rule measures the root with tests of
+        its own: such a test is short enough to spend on a confirm the judgement may not need, which an AgentX test,
+        over an hour long, is not. The confirm's id, or ``""`` for none."""
+
+        if await self._gate.baseline_test_count() == 0:
+            return ""
+        return await self._gate.request_confirm(request_id)
+
+    async def _judge_champion(self, replay: WarmReplay, anchored: Awaitable[object], request_id: str) -> str:
         root = replay.parent_commit
         name = replay.canonical_id
         await asyncio.shield(anchored)

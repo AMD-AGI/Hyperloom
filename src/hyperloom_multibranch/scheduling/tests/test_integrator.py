@@ -30,7 +30,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
 )
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
@@ -93,7 +93,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     recipe_effect,
     session_gate,
 )
-from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, TestJob
 from hyperloom_multibranch.toolbox.fake_model import Fate
 
 COMPONENT = "vllm"
@@ -350,20 +350,74 @@ async def test_a_champion_that_improves_on_the_root_is_where_explore_opens(bench
     }
 
 
-async def test_a_champion_is_replayed_at_once_and_judged_once_the_baseline_is_anchored(bench: Bench) -> None:
+def _confirms(bench: Bench) -> dict[str, TestRequest]:
+    return {rid: test for rid, test in bench.toolbox.requests.items() if test.purpose is Purpose.CONFIRM}
+
+
+async def _until(holds: Callable[[], bool]) -> None:
+    while not holds():
+        await asyncio.sleep(0.01)
+
+
+def _hold_confirms(bench: Bench, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Confirms never end: one the judgement does not need is still running when it is taken back."""
+
+    run = bench.toolbox.executor.run
+
+    async def held(job: TestJob) -> TestResult:
+        if job.request.purpose is Purpose.CONFIRM:
+            await asyncio.Event().wait()
+        return await run(job)
+
+    monkeypatch.setattr(bench.toolbox.executor, "run", held)
+
+
+async def test_a_champion_and_its_confirm_are_submitted_at_once_and_judged_once_the_baseline_is_anchored(
+    bench: Bench,
+) -> None:
     anchored = asyncio.get_running_loop().create_future()
 
     replaying = asyncio.ensure_future(bench.integrator.replay_champion(CHAMPION, bench.root, anchored))
-    while not bench.merge_tests():
-        await asyncio.sleep(0.01)
-    [request_id] = bench.merge_tests()
+    await asyncio.wait_for(_until(lambda: bool(_confirms(bench))), 10)
+    [request_id], [(confirm, retest)] = bench.merge_tests(), _confirms(bench).items()
     while (await bench.handle(Role.OBSERVER).record(request_id)).result is None:
         await asyncio.sleep(0.01)
     await asyncio.sleep(0.1)
 
+    assert retest.retest_of == request_id and retest.delta == bench.merge_tests()[request_id].delta
     assert not replaying.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     anchored.set_result(None)
     assert await replaying == await bench.repo.head(INTEGRATION_BRANCH) != bench.root
+    record = await bench.handle(Role.OBSERVER).record(request_id)
+    assert record.judgement is not None and record.judgement.request_ids == (request_id, confirm)
+    assert list(_confirms(bench)) == [confirm] and bench.toolbox.withdrawn == {}
+
+
+async def test_a_flat_champion_takes_its_confirm_back_at_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 1000.0}})
+    _hold_confirms(bench, monkeypatch)
+
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
+
+    assert opened == bench.root
+    [request_id], [confirm] = bench.merge_tests(), _confirms(bench)
+    record = await bench.handle(Role.OBSERVER).record(request_id)
+    assert record.judgement is not None and record.judgement.request_ids == (request_id,)
+    assert list(bench.toolbox.withdrawn) == [confirm]
+
+
+async def test_a_champion_that_does_not_measure_takes_its_confirm_back(
+    bench: Bench, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _hold_confirms(bench, monkeypatch)
+    bench.toolbox.script(lambda test: test.purpose is Purpose.INTEGRATION, [Fate.MEASUREMENT])
+
+    assert await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored()) == bench.root
+
+    [confirm] = _confirms(bench)
+    assert list(bench.toolbox.withdrawn) == [confirm]
+    [logged] = bench.logged()
+    assert str(logged["reason"]).startswith("the replay did not measure")
 
 
 async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_path: Path) -> None:
@@ -387,7 +441,7 @@ async def test_a_champion_the_toolbox_refuses_leaves_explore_on_the_root(bench: 
 
     opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
-    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
+    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH) and not _confirms(bench)
     [logged] = bench.logged()
     assert logged["reason"] == f"the toolbox refused the replay: {REFUSAL}"
     assert logged["detail"] == {

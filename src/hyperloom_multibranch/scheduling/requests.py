@@ -90,8 +90,13 @@ class SessionTests:
         try:
             return await judge(request_id)
         except asyncio.CancelledError:
-            await asyncio.shield(self._toolbox.cancel(request_id))
+            await asyncio.shield(self.withdraw(request_id))
             raise
+
+    async def withdraw(self, request_id: str) -> None:
+        """Take ``request_id`` back if it is still waiting or running; one that has ended stays as it is."""
+
+        await self._toolbox.cancel(request_id)
 
     async def withdraw_integration(self, reason: str) -> tuple[str, ...]:
         """Take back every test of the integration branch still queued or running, retests included."""
