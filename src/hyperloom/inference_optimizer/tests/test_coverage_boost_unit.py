@@ -32,21 +32,20 @@ def test_gain_math_branches() -> None:
 
 # --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
-def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_override(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "framework_optimization"
 
 
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:

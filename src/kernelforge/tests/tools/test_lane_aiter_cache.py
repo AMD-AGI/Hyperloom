@@ -17,6 +17,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
     AgentToolPolicy,
 )
+from hyperloom.common.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.cli import lanes as cli_lanes
@@ -25,6 +26,7 @@ from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.tools import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
 from kernelforge.tools.git import git
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +69,13 @@ def _result_message():
     )
 
 
+def _stability_env() -> dict[str, str]:
+    """The LLM-transport stability env the Claude backend applies to every session it spawns."""
+    env: dict[str, str] = {}
+    apply_llm_stability_env(env)
+    return env
+
+
 def _recording_claude_backend(spawned: list[dict[str, str]]) -> ClaudeBackend:
     """A Claude backend whose SDK records the environment a session would get."""
     backend = ClaudeBackend.__new__(ClaudeBackend)
@@ -93,6 +102,7 @@ def _implementer_through(backend):
                     user_prompt=plan,
                     cwd=str(Path(kernel_path).parent),
                     tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=8),
+                    protected_path_rules=FORGE_PROTECTED_PATHS,
                 )
             )
             return plan
@@ -223,8 +233,10 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
         factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
 
 
-async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
-    """Pin the single-lane path: an ordinary session carries no overlay at all."""
+async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, monkeypatch):
+    """Pin the single-lane path: an ordinary session carries no overlay beyond the backend's own defaults."""
+    for key in _stability_env():
+        monkeypatch.delenv(key, raising=False)
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
@@ -245,14 +257,17 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
             # write ``__pycache__`` under the checkout while this one runs. The overlay comes from ``env`` alone.
             cwd=str(_lane_dir(tmp_path, "single-lane")),
             tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
         )
     )
 
-    assert "env" not in captured["options"].kwargs
+    assert captured["options"].kwargs["env"] == _stability_env()
 
 
-async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
+async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
     """The overlay reaches the provider option the SDK spawns the CLI with."""
+    for key in _stability_env():
+        monkeypatch.delenv(key, raising=False)
     workspace = _lane_dir(tmp_path, "claude-env")
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
@@ -272,10 +287,11 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
             user_prompt="tune it",
             cwd=str(workspace),
             env={"AITER_JIT_DIR": "/lane/1/jit"},
+            protected_path_rules=FORGE_PROTECTED_PATHS,
         )
     )
 
-    assert captured["options"].kwargs["env"] == {"AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {**_stability_env(), "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):

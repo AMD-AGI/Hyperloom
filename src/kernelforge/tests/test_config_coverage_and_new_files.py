@@ -722,7 +722,7 @@ def test_campaign_config_missing_a_field_names_it(tmp_path, monkeypatch):
 
 def test_matching_refuses_a_pattern_normalization_would_have_rejected():
     """Unreachable through the entry points, and a silent skip if it were not."""
-    from kernelforge.loop.new_path_allowlist import (
+    from kernelforge.tools.new_path_allowlist import (
         AllowlistPatternError,
         matches_commit_new_paths,
     )

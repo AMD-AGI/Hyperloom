@@ -82,7 +82,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
@@ -254,6 +253,39 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:kf-public-interfaces]
+name = hyperloom uses kernelforge only through its package interfaces
+type = forbidden
+# What a kernelforge package offers the rest of the project is what its
+# __init__ exports (and kernelforge.loop.api for the loop), so its modules can
+# move without breaking Hyperloom. Top-level modules such as
+# kernelforge.resources are interfaces of their own.
+source_modules = hyperloom
+forbidden_modules =
+    kernelforge.agent_backends.**
+    kernelforge.assembly.**
+    kernelforge.cli.**
+    kernelforge.evaluation.**
+    kernelforge.fusion.**
+    kernelforge.gemm_tune.**
+    kernelforge.kernel_backends.**
+    kernelforge.kernel_rewrite_controller.**
+    kernelforge.knowledge.**
+    kernelforge.loop.**
+    kernelforge.orchestrator.**
+    kernelforge.rewrite_by_flydsl.**
+    kernelforge.roofline_ceiling.**
+    kernelforge.run_export.**
+    kernelforge.tools.**
+    kernelforge.tracker.**
+    kernelforge.workspace.**
+allow_indirect_imports = True
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    hyperloom.** -> kernelforge.loop.api
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:acyclic]
 name = no cycles between sibling packages (baseline may only shrink)
 type = acyclic_siblings
@@ -301,7 +333,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
@@ -396,12 +427,9 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
-    kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
-    kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
     kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
-    kernelforge.knowledge.kb_store.recipe -> kernelforge.config
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
     kernelforge.orchestrator.specialists -> kernelforge.loop.fanout

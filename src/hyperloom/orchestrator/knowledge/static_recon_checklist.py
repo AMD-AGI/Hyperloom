@@ -218,8 +218,8 @@ def workload_precision(state: object) -> str:
     return str(getattr(state, "precision", "") or "").strip().lower()
 
 
-def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
-    """Return the checklist entries applicable to a ``(model_class, gpu, precision)``."""
+def entries_for(*, gpu_type: str = "", precision: str = "") -> list[ChecklistEntry]:
+    """Return the checklist entries applicable to a ``(gpu, precision)``."""
     gpu_fam = _gpu_family(gpu_type)
     out: list[ChecklistEntry] = []
     for e in _CHECKLIST:
@@ -231,11 +231,11 @@ def entries_for(*, model_class: str = "", gpu_type: str = "", precision: str = "
     return out
 
 
-def source_hint_directories_for(*, model_class: str = "", gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
+def source_hint_directories_for(*, gpu_type: str = "", precision: str = "") -> tuple[str, ...]:
     """Return the de-duplicated source subdirectories to point the specialist at."""
     seen: set[str] = set()
     out: list[str] = []
-    for e in entries_for(model_class=model_class, gpu_type=gpu_type, precision=precision):
+    for e in entries_for(gpu_type=gpu_type, precision=precision):
         for d in e.source_dirs:
             d = (d or "").strip()
             if d and d not in seen:
@@ -261,25 +261,6 @@ def render_checklist_for_prompt(entries: list[ChecklistEntry]) -> str:
     return "\n".join(lines)
 
 
-def checklist_as_dicts(entries: list[ChecklistEntry]) -> list[dict[str, object]]:
-    """Serialize checklist entries to plain dicts (for task params / persistence)."""
-    out: list[dict[str, object]] = []
-    for e in entries:
-        out.append(
-            {
-                "id": e.id,
-                "applies_when": dict(e.applies_when),
-                "detect": e.detect,
-                "consequence": e.consequence,
-                "bridge": e.bridge,
-                "domain_hint": e.domain_hint,
-                "source_dirs": list(e.source_dirs),
-                "evidence": list(e.evidence),
-            }
-        )
-    return out
-
-
 def filter_entries_for_model(entries: list[ChecklistEntry], model_info: dict) -> list[ChecklistEntry]:
     """Filter checklist entries based on model metadata."""
     if model_info.get("has_shared_expert"):
@@ -294,5 +275,4 @@ __all__ = [
     "filter_entries_for_model",
     "source_hint_directories_for",
     "render_checklist_for_prompt",
-    "checklist_as_dicts",
 ]

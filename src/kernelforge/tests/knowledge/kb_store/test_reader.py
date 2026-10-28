@@ -20,7 +20,7 @@ from kernelforge.knowledge.kb_store.writer import (
     hash_implementation_identity,
 )
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig, KnowledgeStoreMode
+from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
 from kernelforge.tests.knowledge.kb_store.test_writer import write_flat_experience

@@ -990,6 +990,43 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         await c.stop()
 
 
+@pytest.mark.asyncio
+async def test_a_queued_or_running_baseline_reads_as_prelude_work(coordinator_with_mocks):
+    """The fact the terminal reads comes off the task store the transition drain cancels from."""
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    c = coordinator_with_mocks
+    try:
+        assert await c.phase_machine._prelude_work_in_flight() is False
+
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="baseline", params={}, idempotency_key="prelude-baseline-retry")
+        )
+        assert await c.phase_machine._prelude_work_in_flight() is True
+        await c.tasks.transition(task.task_id, "running")
+        assert await c.phase_machine._prelude_work_in_flight() is True
+
+        await c.tasks.transition(task.task_id, "succeeded", evidence={"result_keys": []})
+        assert await c.phase_machine._prelude_work_in_flight() is False
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_work_no_phase_owns_is_not_prelude_work(coordinator_with_mocks):
+    """Only PRELUDE's own actions hold the phase open; a queued kernel task must not."""
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    c = coordinator_with_mocks
+    try:
+        await c.tasks.create_or_return_existing(
+            TaskSpec(kind="kernel_agent", params={}, idempotency_key="not-a-prelude-action")
+        )
+        assert await c.phase_machine._prelude_work_in_flight() is False
+    finally:
+        await c.stop()
+
+
 # ENABLEMENT phase predicate tests
 
 

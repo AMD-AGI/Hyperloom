@@ -231,8 +231,9 @@ async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
     from kernelforge.agent_backends.registry import (
         create_registered_backend,
     )
+    from kernelforge.agent_backends.runtime import agent_runtime
 
-    backend = create_registered_backend(config.agent_runtime())
+    backend = create_registered_backend(agent_runtime(config))
 
     result = await backend.run(
         AgentRunSpec(

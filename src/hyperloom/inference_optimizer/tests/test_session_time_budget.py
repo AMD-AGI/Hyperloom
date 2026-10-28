@@ -131,10 +131,15 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
         """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
-            ACTION_CATALOGUE[_EXPENSIVE_ACTION],
+            ACTION_CATALOGUE["integrate"],
             measured_baseline_sec=10 * 60.0,
         )
-        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+        assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
+
+    def test_a_sweep_is_admitted_on_one_measured_pair(self):
+        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
+        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
+        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""

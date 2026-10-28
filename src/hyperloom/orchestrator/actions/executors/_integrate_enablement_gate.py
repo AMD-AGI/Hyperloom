@@ -14,7 +14,6 @@ from typing import Any
 
 from hyperloom.common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
-from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
 from ...bringup import load_boot_observation, observation_summary, verdict_of
 from ...bringup.persist import LoadedObservation
@@ -566,15 +565,7 @@ class EnablementGateMixin:
             "fa_pr_url": pr_url,
             "fa_pr_sha": pr_sha,
             "framework": candidate.get("framework") or "",
-            "gap_canonical_id": candidate.get("gap_canonical_id") or "",
-            "gap_keywords": candidate.get("gap_keywords") or [],
-            "changed_files": candidate.get("changed_files") or [],
             "applicability": candidate.get("applicability") or "",
-            # Names the lever, matching ``lever_kind``. No ledger reader filters
-            # on provenance; it is audit metadata.
-            "provenance": LEVER_UPSTREAM_PR,
-            "source_framework": candidate.get("source_framework") or "",
-            "target_framework": candidate.get("target_framework") or "",
         }
 
     async def _maybe_write_framework_kb_record(
@@ -624,17 +615,8 @@ class EnablementGateMixin:
                     tps_delta_pct=float(lesson.tps_delta_pct),
                     session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
                     framework=first_text(fields.get("framework")).lower(),
-                    gap_canonical_id=first_text(fields.get("gap_canonical_id")),
-                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
-                    model_class=first_text(getattr(shared_state, "model_class", "")),
-                    gpu_type=first_text(getattr(shared_state, "gpu_type", "")),
-                    precision=first_text(getattr(shared_state, "precision", "")),
                     applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
-                    provenance=first_text(fields.get("provenance")),
                     accuracy_delta_pct=accuracy_delta_pct,
-                    changed_files=to_str_list(fields.get("changed_files")),
-                    source_framework=first_text(fields.get("source_framework")).lower(),
-                    target_framework=first_text(fields.get("target_framework")).lower(),
                 )
             )
         except (OSError, ValueError, TypeError) as exc:

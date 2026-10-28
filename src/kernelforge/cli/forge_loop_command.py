@@ -49,8 +49,9 @@ from kernelforge.cli.publication import (
 )
 from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
-from kernelforge.config import Config
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.loop.api import format_forge_loop_result
+from kernelforge.agent_backends.runtime import agent_runtime
+from kernelforge.config import Config, KnowledgeConfig
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
@@ -549,10 +550,9 @@ def _exit_failed_preparation(prep: PrepareResult, result_json: str | None) -> No
     }
     if prep.audit_dir:
         err_result["task_preparation_audit_dir"] = prep.audit_dir
-    err_payload = json.dumps(err_result)
     if result_json:
         atomic_write_json(result_json, err_result)
-    click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
+    click.echo(format_forge_loop_result(err_result))
     sys.exit(2)
 
 
@@ -1873,7 +1873,7 @@ def forge_loop(request: ForgeLoopRequest):
     # PR references are independent of the experience-KB lifecycle.
     pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
-    selected_runtime = config.agent_runtime()
+    selected_runtime = agent_runtime(config)
     implementer_setup = ImplementerSetup(
         ImplementerTask(
             program_md=program_md,
@@ -1989,11 +1989,9 @@ def forge_loop(request: ForgeLoopRequest):
 
     # Final result: full kb_experience.
     result = _build_result(kb_experience=kb_experience)
-    payload = json.dumps(result)
     if result_json:
         atomic_write_json(result_json, result)
-    # Sentinel-wrapped so the caller can extract it from mixed loop stdout.
-    click.echo(f"__FORGE_RESULT__{payload}__FORGE_RESULT__")
+    click.echo(format_forge_loop_result(result))
     _write_pr_provenance(
         workspace_dir=workspace_dir,
         surfaced=iter_config.pr_reference_labels,

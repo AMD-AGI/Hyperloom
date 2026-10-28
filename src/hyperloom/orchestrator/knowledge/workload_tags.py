@@ -18,7 +18,7 @@ def workload_shape_tags(state: Any) -> dict[str, Any]:
     """Return the session's workload-shape tags, omitting unset values.
 
     ``ep`` falls back to the ``EP`` environment variable for callers that never
-    set it on the state, and ``pp`` has no state field, so ``PP`` is its only source.
+    set it on the state.
     """
     tags: dict[str, Any] = {}
     for field in WORKLOAD_SHAPE_FIELDS:
@@ -29,7 +29,4 @@ def workload_shape_tags(state: Any) -> dict[str, Any]:
         ep = optional_positive_int(os.environ.get("EP"))
         if ep is not None:
             tags["ep"] = ep
-    pp = optional_positive_int(os.environ.get("PP"))
-    if pp is not None:
-        tags["pp"] = pp
     return tags

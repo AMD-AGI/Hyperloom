@@ -706,10 +706,10 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the optimized arm runs
-    first as the more informative of the two, so a budget that runs out takes
-    the baseline arm with it. ``concs_ordered`` is descending because a
-    single-server arm boots at the most demanding rung and reuses down."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the
+    first arm may spend half the time left, and the second runs only the rungs
+    it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
+    is the session's own CONC first, then the rest cheapest first."""
 
     grid_source: str | None
     concs_requested: list[int]
@@ -720,10 +720,10 @@ class V6ConcSweepPlan(TypedDict, total=False):
 
 
 class V6ConcSweepBudget(TypedDict, total=False):
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
-    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is the
-    expected duration of one rung used for admission. ``deadline`` is a
+    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is null:
+    a rung is held to its arm's deadline rather than priced. ``deadline`` is a
     wall-clock epoch."""
 
     declared_total_sec: int | None
@@ -877,10 +877,10 @@ class V6ConcSweepRung(TypedDict, total=False):
 
 
 class V6ConcSweepBootAttempt(TypedDict, total=False):
-    """One rung the boot-retry-descend loop tried.
+    """One rung whose round tried to bring the arm's server up.
 
-    ``committed`` false is a concurrency the server would not come up at --
-    the capacity finding the sweep produces for free and the report discards."""
+    ``committed`` false appears only in older sessions, on an attempt a later
+    rung's boot superseded."""
 
     conc: int | None
     committed: bool
@@ -892,7 +892,7 @@ class V6ConcSweepBootAttempt(TypedDict, total=False):
 
 
 class V6ConcSweepBoot(TypedDict, total=False):
-    """How the boot-retry-descend loop resolved.
+    """How the arm's boot attempts resolved: each rung boots until one brings the server up.
 
     ``attempted_concs`` is in the order tried. Absent on an arm refused before
     it built anything."""
@@ -947,8 +947,8 @@ class V6ConcSweepArm(TypedDict, total=False):
 
     The two arms differ only by the server args and envs they add, so the
     curve is only readable alongside the decisions the ladder was run under.
-    The reuse path boots one server at the most demanding rung and reuses it
-    down; the restart path pays a server start per rung. They fail
+    The reuse path boots one server on its first rung and reuses it for the
+    rest; the restart path pays a server start per rung. They fail
     differently, and which one ran is not recoverable after the fact."""
 
     arm: str

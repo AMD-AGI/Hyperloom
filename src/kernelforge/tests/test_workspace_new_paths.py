@@ -11,7 +11,7 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentRunSpec
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS, hide_forge_loop_output
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS, hide_forge_loop_output
 
 OUTPUT_NOTE = "forge_experiments/orchestration/iter_001/note.md"
 
@@ -35,6 +35,7 @@ def workspace(tmp_path):
         target_files=["kernel.py"],
         driver_script="driver.py",
         commit_new_paths=["kernels/*.s"],
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
 
 
