@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -25,9 +26,11 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
-from kernelforge.knowledge.techniques import TechniqueVocabulary
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers
+from kernelforge.knowledge.wiki_tool.techniques import TechniqueVocabulary
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.workflows.forge_loop.memory.lessons import SessionEnd
+from kernelforge.workflows.forge_loop.gate.batch_session import NO_BATCH, BatchSession
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -54,6 +57,7 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # Wall-clock fallback for a session that never sized its own budget (every make_agent_fn caller except the forge-loop,
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
+_IMPLEMENTER_ROLE = "implementer"
 # The most of an iteration's rationale any record keeps.
 RATIONALE_MAX_CHARS = 500
 # Both Implementer prompts ask for the one line agent_fn records as the iteration's rationale.
@@ -63,6 +67,13 @@ _RATIONALE_REQUEST = (
     "without a win, why this direction is exhausted and what you would try next. Only that line is recorded with the "
     "iteration's keep/revert decision, so make it specific enough to compare runs by."
 )
+# The self-correcting session's stopping rule; a knowledge base batch session states its own in its place.
+_FIRST_WIN_RULE = """\
+4. As soon as you have the FIRST candidate that you believe is correct and
+   faster than the current best, STOP exploring. Submit it immediately to the
+   outer loop, which is the sole authority for canonical correctness, benchmark,
+   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
+   gain after you already have a plausible improvement."""
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -229,11 +240,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
    If correctness fails or a compile error is raised, READ the error and FIX it —
    do not stop on a broken kernel. Optimize the mean of per-case speedups,
    not raw `mean_ms`; the in-session gate computes the authoritative score.
-4. As soon as you have the FIRST candidate that you believe is correct and
-   faster than the current best, STOP exploring. Submit it immediately to the
-   outer loop, which is the sole authority for canonical correctness, benchmark,
-   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
-   gain after you already have a plausible improvement.
+{first_win_rule}
 5. There is NO hard edit budget — make as many changes to non-protected tracked
    implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
    stopping: each time you STOP with a candidate that is correct but not faster
@@ -598,6 +605,8 @@ def _fill_session_sink(
     # and an iteration's rationale stands in a placeholder for a session that declared none.
     session_sink["headline"] = session_sink["plan"]
     session_sink["reasoning"] = _parse_output_tag(run_result.text, "RATIONALE:", RATIONALE_MAX_CHARS, last=True)
+    # The session's whole closing message; a GUIDED batch session reports what it landed in it.
+    session_sink["final_text"] = run_result.text or ""
     session_sink["session_id"] = run_result.session_id
     session_sink["summarize"] = summarize
     session_sink["end_reason"] = ending.end_reason
@@ -711,7 +720,9 @@ def _pr_mcp_servers(pr_kb_repo: str, backend) -> dict[str, StdioMcpServer]:
     return pr_mcp_servers
 
 
-def _session_user_prompt(kernel_path: str, experiment_history: str, surface: _SessionSurface, deadline_sec: int) -> str:
+def _session_user_prompt(
+    kernel_path: str, experiment_history: str, surface: _SessionSurface, deadline_section: str
+) -> str:
     """The per-invocation prompt: what the session may edit, its deadline and the prior experience."""
     target_section = _target_section(
         kernel_path,
@@ -723,7 +734,7 @@ def _session_user_prompt(kernel_path: str, experiment_history: str, surface: _Se
 
     return f"""\
 {target_section}
-{_deadline_section(deadline_sec)}
+{deadline_section}
 ## Prior experience (distilled constraints + recent iterations)
 {experiment_history if experiment_history else "(none — this is iteration 1)"}
 
@@ -773,6 +784,8 @@ def make_agent_fn(
 
     pr_mcp_servers = _pr_mcp_servers(task.pr_kb_repo, backend)
     techniques = TechniqueVocabulary.from_config(config)
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    require_mcp_backend(knowledge_wiki, backend, _IMPLEMENTER_ROLE)
 
     prompt_sections = {
         "program_md": task.program_md,
@@ -784,6 +797,7 @@ def make_agent_fn(
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
         "rationale_request": _RATIONALE_REQUEST,
         "declare_techniques": techniques.request_suffix(),
+        "first_win_rule": _FIRST_WIN_RULE,
     }
     base_system_prompt = _BASE_SYSTEM_PROMPT.format(**prompt_sections)
 
@@ -818,6 +832,7 @@ def make_agent_fn(
         experiment_history: str,
         session_sink: dict | None = None,
         gate_scoring: GateScoring = GateScoring(),
+        batch: BatchSession = NO_BATCH,
     ) -> str:
         # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
         if session_sink is None:
@@ -828,10 +843,17 @@ def make_agent_fn(
         # when make_agent_fn is used standalone without obscuring the outer loop's earlier marker.
         session_sink.setdefault("session_started", True)
         session_sink["progress_log"] = progress_log
+        started = time.time()
+        batch = batch.timed(session_deadline_sec, now=started)
 
         def prepare_session() -> tuple[InSessionGate | None, AgentRunSpec]:
             """Build this session's in-session gate (None when disabled) and the run spec handed to the backend."""
-            prompt = _session_user_prompt(kernel_path, experiment_history, surface, session_deadline_sec)
+            prompt = _session_user_prompt(
+                kernel_path,
+                experiment_history,
+                surface,
+                batch.deadline_section(_deadline_section(session_deadline_sec), now=started),
+            )
 
             # One fixed interaction budget per candidate Session.
             turn_cap = config.max_turns
@@ -846,12 +868,14 @@ def make_agent_fn(
                     measurement,
                     # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
                     # run's output dir, which is outside the workspace and is not a repository.
-                    replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
+                    replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace, batch=batch),
                     baseline_case_times=gate_scoring.baseline_case_times,
                     best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
                 )
                 if gate_stop_check:
-                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
+                    system_prompt = gate_system_prompt.replace(
+                        _FIRST_WIN_RULE, batch.stop_rule(_FIRST_WIN_RULE)
+                    ) + _gate_scoring_context(gate_scoring)
                 # Built only for a provider that runs them. A backend which ignores
                 # ``AgentRunSpec.hooks`` drops the whole group without a word, so
                 # attaching one anyway makes this call site read as protection the
@@ -865,7 +889,7 @@ def make_agent_fn(
             run_spec = AgentRunSpec(
                 system_prompt=system_prompt,
                 user_prompt=prompt,
-                role="implementer",
+                role=_IMPLEMENTER_ROLE,
                 cwd=run_cwd,
                 writable=True,
                 timeout_sec=session_deadline_sec,
@@ -890,7 +914,7 @@ def make_agent_fn(
                 ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
                 protected_paths=list(extra_protected_paths),
                 hooks=hooks,
-                mcp_servers=pr_mcp_servers,
+                mcp_servers={**pr_mcp_servers, **wiki_servers(knowledge_wiki, _IMPLEMENTER_ROLE)},
                 progress_log=progress_log,
             )
             return gate, run_spec

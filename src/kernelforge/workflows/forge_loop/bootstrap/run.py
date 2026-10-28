@@ -29,6 +29,7 @@ from kernelforge.workflows.forge_loop.bootstrap.request import (
     SpecialistProbeOptions,
     validate_roofline_target,
     validate_speedup_target,
+    validate_wiki_guided,
 )
 from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadline, _ForgeRun
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec, _is_long_horizon
@@ -98,6 +99,30 @@ def _make_ceiling_estimator(
         )
 
     return estimate
+
+
+def _prepare_knowledge_base(config, campaign) -> None:
+    """Say which knowledge base every forge role reads, when one is configured, and name for the Experience KB search
+    beside it the kernel this campaign optimizes."""
+    from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
+    from kernelforge.knowledge.wiki_tool.kb import SCHEMA_ENV, URL_ENV, kb_environment, write_kb_context
+
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    if knowledge_wiki is None:
+        return
+    print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+    write_kb_context(config.experiments_dir, campaign.to_dict())
+    kb = kb_environment(knowledge_wiki.kb_context_path)
+    if kb:
+        print(f"  Knowledge base KB search: {kb[URL_ENV]} ({kb[SCHEMA_ENV]})")
+
+
+def _announce_wiki_guided(iter_config) -> None:
+    if iter_config.wiki_guided:
+        print(
+            "  Wiki-guided planning: on (the first round implements one knowledge base batch in one session, plus "
+            "one round for what a kept batch left untried; then planning as without the flag)"
+        )
 
 
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
@@ -471,7 +496,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         knowledge_config = KnowledgeConfig.from_env()
     except ValueError as exc:
         raise ForgeLoopError(str(exc)) from exc
-    # The workspace's one Experience KB, as its .env names it, which the run collects into as it ends.
+    # Before any session is built, so the knowledge base's scripts search the KB the run collects into.
     workspace_kb = run_collection.use_workspace_kb()
 
     _reject_incompatible_loop_options(producer=request.knowledge.producer)
@@ -502,7 +527,7 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     long_horizon = _is_long_horizon(request.budget.max_hours)
     opened = _open_campaign(inputs)
     session = _agent_session(inputs, opened)
-    run = _new_run(inputs, opened, session, _iteration_config(inputs, opened.resolution.campaign))
+    run = _new_run(inputs, opened, session, _iteration_config(inputs, opened.resolution.campaign, session.config))
     prepared = _prepare_campaign(inputs, run, opened)
     run, assembly = prepared.run, prepared.assembly
 
@@ -569,6 +594,8 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
     config = _session_config(
         request.probe, campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides
     )
+    # The knowledge base serves this campaign's round, and only a --wiki-guided campaign has one.
+    config.knowledge_wiki_round = request.wiki_guided
     try:
         session_relay = resolve_session_relay(campaign.agent_relay, config)
     except ValueError as error:
@@ -587,7 +614,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
     )
 
 
-def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> IterationConfig:
+def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig, config: Config) -> IterationConfig:
     """The loop's configuration: the campaign's task and measurement semantics, and this invocation's budget."""
     from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationConfig
 
@@ -625,6 +652,7 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=validate_roofline_target(request.roofline_target, request.roofline_ceiling.enabled),
         target_mean_case_speedup=validate_speedup_target(request.target_mean_case_speedup),
+        wiki_guided=validate_wiki_guided(request.wiki_guided, config.knowledge_wiki_root),
     )
     if request.baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -788,8 +816,10 @@ def _search(
         profiling_enabled=plan.profiling_enabled,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
+    _prepare_knowledge_base(run.config, run.campaign)
     for line in prepare_collection(note=plan.workspace_kb):
         print(line)
+    _announce_wiki_guided(run.iter_config)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
     print(
         "  Plan Critic: "

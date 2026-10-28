@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from kernelforge.config import Config
 
 ALIASES_FILE = "aliases.yaml"
+TAGS_FILE = Path("data") / "tags.yaml"
 TECHNIQUES_TAG = "TECHNIQUES:"
 
 _MAX_UNLISTED = 5
@@ -65,10 +66,13 @@ class TechniqueVocabulary:
 
     @classmethod
     def from_config(cls, config: Config) -> TechniqueVocabulary:
-        """The campaign's vocabulary; without one, a vocabulary with no terms, which asks for nothing and reads
-        nothing."""
+        """The campaign's vocabulary, else its knowledge base checkout's, the one that knowledge base judges coverage
+        on; without either, a vocabulary with no terms, which asks for nothing and reads nothing."""
         if config.technique_vocabulary:
             return cls.load(Path(config.technique_vocabulary))
+        tags = Path(config.knowledge_wiki_root) / TAGS_FILE
+        if config.knowledge_wiki_root and tags.is_file():
+            return cls.load(tags)
         return cls(terms=(), spellings={})
 
     def request(self) -> str:

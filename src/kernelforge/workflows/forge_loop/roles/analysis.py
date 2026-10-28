@@ -28,6 +28,7 @@ from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON, ResumePolicy, run_session_with_api_resume
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     EvidenceRef,
@@ -505,6 +506,8 @@ class AnalysisAgentService:
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
         self.profiling_enabled = bool(profiling_enabled)
+        self.knowledge_wiki = KnowledgeWikiTool.from_config(config)
+        require_mcp_backend(self.knowledge_wiki, backend, "analysis")
 
     def _stage_reference_profiling_script(self, work_root: Path) -> Path:
         profiling_source = Path(self.config.local_knowledge_dir).resolve() / "common_methodology" / "profiling"
@@ -1231,9 +1234,17 @@ class AnalysisAgentService:
                 str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
             ],
             allow_untracked=True,
-            tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=self.max_turns),
+            tool_policy=AgentToolPolicy(
+                read=True,
+                search=True,
+                write=True,
+                shell=True,
+                max_turns=self.max_turns,
+                extra_tools=wiki_tool_names(self.knowledge_wiki),
+            ),
             hooks=protection.hooks(),
             protected_path_rules=FORGE_PROTECTED_PATHS,
+            mcp_servers=wiki_servers(self.knowledge_wiki, "analysis"),
         )
 
     async def _run_analysis_session(

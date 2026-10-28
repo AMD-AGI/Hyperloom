@@ -20,6 +20,7 @@ from hyperloom_common.llm.reasoning_effort import (
     REASONING_EFFORT_LEVELS,
     normalize_reasoning_effort,
 )
+from kernelforge.config.knowledge_wiki import SCRIPTS as KNOWLEDGE_WIKI_SCRIPTS
 from kernelforge.config.resources import default_project_root, resource_path
 from kernelforge.utils.gpu_arch import canonical_gpu_type
 
@@ -344,8 +345,17 @@ class Config:
     defer_knowledge_maps: bool | None = field(default=None)
 
     # Absolute path of a knowledge base's tags.yaml whose techniques the Implementer declares its change in; empty
-    # asks for no declaration.
+    # uses the knowledge base checkout's data/tags.yaml, and without one asks for no declaration.
     technique_vocabulary: str = ""
+    # Absolute path of a KernelWiki-layout knowledge base checkout offered read-only to every forge role through the
+    # mcp__knowledge_wiki__* tools (kernelforge.knowledge.wiki_tool). Empty disables it.
+    knowledge_wiki_root: str = ""
+    # Absolute path of the JSONL log of its calls; empty puts it in experiments_dir.
+    knowledge_wiki_log: str = ""
+    # Whether sessions are offered the knowledge base: only a --wiki-guided forge-loop campaign's knowledge base round
+    # is. Every other run and command plans and implements without it, its data/tags.yaml still the technique
+    # vocabulary.
+    knowledge_wiki_round: bool = False
 
     def __post_init__(self):
         """Derive paths and validate the settings that need no other package.
@@ -381,6 +391,7 @@ class Config:
         if not isinstance(self.agent_options, dict):
             raise ValueError("agent_options must be a dict")
         self._normalize_technique_vocabulary()
+        self._normalize_knowledge_wiki_paths()
         if self.experiments_dir is None:
             self.experiments_dir = self.project_root / "experiments"
         if self.local_knowledge_dir is None:
@@ -404,6 +415,24 @@ class Config:
         vocabulary = Path(self.technique_vocabulary)
         if self.technique_vocabulary and not (vocabulary.is_absolute() and vocabulary.is_file()):
             raise ValueError(f"technique_vocabulary must be the absolute path of a file: {self.technique_vocabulary!r}")
+
+    def _normalize_knowledge_wiki_paths(self) -> None:
+        """Strip the knowledge base paths, and refuse a relative one or a root that is not a knowledge base checkout."""
+        self.knowledge_wiki_root = str(self.knowledge_wiki_root or "").strip()
+        self.knowledge_wiki_log = str(self.knowledge_wiki_log or "").strip()
+        if self.knowledge_wiki_root:
+            root = Path(self.knowledge_wiki_root)
+            if not root.is_absolute():
+                raise ValueError(f"knowledge_wiki_root must be an absolute path: {self.knowledge_wiki_root!r}")
+            missing = [
+                f"scripts/{name}" for name in KNOWLEDGE_WIKI_SCRIPTS.values() if not (root / "scripts" / name).is_file()
+            ]
+            if missing:
+                raise ValueError(
+                    f"knowledge_wiki_root {root} is not a knowledge base checkout; missing {', '.join(missing)}"
+                )
+        if self.knowledge_wiki_log and not Path(self.knowledge_wiki_log).is_absolute():
+            raise ValueError(f"knowledge_wiki_log must be an absolute path: {self.knowledge_wiki_log!r}")
 
     @classmethod
     def from_env(cls, **overrides) -> Config:
@@ -463,4 +492,6 @@ class Config:
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
             technique_vocabulary=overrides.get("technique_vocabulary", os.getenv("FORGE_TECHNIQUE_VOCABULARY", "")),
+            knowledge_wiki_root=overrides.get("knowledge_wiki_root", os.getenv("FORGE_KNOWLEDGE_WIKI_ROOT", "")),
+            knowledge_wiki_log=overrides.get("knowledge_wiki_log", os.getenv("FORGE_KNOWLEDGE_WIKI_LOG", "")),
         )

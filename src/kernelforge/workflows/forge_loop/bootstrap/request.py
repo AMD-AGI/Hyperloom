@@ -119,6 +119,7 @@ class ForgeLoopRequest:
     roofline_ceiling: CeilingSwitch
     roofline_target: float
     target_mean_case_speedup: float
+    wiki_guided: bool
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
@@ -150,6 +151,20 @@ def validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
             param_hint="--roofline-target",
         )
     return value
+
+
+def validate_wiki_guided(enabled: bool, knowledge_wiki_root: str) -> bool:
+    """Check guided planning has a knowledge base to build its batch from.
+
+    Without a knowledge base there is nothing to build a batch from, so the flag would plan exactly as without it
+    while the operator believes otherwise; it is refused rather than run.
+    """
+    if enabled and not str(knowledge_wiki_root or "").strip():
+        raise InvalidOptionValue(
+            "--wiki-guided needs a knowledge base to build its batch from; set FORGE_KNOWLEDGE_WIKI_ROOT",
+            param_hint="--wiki-guided",
+        )
+    return bool(enabled)
 
 
 _SPEEDUP_TARGET_OPTION = "--target-mean-case-speedup"
@@ -194,4 +209,5 @@ __all__ = [
     "TimeBudget",
     "validate_roofline_target",
     "validate_speedup_target",
+    "validate_wiki_guided",
 ]

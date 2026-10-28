@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.knowledge.techniques import TechniqueVocabulary
+from kernelforge.knowledge.wiki_tool.techniques import TechniqueVocabulary
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
 from kernelforge.workflows.forge_loop.iteration import keep_checkpoint

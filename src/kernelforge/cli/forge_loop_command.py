@@ -266,6 +266,16 @@ ANALYSIS_TIMEOUT_SEC = 7200
         "finite is refused. It never affects KEEP.",
     ),
     click.option(
+        "--wiki-guided/--no-wiki-guided",
+        default=False,
+        help="Spend the first round on one knowledge base batch (GUIDED): the directions the knowledge base and the "
+        "round's measured evidence support (plus the largest levers only the evidence supports, marked as such), "
+        "implemented in one session without a plan critic and measured once; a kept batch that left items untried "
+        "gets one more round for them. Every round after that plans as without the flag, without the knowledge "
+        "base tools, seeing a summary of what the batch settled. Needs a knowledge base "
+        "(FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+    ),
+    click.option(
         "--prepare-task/--no-prepare-task",
         default=True,
         help="Pre-loop task preparation (default on, fresh campaigns only). "

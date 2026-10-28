@@ -99,6 +99,8 @@ class IterationPhasesMixin:
 
         # Durable per-iteration marker (facts only; detail lives in files).
         self.run_state.iteration = iteration
+        if self.wiki_rounds is not None:
+            self.wiki_rounds.start_iteration()
         self.state_store.append_event(
             make_event(
                 ITERATION_STARTED,
@@ -308,11 +310,14 @@ class IterationPhasesMixin:
         iteration, session_sink = frame.iteration, frame.session_sink
         # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
         # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-        # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
+        # resumed-session factual-record callback; a knowledge base batch is the batch the session implements. The
+        # lesson turn, not this session, writes the record.
         extras = {
             "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
             "session_sink": session_sink,
         }
+        if self.wiki_rounds is not None:
+            extras["batch"] = self.wiki_rounds.session
         extra_kwargs = declared_extras(agent_fn, extras)
         agent_error = None
         try:
@@ -355,6 +360,7 @@ class IterationPhasesMixin:
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         optimization_plan_path, optimization_plan_executable = plan.path, plan.executable
+        self._note_batch_report(iteration, session_sink)
         # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
         # workspace is still busy.
         unmeasured_result: IterationResult | None = None
@@ -596,11 +602,17 @@ class IterationPhasesMixin:
         if orchestration_service.has_plan_critic:
             context = self._with_plan_review(iteration, context)
         try:
-            result = await orchestration_service.run(
-                context,
-                usage=self._usage,
-                lanes=lanes,
-            )
+            if self.wiki_rounds is not None:
+                planned = await self.wiki_rounds.plan_round(
+                    iteration, orchestration_service, context, usage=self._usage, lanes=lanes
+                )
+                context, result = planned.context, planned.result
+            else:
+                result = await orchestration_service.run(
+                    context,
+                    usage=self._usage,
+                    lanes=lanes,
+                )
         except OrchestrationInfrastructureError as error:
             detail = f"{type(error).__name__}: {error}"
             print(f"  [orchestration] failed ({detail})")

@@ -28,6 +28,7 @@ from kernelforge.workflows.forge_loop.iteration.outcome_runtime import OutcomeMi
 from kernelforge.workflows.forge_loop.iteration.round_admission import RoundAdmissionMixin
 from kernelforge.workflows.forge_loop.iteration.scoring_runtime import ScoringMixin
 from kernelforge.workflows.forge_loop.iteration.supervisor_review import SupervisorReviewMixin
+from kernelforge.workflows.forge_loop.iteration.wiki_guidance_hooks import WikiGuidanceMixin
 from kernelforge.workflows.forge_loop.iteration.workspace_git import WorkspaceGitMixin
 from collections.abc import Awaitable, Callable
 from kernelforge.config import Config
@@ -37,6 +38,7 @@ from kernelforge.workflows.forge_loop.iteration.relay_runtime import RelayRuntim
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.campaign.workspace_files import hide_forge_loop_output
 from kernelforge.workflows.forge_loop.search.search_policy import SearchPolicyDecision, SearchPolicyEngine
+from kernelforge.workflows.forge_loop.iteration.wiki_guided_rounds import WikiGuidedRounds
 from kernelforge.workflows.forge_loop.campaign.schema import Experiment
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from typing import Any
@@ -62,6 +64,7 @@ class IterationLoop(
     RoundAdmissionMixin,
     ScoringMixin,
     SupervisorReviewMixin,
+    WikiGuidanceMixin,
     WorkspaceGitMixin,
 ):
     """Autonomous kernel optimization loop."""
@@ -136,6 +139,8 @@ class IterationLoop(
         self.search_policy_engine = SearchPolicyEngine()
         self._search_policy_decision: SearchPolicyDecision | None = None
         self._reported_window_gain_faults: set[str] = set()
+        # Knowledge-base-guided planning; None leaves every planning path as it was.
+        self.wiki_rounds: WikiGuidedRounds | None = self._open_wiki_rounds(resume) if self.ic.wiki_guided else None
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.

@@ -178,6 +178,7 @@ type = forbidden
 # An agent session waits on each server's startup. A new MCP server module must be added here.
 source_modules =
     kernelforge.knowledge.pr_knowledge.mcp_server
+    kernelforge.knowledge.wiki_tool.mcp_server
     kernelforge.workflows.forge_loop.roles.specialist_probe_server
 forbidden_modules =
     kernelforge.agent_backends

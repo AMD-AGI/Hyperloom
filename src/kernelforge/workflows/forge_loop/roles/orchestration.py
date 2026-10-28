@@ -23,32 +23,32 @@ from kernelforge.agent_backends import (
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     AgentResponseInfrastructureError,
     validated_agent_text,
 )
 from kernelforge.workflows.forge_loop.roles.contracts import (
-    CaseEvidence,
     DispatchIntent,
     DispatchPlan,
-    EvidenceRef,
     LaneGround,
     OrchestrationContext,
     OrchestrationRunResult,
     PlanCriticOutcome,
     SynthesizedPlan,
-    SpecialistAssignment,
     SpecialistDefinition,
     SpecialistOutcome,
     SpecialistRound,
 )
 from kernelforge.workflows.forge_loop.roles.critic_fallback import render_critic_fallback
+from kernelforge.workflows.forge_loop.roles.dispatch_binding import bind_dispatch
 from kernelforge.workflows.forge_loop.roles.lane_prompts import lane_prompts, run_lanes_after_the_first_starts
 from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
+    SpecialistTools,
 )
 from kernelforge.workflows.forge_loop.roles.plan_prompts import (
     LANE_SYNTHESIS_SYSTEM_PROMPT,
@@ -71,6 +71,18 @@ from kernelforge.workflows.forge_loop.roles.plan_critic import (
 from kernelforge.workflows.forge_loop.roles.structured_output import (
     build_repair_prompt,
     extract_json_object,
+)
+from kernelforge.workflows.forge_loop.roles.wiki_batch import (
+    BATCH_PART_SYSTEM_PROMPT,
+    PLAYBOOK_GROUP_ROLE,
+    PLAYBOOK_ROLE,
+    PLAYBOOK_SYSTEM_PROMPT,
+    BatchPart,
+    batch_part_payload,
+    batch_parts,
+    playbook_group_definition,
+    playbook_group_dispatch,
+    playbook_payload,
 )
 
 
@@ -111,46 +123,6 @@ def _as_bool(value: object) -> tuple[bool, bool]:
     if value is None or isinstance(value, bool):
         return bool(value), True
     return False, False
-
-
-_GLOBAL_EVIDENCE_KINDS = {
-    "analysis_artifact_catalog",
-    "analysis_bundle",
-    "analysis_cumulative_diff",
-    "analysis_summary",
-    "analysis_source_map",
-    "analysis_workflow",
-    "latest_lesson",
-    "supervisor_guidance",
-}
-_PROFILED_CASE_FLAGS = {
-    "analysis_profiled",
-    "analysis_profile_incremental",
-    "analysis_checkpoint_profile_interpretation",
-    "analysis_checkpoint_normalized_only",
-    "analysis_checkpoint_raw_profile_only",
-}
-
-
-def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
-    """The evidence one scored case hands every specialist assigned to it, keyed by path."""
-    measurement = EvidenceRef(
-        kind="measurement",
-        path=f"case:{case.case_id}",
-        summary=(f"Canonical timing and Analysis flags for {case.case_id}."),
-    )
-    refs = {measurement.path: measurement}
-    if case.profile_summary_path:
-        if _PROFILED_CASE_FLAGS.isdisjoint(case.flags):
-            kind, label = "analysis_interpretation", "Analysis interpretation"
-        else:
-            kind, label = "profile", "Measured profile"
-        refs[case.profile_summary_path] = EvidenceRef(
-            kind=kind,
-            path=case.profile_summary_path,
-            summary=label + f" for {case.case_id}. Flags: " + f"{', '.join(case.flags) or '(none)'}.",
-        )
-    return refs
 
 
 @dataclass(frozen=True)
@@ -199,6 +171,18 @@ text outside the JSON object.
 """
 
 
+def _is_group_dispatch(dispatch_plan: DispatchPlan) -> bool:
+    """Whether a round's dispatch is a GUIDED batch's, which the dispatch planner is never offered the role to make."""
+    return any(assignment.role_id == PLAYBOOK_GROUP_ROLE for assignment in dispatch_plan.assignments)
+
+
+def _critic_skipped(dispatch_plan: DispatchPlan, *, requested: bool) -> dict[str, str]:
+    """Why a round with a plan critic ran none: the loop did not send it, it is a GUIDED batch, or it had no synthesis."""
+    if not requested:
+        return {"status": "skipped_not_requested"}
+    return {"status": "skipped_guided_batch" if _is_group_dispatch(dispatch_plan) else "skipped_synthesis_unavailable"}
+
+
 class OrchestrationInfrastructureError(RuntimeError):
     """Report an orchestration backend outage that produced no model answer."""
 
@@ -217,6 +201,7 @@ class OrchestrationAgent:
         timeout_sec: int,
         max_turns: int,
         min_assignments: int = 1,
+        knowledge_wiki: KnowledgeWikiTool | None = None,
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
@@ -224,10 +209,12 @@ class OrchestrationAgent:
             raise ValueError("max_turns must be greater than zero")
         if min_assignments <= 0:
             raise ValueError("min_assignments must be greater than zero")
+        require_mcp_backend(knowledge_wiki, backend, "orchestration")
         self.backend = backend
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
         self.min_assignments = min_assignments
+        self.knowledge_wiki = knowledge_wiki
         self.structured_output_diagnostics: dict[str, dict] = {}
         # What each planning phase cost this round, in the units the round is budgeted in.
         self.phase_durations_sec: dict[str, float] = {}
@@ -324,14 +311,13 @@ class OrchestrationAgent:
         intents: Sequence[DispatchIntent],
         notes: list[str],
     ) -> DispatchPlan:
-        case_evidence = {case.case_id: _case_evidence_refs(case) for case in context.cases}
-        case_ids = tuple(case_evidence)
+        case_ids = tuple(case.case_id for case in context.cases)
         merged: dict[str, dict[str, object]] = {}
         for intent in intents:
             if intent.role_id not in definitions:
                 notes.append(f"dropped unknown role {intent.role_id!r}")
                 continue
-            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_evidence]
+            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_ids]
             if not selected_cases:
                 selected_cases = list(case_ids)
                 notes.append(f"bound role {intent.role_id!r} to all scored cases")
@@ -363,43 +349,10 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        return DispatchPlan(
-            analysis_commit=context.analysis_commit,
-            assignments=self._bound_assignments(context, merged, case_evidence),
-            normalization_notes=tuple(notes),
-        )
-
-    @staticmethod
-    def _bound_assignments(
-        context: OrchestrationContext,
-        merged: Mapping[str, Mapping[str, object]],
-        case_evidence: Mapping[str, Mapping[str, EvidenceRef]],
-    ) -> tuple[SpecialistAssignment, ...]:
-        """One assignment per merged role, carrying the global, source-map and per-case evidence it reads."""
-        global_refs = {
-            reference.path: reference for reference in context.evidence_refs if reference.kind in _GLOBAL_EVIDENCE_KINDS
-        }
-        source_ref = EvidenceRef(
-            kind="source_map",
-            path=context.source_map_path,
-            summary="Current source map or anchor source.",
-        )
-        assignments = []
-        for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {**global_refs, source_ref.path: source_ref}
-            target_cases = tuple(item["case_ids"])
-            for case_id in target_cases:
-                refs.update(case_evidence[case_id])
-            assignments.append(
-                SpecialistAssignment(
-                    assignment_id=f"{role_id}-{index}",
-                    role_id=role_id,
-                    target_case_ids=target_cases,
-                    evidence_refs=tuple(refs.values()),
-                    reason=str(item["reason"]),
-                )
-            )
-        return tuple(assignments)
+        resolved = [
+            DispatchIntent(role_id, tuple(item["case_ids"]), str(item["reason"])) for role_id, item in merged.items()
+        ]
+        return bind_dispatch(context, resolved, notes)
 
     async def _synthesize_optimization_plan_result(
         self,
@@ -444,6 +397,11 @@ class OrchestrationAgent:
         usage=None,
     ) -> list[SynthesizedPlan]:
         """Partition the round into plans that do not compete for one another's ground."""
+        parts = batch_parts(context, specialists)
+        if parts:
+            # A batch is implemented in one session on one tree, so it is not divided by code: each group analysis
+            # becomes one part, a batch of one group included.
+            return await self._synthesize_batch_parts(context, specialists, parts, usage=usage)
         analyses = specialists.analyses
         width = max(1, min(int(lanes), len(analyses)))
         if width <= 1:
@@ -511,6 +469,62 @@ class OrchestrationAgent:
         if not plans:
             raise OrchestrationOutputError("orchestration synthesis returned no lane plan")
         return plans
+
+    async def _synthesize_batch_parts(
+        self,
+        context: OrchestrationContext,
+        specialists: SpecialistRound,
+        parts: Sequence[BatchPart],
+        *,
+        usage=None,
+    ) -> list[SynthesizedPlan]:
+        """One plan per batch part, in batch order; a part whose call fails is one part lost and not the round."""
+
+        async def _part(index: int) -> SynthesizedPlan | None:
+            role = f"orchestration batch part {index + 1} synthesis"
+            payload = batch_part_payload(context, specialists, parts, index)
+            turn = _Turn(BATCH_PART_SYSTEM_PROMPT, json.dumps(payload, indent=2, sort_keys=True), role=role)
+            result = await self._run_result(context, turn, usage=usage)
+            text = self._validated_text(result, role=role, allow_empty=True)
+            if not text:
+                return None
+            ground = f"batch part {index + 1} of {len(parts)}: playbook group {parts[index].group_id}"
+            return SynthesizedPlan(
+                text=text,
+                session_id=str(result.session_id or "").strip(),
+                system_prompt=turn.system_prompt,
+                ground=ground,
+            )
+
+        with _phase_timer(self.phase_durations_sec, "synthesis"):
+            answers = await asyncio.gather(*(_part(index) for index in range(len(parts))), return_exceptions=True)
+        plans: list[SynthesizedPlan] = []
+        for index, answer in enumerate(answers):
+            if isinstance(answer, BaseException):
+                log.warning(
+                    "batch part %d of %d lost its plan: %s: %s", index + 1, len(parts), type(answer).__name__, answer
+                )
+            elif answer is None:
+                log.warning("batch part %d of %d returned an empty plan", index + 1, len(parts))
+            else:
+                plans.append(answer)
+        self.structured_output_diagnostics["batch"] = {
+            "parts": [part.group_id for part in parts],
+            "planned": len(plans),
+        }
+        if not plans:
+            raise OrchestrationOutputError("orchestration synthesis returned no batch part plan")
+        return plans
+
+    async def build_wiki_playbook(self, context: OrchestrationContext, *, usage=None) -> str:
+        """Turn the knowledge base and the measured evidence into the campaign's batch; the builder's raw answer."""
+        if self.knowledge_wiki is None:
+            raise ValueError("a playbook needs a knowledge base")
+        user_prompt = json.dumps(playbook_payload(context), indent=2, sort_keys=True)
+        result = await self._run_result(
+            context, _Turn(PLAYBOOK_SYSTEM_PROMPT, user_prompt, role=PLAYBOOK_ROLE), usage=usage
+        )
+        return self._validated_text(result, role=PLAYBOOK_ROLE)
 
     @staticmethod
     def _collapsed_grounds(
@@ -911,6 +925,8 @@ class OrchestrationAgent:
     ) -> AgentRunSpec:
         """One read-only orchestration turn."""
         tools = turn.tools
+        # A turn run without tools is a pure formatting turn; the knowledge base goes only where the other tools do.
+        knowledge_wiki = self.knowledge_wiki if tools else None
         return AgentRunSpec(
             system_prompt=turn.system_prompt,
             user_prompt=turn.user_prompt,
@@ -928,11 +944,13 @@ class OrchestrationAgent:
                 write=False,
                 shell=False,
                 max_turns=(self.max_turns if turn.max_turns is None else turn.max_turns),
+                extra_tools=wiki_tool_names(knowledge_wiki),
             ),
             protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=["*"],
             shared_prompt_prefix=turn.shared_prompt_prefix,
             on_response_started=turn.on_response_started,
+            mcp_servers=wiki_servers(knowledge_wiki, turn.role),
         )
 
     def _backend_supports_resume(self) -> bool:
@@ -981,6 +999,34 @@ class OrchestrationService:
         self._plan_critic = plan_critic
         self.has_plan_critic = plan_critic is not None
 
+    async def build_wiki_playbook(self, context: OrchestrationContext, *, usage=None) -> str:
+        """The playbook builder's raw answer (``workflows.forge_loop.iteration.wiki_playbook.parse_playbook`` reads it).
+
+        Refused when the pool has no group analyst, since no batch the builder answers with could be analyzed.
+        """
+        if not self._specialist_pool.has_role(PLAYBOOK_GROUP_ROLE):
+            raise ValueError("a playbook needs the playbook group analyst in the specialist pool")
+        return await self._agent.build_wiki_playbook(context, usage=usage)
+
+    async def _dispatch(self, context: OrchestrationContext, *, lanes: int, usage) -> DispatchPlan:
+        """The round's assignments.
+
+        A GUIDED round already knows its steps, one analysis per open batch group, so it skips the dispatch planner
+        and the angle specialists it chooses among. Only a pool built with a knowledge base holds the group analyst.
+        """
+        group_dispatch = (
+            playbook_group_dispatch(context, lanes=lanes)
+            if self._specialist_pool.has_role(PLAYBOOK_GROUP_ROLE)
+            else None
+        )
+        if group_dispatch is None:
+            return await self._agent.plan_dispatch(context, self._definitions, usage=usage)
+        self._agent.structured_output_diagnostics["dispatch"] = {
+            "mode": "playbook_groups",
+            "assignments": [assignment.reason for assignment in group_dispatch.assignments],
+        }
+        return group_dispatch
+
     async def run(
         self,
         context: OrchestrationContext,
@@ -993,7 +1039,7 @@ class OrchestrationService:
         self._agent.phase_durations_sec = {}
         phase_durations = self._agent.phase_durations_sec
         run_started_at = time.monotonic()
-        specialists, diagnostics = await self._specialist_round(context, phase_durations, usage=usage)
+        specialists, diagnostics = await self._specialist_round(context, phase_durations, lanes=lanes, usage=usage)
         dispatch_plan, specialist_outcomes = specialists.dispatch_plan, specialists.outcomes
         any_succeeded = any(outcome.succeeded for outcome in specialist_outcomes)
 
@@ -1019,15 +1065,21 @@ class OrchestrationService:
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        # A round the loop sends for review is reviewed once a synthesis produced it, at any width.
-        if self._plan_critic is not None and context.review_plan and optimization_plan_executable:
+        # A round the loop sends for review is reviewed once a synthesis produced it, at any width, except a GUIDED
+        # batch: its parts run one after another in one session rather than as competing lanes, so a lane review would
+        # drop a part for depending on an earlier one.
+        if (
+            self._plan_critic is not None
+            and context.review_plan
+            and optimization_plan_executable
+            and not _is_group_dispatch(dispatch_plan)
+        ):
             review = await self._review_round(context, synthesized_plans, specialists, usage=usage)
             diagnostics.update(review.diagnostics)
             plans, draft_plan, critic_outcome = review.plans, review.draft_plan, review.critic_outcome
             plan_revised, optimization_plan_executable = review.plan_revised, review.executable
         elif self._plan_critic is not None:
-            status = "skipped_synthesis_unavailable" if context.review_plan else "skipped_not_requested"
-            diagnostics["plan_critic"] = {"status": status}
+            diagnostics["plan_critic"] = _critic_skipped(dispatch_plan, requested=context.review_plan)
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,
@@ -1052,15 +1104,11 @@ class OrchestrationService:
         )
 
     async def _specialist_round(
-        self, context: OrchestrationContext, phase_durations: MutableMapping[str, float], *, usage
+        self, context: OrchestrationContext, phase_durations: MutableMapping[str, float], *, lanes: int, usage
     ) -> tuple[SpecialistRound, dict]:
         """Dispatch the round and run its specialists, with the diagnostics they recorded."""
         with _phase_timer(phase_durations, "dispatch"):
-            dispatch_plan = await self._agent.plan_dispatch(
-                context,
-                self._definitions,
-                usage=usage,
-            )
+            dispatch_plan = await self._dispatch(context, lanes=lanes, usage=usage)
         diagnostics = dict(self._agent.structured_output_diagnostics)
 
         with _phase_timer(phase_durations, "specialists"):
@@ -1553,6 +1601,12 @@ def make_orchestration_service(
         else None
     )
     specialist_probe = _specialist_probe_config(config)
+    knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    # The dispatch planner chooses among ``resolved_definitions`` only; the group analyst is in the pool for the GUIDED
+    # rounds a knowledge base makes possible.
+    pool_definitions = dict(resolved_definitions)
+    if knowledge_wiki is not None:
+        pool_definitions.setdefault(PLAYBOOK_GROUP_ROLE, playbook_group_definition())
     specialist_agents = {
         role_id: SpecialistAgent(
             definition=definition,
@@ -1563,9 +1617,9 @@ def make_orchestration_service(
             ),
             timeout_sec=effective_runtime.timeout_sec,
             max_turns=config.max_turns,
-            probe=specialist_probe,
+            tools=SpecialistTools(probe=specialist_probe, knowledge_wiki=knowledge_wiki),
         )
-        for role_id, definition in resolved_definitions.items()
+        for role_id, definition in pool_definitions.items()
     }
     return OrchestrationService(
         agent=OrchestrationAgent(
@@ -1573,18 +1627,24 @@ def make_orchestration_service(
             timeout_sec=effective_runtime.timeout_sec,
             max_turns=config.max_turns,
             min_assignments=min(2, len(resolved_definitions)),
+            knowledge_wiki=knowledge_wiki,
         ),
         specialist_pool=SpecialistPool(
             specialist_agents,
             max_parallel=len(specialist_agents),
         ),
         definitions=resolved_definitions,
-        plan_critic=_plan_critic_agent(critic_backend, effective_runtime.timeout_sec, config.max_turns),
+        plan_critic=_plan_critic_agent(
+            critic_backend, effective_runtime.timeout_sec, config.max_turns, knowledge_wiki=knowledge_wiki
+        ),
     )
 
 
-def _plan_critic_agent(critic_backend, timeout_sec: int, max_turns: int) -> PlanCriticAgent | None:
-    """The round's plan critic on its own backend, or None when the critic is disabled."""
+def _plan_critic_agent(
+    critic_backend, timeout_sec: int, max_turns: int, *, knowledge_wiki: KnowledgeWikiTool | None
+) -> PlanCriticAgent | None:
+    """The round's plan critic on its own backend, reading the knowledge base when it has one; None when the
+    critic is disabled."""
     return (
         PlanCriticAgent(
             backend=critic_backend,
@@ -1598,6 +1658,7 @@ def _plan_critic_agent(critic_backend, timeout_sec: int, max_turns: int) -> Plan
                 PLAN_CRITIC_MAX_TURNS,
                 max(1, max_turns),
             ),
+            knowledge_wiki=knowledge_wiki,
         )
         if critic_backend is not None
         else None

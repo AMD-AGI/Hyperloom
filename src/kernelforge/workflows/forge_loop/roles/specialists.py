@@ -24,7 +24,9 @@ from kernelforge.agent_backends import (
     StdioMcpServer,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.base import PYTHON_LAUNCH_ENV_VARS
 from kernelforge.agent_backends.session_resume import is_api_failure
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.utils.process_reaping import ReapReport, reap_processes_under
 from kernelforge.workflows.forge_loop.roles.specialist_probe import (
     ANALYSIS_RESERVE_SEC,
@@ -79,11 +81,7 @@ _PROBE_SECTION_TITLE = "## Scratch probe ledger"
 
 # What the probe's MCP child needs from this process and would not otherwise get.
 _PROBE_CHILD_ENV_VARS = (
-    # The child's own launch: `python -m kernelforge...` from a checkout.
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "VIRTUAL_ENV",
-    "CONDA_PREFIX",
+    *PYTHON_LAUNCH_ENV_VARS,
     # ROCm toolchain and runtime: without these the driver finds no compiler and no libraries.
     "ROCM_PATH",
     "HIP_PATH",
@@ -443,6 +441,14 @@ def build_specialist_prompts(
     return system_prompt, user_prompt
 
 
+@dataclass(frozen=True)
+class SpecialistTools:
+    """What a specialist may use beyond its backend's own tools: the GPU probe and the knowledge base."""
+
+    probe: SpecialistProbeConfig | None = None
+    knowledge_wiki: KnowledgeWikiTool | None = None
+
+
 class SpecialistAgent:
     """Run one registered specialist role through an injected backend."""
 
@@ -453,17 +459,19 @@ class SpecialistAgent:
         backend: AgentBackend,
         timeout_sec: int,
         max_turns: int,
-        probe: SpecialistProbeConfig | None = None,
+        tools: SpecialistTools = SpecialistTools(),
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
+        require_mcp_backend(tools.knowledge_wiki, backend, f"specialist {definition.role_id}")
         self.definition = definition
         self.backend = backend
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
-        self.probe = probe
+        self.probe = tools.probe
+        self.knowledge_wiki = tools.knowledge_wiki
 
     async def run(
         self,
@@ -548,10 +556,13 @@ class SpecialistAgent:
                 write=False,
                 shell=False,
                 max_turns=self.max_turns,
-                extra_tools=probe_setup.tool_names(),
+                extra_tools=(*probe_setup.tool_names(), *wiki_tool_names(self.knowledge_wiki)),
             ),
             protected_globs=["*"],
-            mcp_servers=probe_setup.mcp_servers(),
+            mcp_servers={
+                **probe_setup.mcp_servers(),
+                **wiki_servers(self.knowledge_wiki, f"specialist {self.definition.role_id}"),
+            },
         )
 
     def _outcome(
@@ -720,6 +731,9 @@ class SpecialistPool:
             raise ValueError("agent mapping keys must match specialist role_id values")
         self._agents = dict(agents)
         self._max_parallel = max_parallel
+
+    def has_role(self, role_id: str) -> bool:
+        return role_id in self._agents
 
     async def run(
         self,

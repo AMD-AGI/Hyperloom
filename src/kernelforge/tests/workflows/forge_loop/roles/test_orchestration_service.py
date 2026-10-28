@@ -15,7 +15,12 @@ from kernelforge.workflows.forge_loop.roles.orchestration import (
     OrchestrationService,
 )
 from kernelforge.workflows.forge_loop.roles import specialists as specialists_module
-from kernelforge.workflows.forge_loop.roles.specialists import SpecialistAgent, SpecialistPool, SpecialistProbeConfig
+from kernelforge.workflows.forge_loop.roles.specialists import (
+    SpecialistAgent,
+    SpecialistPool,
+    SpecialistProbeConfig,
+    SpecialistTools,
+)
 from kernelforge.tests.workflows.forge_loop.roles._orchestration_fakes import (
     _QueuedBackend,
     _StaticBackend,
@@ -169,7 +174,7 @@ async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path,
                     backend=_StaticBackend("Memory analysis"),
                     timeout_sec=1,
                     max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
+                    tools=SpecialistTools(probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe"))),
                 )
             },
             max_parallel=1,
@@ -208,7 +213,7 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
                     backend=_StaticBackend("Memory analysis"),
                     timeout_sec=1,
                     max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
+                    tools=SpecialistTools(probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe"))),
                 )
             },
             max_parallel=1,

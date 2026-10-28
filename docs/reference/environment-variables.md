@@ -270,7 +270,7 @@ run.
 | `LOCAL_KB_PLANNER_MODEL` | `CLAUDE_MODEL` | The model the Experience service plans reads with, through `ANTHROPIC_BASE_URL`. |
 | `LOCAL_KB_PLANNER_TIMEOUT_SECONDS` | `20` | How long the Experience service waits on its planner before a read fails. A run waits 30 s per read, so a value above that makes every read fail. |
 | `LOCAL_KB_PLANNER_MAX_OUTPUT_TOKENS` | `1400` | The most output tokens the Experience service's planner may spend on one read plan. A plan cut at this limit fails its read with `planner gateway truncated output at max_tokens`. |
-| `FORGE_TECHNIQUE_VOCABULARY` | Unset (off) | Absolute path of a knowledge base's `tags.yaml`, such as InstinctWiki's `data/tags.yaml`. Its `techniques` list, with the aliases a sibling `aliases.yaml` gives them, is the vocabulary every forge-loop Implementer session declares its change in: a `TECHNIQUES:` line just before its `PLAN:` line, before the change is measured, naming the listed techniques it applies, any the list lacks in at most five words each, or `none`. Each archived candidate's `meta.json` records them as `techniques` and `techniques_unlisted`, and the `kernelforge-v1` collect mapping carries them into `change.techniques`, `change.techniques_unlisted`, and `change.techniques_declared`. Unset, the prompt and `meta.json` are unchanged. A relative path, or one that is not a file, is refused when the campaign starts. |
+| `FORGE_TECHNIQUE_VOCABULARY` | The `data/tags.yaml` of the `FORGE_KNOWLEDGE_WIKI_ROOT` checkout, when it has one; otherwise unset (off) | Absolute path of a knowledge base's `tags.yaml`, such as InstinctWiki's `data/tags.yaml`. The default is the one that knowledge base judges its Experience KB results' coverage on. Its `techniques` list, with the aliases a sibling `aliases.yaml` gives them, is the vocabulary every forge-loop Implementer session declares its change in: a `TECHNIQUES:` line just before its `PLAN:` line, before the change is measured, naming the listed techniques it applies, any the list lacks in at most five words each, or `none`. Each archived candidate's `meta.json` records them as `techniques` and `techniques_unlisted`, and the `kernelforge-v1` collect mapping carries them into `change.techniques`, `change.techniques_unlisted`, and `change.techniques_declared`. Unset, the prompt and `meta.json` are unchanged. A relative path, or one that is not a file, is refused when the campaign starts. |
 
 ---
 
@@ -319,6 +319,41 @@ fusion that already succeeded this session.
 | `FORGE_FUSION_TIMEOUT`         | `7200` (2h)                   | Wrapper timeout in seconds for one forge-fusion run. Unset or unparseable, the fusion lane's share of the KERNEL phase is used, else the default.                                                  |
 | `FORGE_FUSION_MAX_TURNS`       | `100`                         | Agent turn cap handed to forge-fusion for one run.                                                                                                                                                 |
 | `HYPERLOOM_FUSION_KEEP_PCT`    | `1.0`                         | Minimum throughput gain, in percent, that a queued fusion patch must reach to be KEPT when it is integrated. Every nominated patch is queued; the value is recorded on each queued record. A malformed value raises `EnvValueError`. |
+
+---
+
+## Forge knowledge base
+
+A KernelWiki-layout checkout, such as InstinctWiki, offered read-only during a `--wiki-guided` campaign's knowledge
+base round to every forge role that has tools (the Implementer, Analysis, the dispatch and synthesis planners, the
+specialists, the plan critic and the supervisor) through the `mcp__knowledge_wiki__search`, `__page`, `__grep` and
+`__guide` tools. Off unless the root is set, and every other run, a forge-loop run without `--wiki-guided` and every
+other `kernelforge` command alike, offers it to no role: only its `data/tags.yaml` serves, as the technique
+vocabulary. Forge
+also sets `FORGE_KNOWLEDGE_WIKI_ROLE` in each session's server environment to name the calling role; it is internal,
+not an operator setting.
+
+A checkout whose scripts search an Experience KB beside the wiki, as InstinctWiki's do, reads the KB that
+`HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` name ([Experience KB](#experience-kb)): the workspace's one Experience KB,
+the one the run collects into. With both set, forge hands each session's server in the round, and through it the
+scripts:
+
+- `HYPERLOOM_KB_URL`, as set;
+- `HYPERLOOM_KB_TOKEN_FILE`, the token written to a file only this process can read, removed when it exits, and not
+  the token itself, since a server's environment reaches the agent CLI's command line;
+- `HYPERLOOM_KB_SCHEMA`, as set, else the schema the `kernelforge-v1` collect mapping writes forge's records under;
+- `HYPERLOOM_KB_CONTEXT`, `knowledge_wiki_kb_context.json` in the forge experiments directory, which the campaign writes
+  at start to name the kernel it optimizes in the schema's identity fields (`operator`, `kernel`, `framework`,
+  `backend`, `gpu`, `driver_sha256`, from `campaign_config.json`);
+- `HYPERLOOM_KB_CACHE`, when set.
+
+A local KB lists only the Experiences written to it, not those it pulled from the global KB, so set the global KB's URL
+and token to search the ones everyone shares.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FORGE_KNOWLEDGE_WIKI_ROOT` | Unset (off) | Absolute path of the checkout, which must hold `scripts/query.py`, `scripts/get_page.py` and `scripts/grep_wiki.py`; an optional `SKILL.md` is served as its usage guide. A relative path (including one starting with `~`) or a directory missing those scripts is refused when the campaign starts. A `--wiki-guided` campaign on an agent backend without MCP support is refused too: when each role is built at startup, the supervisor, whose backend is built on its first pass, by what its provider and its fallback provider declare. The built-in `claude` and `codex` backends support MCP; `deepseek` does not, so it is refused for a `--wiki-guided` campaign. |
+| `FORGE_KNOWLEDGE_WIKI_LOG` | `knowledge_wiki_calls.jsonl` in the forge experiments directory | Absolute path of the call log: one JSON line per call with the calling role, the tool, the one-line reason every call must give, its arguments, exit code, duration and the pages it returned. A relative path is refused when the campaign starts. |
 
 ---
 
