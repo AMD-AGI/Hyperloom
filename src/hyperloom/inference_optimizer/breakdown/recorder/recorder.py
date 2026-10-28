@@ -17,7 +17,7 @@ from typing import Any, Literal, Mapping
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
-from .sections import slug
+from .sections import EVENT_SECTIONS, slug
 from .trace import WriteTrace, trace_enabled, trace_write
 
 SectionShape = Literal["item", "singleton"]
@@ -41,76 +41,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # Keyed by content rather than by iteration number, which a resume reuses
     # after workdir pruning.
     "critic_iteration": "item",
-    "kernel_event": "item",
-    "kernel_lane_run": "item",
-    "kernel_rebench_attempt": "item",
-    "kernel_trace_analyze": "item",
-    "kernel_geak_attempt": "item",
-    "kernel_geak_discovery": "item",
-    "kernel_geak_acceptance": "item",
-    "kernel_discovered": "item",
-    "kernel_integrate": "item",
-    # The same sections whether the roofline was dispatched or called inline by
-    # a phase; only the rows' event id differs.
-    "roofline_event": "item",
-    "roofline_action": "item",
-    "roofline_profile_run": "item",
-    "roofline_analysis_run": "item",
-    "roofline_kernel": "item",
-    # Runs and rounds are separate because the executor retries at both levels:
-    # a pass the budget refused before it booted anything has a run and no
-    # round, and a flat list would drop it.
-    "baseline_event": "item",
-    "baseline_action": "item",
-    "baseline_run": "item",
-    "baseline_round": "item",
-    # An arm is a whole ladder run under one set of server args, a variant one
-    # rung of it including rungs that only ever attempted to boot, a pair the
-    # two arms joined at one concurrency.
-    "conc_sweep_event": "item",
-    "conc_sweep_action": "item",
-    "conc_sweep_arm": "item",
-    "conc_sweep_variant": "item",
-    "conc_sweep_pair": "item",
-    # One event per session: the lane's trigger and the round that settles it
-    # are recorded from different phases and must land on the same event.
-    "enablement_event": "item",
-    "enablement_attempt": "item",
-    "enablement_build": "item",
-    "enablement_revalidation": "item",
-    "enablement_human_review": "item",
-    # One event per (phase, macro_cycle), so a re-entry is another segment row
-    # rather than a second event.
-    "phase_event": "item",
-    "phase_segment": "item",
-    "phase_action": "item",
-    "phase_marker": "item",
-    # Here rather than on the framework event because a proposal exists in
-    # every phase, and a refused one is never dispatched and so never gets an
-    # action row.
-    "phase_proposal": "item",
-    # One event per session: adoptions arrive from four phases into one ordered
-    # chain, and reconciliation covers the whole.
-    "stack_event": "item",
-    "stack_adoption": "item",
-    "stack_validation": "item",
-    "warm_start_event": "item",
-    # Rows rather than a tally, which cannot be confined to T0: the session's
-    # audit log also holds writes and mid-session amendment reads.
-    "warm_start_read": "item",
-    "warm_replay_event": "item",
-    "warm_replay_gate": "item",
-    # Rows rather than a tally on the event: the plan's counts already say how
-    # many landed, and what a reader needs from a replay that lost is which
-    # item it was that did not.
-    "warm_replay_apply": "item",
-    "framework_event": "item",
-    "framework_plateau": "item",
-    "framework_run": "item",
-    "framework_proposal": "item",
-    "framework_proposal_step": "item",
-    "framework_attempt": "item",
-    "framework_attempt_gate": "item",
+    **dict.fromkeys(EVENT_SECTIONS, "item"),
     # ``close_step`` is composed into ``close.steps`` at assembly. The verdict
     # is recorded by the sequencer's last act rather than inferred at export
     # from which steps are present, because ``session_breakdown`` is itself a
@@ -129,23 +60,7 @@ SECTION_SHAPES: dict[str, SectionShape] = {
 
 log = logging.getLogger(__name__)
 
-_ENTITY_ID_FIELDS = (
-    "attempt_id",
-    "substep_id",
-    "gate_id",
-    "decision_id",
-    "relation_id",
-    "measurement_id",
-    "artifact_id",
-    "adoption_id",
-    "subject_id",
-    "operation_id",
-)
-
-
-#: Shared with the read side so a fragment's name and the glob that finds it
-#: can never disagree.
-_slug = slug
+_ENTITY_ID_FIELDS = ("attempt_id", "gate_id", "decision_id")
 
 
 def _merge_mappings(
@@ -212,19 +127,9 @@ class Recorder:
     def __init__(self, parts_dir: Path | str, *, producer: str) -> None:
         """Initialize a recorder writing into ``parts_dir`` for ``producer``."""
         self._dir = Path(parts_dir)
-        self._producer = _slug(producer)
+        self._producer = slug(producer)
         self._seq = 0
         self._lock = threading.RLock()
-
-    @property
-    def producer(self) -> str:
-        """Return the sanitized producer slug owning this recorder's fragments."""
-        return self._producer
-
-    @property
-    def parts_dir(self) -> Path:
-        """Return the spool directory fragments are written into."""
-        return self._dir
 
     def _next_seq(self) -> int:
         """Return the next monotonically increasing per-recorder sequence number."""
@@ -253,7 +158,7 @@ class Recorder:
 
         try:
             self._check_shape(section, "singleton")
-            filename = f"{_slug(section)}__{self._producer}.json"
+            filename = f"{slug(section)}__{self._producer}.json"
             return self._write(FragmentSlot(section, "singleton", filename), payload)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
@@ -269,26 +174,26 @@ class Recorder:
 
         try:
             self._check_shape(section, "singleton")
-            filename = f"{_slug(section)}__{self._producer}.json"
-            target = self._dir / filename
-            with self._lock:
-                previous: Mapping[str, Any] | None = None
-                try:
-                    current = json.loads(target.read_text(encoding="utf-8"))
-                    current_payload = current.get("payload") if isinstance(current, dict) else None
-                    if isinstance(current_payload, Mapping):
-                        previous = current_payload
-                        merged = _merge_mappings(current_payload, payload)
-                    else:
-                        merged = dict(payload)
-                except (OSError, ValueError, TypeError):
-                    merged = dict(payload)
-                return self._write(
-                    FragmentSlot(section, "singleton", filename), merged, operation="upsert", previous=previous
-                )
+            return self._upsert(FragmentSlot(section, "singleton", f"{slug(section)}__{self._producer}.json"), payload)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
             return None
+
+    def _upsert(self, slot: FragmentSlot, payload: Mapping[str, Any]) -> Path:
+        """Deep-merge ``payload`` into the fragment at ``slot`` and rewrite it."""
+        with self._lock:
+            previous: Mapping[str, Any] | None = None
+            try:
+                current = json.loads((self._dir / slot.filename).read_text(encoding="utf-8"))
+                current_payload = current.get("payload") if isinstance(current, dict) else None
+                if isinstance(current_payload, Mapping):
+                    previous = current_payload
+                    merged = _merge_mappings(current_payload, payload)
+                else:
+                    merged = dict(payload)
+            except (OSError, ValueError, TypeError):
+                merged = dict(payload)
+            return self._write(slot, merged, operation="upsert", previous=previous)
 
     def record_item(
         self,
@@ -314,7 +219,7 @@ class Recorder:
             else:
                 # One number serves both filename and envelope, so ``seq=N`` in a trace line locates the file that write produced.
                 seq = self._next_seq()
-                filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
+                filename = f"{slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
             return self._write(FragmentSlot(section, "item", filename), payload, seq=seq)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
@@ -323,22 +228,22 @@ class Recorder:
     def _stable_item_filename(self, section: str, key: str) -> str:
         """Name the fragment file that holds ``key``'s item in ``section``.
 
-        ``_slug`` folds every character outside ``[A-Za-z0-9._-]`` to a dash,
+        ``slug`` folds every character outside ``[A-Za-z0-9._-]`` to a dash,
         so ``a/b``, ``a:b`` and ``a b`` would all name one file; a digest of
         the untouched key makes the name injective again. Pre-digest fragments
         keep their old name so a resumed session goes on updating the file it
         already wrote, but only when the key survived sanitizing untouched --
         otherwise the legacy file could belong to any key that folds onto it.
         """
-        slug = _slug(key)
-        prefix = f"{_slug(section)}__{self._producer}__{slug}"
+        key_slug = slug(key)
+        prefix = f"{slug(section)}__{self._producer}__{key_slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
         filename = f"{prefix}-{digest}.json"
         if len(filename.encode("utf-8")) > 180:
             short_digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
-            return f"{_slug(section)}__{self._producer}__id-{short_digest}.json"
+            return f"{slug(section)}__{self._producer}__id-{short_digest}.json"
         legacy = self._dir / f"{prefix}.json"
-        if slug != key:
+        if key_slug != key:
             if legacy.exists():
                 log.warning(
                     "breakdown recorder: not reusing %s for key %r -- the name is "
@@ -367,24 +272,7 @@ class Recorder:
             self._check_shape(section, "item")
             if not key:
                 raise ValueError("upsert key must be non-empty")
-            filename = self._stable_item_filename(section, key)
-            target = self._dir / filename
-            merged: dict[str, Any] = {}
-            with self._lock:
-                previous: Mapping[str, Any] | None = None
-                try:
-                    current = json.loads(target.read_text(encoding="utf-8"))
-                    current_payload = current.get("payload") if isinstance(current, dict) else None
-                    if isinstance(current_payload, Mapping):
-                        previous = current_payload
-                        merged = _merge_mappings(current_payload, payload)
-                    else:
-                        merged = dict(payload)
-                except (OSError, ValueError, TypeError):
-                    merged = dict(payload)
-                return self._write(
-                    FragmentSlot(section, "item", filename), merged, operation="upsert", previous=previous
-                )
+            return self._upsert(FragmentSlot(section, "item", self._stable_item_filename(section, key)), payload)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
             return None
@@ -494,7 +382,7 @@ def recorder_for(session_dir: Path | str, *, producer: str) -> Recorder:
     from ...session.session_paths import breakdown_parts_dir  # local: avoid import cycle
 
     pd = breakdown_parts_dir(Path(session_dir))
-    cache_key = (str(pd), _slug(producer))
+    cache_key = (str(pd), slug(producer))
     with _RECORDERS_LOCK:
         rec = _RECORDERS.get(cache_key)
         if rec is None:

@@ -28,7 +28,7 @@ from .kernel_round_budget import controller_round_stop, integrate_within_phase, 
 from hyperloom.common.coerce import first_str, to_float, to_int
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common import gain_math
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
@@ -56,6 +56,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
     IntegrateVerdict,
     KernelExit,
     KernelReprofile,
+    KernelRewriteRun,
     LaneRunFields,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -726,13 +727,11 @@ class KernelPhase(CoordinatorCollaborator):
         """Record settled Controller integrations as Forge kernel rewrites."""
         integration = result.get("integration")
         rows = integration.get("results") if isinstance(integration, dict) else None
-        if not isinstance(rows, list):
+        recorder = self.timeline()
+        if recorder is None or not isinstance(rows, list):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
-            record_backend_versions_and_timeline,
-        )
-
         cycle = int(result.get("macro_cycle") or self.shared_state.macro_cycle or 0)
+        recorded_any = False
         for index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
@@ -748,47 +747,34 @@ class KernelPhase(CoordinatorCollaborator):
                 decision = "SKIPPED"
             else:
                 decision = "FAILED"
-            attempt_id = f"controller-c{cycle}-{index}"
             gain_pct = row.get("gain_pct")
             speedup = (
                 1.0 + float(gain_pct) / 100.0
                 if isinstance(gain_pct, (int, float)) and not isinstance(gain_pct, bool)
                 else None
             )
-            record_backend_versions_and_timeline(
-                self.session_dir,
-                {
-                    "kernel_id": kernel_id,
-                    "kernel_name": kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
-                    "run_id": first_str(result.get("run_id"), f"controller-c{cycle}"),
-                    "status": status,
-                    "attempts": [
-                        {
-                            "attempt_id": attempt_id,
-                            "backend": "forge",
-                            "status": status,
-                            "decision": decision,
-                            "micro_speedup": speedup,
-                            # The integration status *is* this route's failure
-                            # taxonomy -- ``reverted_apply_conflict``,
-                            # ``skipped_dirty_worktree`` -- and an integration
-                            # row carries no separate class. Stamping it here
-                            # is what makes ``error_class`` answerable on this
-                            # route: the GEAK and fusion lanes both fill it, so
-                            # a reader asking why a candidate did not land had
-                            # one field that was empty only for forge.
-                            "error_class": "" if status == "kept" else status,
-                            "error": first_str(row.get("reason")),
-                        }
-                    ],
-                    "verification": {
-                        "best_attempt_id": attempt_id if decision == "KEEP" else "",
-                        "micro_speedup": speedup,
-                    },
-                    "proposal": {"decision": decision},
-                },
-                recorder=self.timeline(),
+            recorder.record_kernel_rewrite(
+                KernelRewriteRun(
+                    lane=LaneRunFields(
+                        run_id=f"controller-c{cycle}-{index}",
+                        status=status,
+                        micro_decision=decision,
+                        failure_reason=first_str(row.get("reason")),
+                        # The integration status is this route's failure taxonomy
+                        # (``reverted_apply_conflict``, ``skipped_dirty_worktree``),
+                        # and an integration row carries no separate class.
+                        error_class="" if status == "kept" else status,
+                    ),
+                    kernel_id=kernel_id,
+                    kernel_name=kernel_id.split(":")[2] if len(kernel_id.split(":")) > 2 else "",
+                    backends_tried=["forge"],
+                    adopted_backend="forge" if decision == "KEEP" else "",
+                    speedup=speedup or None,
+                )
             )
+            recorded_any = True
+        if recorded_any:
+            tool_versions.record_tool_version(self.session_dir, tool="forge")
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled GEMM campaign in the Forge lane -- one row per tuner that ran.
@@ -2004,7 +1990,7 @@ class KernelPhase(CoordinatorCollaborator):
         ):
             state.geak_result = {
                 **state.geak_result,
-                "revalidation_status": "fallback_failed",
+                "revalidation_status": REBENCH_FALLBACK_FAILED,
                 "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
                 "revalidation_error": error,
                 # This refusal is reusable only while its overlay remains unloadable.

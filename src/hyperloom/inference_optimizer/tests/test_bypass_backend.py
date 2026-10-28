@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
 from hyperloom.orchestrator.actions.executors import bypass_runner
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
 )
@@ -1727,6 +1728,44 @@ def test_finalize_report_client_failure_without_raw(tmp_path):
     assert rep["profiling_enabled"] is True
     assert "benchmark client exited 9" in rep["errors"]
     assert "inferencex_result.json not produced" in rep["errors"]
+
+
+@pytest.mark.parametrize("round_seed,expected", [(None, None), ("1", "1")])
+def test_client_takes_the_round_seed_from_the_env(tmp_path, monkeypatch, round_seed, expected):
+    """The bypass client argv names the seed itself, so a warmup round moves off the measured prompts unpatched."""
+    if round_seed is None:
+        monkeypatch.delenv(BENCH_SEED_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BENCH_SEED_ENV, round_seed)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(
+        bypass_runner, "_run_subprocess", lambda cmd, timeout_s, workspace, tag: launched.append(cmd) or 0
+    )
+    r = bypass_runner._Round(
+        framework="sglang",
+        model="/models/x",
+        tp=1,
+        port=8888,
+        max_model_len=None,
+        profile=False,
+        profile_dir=None,
+        bench_envs={"RUN_EVAL": "false"},
+        server_log=tmp_path / "server.log",
+        base_url="http://127.0.0.1:8888",
+        timeout_s=60.0,
+        server_ready_timeout_s=60.0,
+        inferencex_root=str(tmp_path),
+        conc=4,
+        isl=128,
+        osl=64,
+        rrr=0.5,
+        workspace=tmp_path,
+    )
+
+    assert r.run_client() == 0
+    (cmd,) = launched
+    seed = cmd[cmd.index("--seed") + 1] if "--seed" in cmd else None
+    assert seed == expected
 
 
 def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):

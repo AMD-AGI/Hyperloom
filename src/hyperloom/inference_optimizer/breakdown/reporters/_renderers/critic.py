@@ -137,14 +137,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append("The critic was asked but never ruled on a proposal.")
     facts.extend(_priors_facts(iterations))
 
-    parts: list[str] = []
     passes = md_table(
         ["#", "phase", "macro_cycle", "topic", "rulings", "said"],
         _iteration_rows(iterations),
     )
-    if passes:
-        parts.append("**Passes**\n\n" + passes)
-        parts.append("")
+    parts: list[str] = ["**Passes**\n\n" + passes, ""]
 
     reviews = md_table(
         ["#", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],

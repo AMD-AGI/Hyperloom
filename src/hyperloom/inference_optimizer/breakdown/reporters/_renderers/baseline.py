@@ -14,73 +14,35 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, optional_positive_float, to_mapping
+from hyperloom.common.coerce import optional_positive_float, to_mapping
+from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
+    anchoring_baseline_action,
+    quality_ref_actions,
+)
 
 from ..base import (
     Decision,
     RenderedSection,
-    events_of,
     md_kv_list,
     md_table,
     register_renderer,
     session_of,
     task_config_of,
+    timeline_of,
 )
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
 
-#: Action statuses whose figure the session went on to use. ``degraded`` is a
-#: baseline standing on its cold warmup round because the budget would not hold
-#: the hot pass: knowingly depressed, but it is the number every later gain was
-#: read against. Kept in step with the same set in ``collectors/v6.py``, which
-#: publishes ``outcome.baseline`` off the same actions.
-_ANCHORING_STATUSES = frozenset({"succeeded", "degraded"})
+
+def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every quality-reference baseline action, oldest first, including the failed ones."""
+    return [row.action for row in quality_ref_actions(timeline_of(breakdown))]
 
 
-def _anchoring_actions(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every action that was dispatched as a session baseline, oldest first.
-
-    Three different dispatches reach the baseline executor and each lands an
-    action on a ``baseline`` event: the genuine baseline, ``replay_warm_recipe``
-    and the kernel lane's throughput-only probes. Only the first anchors the
-    session, so the selection reads the action's own
-    ``establishes_quality_ref`` rather than re-deciding from the task kind.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        list[dict[str, Any]]: The baseline actions, including the ones that
-            failed -- those are the attempts history.
-    """
-    actions: list[tuple[str, dict[str, Any]]] = []
-    for event in events_of(breakdown, "baseline"):
-        for action in dict_rows(to_mapping(event.get("ext")).get("actions")):
-            if not to_mapping(action.get("request")).get("establishes_quality_ref"):
-                continue
-            actions.append((str(action.get("start_time") or action.get("end_time") or ""), action))
-    actions.sort(key=lambda row: row[0])
-    return [action for _stamp, action in actions]
-
-
-def _anchor(actions: list[dict[str, Any]]) -> dict[str, Any]:
-    """The measurement the session's gains were read against.
-
-    Args:
-        actions (list[dict[str, Any]]): The baseline actions, oldest first.
-
-    Returns:
-        dict[str, Any]: The latest action that produced a usable figure, or
-            ``{}`` when none did. A baseline re-measured after an enablement
-            fix legitimately re-anchors, so the latest wins; ordered on the
-            actions' own end stamps because a re-measure in a later phase is a
-            separate event.
-    """
-    usable = [action for action in actions if str(action.get("status") or "").strip().lower() in _ANCHORING_STATUSES]
-    if not usable:
-        return {}
-    usable.sort(key=lambda action: str(action.get("end_time") or action.get("start_time") or ""))
-    return usable[-1]
+def _anchor(breakdown: dict[str, Any]) -> dict[str, Any]:
+    """The action ``outcome.baseline`` is published from, or ``{}`` when none produced a figure."""
+    anchored = anchoring_baseline_action(timeline_of(breakdown))
+    return anchored.action if anchored else {}
 
 
 @register_renderer("baseline")
@@ -98,8 +60,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     Returns:
         RenderedSection: The rendered baseline section.
     """
-    attempts = _anchoring_actions(breakdown)
-    anchor = _anchor(attempts)
+    attempts = _attempts(breakdown)
+    anchor = _anchor(breakdown)
     measurement = to_mapping(anchor.get("measurement"))
     session = session_of(breakdown)
     tput = measurement.get("output_throughput")

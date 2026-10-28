@@ -103,10 +103,7 @@ def _delta_block(delta: dict[str, Any] | None) -> str:
     """Render the roofline ``delta`` mapping as a two-column table."""
     if not isinstance(delta, dict) or not delta:
         return ""
-    rows = [[key, value] for key, value in delta.items()]
-    if not rows:
-        return ""
-    return "**Delta**\n\n" + md_table(["field", "value"], rows)
+    return "**Delta**\n\n" + md_table(["field", "value"], [[key, value] for key, value in delta.items()])
 
 
 @register_renderer("roofline")
@@ -142,7 +139,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     comparison = to_mapping(build_roofline_comparison_from_history(snapshots))
     baseline = to_mapping(comparison.get("baseline"))
     latest = to_mapping(comparison.get("latest"))
-    mode = str(comparison.get("mode") or "single_snapshot")
+    mode = str(comparison["mode"])
 
     facts: list[str] = [f"Roofline snapshots recorded: {len(snapshots)} (comparison mode: {mode})."]
     parts: list[str] = []

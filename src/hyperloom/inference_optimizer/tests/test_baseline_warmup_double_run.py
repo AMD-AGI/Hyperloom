@@ -35,6 +35,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridLaunch,
     GridRecipe,
 )
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1555,6 +1556,113 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
     assert result.output_throughput == pytest.approx(_COLD_TPUT)
     assert "run_grid_warmup_discarded_first" not in result.nonfatal_warnings
     assert "server_lifecycle" not in captured[0]["benchmark"]
+
+
+def _round_seeds(launches: list) -> list[str | None]:
+    return [launch["env"].get(BENCH_SEED_ENV) for launch in launches]
+
+
+def test_baseline_warmup_round_samples_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
+    """The measured round reuses the warmup server, so a shared prompt set would be served from its prefix cache."""
+    # A stray value in the orchestrator's own env must not reach the measured round.
+    monkeypatch.setenv(BENCH_SEED_ENV, "7")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    captured: list = []
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(captured, launches=launches)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(_executor(base, tmp_path)(ctx))
+
+    assert result["status"] == "succeeded"
+    assert _round_seeds(launches) == ["1", None]
+    # A process env, not a config env: Magpie keeps config envs in the server-reuse identity.
+    assert all(BENCH_SEED_ENV not in cfg["benchmark"]["envs"] for cfg in captured)
+
+
+def test_deferred_accuracy_rounds_keep_the_measured_seed(tmp_path):
+    """Only the discarded warmup moves; the measured and the deferred accuracy rounds keep the default prompts."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(launches=launches)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(_executor(base, tmp_path)(ctx))
+
+    assert _round_seeds(launches) == ["1", None, None]
+
+
+def test_run_grid_warmup_round_samples_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    monkeypatch.setenv(BENCH_SEED_ENV, "7")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, state = _cold_then_hot_fake_run(launches=launches)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(_candidate_grid(base, tmp_path / "grid"))
+
+    assert state["calls"] == 2
+    assert _round_seeds(launches) == ["1", None]
+
+
+def test_a_grid_launch_marked_as_warmup_moves_its_seed(tmp_path, monkeypatch):
+    """Explore's warmup is a whole grid launch the decision round reuses the server of."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(launches=launches)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(
+            run_grid(
+                grid=[GridVariant(name="candidate")],
+                output_root=tmp_path / "grid",
+                recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                launch=GridLaunch(magpie_python=sys.executable, warmup_round=True),
+            )
+        )
+
+    assert _round_seeds(launches) == ["1"]
+
+
+def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
+    """The native AgentX client is not the patched one, so its rounds are left exactly as they were."""
+    from hyperloom.orchestrator.actions.executors import benchmark_config
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.magpie_agentx.native_config",
+        lambda _path: True,
+    )
+    env = {BENCH_SEED_ENV: "7"}
+    benchmark_config.apply_benchmark_round_seed(tmp_path / "variant.yaml", env, warmup=True)
+    assert env == {}
 
 
 def test_baseline_single_round_when_script_not_builtin(tmp_path):
