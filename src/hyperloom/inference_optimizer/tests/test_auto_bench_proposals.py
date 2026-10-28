@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+from hashlib import sha1
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 class _Tasks:
@@ -329,3 +332,80 @@ async def test_no_reference_batch_while_the_cycle_bench_is_switched_off(monkeypa
 
     assert await fp.enqueue_cycle_batch() is False
     assert _explores(fp) == []
+
+
+_BUNDLE_KEY = "lever-bundle-c0-" + sha1(b"HL_ONE,HL_TWO", usedforsecurity=False).hexdigest()[:12]
+
+
+def _two_dormant_patches(fp):
+    for switch, patch in (("HL_ONE", "t-1"), ("HL_TWO", "t-2")):
+        fp._coord.shared_state.record_authored_framework_levers(
+            [{"switch": switch}], default_on=False, specialist_task_id=patch
+        )
+    return fp
+
+
+async def test_a_bundle_runs_its_switches_on_together_on_the_cycle_bench_before_its_replay_round(monkeypatch):
+    """Levers that each passed alone may not boot, or may run slower, switched on together."""
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BATCH_REASON
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _two_dormant_patches(_agentx_phase())
+
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    assert await fp.enqueue_dormant_lever_bundle() is False
+
+    assert [(c["idempotency_key"], c["params"]["reason"], c["params"][CYCLE_ARMS_PARAM]) for c in _explores(fp)] == [
+        (
+            f"{_BUNDLE_KEY}-cycle",
+            CYCLE_BATCH_REASON,
+            [{"name": "lever-bundle", "envs": {"HL_ONE": "1", "HL_TWO": "1"}, "lever_bundle": _BUNDLE_KEY}],
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verdict", "bundled"),
+    [("pass", True), ("neutral", True), ("inconclusive", True), ("broken", False), ("regress", False)],
+)
+async def test_only_a_bundle_whose_switches_neither_broke_nor_regressed_together_takes_its_replay_round(
+    monkeypatch, verdict, bundled
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _two_dormant_patches(_agentx_phase())
+    fp._coord.shared_state.cycle_bundle_screens = {_BUNDLE_KEY: verdict}
+
+    assert await fp.enqueue_dormant_lever_bundle() is bundled
+    assert [c["idempotency_key"] for c in _explores(fp)] == ([_BUNDLE_KEY] if bundled else [])
+
+
+async def test_a_bundle_screen_waits_for_the_batch_on_the_lanes_and_a_cancelled_one_leaves_the_replay_round(
+    monkeypatch,
+):
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    batch = SimpleNamespace(kind="explore", params={CYCLE_ARMS_PARAM: []}, requires_lanes=())
+    busy = _two_dormant_patches(_agentx_phase(running=[batch]))
+    cancelled = _two_dormant_patches(_agentx_phase())
+    cancelled._coord.tasks.ended = {f"{_BUNDLE_KEY}-cycle": "cancelled"}
+
+    assert (await busy.enqueue_dormant_lever_bundle(), await cancelled.enqueue_dormant_lever_bundle()) == (False, True)
+    assert ([c["idempotency_key"] for c in _explores(busy)], [c["idempotency_key"] for c in _explores(cancelled)]) == (
+        [],
+        [_BUNDLE_KEY],
+    )
+
+
+async def test_a_bundle_off_the_cycle_screen_takes_its_replay_round_at_once(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    closed = _two_dormant_patches(_agentx_phase())
+    closed._coord.shared_state.cycle_screen_refused = "the switched-off tree moved"
+    for fp in (closed, _two_dormant_patches(_phase())):
+        assert await fp.enqueue_dormant_lever_bundle() is True
+        assert [c["idempotency_key"] for c in _explores(fp)] == [_BUNDLE_KEY]
+
+    monkeypatch.delenv("HYPERLOOM_CYCLE_BENCH", raising=False)
+    off = _two_dormant_patches(_agentx_phase())
+    assert await off.enqueue_dormant_lever_bundle() is True
+    assert [c["idempotency_key"] for c in _explores(off)] == [_BUNDLE_KEY]

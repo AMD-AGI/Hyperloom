@@ -126,15 +126,52 @@ class ProposalBench(CoordinatorCollaborator):
         if variant is None or self._coord.dispatcher.admission_frozen:
             return False
         switches = sha1(",".join(variant["framework_lever_bundle"]).encode(), usedforsecurity=False).hexdigest()[:12]
+        key = f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}"
+        if not await self._bundle_screened(key, variant):
+            return False
         task = await self._enqueue_coordinator_explore(
-            {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]},
-            idempotency_key=f"lever-bundle-c{int(self.shared_state.macro_cycle or 0)}-{switches}",
+            {"source": _COORDINATOR_SOURCE, "reason": LEVER_BUNDLE_REASON, "grid": [variant]}, idempotency_key=key
         )
         if task is not None:
             log.info(
                 "lever bundle: enqueued explore task_id=%s over %s", task.task_id, variant["framework_lever_bundle"]
             )
         return task is not None
+
+    async def _bundle_screened(self, key: str, variant: Mapping[str, Any]) -> bool:
+        """Whether the bundle round *key* may run: off the cycle screen, or its levers ran on together there without
+        breaking or regressing. Until the screen reports, its arm is queued as a cycle batch of its own."""
+        from hyperloom.common.perf_metric import agentx_active
+
+        from ..actions.executors import cycle_bench_arm as cba
+
+        state = self.shared_state
+        if (
+            not cba.cycle_bench_enabled()
+            or not agentx_active(benchmark_mode=state.benchmark_mode)
+            or state.cycle_screen_refused
+        ):
+            return True
+        verdict = (state.cycle_bundle_screens or {}).get(key)
+        if verdict is not None:
+            return verdict not in cba.BUNDLE_REFUSED
+        screen = await self.tasks.find_by_idempotency_key(f"{key}-cycle")
+        if screen is not None:
+            # A screen that ended without reporting leaves the bundle to its replay round, as off the screen.
+            return str(screen.state) in _UNRUN_STATES
+        if _holds_cycle_batch([*await self.tasks.queued(), *await self.tasks.running()]):
+            return False
+        params = {
+            "source": _COORDINATOR_SOURCE,
+            "reason": cba.CYCLE_BATCH_REASON,
+            cba.CYCLE_ARMS_PARAM: [cba.bundle_arm(key, variant["extra_envs"])],
+        }
+        task = await self._enqueue_coordinator_explore(params, idempotency_key=f"{key}-cycle")
+        if task is not None:
+            log.info(
+                "cycle bench: enqueued batch task_id=%s over bundle %s", task.task_id, variant["framework_lever_bundle"]
+            )
+        return False
 
     async def on_task_settled(self, task: Task, result: Any, verdict: Verdict) -> None:
         """Hand a promoted settlement to FRAMEWORK: an integrate's outcome, and a moved stack's cycle batch."""
