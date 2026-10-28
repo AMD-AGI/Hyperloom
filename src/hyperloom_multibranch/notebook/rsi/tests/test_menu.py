@@ -15,7 +15,7 @@ from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, OpShares, amdahl_ceiling_pct
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LearningKind
-from hyperloom_multibranch.notebook.families import Family, Mechanism
+from hyperloom_multibranch.notebook.families import Component, Family, Mechanism
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import MENU_NOTE, CrossSessionBriefing
 from hyperloom_multibranch.notebook.rsi.family_stats import FamilyStat, base_rate
@@ -39,11 +39,12 @@ from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, pro
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.notebook.tools import MENU_TITLE, render_brief
 
-CONFIG, KERNEL = IntentLayer.CONFIG, IntentLayer.KERNEL
+CONFIG, SOURCE, KERNEL = IntentLayer.CONFIG, IntentLayer.SOURCE, IntentLayer.KERNEL
 #: The scripted session's families: r1 commits and r4 does not, on c0 and c1; r2 and r5 fail on c0.
 SCHEDULER = Family("scheduling and batching", Mechanism.KERNEL_TUNING, KERNEL)
 SPLIT = Family("attention", Mechanism.KERNEL_TUNING, CONFIG)
 FP8_KV = Family("KV cache", Mechanism.PRECISION, CONFIG)
+_KV_SOURCE = Family("KV cache", Mechanism.TUNING, SOURCE)
 KV_INTENT = Intent("s1", "c0", "kv cache", "fp8 kv cache", CONFIG)
 KV_CHANGE = RecipeDelta(config=ConfigDelta(server_args="--kv-cache-dtype fp8"))
 
@@ -65,16 +66,17 @@ def test_the_menu_ranks_the_sessions_families_and_marks_where_each_stands(
 
     menu = menus.menu(dataclasses.replace(snapshot, claims=(held, *snapshot.claims[1:])), branch, "c1")
 
-    found = {item.family: item for item in menu.items}
-    assert set(found) == {SCHEDULER, SPLIT, FP8_KV} and not menu.control
+    found = {item.family: item for item in menu.items if not item.untried}
+    assert set(found) == {SCHEDULER, SPLIT, FP8_KV} and not menu.control and menu.items[-1].untried
     assert found[SCHEDULER].marks == (TRIED_HERE, ON_INTEGRATION) and found[FP8_KV].marks == ("held by zz",)
     # r4 failed on c1 itself and counts in full; r5 failed on c0, elsewhere, and counts half.
     assert found[SCHEDULER].odds == pytest.approx((1 + 0.28 * 4) / (2 + 4))
     assert (found[FP8_KV].tests, found[FP8_KV].odds) == (0.5, pytest.approx(0.12 * 4 / 4.5))
-    assert len(menu.lines()) == 3 and all(" commit odds " in line for line in menu.lines())
+    assert len(menu.lines()) == 4 and all(" commit odds " in line for line in menu.lines())
     (logged,) = MenuLog(tmp_path / MENU_LOG).menus()
     assert (logged.branch, logged.commit, logged.control) == (branch, "c1", False)
     assert logged.families == tuple(item.family.label for item in menu.items)
+    assert logged.untried == menu.items[-1].family.label
 
 
 def test_one_branch_in_four_is_the_menus_control_and_sees_none(snapshot: NotebookSnapshot) -> None:
@@ -86,7 +88,9 @@ def test_one_branch_in_four_is_the_menus_control_and_sees_none(snapshot: Noteboo
     assert menu.control and menu.items and menu.lines() == ()
 
 
-def test_the_last_line_explores_the_least_tried_family_with_the_most_within_reach(snapshot: NotebookSnapshot) -> None:
+def test_after_the_ranked_families_a_line_explores_the_least_tried_with_the_most_within_reach(
+    snapshot: NotebookSnapshot,
+) -> None:
     strong = {
         Family(f"strong {n}", Mechanism.TUNING, CONFIG): FamilyStat(10.0, 10.0, (5.0,)) for n in range(MENU_ITEMS)
     }
@@ -96,25 +100,54 @@ def test_the_last_line_explores_the_least_tried_family_with_the_most_within_reac
 
     menu = direction_menu(snapshot, "s1", "c1", MenuEvidence(archived, {}), metric=METRIC)
 
-    assert len(menu.items) == MENU_ITEMS + 1 and {item.family for item in menu.items[:MENU_ITEMS]} == set(strong)
-    assert menu.items[-1].family == far and menu.items[-1].exploring
-    assert menu.items[-1].render().startswith("to explore, weak far · parameter tuning · config: commit odds 0.")
+    assert len(menu.items) == MENU_ITEMS + 2 and {item.family for item in menu.items[:MENU_ITEMS]} == set(strong)
+    exploring = menu.items[MENU_ITEMS]
+    assert exploring.family == far and exploring.exploring and menu.items[-1].untried
+    assert exploring.render().startswith("to explore, weak far · parameter tuning · config: commit odds 0.")
 
 
-def test_a_hot_op_family_no_test_or_claim_acted_on_is_offered_at_its_base_rate(snapshot: NotebookSnapshot) -> None:
+def _tested(*families: Family) -> MenuEvidence:
+    """Archived evidence of every component at the config and source layers, and of ``families``."""
+
+    every = [Family(component.value, Mechanism.TUNING, layer) for component in Component for layer in (CONFIG, SOURCE)]
+    return MenuEvidence({family: FamilyStat(1.0, 0.0) for family in (*every, *families)}, {})
+
+
+def test_the_untried_line_offers_a_hot_op_family_at_a_layer_no_test_acted_on_at_its_base_rate(
+    snapshot: NotebookSnapshot,
+) -> None:
     shares = OpShares("c1", "j1", "p1", {"fused_moe_kernel": 30.0, "paged_attention_ll4mi": 40.0, "rmsnorm": 2.0})
     profiled = dataclasses.replace(snapshot, op_shares={"c1": shares})
+    # moe was tested at the config and kernel layers and attention at no one layer, so at every one.
+    evidence = _tested(
+        Family("moe", Mechanism.TUNING, CONFIG),
+        Family("moe", Mechanism.KERNEL_TUNING, KERNEL),
+        Family("attention", Mechanism.TUNING, None),
+    )
 
-    menu = direction_menu(profiled, "s1", "c1", MenuEvidence(), metric=METRIC)
+    menu = direction_menu(profiled, "s1", "c1", evidence, metric=METRIC)
 
-    found = {item.family: item for item in menu.items}
-    moe = found[Family("moe", Mechanism.OTHER, None)]
-    assert (moe.tests, moe.odds) == (0.0, pytest.approx(base_rate(None)))
-    assert moe.gain_pct <= amdahl_ceiling_pct(30.0)
-    assert moe.marks == (f"{UNTOUCHED}; its ops take 30% of this commit's profile",)
-    # SPLIT, an attention family, was tested, so attention gets no open line; norm's 2% is under the bar.
-    assert SPLIT in found and Family("attention", Mechanism.OTHER, None) not in found
-    assert 2.0 < HOT_OP_SHARE_PCT and not any(item.family.target == "norm" for item in menu.items)
+    untried = menu.items[-1]
+    assert untried.untried and untried.family == Family("moe", Mechanism.OTHER, SOURCE)
+    assert (untried.tests, untried.odds) == (0.0, pytest.approx(base_rate(SOURCE)))
+    assert untried.gain_pct <= amdahl_ceiling_pct(30.0)
+    assert untried.marks == (f"{UNTOUCHED}; its ops take 30% of this commit's profile",)
+    assert untried.render().startswith("untried, moe · other · source: commit odds 0.24 over 0.0 tests")
+    # norm's 2% is under the bar, so it is not offered at all.
+    assert 2.0 < HOT_OP_SHARE_PCT and not any(item.untried for item in menu.items[:-1])
+
+
+def test_a_component_tested_at_one_layer_is_still_untried_at_another_profile_or_not(
+    snapshot: NotebookSnapshot,
+) -> None:
+    every = _tested().archived
+    evidence = MenuEvidence({family: stat for family, stat in every.items() if family.label != _KV_SOURCE.label}, {})
+
+    menu = direction_menu(snapshot, "s1", "c1", evidence, metric=METRIC)
+
+    # The session's FP8_KV acted on the KV cache at the config layer; the source layer is left.
+    assert menu.items[-1].family == Family("KV cache", Mechanism.OTHER, SOURCE)
+    assert menu.items[-1].marks == (UNTOUCHED,) and menu.items[-1].odds == pytest.approx(base_rate(SOURCE))
 
 
 def test_a_claims_note_says_its_familys_odds_and_its_tests_on_the_claimed_commit(snapshot: NotebookSnapshot) -> None:
@@ -169,7 +202,7 @@ async def test_a_brief_shows_its_branchs_menu_and_a_claims_note_comes_from_the_b
 
     brief = await briefing.startup_brief("c1")
 
-    assert len(brief.menu) == 3 and f"{MENU_TITLE}\n- " in render_brief(brief)
+    assert len(brief.menu) == 4 and f"{MENU_TITLE}\n- " in render_brief(brief)
     assert (await briefing.direction_note(KV_INTENT, KV_CHANGE)).startswith("your direction is KV cache")
     assert await CrossSessionBriefing(notebook).direction_note(KV_INTENT, KV_CHANGE) == ""
     assert (await CrossSessionBriefing(notebook, branch=branch).startup_brief("c1")).menu == ()

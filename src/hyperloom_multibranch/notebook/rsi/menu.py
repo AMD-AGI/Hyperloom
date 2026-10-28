@@ -4,9 +4,7 @@
 """The direction menu: the families a specialist could try next, ranked by what a test of each may bring.
 
 :func:`direction_menu` ranks, for a branch on a commit, the direction families (:mod:`notebook.families`) the archive or
-this session holds evidence of, and each op family whose ops take :data:`HOT_OP_SHARE_PCT` of the commit's profile
-that no test or claim has acted on yet, its mechanism and layer left open, by commit odds times the gain within reach
-over the cost of a test:
+this session holds evidence of by commit odds times the gain within reach over the cost of a test:
 
 * the commit odds are a Thompson draw from the family's Beta distribution: its layer's base rate worth
   :data:`~.family_stats.PRIOR_TRIALS` tests, then the archive's evidence (:mod:`rsi.family_stats`) and this session's,
@@ -18,9 +16,12 @@ over the cost of a test:
 * the cost of a test is the median GPU seconds of this session's tests of the family's layer, over that of them all.
 
 A line says whether the family was tried on the commit, another branch holds a claim in it, or the integration head
-holds a commit of it. The last line is the family with the least evidence for the session's model type and the most
-within reach, so exploring never stops. One branch in four gets no menu (:func:`in_control`): its tests are the menu's
-control. Every menu given is logged (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
+holds a commit of it. After the :data:`MENU_ITEMS` ranked comes the family with the least evidence for the session's
+model type and the most within reach, so exploring never stops, then the untried line: of the directions no test or
+claim has acted on, each a target at one layer with its mechanism open, every component and each op family whose ops
+take :data:`HOT_OP_SHARE_PCT` of the commit's profile, the one of the highest score, so a direction no one has tested
+yet still comes up. One branch in four gets no menu (:func:`in_control`): its tests are the menu's control. Every menu
+given is logged (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.notebook.codec import key_sorted
-from hyperloom_multibranch.notebook.families import OP_FAMILIES, Family, Mechanism, family_of, op_family
+from hyperloom_multibranch.notebook.families import OP_FAMILIES, Component, Family, Mechanism, family_of, op_family
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.family_stats import (
     MAX_TRIALS,
@@ -72,7 +73,10 @@ ELSEWHERE_FAILURE = 0.5
 DEFAULT_GAIN_PCT = 1.0
 #: The share of a commit's profile, in percent, an op family's ops take for the menu to offer it before any test.
 HOT_OP_SHARE_PCT = 5.0
-UNTOUCHED = "no test or claim has acted on it yet"
+#: The layers an op family is offered at before any test acts on it there, and those a component is.
+OP_LAYERS = (IntentLayer.CONFIG, IntentLayer.SOURCE, IntentLayer.KERNEL)
+COMPONENT_LAYERS = (IntentLayer.CONFIG, IntentLayer.SOURCE)
+UNTOUCHED = "no test or claim has acted on it at this layer yet"
 MENU_LOG = "menus.jsonl"
 MENU_LOG_FORMAT = "multibranch.menu-log.v1"
 TRIED_HERE = "tried on this commit"
@@ -179,19 +183,28 @@ def _within_reach(family: Family, typical: float, shares: OpShares | None, headr
 
 
 def _untouched(shares: OpShares | None, known: Iterable[Family]) -> dict[Family, str]:
-    """The op families whose ops take at least :data:`HOT_OP_SHARE_PCT` of ``shares`` and that no family of ``known``
-    acts on, each with its mechanism and layer open and the mark its line carries."""
+    """The directions no family of ``known`` acts on, each a target at one layer with its mechanism open, and the mark
+    its line carries: every component at each of :data:`COMPONENT_LAYERS`, and each op family whose ops take at least
+    :data:`HOT_OP_SHARE_PCT` of ``shares`` at each of :data:`OP_LAYERS`. A family of no one layer acts on its target
+    at every layer."""
 
-    acted = {family.target for family in known}
+    acted = {(family.target, family.layer) for family in known}
     by_target: dict[str, float] = {}
     for op, share in shares.shares.items() if shares is not None else ():
         target = op_family(op)
         if target is not None:
             by_target[target] = by_target.get(target, 0.0) + share
-    return {
-        Family(target, Mechanism.OTHER, None): f"{UNTOUCHED}; its ops take {share:.0f}% of this commit's profile"
+    offered = [
+        (target, layer, f"{UNTOUCHED}; its ops take {share:.0f}% of this commit's profile")
         for target, share in by_target.items()
-        if share >= HOT_OP_SHARE_PCT and target not in acted
+        if share >= HOT_OP_SHARE_PCT
+        for layer in OP_LAYERS
+    ]
+    offered += [(component.value, layer, UNTOUCHED) for component in Component for layer in COMPONENT_LAYERS]
+    return {
+        Family(target, Mechanism.OTHER, layer): mark
+        for target, layer, mark in offered
+        if (target, layer) not in acted and (target, None) not in acted
     }
 
 
@@ -235,7 +248,7 @@ def _marks(snapshot: NotebookSnapshot, branch: str, commit: str) -> dict[Family,
 @dataclass(frozen=True)
 class MenuItem:
     """One family on the menu: the draw it ranked by, its mean commit odds over its ``tests``, the gain a commit of it
-    has within reach, what it scored, its marks, and whether it holds the exploring line."""
+    has within reach, what it scored, its marks, and whether it holds the exploring line or the untried one."""
 
     family: Family
     draw: float
@@ -245,10 +258,11 @@ class MenuItem:
     score: float
     marks: tuple[str, ...] = ()
     exploring: bool = False
+    untried: bool = False
 
     def render(self) -> str:
         marks = f"; {', '.join(self.marks)}" if self.marks else ""
-        lead = "to explore, " if self.exploring else ""
+        lead = "to explore, " if self.exploring else "untried, " if self.untried else ""
         return (
             f"{lead}{self.family.label}: commit odds {self.odds:.2f} over {self.tests:.1f} tests, "
             f"up to {self.gain_pct:+.1f}% a commit{marks}"
@@ -289,8 +303,9 @@ def _headroom(snapshot: NotebookSnapshot, branch: str, commit: str, metric: str)
 def direction_menu(
     snapshot: NotebookSnapshot, branch: str, commit: str, evidence: MenuEvidence, *, metric: str
 ) -> DirectionMenu:
-    """The menu of ``branch`` on ``commit``: its :data:`MENU_ITEMS` families of the highest score, then the one to
-    explore, drawn for this branch, commit and moment."""
+    """The menu of ``branch`` on ``commit``, drawn for this branch, commit and moment: its :data:`MENU_ITEMS` families
+    of evidence of the highest score, the little-tried one to explore, and the untouched direction of the highest
+    score, the untried line."""
 
     session = snapshot.profile.session_id if snapshot.profile is not None else ""
     draws = random.Random(hashlib.sha256(f"{session}:{branch}:{commit}:{snapshot.taken_at}".encode()).digest())
@@ -299,29 +314,52 @@ def direction_menu(
     usual = statistics.median([*gains, *(gain for item in seen.values() for gain in item.gains)] or [DEFAULT_GAIN_PCT])
     shares, headroom = snapshot.op_shares.get(commit), _headroom(snapshot, branch, commit, metric)
     costs, marks = _costs(snapshot), _marks(snapshot, branch, commit)
-    untouched = _untouched(shares, {*evidence.archived, *seen, *marks})
-    for family, mark in untouched.items():
-        marks[family] = [mark]
-    scored = []
-    for family in sorted({*evidence.archived, *seen, *untouched}, key=lambda item: item.label):
-        archived, here = evidence.archived.get(family), seen.get(family)
-        odds = _odds(family, archived, here)
-        known = [*(archived.gains if archived is not None else ()), *(here.gains if here is not None else ())]
-        reach = max(0.0, _within_reach(family, statistics.median(known) if known else usual, shares, headroom))
-        draw = odds.draw(draws)
-        score = draw * reach / costs.get(family.layer, 1.0)
-        scored.append(MenuItem(family, draw, odds.mean, odds.tests, reach, score, tuple(marks.get(family, ()))))
+    scoring = _Scoring(draws, usual, shares, headroom, costs)
+    scored = [
+        scoring.item(family, evidence.archived.get(family), seen.get(family), tuple(marks.get(family, ())))
+        for family in sorted({*evidence.archived, *seen}, key=lambda item: item.label)
+    ]
     ranked = sorted(scored, key=lambda item: (-item.score, item.family.label))
     typed = {family: stat.tests for family, stat in evidence.typed.items()}
-    untried = [
+    little = [
         item
         for item in ranked[MENU_ITEMS:]
         if typed.get(item.family, 0.0) + (seen[item.family].tests if item.family in seen else 0) < EXPLORE_TRIALS
     ]
-    exploring = [replace(max(untried, key=lambda item: item.gain_pct), exploring=True)] if untried else []
+    exploring = [replace(max(little, key=lambda item: item.gain_pct), exploring=True)] if little else []
+    untouched = _untouched(shares, {*evidence.archived, *seen, *marks})
+    fresh = [
+        scoring.item(family, None, None, (mark,))
+        for family, mark in sorted(untouched.items(), key=lambda item: item[0].label)
+    ]
+    untried = [replace(max(fresh, key=lambda item: (item.score, item.family.label)), untried=True)] if fresh else []
     return DirectionMenu(
-        branch, commit, snapshot.taken_at, in_control(session, branch), (*ranked[:MENU_ITEMS], *exploring)
+        branch, commit, snapshot.taken_at, in_control(session, branch), (*ranked[:MENU_ITEMS], *exploring, *untried)
     )
+
+
+@dataclass(frozen=True)
+class _Scoring:
+    """What a menu scores each family by: its branch's draws, the usual gain of a commit, the commit's op shares and
+    roofline headroom, and the cost of a test of each layer."""
+
+    draws: random.Random
+    usual: float
+    shares: OpShares | None
+    headroom: float | None
+    costs: Mapping[IntentLayer | None, float]
+
+    def item(self, family: Family, archived: FamilyStat | None, here: _Seen | None, marks: tuple[str, ...]) -> MenuItem:
+        """``family``'s line: a draw of its odds times the gain within reach over the cost of a test of its layer."""
+
+        odds = _odds(family, archived, here)
+        known = [*(archived.gains if archived is not None else ()), *(here.gains if here is not None else ())]
+        typical = statistics.median(known) if known else self.usual
+        reach = max(0.0, _within_reach(family, typical, self.shares, self.headroom))
+        draw = odds.draw(self.draws)
+        return MenuItem(
+            family, draw, odds.mean, odds.tests, reach, draw * reach / self.costs.get(family.layer, 1.0), marks
+        )
 
 
 def direction_note(snapshot: NotebookSnapshot, intent: Intent, delta: RecipeDelta, evidence: MenuEvidence) -> str:
@@ -346,7 +384,7 @@ def direction_note(snapshot: NotebookSnapshot, intent: Intent, delta: RecipeDelt
 @dataclass(frozen=True)
 class LoggedMenu:
     """A menu as the log keeps it: who was given it, on which commit and when, whether it was shown, its families'
-    labels in order, the exploring one last when there is one, and the commit odds it gave each."""
+    labels in order, the exploring one and the untried one when there are, and the commit odds it gave each."""
 
     at: float
     branch: str
@@ -355,6 +393,7 @@ class LoggedMenu:
     families: tuple[str, ...]
     exploring: str = ""
     odds: tuple[float, ...] = ()
+    untried: str = ""
 
 
 @dataclass(frozen=True)
@@ -372,6 +411,7 @@ class MenuLog:
             "control": menu.control,
             "families": [item.family.label for item in menu.items],
             "exploring": next((item.family.label for item in menu.items if item.exploring), ""),
+            "untried": next((item.family.label for item in menu.items if item.untried), ""),
             "odds": [round(item.odds, 4) for item in menu.items],
             "draws": [round(item.draw, 4) for item in menu.items],
         }
@@ -402,6 +442,7 @@ class MenuLog:
                         tuple(str(label) for label in line["families"]),
                         str(line.get("exploring") or ""),
                         tuple(float(value) for value in line.get("odds") or ()),
+                        str(line.get("untried") or ""),
                     )
                 )
             except (AttributeError, KeyError, TypeError, ValueError):
