@@ -646,7 +646,7 @@ module-lines src/kernelforge/loop/insession_gate.py 1259
 module-lines src/kernelforge/loop/knowledge_integration.py 1426
 module-lines src/kernelforge/loop/task_preparer.py 1450
 module-lines src/kernelforge/orchestrator/analysis.py 1815
-module-lines src/kernelforge/orchestrator/orchestration.py 1658
+module-lines src/kernelforge/orchestrator/orchestration.py 1640
 nested-blocks scripts/platform_audit_bmc.py::main 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_recipe_server_env 5

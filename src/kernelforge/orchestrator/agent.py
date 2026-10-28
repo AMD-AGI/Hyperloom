@@ -917,9 +917,15 @@ def _make_session_summarizer(
 
     from kernelforge.loop.lessons import SUMMARIZER_ROLE
 
+    implementer_policy = spec.tool_policy or AgentToolPolicy()
     summary_spec = replace(
         spec,
-        system_prompt=SUMMARIZER_ROLE,
+        # The implementer's system prompt and tool definitions open the cached prefix the whole session was billed
+        # against; changing either makes the summary rewrite that prefix instead of reading it. The summarizer role
+        # travels in the user turn, and a provider that describes tools beyond the narrower tool_policy below must
+        # refuse them whatever the permission mode or settings say (the Claude backend denies them in a PreToolUse
+        # hook).
+        declared_tool_policy=implementer_policy,
         writable=False,
         hooks=None,
         allow_dirty_targets=True,
@@ -928,18 +934,20 @@ def _make_session_summarizer(
         protected_globs=["*"],
         # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
-        tool_policy=AgentToolPolicy(
+        tool_policy=replace(
+            implementer_policy,
             read=True,
             search=True,
             write=False,
             shell=False,
+            extra_tools=(),
             # Enough turns to check a path or a number it half-remembers, not enough to start exploring the workspace.
             max_turns=4,
         ),
     )
 
     async def summarize(prompt: str) -> str:
-        result = await backend.resume(summary_spec, session_id, prompt, usage=usage)
+        result = await backend.resume(summary_spec, session_id, f"{SUMMARIZER_ROLE}\n\n{prompt}", usage=usage)
         return result.text or ""
 
     return summarize
