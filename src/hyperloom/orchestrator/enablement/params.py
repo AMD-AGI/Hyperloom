@@ -117,7 +117,7 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
     """
     grounding_drops = [str(d) for d in (enablement.last_grounding_drop_reason or [])]
     setup_refusals = [str(c) for c in (enablement.last_setup_refusals or [])]
-    unarmed_gates = [str(g) for g in (enablement.last_unarmed_switch_gates or [])]
+    inert_env_reads = [str(n) for n in (enablement.last_inert_round_env_reads or [])]
     blocks = [_build_failure_note(enablement)]
     if enablement.patches_span_multiple_roots:
         blocks.append(
@@ -134,17 +134,6 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
             + ". Re-author these as installer invocations, or carry the work "
             "in a patch instead."
         )
-    if unarmed_gates:
-        blocks.append(
-            "UNARMED SWITCH GATE: the prior round's patch turned its own "
-            "change on with environment variable(s) "
-            + ", ".join(unarmed_gates[:4])
-            + ", which nothing arms for the bench, so the round was failed "
-            "WITHOUT benching it: the measurement would have run the "
-            "unpatched path. Declare each switch in the framework_switches "
-            "manifest of your specialist_done, or set it in proposal_set as "
-            "an extra_envs entry, or ship the change ungated."
-        )
     if grounding_drops:
         blocks.append(
             "PATCH GROUNDING FAILURE: the patches the prior round submitted "
@@ -153,6 +142,17 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
             + "; ".join(grounding_drops[:4])
             + ". Verify the target path with Glob/Read inside the worktree "
             "before authoring the diff."
+        )
+    if inert_env_reads:
+        blocks.append(
+            "POSSIBLE CAUSE OF THE INERT BENCH: the prior round measured the "
+            "same throughput as the baseline, as though its change were not "
+            "there, and its diff reads environment variable(s) "
+            + ", ".join(inert_env_reads[:4])
+            + " that nothing set for that bench. Check whether the patched "
+            "path is switched off by default. This is one lead among others, "
+            "not a finding: a read may be an opt-out, a value the code needs "
+            "or unrelated to the change."
         )
     blocks.append(_apply_feedback_note(enablement))
     if attempt:

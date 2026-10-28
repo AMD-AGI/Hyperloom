@@ -323,109 +323,137 @@ def _diff(*added: str, context: tuple[str, ...] = (), removed: tuple[str, ...] =
     return header + "\n".join(body) + "\n"
 
 
-def test_a_gate_the_patch_adds_and_nothing_arms_is_reported():
-    """Nothing sets it, so the bench would measure the unpatched path."""
+def test_a_name_the_patch_adds_a_read_of_and_nothing_sets_is_listed():
+    """The lead the next mandate carries: the patch reads it, the bench had no value for it."""
     patch = _diff('    if os.environ.get("HL_FUSE_RMSNORM") == "1":')
-    assert manifest.unarmed_switch_gates([patch], armed=set()) == ["HL_FUSE_RMSNORM"]
+    assert manifest.unarmed_env_reads([patch], armed=set()) == ["HL_FUSE_RMSNORM"]
 
 
-def test_every_read_form_counts_as_a_gate():
-    """A kernel-side rewrite reads its switch from C just as the Python side does."""
+def test_every_read_form_is_seen():
+    """A kernel-side rewrite reads its env from C just as the Python side does."""
     patch = _diff(
         '    a = os.getenv("HL_A")',
         '    b = os.environ["HL_B"]',
         '    const char* c = std::getenv("HL_C");',
     )
-    assert manifest.unarmed_switch_gates([patch]) == ["HL_A", "HL_B", "HL_C"]
+    assert manifest.unarmed_env_reads([patch]) == ["HL_A", "HL_B", "HL_C"]
 
 
-def test_an_armed_gate_is_not_reported():
-    """The manifest switches and the proposal's extra_envs both arm."""
+def test_a_name_something_sets_is_not_listed():
+    """The manifest switches and the proposal's extra_envs both set names for the bench."""
     patch = _diff('    if os.environ.get("HL_FUSE") == "1":')
-    assert manifest.unarmed_switch_gates([patch], armed={"HL_FUSE"}) == []
+    assert manifest.unarmed_env_reads([patch], armed={"HL_FUSE"}) == []
 
 
-def test_a_gate_the_file_already_reads_is_not_this_rounds_contract():
-    """The patch moved an existing read; whoever armed it before arms it still."""
+def test_a_read_the_file_already_had_is_not_this_rounds_lead():
+    """The patch moved an existing read, so it says nothing about what this round changed."""
     patch = _diff(
         '    flag = os.environ.get("HL_OLD")',
         context=('    if os.environ.get("HL_OLD") == "1":',),
     )
-    assert manifest.unarmed_switch_gates([patch]) == []
+    assert manifest.unarmed_env_reads([patch]) == []
 
 
-def test_a_read_the_patch_rewrites_in_place_is_not_a_new_gate():
-    """Replacing the line that reads a switch does not make the round own the switch."""
+def test_a_read_the_patch_rewrites_in_place_is_not_new():
+    """Replacing the line that reads a name does not make it this round's doing."""
     patch = _diff(
         '    flag = os.environ.get("HL_OLD", "0")',
         removed=('    flag = os.environ.get("HL_OLD")',),
     )
-    assert manifest.unarmed_switch_gates([patch]) == []
+    assert manifest.unarmed_env_reads([patch]) == []
 
 
-def test_a_secret_shaped_name_is_not_a_switch():
-    """A credential the patch reads is never something a round may arm."""
+def test_a_secret_shaped_name_is_not_listed():
+    """A credential the patch reads is never a switch of the round's own."""
     patch = _diff('    key = os.environ.get("HF_TOKEN")')
-    assert manifest.unarmed_switch_gates([patch]) == []
+    assert manifest.unarmed_env_reads([patch]) == []
 
 
 def test_the_patch_set_is_read_as_one_change():
-    """One patch adding a read of what another patch's file already reads adds no gate."""
+    """One patch adding a read of what another patch's file already reads is not new either."""
     adds = _diff('    flag = os.environ.get("HL_SHARED")')
     reads_already = _diff("    pass", context=('    if os.environ.get("HL_SHARED") == "1":',))
-    assert manifest.unarmed_switch_gates([adds, reads_already]) == []
+    assert manifest.unarmed_env_reads([adds, reads_already]) == []
 
 
-def test_a_falsy_default_still_leaves_the_change_off():
-    """Unset and "0" reach the same branch, so the round still has to arm it."""
+def test_a_falsy_default_is_listed():
+    """Unset and "0" reach the same branch, so setting the name is still worth checking."""
     patch = _diff('    if os.environ.get("HL_FUSE", "0") == "1":')
-    assert manifest.unarmed_switch_gates([patch]) == ["HL_FUSE"]
+    assert manifest.unarmed_env_reads([patch]) == ["HL_FUSE"]
 
 
-def test_a_read_that_defaults_the_change_on_is_not_a_gate():
-    """The rewrite ships enabled: the bench measures it whether or not anything sets the name."""
+def test_a_read_with_a_non_falsy_default_is_not_listed():
+    """Set or unset, the line runs the same way, so it explains no inert bench."""
     patch = _diff('    if os.environ.get("SGLANG_USE_NEW_PATH", "1") == "1":')
-    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
 
 
-def test_a_tuning_default_is_not_a_gate():
-    """A read that falls back to a usable value turns nothing on or off."""
+def test_a_tuning_default_is_not_listed():
+    """A read that falls back to a usable value leaves nothing to check."""
     patch = _diff(
         '    root = os.getenv("ROCM_PATH", "/opt/rocm")',
         '    streams = int(os.environ.get("HL_STREAMS", "4"))',
     )
-    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
 
 
-def test_a_launcher_provided_name_is_not_a_gate():
-    """Rank and world topology come from the launch per process; no round can arm them."""
+def test_a_launcher_provided_name_is_not_listed():
+    """Rank and world topology come from the launch per process; no round sets them."""
     patch = _diff(
         '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
         '    size = os.environ["WORLD_SIZE"]',
         '    node = os.getenv("SLURM_PROCID")',
     )
-    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+    assert manifest.unarmed_env_reads([patch], armed={"PATH", "HOME"}) == []
 
 
-def test_a_benchmark_owned_name_is_not_a_switch():
-    """A manifest may not claim it either, so reading it is no reason to fail the round."""
+def test_a_benchmark_owned_name_is_not_listed():
+    """A manifest may not claim it either, so a round could not have set it."""
     patch = _diff('    out = os.environ["RESULT_DIR"]')
-    assert manifest.unarmed_switch_gates([patch]) == []
+    assert manifest.unarmed_env_reads([patch]) == []
 
 
-def test_a_default_that_is_not_a_literal_is_not_refused():
-    """Nothing here shows the change is off when the name is unset, and a wrong refusal costs a round."""
+def test_a_default_that_is_not_a_literal_is_not_listed():
+    """Nothing readable here says an unset name changes what the line does."""
     patch = _diff('    mode = os.environ.get("HL_MODE", _DEFAULT_MODE)')
-    assert manifest.unarmed_switch_gates([patch]) == []
+    assert manifest.unarmed_env_reads([patch]) == []
 
 
-def test_the_real_gate_is_reported_next_to_reads_that_are_not_gates():
-    """A patch that reads its rank and gates its rewrite owes the gate only."""
+def test_the_unset_name_is_listed_next_to_reads_that_are_set_elsewhere():
+    """A patch that reads its rank and a name of its own leaves one name to check."""
     patch = _diff(
         '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
         '    if os.environ.get("HL_FUSE_RMSNORM") == "1":',
     )
-    assert manifest.unarmed_switch_gates([patch]) == ["HL_FUSE_RMSNORM"]
+    assert manifest.unarmed_env_reads([patch]) == ["HL_FUSE_RMSNORM"]
+
+
+def test_a_read_the_scan_cannot_read_as_a_switch_is_listed_all_the_same():
+    """What the list is and is not.
+
+    An opt-out switch runs the change precisely while the name is unset, a
+    write sets the name rather than reading it, and a value read gates
+    nothing at all — on the line, all three look like the switch above. The
+    scan reports them, which is why nothing refuses a round over this list:
+    it is read next to a bench that already came out inert, where it is a
+    place to look.
+    """
+    opt_out = _diff(
+        '    if not os.environ.get("HL_DISABLE_NEW"):',
+        '    if (!std::getenv("HL_DISABLE_FAST_PATH")) {',
+        '    use_new = os.environ.get("HL_LEGACY_PATH") is None',
+        '    off = bool(int(os.getenv("VLLM_ROCM_DISABLE_NEW_PATH", "0")))',
+    )
+    writes = _diff('    os.environ["SGLANG_ENABLE_X"] = "1"', '    del os.environ["SGLANG_OLD"]')
+    values = _diff('    cache = os.environ.get("TRITON_CACHE_DIR") or default_dir', '    hip = os.getenv("HIP_PATH")')
+    assert manifest.unarmed_env_reads([opt_out]) == [
+        "HL_DISABLE_FAST_PATH",
+        "HL_DISABLE_NEW",
+        "HL_LEGACY_PATH",
+        "VLLM_ROCM_DISABLE_NEW_PATH",
+    ]
+    assert manifest.unarmed_env_reads([writes]) == ["SGLANG_ENABLE_X", "SGLANG_OLD"]
+    assert manifest.unarmed_env_reads([values]) == ["HIP_PATH", "TRITON_CACHE_DIR"]
 
 
 # SharedState lever ledger

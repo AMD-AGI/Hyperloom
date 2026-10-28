@@ -224,21 +224,21 @@ def switch_env(switches: list[dict[str, Any]], *, only: "set[str] | None" = None
 # and the C/C++ ``getenv``/``std::getenv`` a kernel-side rewrite uses.
 _ENV_READ_RE = re.compile(r"""(?:environ\s*(?:\.\s*get\s*\(|\[)|\bgetenv\s*\()\s*["']([A-Za-z_][A-Za-z0-9_]*)["']""")
 
-# Defaults a read falls back to that still leave the patched path off. Anything
-# else runs the change whether or not the name is set, so there is no gate to
-# arm: a tuning default (``os.getenv("X", "/opt/rocm")``) or an on default
-# (``os.environ.get("X", "1") == "1"``, the shape of a rewrite shipped enabled).
+# Falsy defaults, which keep a name in the list. A read with any other literal
+# default -- a tuning value (``os.getenv("X", "/opt/rocm")``) or an on default
+# (``os.environ.get("X", "1") == "1"``, a rewrite shipped enabled) -- runs the
+# same whether or not the name is set, so it is not worth reporting at all.
 _OFF_DEFAULTS: frozenset[str] = frozenset({"", "0", "0.0", "false", "no", "off", "none", "null", "nullptr"})
 
 
-def _read_leaves_change_off(tail: str) -> bool:
-    """Whether a read whose argument list continues with ``tail`` is off when nothing sets the name.
+def _read_could_default_off(tail: str) -> bool:
+    """Whether a read whose argument list continues with ``tail`` has no default or a falsy one.
 
-    ``tail`` is the rest of the line after the name. A subscript or a
-    one-argument read has no default, so an unset name leaves the gate unset.
-    A second argument is the value the patch runs with instead, and only a
-    falsy literal keeps the change off. A default this cannot read as a literal
-    is not proof of anything, and an unprovable gate is not worth a refusal.
+    ``tail`` is the rest of the line after the name. This is a filter on the
+    literal text, not a finding about the patched path: an opt-out switch
+    (``if not os.environ.get("HL_DISABLE_NEW")``), a write
+    (``os.environ["X"] = "1"``) and a plain value read all look like this, and
+    only reading the surrounding code tells them apart.
     """
     rest = tail.lstrip()
     if not rest.startswith(","):
@@ -251,24 +251,23 @@ def _read_leaves_change_off(tail: str) -> bool:
     return default.lower() in _OFF_DEFAULTS
 
 
-def _gating_reads(text: str) -> set[str]:
-    """The env names ``text`` reads in a way that leaves its change off until the name is set."""
-    return {m.group(1).upper() for m in _ENV_READ_RE.finditer(text) if _read_leaves_change_off(text[m.end() :])}
+def _env_reads(text: str) -> set[str]:
+    """The env names ``text`` reads with no default or a falsy one."""
+    return {m.group(1).upper() for m in _ENV_READ_RE.finditer(text) if _read_could_default_off(text[m.end() :])}
 
 
-def _patch_env_gates(patch_text: str) -> tuple[set[str], set[str]]:
-    """Split the env gates a diff carries into the ones it adds and the ones already in the file.
+def _patch_env_reads(patch_text: str) -> tuple[set[str], set[str]]:
+    """Split the env reads a diff carries into the ones it adds and the ones already in the file.
 
     A read on a context or a removed line belongs to the file as it stands, so
-    the patch is not the one that introduced the gate and arming it is not this
-    round's contract.
+    the patch did not introduce it and it says nothing about this round.
     """
     added: set[str] = set()
     preexisting: set[str] = set()
     for line in patch_text.splitlines():
         if line.startswith(("+++", "---", "@@")):
             continue
-        names = _gating_reads(line[1:])
+        names = _env_reads(line[1:])
         if not names:
             continue
         if line.startswith("+"):
@@ -278,48 +277,44 @@ def _patch_env_gates(patch_text: str) -> tuple[set[str], set[str]]:
     return added, preexisting
 
 
-def _is_armable_switch(name: str) -> bool:
-    """Whether this round could arm ``name`` by either route the refusal names.
+def _could_be_a_round_switch(name: str) -> bool:
+    """Whether ``name`` is one a round could set at all, by manifest or ``extra_envs``.
 
-    The refusal tells the author to declare the name in the manifest or to set
-    it in ``extra_envs``. A name neither route may set — a credential, a key the
-    benchmark owns, or one the launch assigns per process — is not a switch the
-    patch left unarmed, so reading it is no reason to fail the round.
+    A name neither route may set — a credential, a key the benchmark owns, or
+    one the launch assigns per process — is read for what it holds, never as a
+    switch of the patch's own, so reporting it would only be noise.
     """
     return (
         name not in FORBIDDEN_SWITCHES and not is_secret_shaped_env_name(name) and not is_launch_provided_env_name(name)
     )
 
 
-def unarmed_switch_gates(patch_texts: list[str], *, armed: "set[str] | frozenset[str] | None" = None) -> list[str]:
-    """Return the env switches the patches ADD that nothing in ``armed`` turns on.
+def unarmed_env_reads(patch_texts: list[str], *, armed: "set[str] | frozenset[str] | None" = None) -> list[str]:
+    """Return the env names the patches ADD a read of that nothing in ``armed`` sets.
 
-    A rewrite behind a variable that neither the manifest nor an ``extra_envs``
-    override sets is never on for the measurement: the patch applies, the bench
-    runs the unpatched path, and the round reports the failure it was
-    dispatched on.
-
-    Only a read that can leave the change off counts — no default, or a falsy
-    one — and only for a name this round could have armed. A patch that reads
-    its rank, a tuning default or a knob shipped on runs its change either way,
-    so there is nothing for the author to declare and nothing to refuse.
+    This is a lead, never a verdict. Scanning diff lines cannot tell whether a
+    read keeps the patched path off: an opt-out switch
+    (``if not os.getenv("HL_DISABLE_NEW")``) runs the change precisely while
+    the name is unset, and a write or a value read is no switch at all. The
+    names are worth reporting only beside a round that already measured as
+    though its change were absent, where one of them may be the reason.
 
     Args:
         patch_texts: The diff text of every patch the round submitted.
         armed: Every env name the launch will set, manifest switches included.
 
     Returns:
-        The unarmed switch names, sorted.
+        The unset names, sorted.
     """
     armed_names = {str(name).strip().upper() for name in (armed or ())}
     added: set[str] = set()
     preexisting: set[str] = set()
     for text in patch_texts:
-        text_added, text_preexisting = _patch_env_gates(text)
+        text_added, text_preexisting = _patch_env_reads(text)
         added |= text_added
         preexisting |= text_preexisting
     unarmed = added - preexisting - armed_names
-    return sorted(name for name in unarmed if _is_armable_switch(name))
+    return sorted(name for name in unarmed if _could_be_a_round_switch(name))
 
 
 def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
@@ -476,5 +471,5 @@ __all__ = [
     "parse_manifest",
     "summarize",
     "switch_env",
-    "unarmed_switch_gates",
+    "unarmed_env_reads",
 ]

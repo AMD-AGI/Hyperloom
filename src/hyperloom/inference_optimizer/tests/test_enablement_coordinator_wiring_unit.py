@@ -758,20 +758,20 @@ async def test_rearm_records_the_refused_setup_commands_of_the_round_that_failed
 
 
 @pytest.mark.asyncio
-async def test_rearm_records_the_switch_gates_the_refused_round_left_unarmed(tmp_path):
-    """The round never benched, so the gate name is the only thing the next author gets."""
+async def test_rearm_records_the_env_reads_an_inert_round_left_unset(tmp_path):
+    """The round benched as though its patch were absent; the names are where to look next."""
     fake = _enqueue_self(tmp_path, enablement_origin="eval")
     await _hold_round(fake, "spec-1")
     await fake.enablement_lane.maybe_rearm_enablement(
         {
-            "status": "apply_failed",
+            "status": "reverted",
             "enablement": True,
             "specialist_task_id": "spec-1",
-            "error_class": "framework_switch_gates_unarmed",
-            "unarmed_switch_gates": ["HL_FUSE_RMSNORM"],
+            "runnable": False,
+            "inert_round_env_reads": ["HL_FUSE_RMSNORM"],
         }
     )
-    assert fake.shared_state.enablement.last_unarmed_switch_gates == ["HL_FUSE_RMSNORM"]
+    assert fake.shared_state.enablement.last_inert_round_env_reads == ["HL_FUSE_RMSNORM"]
     assert fake.shared_state.enablement.succeeded is False
 
 
@@ -1160,16 +1160,16 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
     assert "ln -sf /a /b" in params["notes"]
 
 
-def test_build_params_tells_the_next_round_which_switch_gate_was_unarmed(monkeypatch, tmp_path):
-    """Without the name the next round resubmits the same patch and stays inert."""
+def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkeypatch, tmp_path):
+    """Without the names the next round repeats the patch and measures the same nothing."""
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
-    fake.shared_state.enablement.last_unarmed_switch_gates = ["HL_FUSE_RMSNORM"]
+    fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
-    assert "UNARMED SWITCH GATE" in params["notes"]
+    assert "POSSIBLE CAUSE OF THE INERT BENCH" in params["notes"]
     assert "HL_FUSE_RMSNORM" in params["notes"]
-    assert "framework_switches" in params["notes"]
+    assert "not a finding" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,6 +21,7 @@ from ...bringup import load_boot_observation, observation_summary, verdict_of
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
+from . import _framework_switch_manifest as _switch_manifest
 from ._accuracy_gate import enablement_correctness
 from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
 from ._git import _git_head_sha
@@ -29,11 +31,30 @@ from ._nogit_patch import _is_git_tree
 from ._patch_git import _uncommitted_revert
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
-from ._patch_sources import _declared_stack_ops, _patch_stack_by_root
+from ._patch_sources import _declared_stack_ops, _patch_stack_by_root, _read_patch_texts
 from ._server_argv import ConfigUnreadable
 from ._workload_envs import FrameworkScriptMismatchError
 
 log = logging.getLogger(__name__)
+
+
+def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt) -> None:
+    """Add to a verdict what the applied attempt holds and the gate itself cannot see."""
+    if attempt.dropped_env_overrides:
+        verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+    # An enablement round that reverted without running booted no further than
+    # the unpatched tree did: whatever the patch wrote, the measurement did not
+    # see it. The env names its diff reads are worth checking then -- one of
+    # them may be a switch nothing turns on -- so they ride along as a lead for
+    # the next round's mandate. A read is not proof of a gate (an opt-out
+    # switch, a write and a plain value read read the same), which is why this
+    # is evidence beside a bench that already happened and not a refusal.
+    if verdict.get("status") != "reverted" or verdict.get("runnable") is not False:
+        return
+    armed = {*attempt.extra_envs_applied, *os.environ}
+    names = _switch_manifest.unarmed_env_reads(_read_patch_texts(attempt.applied), armed=armed)
+    if names:
+        verdict["inert_round_env_reads"] = names
 
 
 def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any]:
@@ -113,8 +134,7 @@ class EnablementGateMixin:
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
-        if attempt.dropped_env_overrides:
-            verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
+        _attach_attempt_evidence(verdict, attempt)
         return verdict
 
     async def _gate_enablement(

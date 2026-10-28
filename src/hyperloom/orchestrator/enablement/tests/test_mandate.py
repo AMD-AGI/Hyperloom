@@ -105,14 +105,6 @@ def test_invariants_present_and_mention_runnable_gate() -> None:
     assert any("git apply --check" in inv for inv in mandate.invariants)
 
 
-def test_invariants_state_the_switch_arming_contract() -> None:
-    """A patch gated on an env var armed nowhere benches inert and stalls the lane."""
-    td = build_mandate(_req(), _sig()).task_description
-    assert "framework_switches" in td
-    assert "extra_envs" in td
-    assert any("armed nowhere" in inv for inv in ENABLEMENT_PATCH_INVARIANTS)
-
-
 def test_empty_candidate_refs_filtered() -> None:
     """Blank refs are dropped."""
     mandate = build_mandate(_req(), _sig(), candidate_refs=("", "PR:7", ""))

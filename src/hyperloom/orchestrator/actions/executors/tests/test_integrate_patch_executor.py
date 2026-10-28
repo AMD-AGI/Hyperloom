@@ -84,6 +84,26 @@ index 0000000..1111111 100644
 """
 
 
+# The reads a scan of diff lines cannot tell apart from the gate above: an
+# opt-out that runs the new path precisely while the name is unset, a write,
+# and a value the code needs. None of them keeps the change from running, so
+# none of them may cost the round its bench.
+_ENV_READING_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,6 @@
++import os
+ def f():
+-    return 1
++    if not os.environ.get("HL_TEST_DISABLE_FAST_PATH"):
++        os.environ["HL_TEST_CHILD_FLAG"] = "1"
++        return 2 + len(os.getenv("TRITON_CACHE_DIR") or "")
++    return 1
+"""
+
+
 # Targets a file absent from the framework tree — must be caught by the
 # missing-target preflight, not a wasted ``git apply``.
 _MISSING_TARGET_PATCH = """\
@@ -1179,12 +1199,13 @@ async def _run_enablement_integrate(
     extra_params: dict[str, Any] | None = None,
     bench_effective_config: dict[str, Any] | None = None,
     bench_materialized_config: str = "",
+    patch_contents: list[str] | None = None,
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=[_VALID_PATCH])
+    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=patch_contents or [_VALID_PATCH])
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
@@ -1706,44 +1727,42 @@ async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_any
 
 
 @pytest.mark.asyncio
-async def test_a_patch_gated_on_an_unarmed_switch_fails_the_round_before_the_bench(tmp_path: Path, monkeypatch):
-    """Benching it would measure the unpatched path and report the gap it was dispatched on.
+@pytest.mark.parametrize("patch", [_SWITCH_GATED_PATCH, _ENV_READING_PATCH], ids=["gate", "opt-out-write-value"])
+async def test_a_patch_that_reads_an_env_name_still_gets_its_bench(tmp_path: Path, monkeypatch, patch: str):
+    """The diff text does not say whether a read keeps the change off.
 
-    The round is failed where the patch is admitted, and the variable is named
-    in the result so the next dispatch declares it instead of resubmitting.
+    An opt-out runs the new path while the name is unset, a write sets rather
+    than reads, and a value read gates nothing; on the line all three look like
+    the gate above. Refusing the round over that would cost rounds that work
+    their measurement, so the bench is what decides.
     """
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    repo = tmp_path / "framework"
-    init_git_repo(repo)
-    _write_specialist_workspace(session_dir, "t-spec-unarmed", patch_contents=[_SWITCH_GATED_PATCH])
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-
-    async def _noop_kb(*_args, **_kwargs):
-        return None
-
     monkeypatch.delenv("HL_TEST_FUSE", raising=False)
-    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
-    monkeypatch.setattr(
-        executor,
-        "_bench_patch",
-        lambda *_args, **_kwargs: pytest.fail("an inert patch reached the bench"),
+    monkeypatch.delenv("HL_TEST_DISABLE_FAST_PATH", raising=False)
+
+    result, _repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, patch_contents=[patch])
+
+    assert result["status"] == "kept"
+    assert result[RESULT_BENCHED] is True
+    assert "inert_round_env_reads" not in result
+
+
+@pytest.mark.asyncio
+async def test_an_inert_round_hands_on_the_env_names_its_patch_added_a_read_of(tmp_path: Path, monkeypatch):
+    """A round that reverted without running is where an unset switch is worth a look.
+
+    The patch was there and the measurement came out as though it were not, so
+    the names ride along for the next mandate to check. They are a lead beside
+    a bench that already happened, not a verdict on the patch.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=False, patch_contents=[_SWITCH_GATED_PATCH]
     )
 
-    params = {
-        "specialist_task_id": "t-spec-unarmed",
-        "framework_source_root": str(repo),
-        "enablement": True,
-    }
-    result = await executor(_make_ctx("t-int-unarmed", params))
-
-    assert result["status"] == "apply_failed"
-    assert result["enablement"] is True
-    assert result["error_class"] == "framework_switch_gates_unarmed"
-    assert result["unarmed_switch_gates"] == ["HL_TEST_FUSE"]
-    assert "HL_TEST_FUSE" in result["advisory"]
-    assert result["patches_applied"] == []
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["inert_round_env_reads"] == ["HL_TEST_FUSE"]
 
 
 @pytest.mark.asyncio
@@ -1794,7 +1813,6 @@ async def test_a_declared_switch_arms_its_gate_and_the_round_benches(tmp_path: P
     result = await executor(_make_ctx("t-int-armed", params))
 
     assert result["status"] == "kept"
-    assert "unarmed_switch_gates" not in result
     assert benched["extra_envs_applied"]["HL_TEST_FUSE"] == "1"
 
 
