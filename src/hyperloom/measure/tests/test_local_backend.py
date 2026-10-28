@@ -81,7 +81,7 @@ class _Grid:
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         self.calls.append(kwargs)
-        self.configs.append(yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text()))
+        self.configs.append(yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text()))
         self.shapes.append({key: os.environ[key] for key in AMBIENT_SHAPE_ENVS if key in os.environ})
         self.env_seen.append(
             {
@@ -151,9 +151,13 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
-    assert (kwargs["result_dir"], kwargs["session_deadline_sec"], kwargs["serving_lease"]) == ("/res", 123.0, "lease")
-    assert kwargs["magpie_python"] is None
-    assert "server_lifecycle" not in kwargs
+    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec, kwargs["launch"].serving_lease) == (
+        "/res",
+        123.0,
+        "lease",
+    )
+    assert kwargs["launch"].magpie_python is None
+    assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     _own_port(config)
     assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is, with a port of its own"
@@ -166,7 +170,7 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
 def test_the_warmup_plan_reaches_run_grid_as_it_was_stated(grid, tmp_path, plan, expected):
     _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=plan)))
 
-    assert grid.calls[0]["warmup_before_measure"] is expected
+    assert grid.calls[0]["launch"].warmup_before_measure is expected
 
 
 def test_a_discarded_warmup_round_is_reported_as_its_own_round(grid, tmp_path):
@@ -272,7 +276,7 @@ def _graded_call(tmp_path: Path, **kwargs: Any) -> TestCall:
 
 def _evaluates(kwargs: dict[str, Any], config: dict[str, Any]) -> bool:
     """Whether a round evaluates, as ``run_grid`` would build it: the round's extra envs laid over the point's own."""
-    envs = {**config["benchmark"]["envs"], **(kwargs.get("base_extra_envs") or {})}
+    envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
     return is_truthy(envs["RUN_EVAL"], default=True)
 
 
@@ -299,16 +303,18 @@ def test_the_two_rounds_of_a_graded_test_share_one_server_that_the_measured_roun
     _run(_graded_call(tmp_path))
 
     warmup, measured = grid.calls
-    assert warmup["server_lifecycle"] == {
+    assert warmup["launch"].server_lifecycle == {
         "cleanup": False,
-        "pid_dir": warmup["server_lifecycle"]["pid_dir"],
+        "pid_dir": warmup["launch"].server_lifecycle["pid_dir"],
         "port": 8123,
     }
-    assert measured["server_lifecycle"] == {**warmup["server_lifecycle"], "cleanup": True}
-    assert "server_already_ready" not in warmup and measured["server_already_ready"] is True
-    assert warmup["warmup_before_measure"] is measured["warmup_before_measure"] is False, "run_grid does not warm up"
-    assert "lifecycle_boot_only" not in warmup, "the warmup round is a whole round, it measures and evaluates"
-    assert measured["base_extra_envs"] == {"RUN_EVAL": "false"} and "base_extra_envs" not in warmup
+    assert measured["launch"].server_lifecycle == {**warmup["launch"].server_lifecycle, "cleanup": True}
+    assert not warmup["launch"].server_already_ready and measured["launch"].server_already_ready is True
+    assert warmup["launch"].warmup_before_measure is measured["launch"].warmup_before_measure is False, (
+        "run_grid does not warm up"
+    )
+    assert not warmup["launch"].lifecycle_boot_only, "the warmup round is a whole round, it measures and evaluates"
+    assert measured["recipe"].base.extra_envs == {"RUN_EVAL": "false"} and warmup["recipe"].base.extra_envs is None
     assert len(server.teardowns) == 1, "and whatever is still up is reclaimed when the test ends"
 
 
@@ -399,7 +405,7 @@ def test_a_graded_test_without_a_warmup_evaluates_in_its_one_round_as_before(gri
     outcome = _run(_call(tmp_path, point, accuracy=True, kind="accuracy", **kwargs))
 
     assert [c["grid"][0].name for c in grid.calls] == ["test"], why
-    assert "server_lifecycle" not in grid.calls[0] and "base_extra_envs" not in grid.calls[0]
+    assert grid.calls[0]["launch"].server_lifecycle is None and grid.calls[0]["recipe"].base.extra_envs is None
     assert [r.phase for r in outcome.rounds] == ["measure", "accuracy"]
     assert outcome.rounds[1].accuracy[0].score == 0.64
 
@@ -410,16 +416,20 @@ def test_a_graded_test_on_a_framework_that_cannot_hold_a_server_keeps_run_grids_
     _run(_graded_call(tmp_path))
 
     (kwargs,) = grid.calls
-    assert kwargs["grid"][0].name == "test" and kwargs["warmup_before_measure"] is True
-    assert "server_lifecycle" not in kwargs and "base_extra_envs" not in kwargs
+    assert kwargs["grid"][0].name == "test" and kwargs["launch"].warmup_before_measure is True
+    assert kwargs["launch"].server_lifecycle is None and kwargs["recipe"].base.extra_envs is None
 
 
 def test_a_test_that_is_not_graded_keeps_run_grids_warmup_and_never_holds_a_server(grid, server, tmp_path):
     _run(_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
 
     (kwargs,) = grid.calls
-    assert kwargs["grid"][0].name == "test" and kwargs["warmup_before_measure"] is True
-    assert "server_lifecycle" not in kwargs and "base_extra_envs" not in kwargs and server.teardowns == []
+    assert kwargs["grid"][0].name == "test" and kwargs["launch"].warmup_before_measure is True
+    assert (
+        kwargs["launch"].server_lifecycle is None
+        and kwargs["recipe"].base.extra_envs is None
+        and server.teardowns == []
+    )
 
 
 def test_the_default_warmup_of_run_grid_decides_for_a_graded_test_that_states_none(grid, server, tmp_path, monkeypatch):
@@ -584,7 +594,7 @@ def _sweep_call(tmp_path: Path, *levels: int, **kwargs: Any) -> TestCall:
 
 
 def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
-    return call.get("server_lifecycle")
+    return call["launch"].server_lifecycle
 
 
 #: What a boot round adds to the point on Magpie: no evaluation, and one request of the client round Magpie runs after
@@ -594,8 +604,8 @@ BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
 def _envs_handed_to_magpie(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
-    """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and ``base_extra_envs``
-    over the round's shape the process environment held while the call ran."""
+    """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and the recipe's
+    base variables over the round's shape the process environment held while the call ran."""
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
     shape = grid.shapes[next(index for index, recorded in enumerate(grid.calls) if recorded is call)]
@@ -604,11 +614,9 @@ def _envs_handed_to_magpie(grid: _Grid, tmp_path: Path, call: dict[str, Any]) ->
             os.environ.pop(key, None)
         os.environ.update(shape)
         candidate = _build_variant_yaml(
-            Path(call["base_yaml_path"]),
-            "",
+            call["recipe"],
             call["grid"][0],
             output_subdir=tmp_path / "candidates" / str(len(list((tmp_path / "candidates").glob("*")))),
-            base_extra_envs=call.get("base_extra_envs"),
         )
     return yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
 
@@ -619,15 +627,15 @@ def test_a_sweep_boots_the_server_once_and_measures_the_levels_from_high_to_low_
     names = [c["grid"][0].name for c in grid.calls]
     assert names == ["c8", "c8", "c4", "c2"]
     boot, *reuse = grid.calls
-    assert boot["lifecycle_boot_only"] is True and boot["base_extra_envs"] == BOOT_ENVS
-    assert all("base_extra_envs" not in c for c in reuse), "the rounds that measure carry nothing of the boot"
+    assert boot["launch"].lifecycle_boot_only is True and boot["recipe"].base.extra_envs == BOOT_ENVS
+    assert all(c["recipe"].base.extra_envs is None for c in reuse), "the rounds that measure carry nothing of the boot"
     assert _lifecycle(boot)["cleanup"] is False
-    assert all(c["server_already_ready"] is True for c in reuse)
+    assert all(c["launch"].server_already_ready is True for c in reuse)
     assert [_lifecycle(c)["cleanup"] for c in reuse] == [False, False, True]
     assert {(_lifecycle(c)["pid_dir"], _lifecycle(c)["port"]) for c in grid.calls} == {
         (str(tmp_path / "out" / "server_arm"), 8123)
     }
-    assert all(c["warmup_before_measure"] is False for c in grid.calls)
+    assert all(c["launch"].warmup_before_measure is False for c in grid.calls)
     assert [r.point for r in outcome.rounds] == [1, 0 + 2, 0]  # c8, c4, c2 by their positions in the call
     assert len(server.teardowns) == 1
 
@@ -654,12 +662,12 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
 
     outcome = _run(call)
 
-    boots = [c for c in grid.calls if c.get("lifecycle_boot_only")]
-    measured = [c for c in grid.calls if not c.get("lifecycle_boot_only")]
+    boots = [c for c in grid.calls if c["launch"].lifecycle_boot_only]
+    measured = [c for c in grid.calls if not c["launch"].lifecycle_boot_only]
     assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
     assert [c["grid"][0].name for c in measured] == ["c4", "c2"]
-    assert all(c["base_extra_envs"] == BOOT_ENVS for c in boots)
-    assert all("base_extra_envs" not in c for c in measured)
+    assert all(c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
+    assert all(c["recipe"].base.extra_envs is None for c in measured)
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
     for index, boot in enumerate(boots):
         level = (8, 4)[index]
@@ -680,7 +688,7 @@ def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp
     _run(_graded_sweep(tmp_path, 8, 4, run_eval="false"))
 
     boot, *measured = grid.calls
-    assert boot["base_extra_envs"] == BOOT_ENVS and all("base_extra_envs" not in c for c in measured)
+    assert boot["recipe"].base.extra_envs == BOOT_ENVS and all(c["recipe"].base.extra_envs is None for c in measured)
 
 
 def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server, tmp_path):
@@ -690,7 +698,7 @@ def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server
     _run(call)  # an accuracy sweep whose points say RUN_EVAL=true is accepted, and its boots run
 
     assert all(yaml.safe_load(Path(p).read_text())["benchmark"]["envs"]["RUN_EVAL"] == "true" for p in call.points)
-    assert grid.calls[0]["base_yaml_path"] == call.points[0]
+    assert grid.calls[0]["recipe"].base_yaml_path == call.points[0]
 
 
 @pytest.mark.parametrize(
@@ -704,8 +712,8 @@ def test_an_agentx_boot_carries_only_what_its_backend_says(grid, server, tmp_pat
     _run(_call(tmp_path, point, prep="conc_sweep"))
 
     boot, *measured = grid.calls
-    assert boot["base_extra_envs"] == boot_envs
-    assert all("base_extra_envs" not in c for c in measured)
+    assert boot["recipe"].base.extra_envs == boot_envs
+    assert all(c["recipe"].base.extra_envs is None for c in measured)
 
 
 def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
@@ -719,7 +727,7 @@ def test_a_round_the_lifecycle_holds_runs_from_the_point_itself_on_the_lifecycle
 
     _run(call)
 
-    assert [c["base_yaml_path"] for c in grid.calls] == [call.points[0], call.points[0], call.points[1]]
+    assert [c["recipe"].base_yaml_path for c in grid.calls] == [call.points[0], call.points[0], call.points[1]]
     assert all("PORT" not in config["benchmark"]["envs"] for config in grid.configs)
     assert {_lifecycle(c)["port"] for c in grid.calls} == {8123}
 
@@ -850,7 +858,7 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     imported: dict[str, str] = {}
 
     async def look(**kwargs):
-        envs = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())["benchmark"]["envs"]
+        envs = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())["benchmark"]["envs"]
         done = subprocess.run(
             [str(python), "-c", "import sglang.srt.a as a; print(a.f())"],
             capture_output=True,
@@ -875,14 +883,15 @@ def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
     """The point the toolbox renders for an AgentX session whose recipe launches with ``launch_envs``."""
     from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
-    from hyperloom.orchestrator.actions.executors import materialize_benchmark_config
+    from hyperloom.orchestrator.actions.executors import LaunchLayer, materialize_benchmark_config
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
     source = tmp_path / "agentx.yaml"
     workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=4)
     write_agentx_benchmark(source, workload)
-    return materialize_benchmark_config(source, tmp_path / "agentx", extra_envs={**launch_envs, "RUN_EVAL": "false"})
+    envs = {**launch_envs, "RUN_EVAL": "false"}
+    return materialize_benchmark_config(source, tmp_path / "agentx", launch=LaunchLayer(extra_envs=envs))
 
 
 def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
@@ -894,9 +903,7 @@ def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
     launched: dict[str, Any] = {}
 
     async def look(**kwargs):
-        candidate = _build_variant_yaml(
-            Path(kwargs["base_yaml_path"]), "", kwargs["grid"][0], output_subdir=tmp_path / "candidate"
-        )
+        candidate = _build_variant_yaml(kwargs["recipe"], kwargs["grid"][0], output_subdir=tmp_path / "candidate")
         launch = yaml.safe_load(candidate.read_text())["benchmark"]["agentx"]["launch_overrides"]
         done = subprocess.run(
             [launch.get("executable") or "python3", "-c", "import sglang.srt.a as a; print(a.f())"],
@@ -1016,7 +1023,7 @@ def test_a_profile_test_is_one_profiled_round_with_no_warmup_before_it(grid, tmp
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
-    assert kwargs["warmup_before_measure"] is False, "a profiled round is not a statistic: no warmup before it"
+    assert kwargs["launch"].warmup_before_measure is False, "a profiled round is not a statistic: no warmup before it"
     assert outcome.returncode == 0 and [r.phase for r in outcome.rounds] == ["measure"]
 
 
@@ -1169,7 +1176,7 @@ def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on
 
     (kwargs,) = grid.calls
     _own_port(grid.configs[0])
-    assert kwargs["warmup_before_measure"] is False and grid.configs[0] == yaml.safe_load(point.read_text())
+    assert kwargs["launch"].warmup_before_measure is False and grid.configs[0] == yaml.safe_load(point.read_text())
     assert outcome.returncode == 0
     assert (tmp_path / "out" / "profile" / "torch_trace" / capture / "rank0.pt.trace.json.gz").is_file()
 
@@ -1213,7 +1220,7 @@ class _Machine:
 
         variant = kwargs["grid"][0]
         slot = self.tmp_path / "slots" / str(len(self.ports))
-        launched = _build_variant_yaml(Path(kwargs["base_yaml_path"]), "", variant, output_subdir=slot)
+        launched = _build_variant_yaml(kwargs["recipe"], variant, output_subdir=slot)
         self.launches.append(benchmark := yaml.safe_load(launched.read_text())["benchmark"])
         self.ports.append(port := int((benchmark.get("envs") or {}).get("PORT", REUSE_PORT_DEFAULT)))
         workspace = slot / "benchmark_stub"
@@ -1323,9 +1330,9 @@ def test_a_repro_test_boots_the_server_runs_the_case_against_it_and_reports_the_
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["repro"]
-    assert kwargs["lifecycle_boot_only"] is True and kwargs["warmup_before_measure"] is False
-    assert kwargs["base_extra_envs"] == BOOT_ENVS, "the repro boot is not an evaluation"
-    assert kwargs["server_lifecycle"]["cleanup"] is False and kwargs["server_lifecycle"]["port"] == 8123
+    assert kwargs["launch"].lifecycle_boot_only is True and kwargs["launch"].warmup_before_measure is False
+    assert kwargs["recipe"].base.extra_envs == BOOT_ENVS, "the repro boot is not an evaluation"
+    assert kwargs["launch"].server_lifecycle["cleanup"] is False and kwargs["launch"].server_lifecycle["port"] == 8123
     assert (tmp_path / "case-ran").read_text() == "http://127.0.0.1:8123 /models/m\n"
     assert case.events == ["teardown after the case"], "the server stays up for the case and is reclaimed after it"
     assert read_verdict(tmp_path / "out") == verdict
@@ -1338,7 +1345,7 @@ def test_a_repro_test_runs_no_warmup_even_when_the_call_plans_one(grid, server, 
 
     _run(_repro_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
 
-    assert [c["warmup_before_measure"] for c in grid.calls] == [False]
+    assert [c["launch"].warmup_before_measure for c in grid.calls] == [False]
 
 
 @pytest.mark.parametrize(

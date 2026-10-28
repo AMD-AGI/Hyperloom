@@ -124,7 +124,7 @@ def test_more_short_answers_alone_never_refuse_a_candidate():
 @pytest.mark.parametrize(
     ("candidate", "parent"),
     [
-        ({**COUNTED, GRADED_UNSERVED_REQUESTS: 2.0}, COUNTED),
+        ({**COUNTED, GRADED_UNSERVED_REQUESTS: 3.0}, COUNTED),
         ({key: value for key, value in COUNTED.items() if key != GRADED_UNSERVED_REQUESTS}, COUNTED),
         (COUNTED, PARENT),
     ],

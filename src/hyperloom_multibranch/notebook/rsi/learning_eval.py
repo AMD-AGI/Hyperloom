@@ -250,7 +250,7 @@ async def read_session(notebook_root: Path, log_path: Path, archive: Path | None
     ``archive``, against the live lessons of the pool beside it too."""
 
     snapshot = await LocalNotebook(notebook_root, Writer(Role.OBSERVER, STUDY_WRITER)).snapshot()
-    log = read_jsonl(log_path, skip_malformed=True, skip_non_dict=True)
+    log = read_jsonl(log_path)
     if archive is None:
         return evaluate_learnings(snapshot, log)
     live = LessonPool.beside(TreeArchive(archive)).live()

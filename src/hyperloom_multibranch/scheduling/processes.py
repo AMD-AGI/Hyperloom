@@ -250,11 +250,7 @@ def _recorded(pids_file: Path) -> tuple[ProcessRecord, ...]:
     the records before it still say what runs; a line that is no record at all is a damaged file and raises."""
 
     rows = read_jsonl(
-        pids_file,
-        require_dict=True,
-        skip_malformed=True,
-        skip_non_dict=True,
-        on_error=lambda exc: logger.warning("skipping what cannot be read from %s: %s", pids_file, exc),
+        pids_file, on_error=lambda exc: logger.warning("skipping what cannot be read from %s: %s", pids_file, exc)
     )
     try:
         return tuple(decode(ProcessRecord, row) for row in rows)

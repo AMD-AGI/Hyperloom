@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from hyperloom.orchestrator.actions.executors import RoundWatch
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import TEST_ID, FakeForge, Make, build_rig, record_test
 from hyperloom_multibranch.toolbox.tools import JobStatus
@@ -35,16 +36,14 @@ class BuildingForge(FakeForge):
     __test__ = False
     seen: list[dict[str, object]] = field(default_factory=list)
 
-    def __call__(
-        self, cmd: list[str], *, env: dict[str, str], timeout: float, text: bool
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, cmd: list[str], *, env: dict[str, str], watch: RoundWatch) -> subprocess.CompletedProcess[str]:
         jit = Path(env.get("AITER_JIT_DIR") or Path(env["AITER_ROOT_DIR"]) / "aiter" / "jit")
         temporary = Path(env.get("TMPDIR") or tempfile.gettempdir())
         self.seen.append({"links": sorted(p.name for p in jit.iterdir()), "tmp_is_dir": temporary.is_dir()})
         (jit / BUILT).write_bytes(b"built by the tuner")
         (temporary / "aiter_compare").mkdir(exist_ok=True)
         (temporary / "aiter_compare" / "shape0.pt").write_bytes(b"x")
-        return super().__call__(cmd, env=env, timeout=timeout, text=text)
+        return super().__call__(cmd, env=env, watch=watch)
 
 
 @pytest_asyncio.fixture

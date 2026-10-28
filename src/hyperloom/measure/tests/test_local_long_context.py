@@ -76,7 +76,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
     outcome = _run(tmp_path, cache)
 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no second boot"
-    assert grid.calls[0]["server_lifecycle"]["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == ([0], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
     assert [e.status for e in found.prompts] == [PROMPT_OK] * 64 and found.served_context == 4096
@@ -93,7 +93,7 @@ def test_the_check_is_apart_from_the_test_its_files_and_its_result_directory_are
     _run(tmp_path, cache)
 
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [LONG_CONTEXT_DIR, "server_arm"]
-    assert grid.calls[0]["result_dir"] == str(tmp_path / "out" / "results")
+    assert grid.calls[0]["launch"].result_dir == str(tmp_path / "out" / "results")
 
 
 def test_the_check_adds_a_phase_for_its_questions_and_the_phases_still_tile_the_test(monkeypatch, tmp_path, cache):

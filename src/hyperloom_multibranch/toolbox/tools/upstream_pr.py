@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,20 @@ _TIMEOUT_SEC = 10.0
 _HTTP_UNAUTHORIZED = 401
 _HTTP_RATE_LIMITED = (403, 429)
 
-Enumerate = Callable[[CandidateSearchRequest], list[Candidate]]
+
+@dataclass(frozen=True)
+class UpstreamSearch:
+    """The framework agent's search ``request``, and the pull-request ``states`` the caller asked for."""
+
+    request: CandidateSearchRequest
+    states: tuple[str, ...] = ("open",)
+
+    def state_qualifier(self) -> str:
+        """``is:open`` when the caller asked for open pull requests only; any other state searches them all."""
+        return "is:open" if set(self.states) == {"open"} else ""
+
+
+Enumerate = Callable[[UpstreamSearch], list[Candidate]]
 
 
 class GitHubUnavailable(RuntimeError):
@@ -68,15 +82,16 @@ def _refusal(code: int) -> str:
     return f"GitHub answered the search with HTTP {code}"
 
 
-def _github_answer(search: CandidateSearchRequest) -> dict[str, Any]:
-    """GitHub's answer to ``search``, the query the framework agent's own search sends.
+def _github_answer(search: UpstreamSearch) -> dict[str, Any]:
+    """GitHub's answer to ``search``, the query the framework agent's own search sends, held to the caller's states.
 
     Raises:
         GitHubUnavailable: GitHub could not be asked, refused, or did not answer with a search result.
     """
-    terms = tuple(word.lower() for word in search.keywords if word.strip()) or PERF_TERMS
-    query = build_query(repo_slug(search.repo_url), search.pr_states, terms=terms)
-    url = f"{_SEARCH_URL}?" + urllib.parse.urlencode({"q": query, "per_page": str(search.max_search_candidates)})
+    request = search.request
+    terms = tuple(word.lower() for word in request.keywords if word.strip()) or PERF_TERMS
+    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
+    url = f"{_SEARCH_URL}?" + urllib.parse.urlencode({"q": query, "per_page": str(request.max_search_candidates)})
     request = urllib.request.Request(url, headers=auth_headers("application/vnd.github+json"))
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:  # nosec B310 - fixed GitHub HTTPS API URL.
@@ -92,28 +107,24 @@ def _github_answer(search: CandidateSearchRequest) -> dict[str, Any]:
     return answer
 
 
-def search_github(search: CandidateSearchRequest) -> list[Candidate]:
+def search_github(search: UpstreamSearch) -> list[Candidate]:
     """The pull requests GitHub's search finds for ``search``, best first.
 
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
     """
-    if _MONITOR in search.search_modes:
-        return enumerate_candidates(search)
+    if _MONITOR in search.request.search_modes:
+        return enumerate_candidates(search.request)
     found = []
     for item in _github_answer(search)["items"]:
         number = item.get("number") if isinstance(item, dict) else None
         if isinstance(number, int):
             found.append(
                 Candidate(
-                    ref=f"PR:{number}",
-                    repo=search.repo_url,
-                    source=_GITHUB,
-                    title=str(item.get("title") or ""),
-                    html_url=str(item.get("html_url") or ""),
+                    ref=f"PR:{number}", title=str(item.get("title") or ""), html_url=str(item.get("html_url") or "")
                 )
             )
-    return found[: search.max_search_candidates]
+    return found[: search.request.max_search_candidates]
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -124,7 +135,7 @@ def _strings(value: Any) -> tuple[str, ...]:
     return tuple(str(v).strip() for v in value if str(v).strip())
 
 
-def build_search(params: Mapping[str, Any]) -> CandidateSearchRequest:
+def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
     """Turn tool parameters into the framework agent's search request; raises :class:`InvalidRequest`."""
     repo_url = str(params.get("repo_url") or "").strip()
     try:
@@ -143,14 +154,14 @@ def build_search(params: Mapping[str, Any]) -> CandidateSearchRequest:
     if not set(states) <= _STATES:
         raise InvalidRequest(f"states must come from {sorted(_STATES)}")
     monitor_url = str(params.get("pr_monitor_url") or "").strip()
-    return CandidateSearchRequest(
+    request = CandidateSearchRequest(
         repo_url=repo_url,
         max_search_candidates=limit,
         pr_monitor=PRMonitorConfig(monitor_url) if monitor_url else None,
         keywords=_strings(params.get("keywords")),
         search_modes=(_MONITOR, _GITHUB) if monitor_url else (_GITHUB,),
-        pr_states=states,
     )
+    return UpstreamSearch(request, states)
 
 
 class UpstreamPrSearch:
@@ -174,9 +185,10 @@ class UpstreamPrSearch:
             raise ToolFailure(f"upstream PR search cannot use GitHub: {exc}") from exc
         except Exception as exc:
             raise ToolFailure(f"upstream PR search failed: {type(exc).__name__}: {exc}") from exc
-        prs = [{"ref": c.ref, "title": c.title, "url": c.html_url, "score": c.score, "source": c.source} for c in found]
+        prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found]
         top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
+        repo_url = search.request.repo_url
         return ToolOutput(
-            result={"repo_url": search.repo_url, "keywords": list(search.keywords), "candidates": prs},
-            summary=f"{len(prs)} upstream PR candidate(s) in {search.repo_url}{top}",
+            result={"repo_url": repo_url, "keywords": list(search.request.keywords), "candidates": prs},
+            summary=f"{len(prs)} upstream PR candidate(s) in {repo_url}{top}",
         )

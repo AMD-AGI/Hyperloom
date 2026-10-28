@@ -16,7 +16,14 @@ from .conc_sweep import ConcSweepExecutor, conc_sweep_executor
 from .report import ReportExecutor, report_executor
 from .session_breakdown import SessionBreakdownExecutor, session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
-from ._workload_envs import default_baseline_config, materialize_benchmark_config, materialize_config_with_envs
+from ._workload_envs import (
+    BenchmarkTarget,
+    LaunchLayer,
+    MaterializeOptions,
+    default_baseline_config,
+    materialize_benchmark_config,
+    materialize_config_with_envs,
+)
 from ._grid_base import GridVariant, VariantResult
 from ._inferencex_patcher import (
     benchmark_serving_path_in,
@@ -25,7 +32,7 @@ from ._inferencex_patcher import (
 )
 from ._grid_runner import _num_gpus_for_config as num_gpus_for_config
 from ._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
-from ._grid_runner import run_grid, sync_benchmark_timeout
+from ._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, sync_benchmark_timeout
 from ._ray_backend import strip_visible_devices_from_config
 from ._server_lifecycle import REUSE_PORT_DEFAULT, resolve_lifecycle_params, teardown_lifecycle_server
 from ._server_lifecycle import _assign_free_port as assign_free_port
@@ -35,11 +42,12 @@ from ._subprocess_kill import (
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     run_with_session_kill,
 )
 from .benchmark_result import harvest_leaked_artifacts
 from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
-from ._launch_evidence import build_launch_evidence
+from ._launch_evidence import RequestedLaunch, build_launch_evidence
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
@@ -52,15 +60,23 @@ __all__ = [
     "CONTEXT_COPY_REFUSAL",
     "AGENTX_PREFLIGHT_RETURNCODE",
     "BaselineExecutor",
+    "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "ConcSweepExecutor",
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "ExploreExecutor",
+    "GridLaunch",
+    "GridRecipe",
+    "GridStop",
     "GridVariant",
+    "LaunchLayer",
+    "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "REUSE_PORT_DEFAULT",
     "ReportExecutor",
+    "RequestedLaunch",
+    "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "SPECULATIVE_DECODING_PINNED",
     "SessionBreakdownExecutor",

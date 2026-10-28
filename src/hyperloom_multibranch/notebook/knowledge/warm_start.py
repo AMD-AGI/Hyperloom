@@ -76,7 +76,7 @@ from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, Sessio
 from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
-from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity
+from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity, serving_identity
 from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot, stack_added_kernels
 
 log = logging.getLogger(__name__)
@@ -420,17 +420,7 @@ def labels_of(canonical_id: str) -> dict[str, str]:
 def identity_labels(profile: SessionProfile) -> dict[str, str]:
     """The session's seven serving dimensions, as the KB labels them; ``ValueError`` as :func:`labels_of` raises it."""
 
-    return labels_of(
-        recipe_canonical_id(
-            model=profile.model,
-            hardware=profile.hardware,
-            framework_name=profile.framework,
-            model_type=profile.model_type,
-            architectures=list(profile.architectures),
-            framework_version=profile.framework_version,
-            precision=profile.precision,
-        )
-    )
+    return labels_of(recipe_canonical_id(serving_identity(profile)))
 
 
 def _config(envelope: Mapping[str, Any]) -> tuple[str, dict[str, str]]:

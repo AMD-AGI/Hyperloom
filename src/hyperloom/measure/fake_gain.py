@@ -24,6 +24,7 @@ from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
+    RequestedLaunch,
     SpeculativeDecodingPinnedError,
     build_launch_evidence,
     context_copy_refusal,
@@ -77,7 +78,7 @@ def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     is built from both like the main flow does, and main's #1884 check reads it.
     """
     evidence = build_launch_evidence(
-        config_path=point, actual_server_log=_server_log(round_dir), framework="", slot=round_dir
+        RequestedLaunch(config_path=point, framework=""), actual_server_log=_server_log(round_dir), slot=round_dir
     )
     measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)

@@ -151,7 +151,7 @@ def _sweep_scripts(clock: FakeClock) -> dict[str, Script]:
         return result(slot.name.removeprefix("variant_00_"), slot)
 
     def boot_then_measure(slot: Path, kwargs: dict[str, Any]):
-        if not kwargs.get("lifecycle_boot_only"):
+        if not kwargs["launch"].lifecycle_boot_only:
             return measure(slot, kwargs)
         clock.advance(5.0)
         Run(clock, slot).boot(70.0, log=Rounds(clock).vllm_log()).end(2.0)

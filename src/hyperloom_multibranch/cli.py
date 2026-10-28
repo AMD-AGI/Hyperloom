@@ -475,8 +475,10 @@ def recipe_kb_from_env() -> RemoteRecipeClient | None:
     """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
     :class:`EnvironmentIncomplete` when only one is."""
 
+    if not any(os.environ.get(name, "").strip() for name in ("KB_STORE_URL", "KB_STORE_TOKEN")):
+        return None
     try:
-        return RemoteRecipeClient.from_env_optional()
+        return RemoteRecipeClient.from_env()
     except RemoteRecipeConfigurationError as exc:
         raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
 

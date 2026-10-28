@@ -96,12 +96,10 @@ class _Rounds:
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         variant = kwargs["grid"][0]
         candidate = _build_variant_yaml(
-            Path(kwargs["base_yaml_path"]),
-            kwargs["base_extra_args"],
+            kwargs["recipe"],
             variant,
             output_subdir=self.tmp_path / "candidates" / str(len(self.rounds)),
-            server_lifecycle=kwargs.get("server_lifecycle"),
-            base_extra_envs=kwargs.get("base_extra_envs"),
+            server_lifecycle=kwargs["launch"].server_lifecycle,
         )
         envs = yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
         if self.copies_launchers is not None:
@@ -113,8 +111,8 @@ class _Rounds:
         self.rounds.append(
             {
                 "name": variant.name,
-                "boot": bool(kwargs.get("lifecycle_boot_only")),
-                "ready": bool(kwargs.get("server_already_ready")),
+                "boot": bool(kwargs["launch"].lifecycle_boot_only),
+                "ready": bool(kwargs["launch"].server_already_ready),
                 "envs": envs,
                 "tables_present": [Path(part).read_text() for part in tables if Path(part).is_file()],
             }

@@ -37,7 +37,7 @@ def archive_decisions(transcript: Path, archive: TreeArchive, session_id: str) -
     """Keep the exchanges of the judge's ``transcript`` beside ``archive`` for ``session_id``; how many, ``None`` when
     the session's are kept already."""
 
-    lines = read_jsonl(transcript, skip_malformed=True, skip_non_dict=True) if transcript.is_file() else []
+    lines = read_jsonl(transcript) if transcript.is_file() else []
     calls = [sanitize_shared_knowledge({key: line.get(key) for key in KEPT}) for line in lines]
     document = {"format": DECISIONS_FORMAT, "session_id": session_id, _CALLS: calls}
     return len(calls) if publish_once(_path(archive, session_id), encode_json(document)) else None

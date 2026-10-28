@@ -138,7 +138,7 @@ class Entry:
 
 def _read_entries(path: Path) -> list[Entry]:
     entries: list[Entry] = []
-    for row in read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True):
+    for row in read_jsonl(path):
         try:
             entries.append(Entry.from_dict(row))
         except (KeyError, TypeError, ValueError) as exc:

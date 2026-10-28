@@ -29,6 +29,7 @@ import yaml
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.measure.tests.hosted_fixtures import runner_template, spec_context
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
+from hyperloom.orchestrator.actions.executors import RoundWatch
 from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, read_holders
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -208,9 +209,7 @@ class FakeForge:
     demands: list[dict[str, Any]] = field(default_factory=list)
     started: threading.Event = field(default_factory=threading.Event)
 
-    def __call__(
-        self, cmd: list[str], *, env: dict[str, str], timeout: float, text: bool
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, cmd: list[str], *, env: dict[str, str], watch: RoundWatch) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(cmd), dict(env)))
         wanted = flags(cmd)
         self.demands.append(json.loads(Path(wanted["--demand"]).read_text(encoding="utf-8")))

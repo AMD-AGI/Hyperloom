@@ -34,6 +34,8 @@ from hyperloom.measure.points import _limit_agentx_capture
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import (
+    BenchmarkTarget,
+    LaunchLayer,
     default_baseline_config,
     materialize_benchmark_config,
     materialize_config_with_envs,
@@ -301,7 +303,7 @@ def agentx_canonical(tmp_path, model):
 def test_an_agentx_canonical_is_what_the_main_flow_renders_for_the_workload(tmp_path, model, agentx_canonical):
     source = agentx_source(tmp_path / "single" / "benchmark.yaml", 32)
 
-    main_flow = materialize_benchmark_config(source, tmp_path / "main", model_path=str(model))
+    main_flow = materialize_benchmark_config(source, tmp_path / "main", target=BenchmarkTarget(model_path=str(model)))
 
     rendered = load(tmp_path / "canonical" / "canonical.yaml")
     assert CANONICAL_FILE == "canonical.yaml", "the name callers read the rendered canonical by"
@@ -326,9 +328,8 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        extra_server_args=SERVER_ARGS,
-        extra_envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"},
-        model_path=str(model),
+        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "RUN_EVAL": "false"}),
+        target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
     assert rendered == load(main_flow)
@@ -368,9 +369,8 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     main_flow = materialize_benchmark_config(
         source,
         tmp_path / "main",
-        extra_server_args=SERVER_ARGS,
-        extra_envs={"RUN_EVAL": "false"},
-        model_path=str(model),
+        launch=LaunchLayer(SERVER_ARGS, {"RUN_EVAL": "false"}),
+        target=BenchmarkTarget(model_path=str(model)),
     )
     _limit_agentx_capture(main_flow)  # the one difference: the window is sized to the result's cap
     enable_profile(main_flow)
@@ -417,9 +417,8 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     expected = materialize_config_with_envs(
         default_baseline_config(),
         tmp_path / "direct",
-        extra_server_args=SERVER_ARGS,
-        extra_envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"},
-        model_path=str(model),
+        launch=LaunchLayer(SERVER_ARGS, {"HSA_FORCE_FINE_GRAIN_PCIE": "1", "CONC": "8", "RUN_EVAL": "true"}),
+        target=BenchmarkTarget(model_path=str(model)),
     )
     rendered = load(point)
     assert rendered == load(expected)

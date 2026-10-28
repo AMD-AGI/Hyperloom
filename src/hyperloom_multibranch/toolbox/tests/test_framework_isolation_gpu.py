@@ -136,7 +136,7 @@ class _AiterAsServer:
         self.said: list[str] = []
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
-        config = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())
+        config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         env = {**os.environ, **{str(k): str(v) for k, v in config["benchmark"]["envs"].items()}}
         done = subprocess.run([sys.executable, "-c", _AITER_CALL], env=env, capture_output=True, text=True, timeout=600)
         self.said.append(done.stdout + done.stderr)

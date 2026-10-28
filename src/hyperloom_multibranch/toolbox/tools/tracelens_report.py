@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
-from hyperloom.orchestrator.actions.executors import run_with_session_kill
+from hyperloom.orchestrator.actions.executors import RoundWatch, run_with_session_kill
 from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs, is_capture_fragment
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
@@ -167,7 +167,7 @@ def _text(payload: Mapping[str, Any], *keys: str) -> str:
 def _sh(run: _Run, step: str, cmd: list[str]) -> None:
     """Run ``cmd`` in the TraceLens checkout, in its own session reaped on every exit path; its output goes to the log."""
     try:
-        done = run_with_session_kill(cmd, cwd=str(run.tracelens_root), timeout=run.timeout_sec, text=True)
+        done = run_with_session_kill(cmd, cwd=str(run.tracelens_root), watch=RoundWatch(timeout=run.timeout_sec))
     except subprocess.TimeoutExpired:
         raise _Refused("subprocess_timeout", f"{step} timed out after {run.timeout_sec}s") from None
     with run.log.open("a", encoding=_ENCODING) as handle:

@@ -20,7 +20,7 @@ import yaml
 
 from hyperloom.measure import local
 from hyperloom.measure.runner import run as runner_flow
-from hyperloom.orchestrator.actions.executors import VariantResult
+from hyperloom.orchestrator.actions.executors import GridRecipe, VariantResult
 
 PORT = 8123
 CASE_TIMEOUT_SEC = 2.0
@@ -28,12 +28,12 @@ BOOT_FAILURE_LOG = "ModuleNotFoundError: No module named 'sglang_kernel'\n"
 
 
 async def fake_run_grid(
-    *, grid: list[Any], output_root: Path, base_yaml_path: Path, **kwargs: Any
+    *, grid: list[Any], output_root: Path, recipe: GridRecipe, **kwargs: Any
 ) -> list[VariantResult]:
     name = grid[0].name
     workspace = Path(output_root) / name / "benchmark_stub_20261014_000000"
     workspace.mkdir(parents=True)
-    envs = (yaml.safe_load(Path(base_yaml_path).read_text()).get("benchmark") or {}).get("envs") or {}
+    envs = (yaml.safe_load(Path(recipe.base_yaml_path).read_text()).get("benchmark") or {}).get("envs") or {}
     if envs.get("FAKE_BOOT") == "fail":
         log = workspace / "server.log"
         log.write_text(BOOT_FAILURE_LOG)
@@ -49,7 +49,7 @@ async def fake_run_grid(
                 error=BOOT_FAILURE_LOG,
             )
         ]
-    assert kwargs.get("lifecycle_boot_only") is True, "a repro test boots the server and measures nothing"
+    assert kwargs["launch"].lifecycle_boot_only is True, "a repro test boots the server and measures nothing"
     return [
         VariantResult(
             name=name,

@@ -83,7 +83,7 @@ class _Server:
         self.files: list[set[str]] = []  # the listed tables that existed while the server ran
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
-        config = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())
+        config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
         unset = list(kwargs["grid"][0].unset_envs)
         env = {**os.environ, **{str(k): str(v) for k, v in server_environment(config).items()}}
         env = {k: v for k, v in env.items() if k not in unset}

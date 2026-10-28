@@ -100,7 +100,11 @@ from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     REUSE_PORT_DEFAULT,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    GridLaunch,
+    GridRecipe,
+    GridStop,
     GridVariant,
+    LaunchLayer,
     VariantResult,
     assign_free_port,
     resolve_lifecycle_params,
@@ -590,24 +594,20 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
         yield pinned
 
 
-async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResult:
-    """One ``run_grid`` call for the point at index ``point``."""
-    call = run.call
-    with _free_port_for(call.points[point], kwargs.get("server_lifecycle")) as base_yaml, _booting(run, point, kwargs):
+async def _grid(run: _Run, point: int, name: str, **launch: Any) -> VariantResult:
+    """One ``run_grid`` call for the point at index ``point``: ``launch`` its GridLaunch, and its base_extra_envs."""
+    call, envs = run.call, launch.pop("base_extra_envs", None)
+    with _free_port_for(call.points[point], launch.get("server_lifecycle")) as base_yaml, _booting(run, point, launch):
         started = time.time()
         results = await run_grid(
-            base_yaml_path=base_yaml,
-            base_extra_args="",
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
-            magpie_python=call.magpie_python or None,
-            result_dir=call.result_dir,
-            session_deadline_sec=call.session_deadline_sec,
-            serving_lease=call.serving_lease,
-            **kwargs,
+            recipe=GridRecipe(base_yaml, base=LaunchLayer(extra_envs=envs)),
+            launch=GridLaunch(call.magpie_python or None, call.result_dir, call.serving_lease, **launch),
+            stop=GridStop(session_deadline_sec=call.session_deadline_sec),
         )
         ended = time.time()
-    _stamp_round(run, point, _round_shape(run, point, name, kwargs, results[0]), (started, ended))
+    _stamp_round(run, point, _round_shape(run, point, name, launch, results[0]), (started, ended))
     return results[0]
 
 

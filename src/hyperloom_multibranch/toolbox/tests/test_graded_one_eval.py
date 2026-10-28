@@ -40,8 +40,8 @@ class _Grid:
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         name = kwargs["grid"][0].name
-        config = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())
-        envs = {**config["benchmark"]["envs"], **(kwargs.get("base_extra_envs") or {})}
+        config = yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text())
+        envs = {**config["benchmark"]["envs"], **(kwargs["recipe"].base.extra_envs or {})}
         workspace = self.root / f"variant_00_{name}" / "benchmark_fake_1"
         workspace.mkdir(parents=True)
         report = {

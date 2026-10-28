@@ -29,6 +29,7 @@ from hyperloom.measure.socket import TestCall
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    RoundWatch,
     VariantResult,
     run_with_session_kill,
 )
@@ -83,7 +84,9 @@ class _ServerGrid:
         slot.mkdir(parents=True, exist_ok=True)
         log = slot / "server.log"
         proc = await asyncio.to_thread(
-            run_with_session_kill, [sys.executable, "-c", self.script, str(log)], server_log_path=str(log), timeout=30
+            run_with_session_kill,
+            [sys.executable, "-c", self.script, str(log)],
+            watch=RoundWatch(timeout=30, server_log_path=str(log)),
         )
         stopped = proc.returncode == ORCHESTRATOR_CANCELLED_RETURNCODE
         return [

@@ -96,7 +96,7 @@ class Shell:
 
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         self.commands.append(cmd)
-        assert Path(kwargs["cwd"]).is_dir() and kwargs["timeout"] == 3600
+        assert Path(kwargs["cwd"]).is_dir() and kwargs["watch"].timeout == 3600
         if SPLITTER in cmd:
             out = Path(cmd[cmd.index("-o") + 1])
             out.mkdir(parents=True)

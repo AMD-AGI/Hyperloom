@@ -202,7 +202,8 @@ def _optimize_options() -> set[str]:
 
     source = (Path(hyperloom.__file__).parent / "inference_optimizer" / "cli" / "parser.py").read_text()
     start = source.index('sub.add_parser("optimize"')
-    optimize = source[start : source.index("sub.add_parser(", start + 1)]
+    end = source.find("sub.add_parser(", start + 1)
+    optimize = source[start : end if end != -1 else None]
     options: set[str] = set()
     for call in optimize.split("add_argument(")[1:]:
         head = call.split("help=")[0]

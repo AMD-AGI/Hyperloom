@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +54,9 @@ from hyperloom.measure.surface import (
     point_values,
 )
 from hyperloom.orchestrator.actions.executors import (
+    BenchmarkTarget,
+    LaunchLayer,
+    MaterializeOptions,
     default_baseline_config,
     materialize_benchmark_config,
 )
@@ -93,22 +96,40 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
     An AgentX benchmark carries its concurrency in ``benchmark.envs``, not in the server environment the pins feed, so
     ``CONC`` is taken out of them and written there. The AgentX materializer hands every variable it is given to the
     server, so the variables are held to the allowlist the InferenceX renderer applies first; one that does not pass
-    is missing from the point, and :func:`_check_launch_present` refuses it.
+    is missing from the point, and :func:`_check_launch_present` refuses it. ``inferencex_path`` names the InferenceX
+    checkout the point runs from; the renderer reads it from ``INFERENCEX_PATH`` alone, so it is written over that.
     """
 
-    options = {**canonical.materialize, **overrides}
+    options = {**canonical.materialize, **overrides, "out_name": name}
+    inferencex = str(options.pop("inferencex_path", None) or "").strip()
     concurrency = None
     if canonical.agentx:
         pins = dict(options.get("extra_envs") or {})
         concurrency = pins.pop(ENV_CONC)
         options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
-    path = materialize_benchmark_config(canonical.config_path, out_dir, out_name=name, **options)
+    path = materialize_benchmark_config(canonical.config_path, out_dir, **_materialize_args(options))
     with path.open(encoding=_UTF8) as handle:
         config = yaml.safe_load(handle) or {}
     if concurrency is not None:
         config["benchmark"]["envs"][ENV_CONC] = int(concurrency)
+    if inferencex:
+        config["benchmark"]["inferencex_path"] = inferencex
+    if concurrency is not None or inferencex:
         path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
     return config
+
+
+def _materialize_args(options: Mapping[str, Any]) -> dict[str, Any]:
+    """``options``, keyword by keyword, as the launch, target and options values the renderer takes them in."""
+
+    left = dict(options)
+    split = {
+        name: kind(**{item.name: left.pop(item.name) for item in fields(kind) if item.name in left})
+        for name, kind in (("launch", LaunchLayer), ("target", BenchmarkTarget), ("options", MaterializeOptions))
+    }
+    if left:
+        raise TypeError(f"the renderer takes no {', '.join(sorted(left))}")
+    return split
 
 
 def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict[str, Any]:

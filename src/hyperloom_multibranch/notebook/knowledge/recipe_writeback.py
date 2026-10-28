@@ -38,7 +38,7 @@ from pathlib import Path
 
 from hyperloom.common.perf_metric import GRADED_TOTAL
 from hyperloom.contracts.recipe import Recipe, RecipeError
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -89,12 +89,10 @@ class FinalRecipe:
     blobs: BlobStore | None = None
 
 
-def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
-    """The canonical id and scope a session's record is filed under; raises on a scope the KB cannot partition on."""
+def serving_identity(profile: SessionProfile) -> RecipeIdentity:
+    """The session's seven serving dimensions, which its recipe id is built from."""
 
-    scope = RecipeScope(profile.kernel_optimizer, profile.tp, profile.conc, profile.isl, profile.osl)
-    scope.validate()
-    canonical_id = recipe_canonical_id(
+    return RecipeIdentity(
         model=profile.model,
         hardware=profile.hardware,
         framework_name=profile.framework,
@@ -102,9 +100,15 @@ def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
         architectures=list(profile.architectures),
         framework_version=profile.framework_version,
         precision=profile.precision,
-        scheme=scope.identity_scheme,
     )
-    return canonical_id, scope
+
+
+def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
+    """The canonical id and scope a session's record is filed under; raises on a scope the KB cannot partition on."""
+
+    scope = RecipeScope(profile.kernel_optimizer, profile.tp, profile.conc, profile.isl, profile.osl)
+    scope.validate()
+    return recipe_canonical_id(serving_identity(profile), scheme=scope.identity_scheme), scope
 
 
 def _metrics(snapshot: NotebookSnapshot, final: FinalRecipe, scope: RecipeScope) -> dict[str, float]:
@@ -222,7 +226,7 @@ def stage_files(recipe: Recipe, files_root: Path, staging: Path, blobs: BlobStor
         destination = staging / ref
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
-        return Artifact(path=ref, source=destination, kind=ref.split("/", 1)[0])
+        return Artifact(path=ref, source=destination)
 
     artifacts = [
         stage(patch.path, overlay_ref(stack, member, patch.path), patch.sha256)
@@ -288,5 +292,6 @@ __all__ = [
     "knowledge_document",
     "publish_final_recipe",
     "recipe_identity",
+    "serving_identity",
     "stage_files",
 ]

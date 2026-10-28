@@ -1398,7 +1398,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
 def _as_another_pod(pids: Path) -> None:
     """Move every record of ``MB-pids.jsonl`` to a pod that is gone, as the kill of a session's pod leaves them."""
 
-    rows = [{**row, "owner_scope": ANOTHER_POD} for row in read_jsonl(pids, require_dict=True)]
+    rows = [{**row, "owner_scope": ANOTHER_POD} for row in read_jsonl(pids)]
     pids.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
 
@@ -1411,7 +1411,7 @@ async def test_final_only_finishes_a_session_that_was_killed_before_it_could_clo
     stage.layout.report.unlink()
 
     # The scheduler recorded itself when the run started, so the directory names the process the session ran as.
-    assert os.getpid() in [row["pid"] for row in read_jsonl(stage.layout.pids, require_dict=True)]
+    assert os.getpid() in [row["pid"] for row in read_jsonl(stage.layout.pids)]
 
     _as_another_pod(stage.layout.pids)
     persisted = persisted_run(stage.layout.root)

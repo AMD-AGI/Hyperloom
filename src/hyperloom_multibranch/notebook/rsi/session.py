@@ -448,7 +448,7 @@ def _standings(snapshot: NotebookSnapshot, pool: LessonPool | None, log_path: Pa
     if log_path is None or not log_path.is_file():
         return CloseStep(SKIPPED, NO_RETRIEVAL_LOG)
     try:
-        standings = session_standings(snapshot, pool, read_jsonl(log_path, skip_malformed=True, skip_non_dict=True))
+        standings = session_standings(snapshot, pool, read_jsonl(log_path))
         if not standings.lessons:
             return CloseStep(SKIPPED, NO_LESSON_SHOWN)
         written = pool.record_standings(standings)

@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest
+from hyperloom.agents.framework.models import Candidate
 from hyperloom.agents.framework.sources import SourceConfigError
 from hyperloom_multibranch.toolbox.tools import InvalidRequest, JobStatus, ToolJobs, ToolRequest, UpstreamPrSearch
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
-from hyperloom_multibranch.toolbox.tools.upstream_pr import build_search
+from hyperloom_multibranch.toolbox.tools.upstream_pr import UpstreamSearch, build_search
 
 REPO = "https://github.com/sgl-project/sglang"
 
@@ -21,12 +21,17 @@ def req(**params: object) -> ToolRequest:
 
 def test_the_search_is_github_only_until_a_pr_monitor_is_named() -> None:
     search = build_search({"repo_url": REPO, "keywords": "moe, gemm", "limit": 3, "states": ["merged"]})
-    assert search.search_modes == ("github",)
-    assert search.keywords == ("moe", "gemm")
-    assert (search.max_search_candidates, search.pr_states, search.pr_monitor) == (3, ("merged",), None)
+    assert search.request.search_modes == ("github",)
+    assert search.request.keywords == ("moe", "gemm")
+    assert (search.request.max_search_candidates, search.states, search.request.pr_monitor) == (3, ("merged",), None)
     monitored = build_search({"repo_url": REPO, "pr_monitor_url": "http://monitor.example/"})
-    assert monitored.search_modes == ("pr_monitor", "github")
-    assert monitored.pr_monitor is not None
+    assert monitored.request.search_modes == ("pr_monitor", "github")
+    assert monitored.request.pr_monitor is not None
+
+
+def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
+    assert build_search({"repo_url": REPO}).state_qualifier() == "is:open"
+    assert build_search({"repo_url": REPO, "states": ["open", "merged"]}).state_qualifier() == ""
 
 
 @pytest.mark.parametrize(
@@ -52,20 +57,18 @@ async def run(tmp_path: Path, enumerate_fn, request: ToolRequest) -> tuple[JobSt
 
 
 async def test_candidates_come_back_through_the_inbox(tmp_path: Path) -> None:
-    seen: list[CandidateSearchRequest] = []
+    seen: list[UpstreamSearch] = []
 
-    def enumerate_fn(search: CandidateSearchRequest) -> list[Candidate]:
+    def enumerate_fn(search: UpstreamSearch) -> list[Candidate]:
         seen.append(search)
-        return [Candidate("PR:42", REPO, "github", "Faster MoE decode", f"{REPO}/pull/42", 0.8)]
+        return [Candidate("PR:42", "Faster MoE decode", f"{REPO}/pull/42")]
 
     status, sink = await run(tmp_path, enumerate_fn, req(keywords=["moe"]))
     assert status is JobStatus.SUCCEEDED
-    assert seen[0].keywords == ("moe",)
+    assert seen[0].request.keywords == ("moe",)
     assert sink.pointers[0].summary == f"succeeded: 1 upstream PR candidate(s) in {REPO}; top: PR:42 Faster MoE decode"
     record = json.loads(Path(sink.pointers[0].location).read_text())
-    assert record["result"]["candidates"] == [
-        {"ref": "PR:42", "title": "Faster MoE decode", "url": f"{REPO}/pull/42", "score": 0.8, "source": "github"}
-    ]
+    assert record["result"]["candidates"] == [{"ref": "PR:42", "title": "Faster MoE decode", "url": f"{REPO}/pull/42"}]
 
 
 async def test_no_match_is_a_success_with_an_empty_list(tmp_path: Path) -> None:
@@ -75,7 +78,7 @@ async def test_no_match_is_a_success_with_an_empty_list(tmp_path: Path) -> None:
 
 
 async def test_a_misconfigured_source_fails_with_that_reason(tmp_path: Path) -> None:
-    def broken(search: CandidateSearchRequest) -> list[Candidate]:
+    def broken(search: UpstreamSearch) -> list[Candidate]:
         raise SourceConfigError("no pr_monitor config")
 
     status, sink = await run(tmp_path, broken, req())
@@ -84,7 +87,7 @@ async def test_a_misconfigured_source_fails_with_that_reason(tmp_path: Path) -> 
 
 
 async def test_an_unreachable_backend_fails_instead_of_crashing(tmp_path: Path) -> None:
-    def down(search: CandidateSearchRequest) -> list[Candidate]:
+    def down(search: UpstreamSearch) -> list[Candidate]:
         raise TimeoutError("pr_monitor unreachable")
 
     status, sink = await run(tmp_path, down, req())

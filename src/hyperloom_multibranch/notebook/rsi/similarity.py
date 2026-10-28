@@ -16,7 +16,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 from hyperloom_multibranch.notebook.knowledge.warm_start import MODEL_LABEL, labels_of
@@ -86,7 +86,9 @@ def model_name(model: str) -> str:
     """``model`` as the Recipe KB names it, so a local path, a hub id and the bare name of one model are one name."""
 
     labels = labels_of(
-        recipe_canonical_id(model=model, hardware="", framework_name="", framework_version="", precision="")
+        recipe_canonical_id(
+            RecipeIdentity(model=model, hardware="", framework_name="", framework_version="", precision="")
+        )
     )
     return labels[MODEL_LABEL]
 

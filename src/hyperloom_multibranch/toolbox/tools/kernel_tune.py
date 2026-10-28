@@ -46,7 +46,7 @@ from typing import Any
 from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
 from hyperloom.common.outside_facts import AITER_META_MARKER_DIR, AITER_META_WHEEL_DIR, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
-from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC, run_with_session_kill
+from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC, RoundWatch, run_with_session_kill
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.toolbox import BranchLease, RequestRejected
@@ -274,7 +274,9 @@ async def _reaped(worker: asyncio.Future[Any]) -> None:
 async def _forge(cmd: list[str], env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
     """Run the Forge command in a session of its own, ended with the job: a cancelled job has the child's process group
     killed, and this returns only when the thread that runs it ended (or the reap budget did)."""
-    worker = asyncio.ensure_future(asyncio.to_thread(run_with_session_kill, cmd, env=env, timeout=timeout, text=True))
+    worker = asyncio.ensure_future(
+        asyncio.to_thread(run_with_session_kill, cmd, env=env, watch=RoundWatch(timeout=timeout))
+    )
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:

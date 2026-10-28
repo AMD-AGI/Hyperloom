@@ -88,7 +88,7 @@ class _CheckGrid(_Grid):
 
     async def __call__(self, **kwargs: Any):
         name = kwargs["grid"][0].name
-        if kwargs.get("server_lifecycle") and self.servers.live is None and name not in self.answers:
+        if kwargs["launch"].server_lifecycle and self.servers.live is None and name not in self.answers:
             self.servers.start(int(name.removeprefix(self.prefix)) if name.startswith(self.prefix) else 0)
         return await super().__call__(**kwargs)
 
@@ -128,7 +128,7 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     outcome = _run(tmp_path, cache)
 
     assert _names(grid) == ["test"], "no second boot"
-    assert grid.calls[0]["server_lifecycle"]["cleanup"] is False, "Magpie leaves the server up for the check"
+    assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
     assert (grid.servers.started, grid.servers.teardowns) == ([0], 1), "one server, torn down after the answers"
     found = read_outputs(tmp_path / "out")
     assert [(e.index, e.status, e.boot_seconds) for e in found.processes] == [(0, OK, 0.0)]
@@ -144,8 +144,10 @@ def test_the_extra_processes_boot_fresh_servers_after_the_tests_server_is_torn_d
 
     assert _names(grid) == ["test", "short1", "short2"]
     boots = grid.calls[1:]
-    assert all(c["lifecycle_boot_only"] is True and c["base_extra_envs"] == BOOT_ENVS for c in boots)
-    assert all(c["server_lifecycle"]["cleanup"] is False and c["warmup_before_measure"] is False for c in boots)
+    assert all(c["launch"].lifecycle_boot_only is True and c["recipe"].base.extra_envs == BOOT_ENVS for c in boots)
+    assert all(
+        c["launch"].server_lifecycle["cleanup"] is False and c["launch"].warmup_before_measure is False for c in boots
+    )
     assert grid.servers.started == [0, 1, 2] and grid.servers.teardowns == 3, "each server is stopped before the next"
     assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK] * 3
 
@@ -164,9 +166,11 @@ def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_di
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["server_arm", SHORT_PROMPTS_DIR]
     out = (tmp_path / "out").resolve()
     boot = grid.calls[1]
-    assert boot["result_dir"] is None and out not in Path(boot["output_root"]).resolve().parents
+    assert boot["launch"].result_dir is None and out not in Path(boot["output_root"]).resolve().parents
     assert grid.calls[0]["output_root"] == tmp_path / "out"
-    assert grid.calls[0]["result_dir"] == str(tmp_path / "out" / "results"), "the test's round keeps its directory"
+    assert grid.calls[0]["launch"].result_dir == str(tmp_path / "out" / "results"), (
+        "the test's round keeps its directory"
+    )
     assert plain.calls and len(plain.calls) == 1
 
 
@@ -225,8 +229,11 @@ def test_a_graded_test_answers_after_its_measured_round_on_the_server_its_warmup
     )
 
     assert _names(grid) == ["warmup", "test"]
-    assert [c["server_lifecycle"]["cleanup"] for c in grid.calls] == [False, False]
-    assert grid.calls[1]["base_extra_envs"] == {"RUN_EVAL": "false"} and grid.calls[1]["server_already_ready"] is True
+    assert [c["launch"].server_lifecycle["cleanup"] for c in grid.calls] == [False, False]
+    assert (
+        grid.calls[1]["recipe"].base.extra_envs == {"RUN_EVAL": "false"}
+        and grid.calls[1]["launch"].server_already_ready is True
+    )
     assert grid.servers.started == [0] and [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
     assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy", "measure"]
 
@@ -239,8 +246,8 @@ def test_an_agentx_test_holds_its_server_for_the_check_and_reports_no_accuracy_r
         _call(tmp_path, point, short_prompts=staged_plan(cache), rounds=RoundPlan(warmup_rounds=1))
     )
 
-    assert _names(grid) == ["warmup", "test"] and grid.calls[1]["server_already_ready"] is True
-    assert grid.calls[1].get("base_extra_envs") is None, "an AgentX round carries nothing of an evaluation"
+    assert _names(grid) == ["warmup", "test"] and grid.calls[1]["launch"].server_already_ready is True
+    assert grid.calls[1]["recipe"].base.extra_envs is None, "an AgentX round carries nothing of an evaluation"
     assert [r.phase for r in outcome.rounds] == ["warmup", "measure"]
     assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK]
 
@@ -336,7 +343,9 @@ def test_a_sweep_answers_on_its_arms_server_after_its_last_level(monkeypatch, tm
     )
 
     assert _names(grid) == ["c4", "c4", "c2", "short1"]
-    assert grid.calls[2]["server_lifecycle"]["cleanup"] is False, "the last level leaves the server up for the check"
+    assert grid.calls[2]["launch"].server_lifecycle["cleanup"] is False, (
+        "the last level leaves the server up for the check"
+    )
     assert grid.servers.started == [0, 1] and len(read_outputs(tmp_path / "out").completed) == 2
 
 
@@ -375,5 +384,5 @@ def test_a_call_with_no_plan_is_run_exactly_as_before(monkeypatch, tmp_path):
 
     LocalMeasurementBackend().run_test(_call(tmp_path))
 
-    assert _names(grid) == ["test"] and grid.calls[0].get("server_lifecycle") is None
+    assert _names(grid) == ["test"] and grid.calls[0]["launch"].server_lifecycle is None
     assert not (tmp_path / "out" / SHORT_PROMPTS_DIR).exists()

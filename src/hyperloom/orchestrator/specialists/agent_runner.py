@@ -638,12 +638,7 @@ class LocalAgentRunner:
         try:
             session.outcome = await self._dispatcher._reap_loop(
                 session.proc,
-                ReapWatch(
-                    workspace=spec.workspace,
-                    done_files=tuple(spec.done_paths),
-                    heartbeat_file=spec.heartbeat_path,
-                    task_id=spec.task_id,
-                ),
+                ReapWatch(workspace=spec.workspace, done_files=tuple(spec.done_paths), task_id=spec.task_id),
                 deadline=session.deadline,
                 started=session.started_mono,
             )
