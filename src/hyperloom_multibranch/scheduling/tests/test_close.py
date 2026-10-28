@@ -321,7 +321,7 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``spend.llm_usd`` must count the playbook author's call (#121 c3498); a snapshot taken before it would miss it."""
+    """``spend.llm_usd`` counts the playbook author's call, which CLOSE records after its first snapshot."""
 
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
     before = (await blackboard.snapshot()).llm_usd
