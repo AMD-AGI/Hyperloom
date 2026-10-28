@@ -93,6 +93,7 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     assert baseline.bar_pct == pytest.approx(2.0)
     assert baseline.accuracy == pytest.approx(0.90)
     assert baseline.short_prompt_floor is None, "no root test ran the short-prompt check"
+    assert baseline.short_prompt_processes == 3, "one process a root test"
 
 
 @pytest.mark.parametrize(

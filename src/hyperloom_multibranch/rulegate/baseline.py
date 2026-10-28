@@ -57,7 +57,10 @@ async def write_inferencex_baseline(
 async def read_inferencex_baseline(store: CommitQuery) -> InferenceXBaseline:
     current = await store.baseline()
     return InferenceXBaseline(
-        current.threshold_pct[GRADED_OUTPUT], current.values[ACCURACY_SCORE], current.short_prompt_floor
+        current.threshold_pct[GRADED_OUTPUT],
+        current.values[ACCURACY_SCORE],
+        current.short_prompt_floor,
+        len(current.request_ids),
     )
 
 

@@ -107,11 +107,13 @@ class InferenceXReading:
 @dataclass(frozen=True)
 class InferenceXBaseline:
     """What every candidate of a session is held to: the bar on its throughput gain, the baselines' eval score, and the
-    most short-prompt inconsistency they measured (``None`` when none did)."""
+    most short-prompt inconsistency they measured (``None`` when none did) over ``short_prompt_processes`` server
+    processes, one a root test."""
 
     bar_pct: float
     accuracy: float
     short_prompt_floor: int | None = None
+    short_prompt_processes: int = 0
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.bar_pct) and self.bar_pct > 0) or finite_score(self.accuracy) is None:

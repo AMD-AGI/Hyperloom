@@ -138,16 +138,27 @@ async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked()
 @pytest.mark.parametrize(
     ("floor", "check", "refused"),
     [
-        (1, short_prompt_check(0, 2, 0, 0, 0, 0), True),
-        (0, short_prompt_check(0, 0, 1, 0, 0, 0), True),
-        (2, short_prompt_check(0, 2, 0, 0, 0, 0), False),
-        (0, short_prompt_check(0, 0, 0, 0, 0, 0), False),
-        (None, short_prompt_check(0, 9, 0, 0, 0, 0), False),
+        (1, short_prompt_check(0, 2, 0), True),
+        (0, short_prompt_check(0, 1, 0), True),
+        (2, short_prompt_check(0, 2, 0), False),
+        (0, short_prompt_check(0, 0, 0), False),
+        (None, short_prompt_check(0, 9, 0), False),
         (1, None, False),
         (1, short_prompt_check(0, 9, complete=False), False),
         (1, short_prompt_check(0, complete=False), False),
+        (1, short_prompt_check(0, 9, 0, 0), False),
     ],
-    ids=["above", "above-zero", "at", "clean", "no-floor", "no-check", "incomplete", "nothing-compared"],
+    ids=[
+        "above",
+        "above-zero",
+        "at",
+        "clean",
+        "no-floor",
+        "no-check",
+        "incomplete",
+        "nothing-compared",
+        "more-processes-than-the-floor",
+    ],
 )
 async def test_an_inferencex_candidate_is_refused_only_above_the_baseline_short_prompt_floor(floor, check, refused):
     judgement = await InferenceXRule(_Baseline(floor), 64).first(_checked(1000.0, check), PARENT)
@@ -159,15 +170,15 @@ async def test_an_inferencex_candidate_is_refused_only_above_the_baseline_short_
 @pytest.mark.parametrize(
     ("retest_check", "verdict", "action"),
     [
-        (short_prompt_check(0, 3, 0, 0, 0, 0), Verdict.BLOCKED, Action.DIAGNOSE),
-        (short_prompt_check(0, 0, 0, 0, 0, 0), Verdict.INCONCLUSIVE, Action.RECORD_ONLY),
+        (short_prompt_check(0, 3, 0), Verdict.BLOCKED, Action.DIAGNOSE),
+        (short_prompt_check(0, 0, 0), Verdict.INCONCLUSIVE, Action.RECORD_ONLY),
         (None, Verdict.INCONCLUSIVE, Action.RECORD_ONLY),
     ],
     ids=["both-inconsistent", "retest-consistent", "retest-unchecked"],
 )
 async def test_a_gain_inconsistent_beyond_the_floor_on_both_measurements_is_blocked(retest_check, verdict, action):
     rule = InferenceXRule(_Baseline(1), 64)
-    first = await rule.first(_checked(1100.0, short_prompt_check(0, 3, 0, 0, 0, 0)), PARENT)
+    first = await rule.first(_checked(1100.0, short_prompt_check(0, 3, 0)), PARENT)
     assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == (SHORT_PROMPTS_INCONSISTENT,)
 
     settled = await rule.retest(first, _checked(1100.0, retest_check, request_id="r2", retest_of="r1"), PARENT)

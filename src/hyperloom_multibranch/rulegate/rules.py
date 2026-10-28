@@ -100,7 +100,7 @@ class InferenceXRule(Rule):
     def _candidate(self, record: TestRecord, baseline: inferencex.InferenceXBaseline) -> inferencex.InferenceXReading:
         result = _result(record)
         dropped = dropped_requests(result, self.concurrency)
-        inconsistent = exceeds_floor(result, baseline.short_prompt_floor)
+        inconsistent = exceeds_floor(result, baseline.short_prompt_floor, baseline.short_prompt_processes)
         long_context = result.long_context
         long_context_dropped = long_context is not None and refuses(long_context, long_context.root)
         skipped = record.request.purpose is Purpose.EXPLORE and not ran_accuracy(record.request, self)

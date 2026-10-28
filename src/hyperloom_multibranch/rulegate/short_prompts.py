@@ -5,8 +5,9 @@
 baseline processes did.
 
 The floor is the inconsistency the root's BASELINE tests measured; a candidate whose complete check is more inconsistent
-than that shows the defect. A session without a floor, a candidate without a check, and a check that is incomplete or
-compared fewer than two processes refuse nothing: the check stays recorded on the test's result.
+than that shows the defect. A session without a floor, a candidate without a check, and a check that is incomplete,
+compared fewer than two processes or pooled more processes than the floor did refuse nothing: the check stays recorded
+on the test's result.
 """
 
 from __future__ import annotations
@@ -29,9 +30,14 @@ def baseline_floor(baselines: Iterable[TestResult]) -> int | None:
     return max(measured, default=None)
 
 
-def exceeds_floor(result: TestResult, floor: int | None) -> bool:
+def exceeds_floor(result: TestResult, floor: int | None, floor_processes: int) -> bool:
+    """Whether the candidate's pooled check is more inconsistent than ``floor``, the most the root's
+    ``floor_processes`` processes showed. The most one process differs from the consensus grows with the processes
+    pooled, so a pool larger than the floor's is not compared and refuses nothing."""
     check = result.short_prompt_consistency
     if floor is None or check is None or check.status != SHORT_PROMPTS_COMPLETE or check.inconsistency is None:
+        return False
+    if check.pooled is None or check.pooled.count > floor_processes:
         return False
     return check.inconsistency > floor
 
