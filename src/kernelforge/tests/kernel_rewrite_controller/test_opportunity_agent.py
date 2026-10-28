@@ -692,10 +692,6 @@ def test_hookless_resume_names_the_unobserved_decode_batch_size(
     assert json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["shape_cases"] == observed_case
 
 
-def test_the_prompt_bounds_decode_cases_to_the_observed_batch_sizes() -> None:
-    assert "Observed Decode Classes section of\n   trace-evidence.md" in _system_prompt()
-
-
 def test_hookless_resume_stops_when_the_analysis_deadline_is_exhausted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

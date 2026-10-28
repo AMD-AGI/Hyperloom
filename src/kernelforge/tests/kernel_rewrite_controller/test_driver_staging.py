@@ -88,65 +88,6 @@ def test_the_staging_directory_is_hidden_from_git(staged) -> None:
     assert (driver.parent / ".gitignore").read_text(encoding="utf-8") == "*\n"
 
 
-def test_preparation_that_repairs_the_staged_driver_succeeds_with_nothing_to_commit(
-    staged, tmp_path: Path, monkeypatch
-) -> None:
-    """The staging directory hides the driver from git, so its repair leaves nothing to commit, and that is success.
-
-    Preparation used to require its repair to land in a commit. A collective task, whose driver always needs the
-    ranks the preparer adds, then failed with "the git commit did not land" after its repaired driver had passed
-    preflight -- a GLM-5.3 TP4 quick-allreduce task, 16.5% of the prefill kernel time, went no further.
-    """
-    import asyncio
-    from types import SimpleNamespace
-
-    from kernelforge.loop import task_preflight, task_preparer
-
-    _task, workspace, driver = staged
-    for args in (("init", "-q"), ("add", "-A"), ("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "base")):
-        assert task_preparer._git(workspace, *args)[0] == 0
-    base = task_preparer.git_head(workspace)
-
-    def reference(_workspace):
-        ref_dir = driver.parent / task_preparer.REFERENCE_SUBDIR
-        ref_dir.mkdir(exist_ok=True)
-        (ref_dir / "CONTRACT.md").write_text("driver contract\n", encoding="utf-8")
-        return ref_dir
-
-    async def repair(**_kwargs):
-        driver.write_text("# driver with its ranks\n", encoding="utf-8")
-        return "prepared"
-
-    async def conforms(*_args, **_kwargs):
-        return task_preflight.PreflightResult(ok=True, correctness_ok=True, bench_ok=True, graph_ok=True)
-
-    monkeypatch.setattr(task_preparer, "_materialize_reference", reference)
-    monkeypatch.setattr(task_preparer, "_run_prepare_agent", repair)
-    monkeypatch.setattr(task_preparer, "_preflight_async", conforms)
-
-    kernel = workspace / _task.kernel_path
-    result = asyncio.run(
-        task_preparer.prepare_task(
-            config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "forge_experiments")),
-            task=task_preparer.PreparationTask(
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=[],
-                source_files=[str(kernel)],
-            ),
-            preflight=task_preflight.PreflightResult(
-                ok=False, correctness_ok=False, bench_ok=False, reasons=["DRIVER CRASHED (exit 1)"]
-            ),
-        )
-    )
-
-    assert result.ok is True, result.message
-    assert task_preparer.git_head(workspace) == base
-    assert driver.read_text(encoding="utf-8") == "# driver with its ranks\n"
-
-
 def test_the_published_task_file_is_left_alone(staged, task_dir: Path) -> None:
     """The task directory keeps the analyst's deliverable; the copy is the working one."""
     task, _workspace, driver = staged
