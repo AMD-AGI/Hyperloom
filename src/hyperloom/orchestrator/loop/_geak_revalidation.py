@@ -775,9 +775,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         fallback_result: dict[str, Any]
         try:
-            # Routed via ``_coord`` so a test / caller that overrides
-            # ``coordinator._validate_geak_via_geak_harness`` still wins
-            # (bare-name delegation resolves it back onto this class).
             fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
         except Exception as exc:  # isolation boundary: one GEAK candidate's harness fallback
             log.exception("geak 2a GEAK-harness fallback failed")

@@ -1367,18 +1367,11 @@ class KernelPhase(CoordinatorCollaborator):
         )
 
     def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
-        state = self.shared_state
-        cb = state.current_best
         try:
             env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
             raise EnvSpecUnserializable(str(exc)) from exc
-        state_measurement = state.current_best_measurement or None
-        measurement = (
-            state_measurement
-            if isinstance(state_measurement, Mapping) and state_measurement
-            else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
-        )
+        measurement = self.shared_state.current_best_measurement
         config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
         if agentx and not str(config.get("server_launch_flags") or "").strip():
             evidence = measurement.get("launch_evidence")
@@ -1406,7 +1399,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _same_config_reference(
         self, measurement: Mapping[str, Any], *, expected_identity: str, agentx: bool
     ) -> dict[str, Any]:
-        measured_identity = _first_text(measurement, "declared_launch_identity", "launch_identity")
+        measured_identity = _first_text(measurement, "declared_launch_identity")
         identity_matches = bool(expected_identity and expected_identity == measured_identity)
         evidence = measurement.get("launch_evidence")
         evidence = dict(evidence) if isinstance(evidence, Mapping) else {}

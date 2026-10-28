@@ -643,11 +643,11 @@ def _card_errors(
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
-    """Return the canonical corpus shape, until a measurement replaces it."""
+    """Return the canonical corpus shape."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
 
     if is_mlperf_backend():
-        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        # The MLPerf corpus has no published length distribution, only its trajectory count.
         return {
             "corpus_loader": MLPERF_CORPUS,
             "corpus_entries": mlperf_trajectories(),
@@ -766,8 +766,7 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
-        # overwritten by the measured shape after every aiperf run.
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,

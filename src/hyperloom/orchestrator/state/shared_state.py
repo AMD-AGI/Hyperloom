@@ -497,9 +497,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # GPU power record: {"declared", "observed": {gpu: {power_cap_w, perf_level, sclk_max_mhz}}, "node" (NPM),
     # "applied", and with --allow-shared-npm-node "shared_npm_node" (the cards left out)}. Asserted on resume.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
-    # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
-    # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
-    # state.osl placeholders. Absent on synthetic sessions.
+    # AgentX corpus shape: written at seed from canonical constants. Read by semantic consumers (prompts, manifest,
+    # reports) instead of the inert state.isl / state.osl placeholders. Absent on synthetic sessions.
     agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
