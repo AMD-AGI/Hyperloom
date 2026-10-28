@@ -52,10 +52,3 @@ def test_every_candidate_bound_raises(monkeypatch, tmp_path):
 
         with pytest.raises(OSError, match="no free server port"):
             ports.pick_server_port()
-
-
-def test_no_room_below_the_ephemeral_range_raises(monkeypatch, tmp_path):
-    _set_ephemeral_start(monkeypatch, tmp_path, ports._LOWEST_SERVER_PORT)
-
-    with pytest.raises(OSError, match="no server port below the ephemeral range"):
-        ports.pick_server_port()

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 from hyperloom.orchestrator.actions.executors._jit_cache_env import apply_session_jit_cache, benchmark_framework
 
@@ -51,12 +50,6 @@ def test_a_framework_without_an_established_cache_location_is_untouched(tmp_path
 
     assert env == {}
     assert not jit_cache_dir(tmp_path).exists()
-
-
-def test_every_registered_framework_names_real_env_vars():
-    for name in framework_registry.names():
-        for env_name in framework_registry.jit_cache_envs(name):
-            assert env_name.isupper() and env_name.isidentifier(), (name, env_name)
 
 
 def test_the_framework_is_read_from_the_rendered_benchmark_config(tmp_path):

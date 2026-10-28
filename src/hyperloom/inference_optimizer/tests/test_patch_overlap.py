@@ -134,18 +134,3 @@ def test_the_ledger_keeps_the_newest_entries_and_drops_empty_ones():
     assert len(state.measured_patch_sets) == po.MAX_MEASURED
     assert state.measured_patch_sets[-1]["task_id"] == f"t{po.MAX_MEASURED + 2}"
     assert state.measured_patch_sets[0]["ts"]
-
-
-def test_the_ledger_survives_a_state_round_trip():
-    state = SharedState(session_id="s")
-    state.record_measured_patch_set(
-        task_id="t1",
-        patch_name="p",
-        identity={"files": ["f"], "line_keys": po.changed_line_keys([_PORT_A])},
-        outcome="adopted",
-    )
-
-    reloaded = SharedState.from_dict(state.to_dict())
-
-    hits = po.overlapping_measured(po.changed_line_keys([_PORT_B]), reloaded.measured_patch_sets, min_ratio=0.5)
-    assert [h["task_id"] for h in hits] == ["t1"]

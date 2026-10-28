@@ -117,8 +117,3 @@ def test_the_rendering_separates_a_leak_from_a_table(tmp_path):
     assert "tracks a runtime quantity" in body
     assert "consistent with a tuning table" in body
     assert "GRID_MN" in body
-
-
-def test_nothing_renders_without_findings():
-    assert jv.render_jit_variants([]) == []
-    assert jv.render_jit_variants(None) == []

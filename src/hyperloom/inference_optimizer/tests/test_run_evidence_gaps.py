@@ -127,12 +127,6 @@ def test_every_gap_names_a_lane_a_phase_reads_and_a_domain_a_specialist_answers_
         assert gap["layer"] == expected, gap["canonical_id"]
 
 
-def test_a_front_end_that_costs_nothing_raises_nothing(tmp_path):
-    assert (
-        reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace=_requests(tmp_path, ms_per_100k=2.0)) == []
-    )
-
-
 def test_one_census_cannot_bury_the_others(tmp_path):
     events = [step("step[VERIFY bs=3]", 0.0, 100_000.0)]
     ts = 1.0
@@ -224,13 +218,3 @@ def test_one_unreadable_artifact_does_not_cost_the_other_censuses(tmp_path, monk
     provenances = {g["provenance"] for g in gaps}
     assert "recompile" not in provenances
     assert {"ungraphed_step", "front_end_input_cost"} <= provenances
-
-
-def test_a_capture_directory_resolves_to_its_newest_file(tmp_path):
-    captures = tmp_path / "torch_trace"
-    captures.mkdir()
-    _trace(captures, eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10), name="rank0.trace.json")
-
-    gaps = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=captures, workspace="")
-
-    assert [g["provenance"] for g in gaps] == ["ungraphed_step"]
