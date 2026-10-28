@@ -432,7 +432,16 @@ _DEV_SANDBOX = (
     "cards, numbered from 0 (never set HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES), listen "
     "only on the ports the lease names, and write under the lease's root, never in your worktree. Release it with "
     "dev_sandbox_release as soon as you are done: the runtime takes it back when it expires, sits idle or tests "
-    "queue for cards. When a lease is refused, submit the full test instead of waiting."
+    "queue for cards. When a lease is refused, submit the full test instead of waiting.\n\n"
+    "Forge, a kernel optimizer you may call on a hot kernel, runs for hours: lease it with term=long (up to 6 h, kept "
+    "while its process runs). forge-fuse finds a fusion in the code by itself, or around a kernel you name, from a "
+    "decode trace without CUDA graphs; forge-loop rewrites one kernel you name (to FlyDSL, to assembly, or HIP to HIP, "
+    "with --kernel-backend) and forge-rewrite-by-flydsl ports one to FlyDSL. Run them as `python -m kernelforge.cli "
+    "<command>` (--help lists the options) with dev_sandbox_start, on a copy of your worktree under the lease's root "
+    "(git worktree add there; Forge commits and switches branches in its workspace, so never point it at your own "
+    "worktree), with a deadline before the lease ends. While it runs, go on with other work. When it ends, apply its "
+    "patch to your worktree (git apply), add the environment flag that enables the result to your test's envs, and "
+    "submit_test: Forge's own timings never enter the gate. Run it again on top of a result to go further."
 )
 
 

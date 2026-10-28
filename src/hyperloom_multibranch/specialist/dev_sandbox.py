@@ -5,9 +5,11 @@
 runs and to time a kernel before a full test, through five MCP tools.
 
 The session lends at most :attr:`DevLimits.cap` at once, one a branch, and none while a test waits for cards; a cap
-of 0, the default, lends none. A lease lasts at most :attr:`DevLimits.max_s`, and the runtime takes it back, never the model:
-when it expires, when the branch made no call for :attr:`DevLimits.idle_s` with nothing left running (or for
-:attr:`DevLimits.idle_running_s` with something), and once tests have queued for :attr:`DevLimits.queued_s`. A branch
+of 0, the default, lends none. A short lease lasts at most :attr:`DevLimits.max_s`, and the runtime takes it back, never
+the model: when it expires, when the branch made no call for :attr:`DevLimits.idle_s` with nothing left running (or for
+:attr:`DevLimits.idle_running_s` with something), and once tests have queued for :attr:`DevLimits.queued_s`. A long lease,
+for a tool that runs for hours (Forge), lasts at most :attr:`DevLimits.long_max_s` and is taken back only when it
+expires, or when nothing it started runs and it sat idle. A branch
 whose lease ended leases again only after :attr:`DevLimits.cooldown_s`. The branch's sessions give its lease back when
 a run ends or is stopped (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`); the toolbox's close
 releases whatever is left.
@@ -28,6 +30,7 @@ import re
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, TypeVar
 
@@ -62,6 +65,13 @@ LINES = 100
 MINUTE = 60.0
 
 
+class LeaseTerm(str, Enum):
+    """How long a lease may last: ``short`` for a check or a kernel timing, ``long`` for a run of hours."""
+
+    SHORT = "short"
+    LONG = "long"
+
+
 @dataclass(frozen=True)
 class DevLimits:
     """How many leases the session lends at once, how long one lasts and when the runtime takes it back; how long a
@@ -69,6 +79,9 @@ class DevLimits:
 
     cap: int = 0
     max_s: float = 1800.0
+    #: A long lease, for work that runs for hours (a Forge fusion or rewrite): taken back only when it expires, or once
+    #: nothing it started runs and it sat idle.
+    long_max_s: float = 6 * 3600.0
     queued_s: float = 300.0
     cooldown_s: float = 600.0
     idle_s: float = 600.0
@@ -161,6 +174,7 @@ class _Lease:
     granted: float
     expires: float
     last_call: float
+    term: LeaseTerm = LeaseTerm.SHORT
     queued_since: float | None = None
     processes: dict[int, AgentProcess] = field(default_factory=dict)
 
@@ -189,7 +203,7 @@ class DevLeases:
     def limits(self) -> DevLimits:
         return self._limits
 
-    async def lease(self, branch: str, cards: int, minutes: float) -> Granted:
+    async def lease(self, branch: str, cards: int, minutes: float, term: LeaseTerm = LeaseTerm.SHORT) -> Granted:
         self._reclaimed.pop(branch, None)
         await self._admit(branch)
         slot = min(set(range(self._limits.cap)) - set(self._slots.values()))
@@ -206,10 +220,12 @@ class DevLeases:
             await self._toolbox.release_branch_sandbox(lease.lease_id)
             raise
         now = self._clock()
-        seconds = min(minutes * MINUTE, self._limits.max_s)
-        self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now)
+        seconds = min(minutes * MINUTE, self._limits.long_max_s if term is LeaseTerm.LONG else self._limits.max_s)
+        self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now, term)
         self._watching()
-        await self._note(branch, f"dev sandbox leased: {cards} card(s) for up to {seconds / MINUTE:g} min")
+        await self._note(
+            branch, f"dev sandbox leased ({term.value}): {cards} card(s) for up to {seconds / MINUTE:g} min"
+        )
         return Granted(lease.lease_id, len(lease.gpu_ids), str(lease.root), self._ports(slot), seconds)
 
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
@@ -272,6 +288,9 @@ class DevLeases:
         limits, quiet = self._limits, now - held.last_call
         if now >= held.expires:
             return "it expired"
+        if held.term is LeaseTerm.LONG:
+            alive = held.sandbox.alive()
+            return "" if alive or quiet < limits.idle_s else f"it sat idle for {quiet / MINUTE:.0f} min"
         if held.queued_since is not None and now - held.queued_since >= limits.queued_s:
             return f"tests waited {limits.queued_s / MINUTE:g} min for its cards"
         if quiet >= limits.idle_running_s or quiet >= limits.idle_s and not held.sandbox.alive():
@@ -435,23 +454,37 @@ class _DevTool:
 
 
 def _lease_tool(leases: DevLeases) -> _DevTool:
-    most = leases.limits.max_s / MINUTE
+    most, longest = leases.limits.max_s / MINUTE, leases.limits.long_max_s / MINUTE
     return _DevTool(
         "dev_sandbox_lease",
-        "Lease cards of your own for a while, to check a change runs and time a kernel before a full test; refused "
-        "while tests wait for cards. Its results never enter the gate.",
+        "Lease cards of your own for a while, to check a change runs and time a kernel before a full test, or, as a "
+        "long lease, to run a tool for hours (a Forge fusion or rewrite); refused while tests wait for cards. Its "
+        "results never enter the gate.",
         _schema(
             {
                 "cards": {"type": _INTEGER, "minimum": 1, "description": "How many cards (1)."},
                 "minutes": {
                     "type": _NUMBER,
                     "exclusiveMinimum": 0,
-                    "description": f"How long, at most {most:g} ({most:g}).",
+                    "description": f"How long, at most {most:g} short or {longest:g} long (the most).",
+                },
+                "term": {
+                    "type": "string",
+                    "enum": [term.value for term in LeaseTerm],
+                    "description": "short (default): taken back when idle or when tests queue for its cards; long: "
+                    "kept while a process it started runs, until it expires.",
                 },
             }
         ),
-        lambda branch, a: leases.lease(branch, a.get("cards", 1), a.get("minutes", math.inf)),
+        lambda branch, a: leases.lease(branch, a.get("cards", 1), a.get("minutes", math.inf), _term(a)),
     )
+
+
+def _term(arguments: dict[str, Any]) -> LeaseTerm:
+    try:
+        return LeaseTerm(arguments.get("term", LeaseTerm.SHORT.value))
+    except ValueError as error:
+        raise InvalidParamsError(f"term is short or long, not {arguments.get('term')!r}") from error
 
 
 def _run_tool(leases: DevLeases) -> _DevTool:

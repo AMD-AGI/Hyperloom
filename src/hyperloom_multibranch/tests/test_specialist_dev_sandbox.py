@@ -302,6 +302,42 @@ async def test_the_runtime_takes_back_a_lease_once_tests_queued_long_enough(rig)
     assert "tests" in refused
 
 
+async def test_a_long_lease_lasts_up_to_six_hours(rig):
+    server = rig.build().server
+    granted = await server.call("dev_sandbox_lease", term="long", minutes=10 * 60)
+    assert granted["expires_in_s"] == LIMITS.long_max_s == 6 * 60 * MINUTE
+
+
+async def test_a_long_lease_running_a_process_outlasts_queued_tests_and_quiet_calls(rig):
+    built = rig.build()
+    await built.server.call("dev_sandbox_lease", term="long", minutes=6 * 60)
+    await built.server.call("dev_sandbox_start", command="forge-fuse --trace t.json")
+    rig.toolbox.queued = 1
+    await built.leases.sweep()
+    rig.clock.now += 3 * 60 * MINUTE
+    await built.leases.sweep()
+    assert rig.toolbox.released == [], "a long lease with its process running stays while tests queue and it is quiet"
+    rig.sandboxes[B1].processes[0].code = 0
+    rig.clock.now += LIMITS.idle_s
+    await built.leases.sweep()
+    assert rig.toolbox.released == ["lease-1"], "with nothing left running it is idle and taken back"
+
+
+async def test_a_long_lease_still_ends_when_it_expires(rig):
+    built = rig.build()
+    await built.server.call("dev_sandbox_lease", term="long", minutes=60)
+    await built.server.call("dev_sandbox_start", command="forge-loop")
+    rig.clock.now += 60 * MINUTE
+    await built.leases.sweep()
+    assert rig.toolbox.released == ["lease-1"]
+
+
+async def test_a_lease_term_is_short_or_long(rig):
+    server = rig.build().server
+    with pytest.raises(Exception, match="term"):
+        await server.call("dev_sandbox_lease", term="forever")
+
+
 async def test_the_watch_reclaims_without_a_call(rig):
     built = rig.build(limits=replace(LIMITS, poll_s=0.01))
     await built.server.call("dev_sandbox_lease", minutes=1)
@@ -375,6 +411,8 @@ def test_the_role_prompt_teaches_the_dev_sandbox_when_the_session_has_one():
     assert "You have no GPU of your own" not in role
     for said in ("dev_sandbox_lease", "never enter the gate", "dev_sandbox_release", "HIP_VISIBLE_DEVICES"):
         assert said in role
+    for said in ("term=long", "forge-fuse", "forge-loop", "git worktree add", "git apply"):
+        assert said in role, "a session with dev sandboxes teaches Forge on a long lease"
 
 
 # -- the real sandbox against a real worktree ---------------------------------------------------------------------
