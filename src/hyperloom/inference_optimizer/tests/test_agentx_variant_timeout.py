@@ -15,16 +15,16 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridRecipe,
     GridVariant,
     _build_variant_yaml,
-    composed_benchmark_timeout_sec,
     sync_benchmark_timeout,
     variant_conc,
 )
+from hyperloom.orchestrator.actions.executors.benchmark_config import composed_benchmark_timeout_sec
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     resolve_benchmark_timeouts,
     sync_agentx_phase_wait,
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
-from hyperloom.orchestrator.kernel.conc_sweep import _budget_skip_result
+from hyperloom.orchestrator.kernel._rung_outcomes import _budget_skip_result
 
 
 @pytest.mark.parametrize("declared", [1800, 2400, 36000])

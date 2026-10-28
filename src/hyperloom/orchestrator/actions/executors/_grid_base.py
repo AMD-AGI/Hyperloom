@@ -8,10 +8,21 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.env_safety import (
+    BLOCKED_EXTERNAL_ENV_NAMES,
+    filter_untrusted_env_mapping,
+    is_allowed_variant_env_key,
+)
+from hyperloom.common.overlay import is_safe_path_entry
+from hyperloom.inference_optimizer.grid_server_args import (
+    SGLANG_MOE_RUNNER_BACKEND_RE,
+    moe_runner_requires_aiter,
+    remove_moe_runner_backend_arg,
+)
 
 log = logging.getLogger(__name__)
 
@@ -190,3 +201,65 @@ class VariantResult:
             "launch_evidence_path": self.launch_evidence_path,
             "granted_cap_sec": self.granted_cap_sec,
         }
+
+
+def apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
+    """Apply accepted environment edits before the candidate's set/unset operations."""
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    for k in to_str_list(base_unset_envs):
+        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            continue
+        envs.pop(k, None)
+    for k, v in (base_extra_envs or {}).items():
+        envs[str(k)] = str(v)
+    base_envs = dict(envs)
+    for k in getattr(variant, "unset_envs", []) or []:
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
+        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+            continue
+        envs.pop(str(k), None)
+    for k, v in variant.extra_envs.items():
+        envs[str(k)] = str(v)
+    return base_envs
+
+
+def runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str | None, variant: GridVariant) -> str:
+    """``combined`` with a MoE runner backend this checkpoint cannot run dropped."""
+    if not combined or not SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
+        return combined
+    if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
+        return combined
+    log.warning(
+        "grid: dropping inherited --moe-runner-backend for variant %s: "
+        "this checkpoint's MoE quant scheme is only implemented on the "
+        "aiter runner and would crash on the first forward pass.",
+        variant.name,
+    )
+    return remove_moe_runner_backend_arg(combined)
+
+
+def importable_overlay_dir(variant: GridVariant) -> str:
+    """This variant's overlay directory, or ``""`` when it names none the server may import."""
+    overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+    if not overlay:
+        return ""
+    if is_safe_path_entry(overlay) and Path(overlay).is_dir():
+        return overlay
+    log.warning(
+        "grid: dropping unsafe overlay_pythonpath %r (not a single existing directory / contains separator or traversal)",
+        overlay,
+    )
+    return ""
+
+
+def pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
+    """Put the ROCm and venv tool directories ahead of a xDiT launch's ``PATH``."""
+    if str(framework or "").strip().lower() != "xdit":
+        return
+    parts = [p for p in str(envs.get("PATH", "") or "").split(":") if p]
+    for essential in ("/opt/rocm/bin", "/venv/bin"):
+        if essential not in parts:
+            parts.insert(0, essential)
+    envs["PATH"] = ":".join(parts)
