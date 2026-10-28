@@ -10,29 +10,30 @@ from hyperloom.contracts.consistency import (
     SHORT_PROMPTS_INCOMPLETE,
     OutputCounts,
     OutputDifference,
+    PooledConsistency,
     ShortPromptConsistency,
 )
 
 _DIFFERENCE = OutputDifference(1, "s05", "sequential", 7, 1, "abc", "aXY")
 
 
-def short_prompt_check(*mismatches: int, planned: int | None = None) -> ShortPromptConsistency:
-    """A check whose completed processes answer ``mismatches`` prompts each differently from their consensus; it is
-    incomplete when fewer than ``planned`` processes completed, and compares nothing below two."""
-    planned = planned or max(len(mismatches), 1)
+def short_prompt_check(*mismatches: int, complete: bool = True) -> ShortPromptConsistency:
+    """A check whose recipe's pool holds processes that answer ``mismatches`` prompts each differently from their
+    consensus (the pool compares nothing below two); ``complete`` says whether the test's own server answered every
+    prompt."""
     counts = OutputCounts(mismatches, _DIFFERENCE if any(mismatches) else None) if len(mismatches) >= 2 else None
-    complete = len(mismatches) == planned
+    names = tuple(f"tests/t{index}/attempt-1#0" for index in range(len(mismatches)))
+    pooled = PooledConsistency("sha256:" + "1" * 64, names, "tokens" if counts is not None else "", counts)
     return ShortPromptConsistency(
         status=SHORT_PROMPTS_COMPLETE if complete else SHORT_PROMPTS_INCOMPLETE,
-        reason="" if complete else "a process did not answer every prompt",
+        reason="" if complete else "the test's own server did not answer every prompt",
         prompt_set_sha256="a" * 64,
         prompts=64,
         max_new_tokens=32,
         trigger=("purpose baseline",),
-        processes_planned=planned,
-        processes=tuple(range(len(mismatches))),
-        miss_probability_one_third=0.088,
-        compared_by="tokens" if counts is not None else "",
-        self_consistency=counts,
+        processes=(0,) if complete else (),
+        miss_probability_one_third=2 / 3 if complete else 1.0,
+        compared_by="tokens" if complete else "",
         outputs="short_prompts/outputs.json",
+        pooled=pooled,
     )

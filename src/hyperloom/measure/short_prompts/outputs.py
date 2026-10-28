@@ -5,13 +5,13 @@
 
 ``<output_dir>/short_prompts/outputs.json``::
 
-    {"schema": 1, "prompt_set": KEY, "prompts_sha256": SHA, "max_new_tokens": N, "processes_planned": N, "stopped": "",
+    {"schema": 2, "prompt_set": KEY, "prompts_sha256": SHA, "max_new_tokens": N,
      "prompts": [{"id": ID, "mode": MODE, "length": TOKENS}, ...],
      "processes": [{"index": 0, "status": "ok", "reason": "", "boot_seconds": S, "query_seconds": S,
                     "outputs": {"<prompt id>": {"text": T, "tokens": [..] or null, "finish_reason": R}}}, ...]}
 
-A process that did not answer every prompt is ``failed`` with a ``reason`` and holds no outputs; ``stopped`` says why fewer
-processes than planned were tried. The toolbox reads the file from the landed bundle, so every field is read strictly.
+The one process is the test's own server (index 0). A process that did not answer every prompt is ``failed`` with a
+``reason`` and holds no outputs. The toolbox reads the file from the landed bundle, so every field is read strictly.
 """
 
 from __future__ import annotations
@@ -44,7 +44,8 @@ __all__ = [
 
 OK = "ok"
 FAILED = "failed"
-_SCHEMA = 1
+#: Version 2 has no planned process count and no stop reason: the one process is the test's own server.
+_SCHEMA = 2
 _UTF8 = "utf-8"
 _REASON_CHARS = 300
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
@@ -72,8 +73,6 @@ class OutputsFile:
     prompt_set: str
     prompts_sha256: str
     max_new_tokens: int
-    processes_planned: int
-    stopped: str
     prompts: tuple[PromptInfo, ...]
     processes: tuple[ProcessEntry, ...]
 
@@ -116,7 +115,6 @@ def write_outputs(
     output_dir: Path,
     plan: ShortPromptPlan,
     prompts: Sequence[PromptInfo],
-    stopped: str,
     entries: Sequence[ProcessEntry],
 ) -> Path:
     """Write the file below ``output_dir``; the signed manifest then lists it."""
@@ -125,8 +123,6 @@ def write_outputs(
         "prompt_set": plan.prompt_set,
         "prompts_sha256": plan.prompts_sha256,
         "max_new_tokens": plan.max_new_tokens,
-        "processes_planned": plan.processes,
-        "stopped": clean_reason(stopped),
         "prompts": [{"id": p.id, "mode": p.mode, "length": p.length} for p in prompts],
         "processes": [_entry_document(entry) for entry in entries],
     }
@@ -212,7 +208,7 @@ def read_outputs_document(directory: Path) -> dict[str, Any]:
 
 
 def parse_outputs(document: Mapping[str, Any]) -> OutputsFile:
-    keys = {"schema", "prompt_set", "prompts_sha256", "max_new_tokens", "processes_planned", "stopped", "prompts"}
+    keys = {"schema", "prompt_set", "prompts_sha256", "max_new_tokens", "prompts"}
     keys.add("processes")
     listed = isinstance(document.get("processes"), list) and isinstance(document.get("prompts"), list)
     if set(document) != keys or document["schema"] != _SCHEMA or not listed:
@@ -222,10 +218,10 @@ def parse_outputs(document: Mapping[str, Any]) -> OutputsFile:
     prompts = tuple(_prompt_info(item, f"prompts[{i}]") for i, item in enumerate(document["prompts"]))
     entries = tuple(_entry(item, f"processes[{i}]") for i, item in enumerate(document["processes"]))
     indices = [entry.index for entry in entries]
-    counts = (document["max_new_tokens"], document["processes_planned"])
-    if len(set(indices)) != len(indices) or any(isinstance(c, bool) or not isinstance(c, int) for c in counts):
-        raise OutputsError("the outputs file repeats a process index, or its counts are not integers")
-    texts = (document["prompt_set"], document["prompts_sha256"], document["stopped"])
+    tokens = document["max_new_tokens"]
+    if len(set(indices)) != len(indices) or isinstance(tokens, bool) or not isinstance(tokens, int):
+        raise OutputsError("the outputs file repeats a process index, or its max_new_tokens is not an integer")
+    texts = (document["prompt_set"], document["prompts_sha256"])
     if not all(isinstance(t, str) for t in texts):
-        raise OutputsError("the outputs file's prompt_set, prompts_sha256 and stopped are strings")
-    return OutputsFile(texts[0], texts[1], counts[0], counts[1], texts[2], prompts, entries)
+        raise OutputsError("the outputs file's prompt_set and prompts_sha256 are strings")
+    return OutputsFile(texts[0], texts[1], tokens, prompts, entries)

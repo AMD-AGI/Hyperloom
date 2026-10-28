@@ -20,7 +20,7 @@
 # reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "15"
+version: "16"
 facts:
   aiter_merged_view:
     kind: names
@@ -717,20 +717,18 @@ facts:
     project: aiter (the prefill kernels the framework image serves with) and the framework that calls them
     reason: >-
       aiter's vectorized_5d mha_batch_prefill gave wrong output for short sequences in about one server process in three,
-      and a long, batched, averaged evaluation (GSM8K) did not see it. The check boots fresh server processes of a
-      candidate's own launch and asks each the same short prompts greedily; processes is how many (a defect in one launch
-      in three escapes six launches with probability (2/3)^6, 8.8 percent, and eight with 3.9 percent), max_new_tokens how
-      many tokens each prompt may generate, phase_cap_sec how long the whole check may take before it ends incomplete while
-      the runner has measured no server boot to size the cap from, and always_purposes the test purposes that run it
+      and a long, batched, averaged evaluation (GSM8K) did not see it. The check asks a test's own server, after its rounds,
+      the same short prompts greedily, and compares the answers of every test of one recipe (each test's server is one
+      launch; the check boots none); max_new_tokens is how many tokens each prompt may generate, phase_cap_sec how long the
+      check may take before it ends incomplete, and always_purposes the test purposes that run it
       whatever their recipe change is (a baseline measures the inconsistency the rule gate holds every candidate to, a
       final candidate is the one that ships). The values are read as numbers and words by the toolbox.
     names:
-      processes: "6"
       max_new_tokens: "32"
       phase_cap_sec: "1200"
       always_purposes: "baseline final"
     examples:
-      - "hyperloom_multibranch.toolbox.short_prompts: the plan of a test that runs the check takes its process count, token budget and time cap from these names"
+      - "hyperloom_multibranch.toolbox.short_prompts: the plan of a test that runs the check takes its token budget and time cap from these names"
       - "hyperloom_multibranch.toolbox.short_prompts: a test whose purpose is one of always_purposes runs the check, with the purpose as the reason"
 
   short_prompt_touch:

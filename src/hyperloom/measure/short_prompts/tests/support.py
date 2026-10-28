@@ -149,33 +149,25 @@ def prompt_set() -> tuple[Prompt, ...]:
     return build_prompts(encode, seed=1)
 
 
-def outputs_files(plan: ShortPromptPlan, behaviours: Sequence[str]) -> dict[str, bytes]:
-    """The ``outputs.json`` a runner leaves for a check whose processes behave as ``behaviours`` say: ``good``, ``bad`` (wrong
-    for short prompts), ``drift`` (a late difference on one long prompt) or ``fail`` (did not come up)."""
+def outputs_files(plan: ShortPromptPlan, behaviour: str) -> dict[str, bytes]:
+    """The ``outputs.json`` a runner leaves for a check whose one process, the test's own server, behaves as ``behaviour``
+    says: ``good``, ``bad`` (wrong for short prompts), ``drift`` (a late difference on one long prompt) or ``fail`` (did not
+    answer)."""
     prompts = prompt_set()
     long_prompt = next(p for p in prompts if p.length > SHORT)
-    entries = []
-    for index, behaviour in enumerate(behaviours):
-        answers = {}
-        for prompt in prompts:
-            wrong = behaviour == "bad" or (behaviour == "drift" and prompt.id == long_prompt.id)
-            tokens = (short_prompts_wrong if wrong else good_answer)(prompt.token_ids, plan.max_new_tokens)
-            if behaviour == "drift" and wrong:
-                tokens = [*tokens[:-1], "drifted"]
-            answers[prompt.id] = Output("".join(tokens), tuple(tokens), "length")
-        failed = behaviour == "fail"
-        entries.append(
-            ProcessEntry(
-                index,
-                FAILED if failed else OK,
-                "did not come up (test)" if failed else "",
-                80.0,
-                20.0,
-                {} if failed else answers,
-            )
-        )
+    answers = {}
+    for prompt in prompts:
+        wrong = behaviour == "bad" or (behaviour == "drift" and prompt.id == long_prompt.id)
+        tokens = (short_prompts_wrong if wrong else good_answer)(prompt.token_ids, plan.max_new_tokens)
+        if behaviour == "drift" and wrong:
+            tokens = [*tokens[:-1], "drifted"]
+        answers[prompt.id] = Output("".join(tokens), tuple(tokens), "length")
+    failed = behaviour == "fail"
+    entry = ProcessEntry(
+        0, FAILED if failed else OK, "did not answer (test)" if failed else "", 0.0, 20.0, {} if failed else answers
+    )
     with tempfile.TemporaryDirectory() as scratch:
-        path = write_outputs(Path(scratch), plan, [p.info() for p in prompts], "", entries)
+        path = write_outputs(Path(scratch), plan, [p.info() for p in prompts], [entry])
         return {f"{SHORT_PROMPTS_DIR}/{OUTPUTS_FILE}": path.read_bytes()}
 
 

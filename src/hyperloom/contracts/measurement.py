@@ -875,7 +875,8 @@ class TestResult:
     to do, and it is ``None`` exactly when the result has no phases (a document written before they existed, a result
     no measurement made).
     ``short_prompt_consistency`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set
-    of short prompts answered by fresh server processes, compared with each other, as counts and positions only.
+    of short prompts answered by the test's own server, compared with the other tests' of its recipe, as counts and
+    positions only.
     ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
     synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
     per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``; a candidate's carries

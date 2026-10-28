@@ -206,8 +206,10 @@ def test_the_plan_round_trips_and_a_wrong_field_is_refused_naming_it(tmp_path):
     assert ShortPromptPlan.parse(plan.to_document(), "sheet") == plan
     with pytest.raises(DocumentError, match="prompt set key"):
         ShortPromptPlan("Not A Key", "a" * 64)
-    with pytest.raises(DocumentError, match="processes must be 1 to"):
-        ShortPromptPlan("k", "a" * 64, processes=0)
+    with pytest.raises(DocumentError, match="max_new_tokens must be 1 to"):
+        ShortPromptPlan("k", "a" * 64, max_new_tokens=0)
+    with pytest.raises(DocumentError, match="unknown key"):
+        ShortPromptPlan.parse({**plan.to_document(), "processes": 6}, "sheet")  # a sheet asks for no server of its own
     with pytest.raises(DocumentError, match="unknown key"):
         ShortPromptPlan.parse({**plan.to_document(), "extra": 1}, "sheet")
 

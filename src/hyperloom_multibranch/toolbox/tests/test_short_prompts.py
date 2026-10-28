@@ -36,9 +36,7 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     short_prompt_rules,
     no_patch_files,
     touch_lines,
-    with_extra_processes,
 )
-from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 
 SETUP = ShortPromptSetup("short-prompts-test", "a" * 64)
@@ -232,7 +230,7 @@ def test_each_decided_trigger_runs_the_check_on_the_tests_own_server_and_names_i
     plan = _plan(_purposed(purpose, **fields), candidate)
 
     assert plan is not None and plan.trigger == (trigger,)
-    assert plan.processes == 1, "fresh processes are added for a short pool only (with_extra_processes)"
+    assert "processes" not in plan.to_document(), "a plan asks for no server of its own"
 
 
 @pytest.mark.parametrize("consistency_check", [None, False])
@@ -250,10 +248,10 @@ def test_a_toolbox_given_no_prompt_set_runs_no_check_and_refuses_nothing():
 def test_the_rules_come_from_the_rule_pack():
     rules = short_prompt_rules()
 
-    assert (rules.processes, rules.max_new_tokens, rules.phase_cap_sec) == (6, 32, 1200.0)
+    assert (rules.max_new_tokens, rules.phase_cap_sec) == (32, 1200.0)
     assert rules.always_purposes == {"baseline", "final"}
     plan = _plan(req(purpose=Purpose.FINAL), PARENT)
-    assert plan is not None and (plan.processes, plan.max_new_tokens, plan.phase_cap_sec) == (1, 32, 1200.0)
+    assert plan is not None and (plan.max_new_tokens, plan.phase_cap_sec) == (32, 1200.0)
 
 
 def test_touch_lines_render_each_kind_of_change_one_line_each():
@@ -300,13 +298,11 @@ def _prepare(
     setup: ShortPromptSetup | None,
     accepted: object,
     replay: bool = False,
-    pooled=lambda key: 0,
 ):
     repo = FakeRepo(PARENT)
     acceptance = Acceptance(
         AcceptanceSetup(repo, _Planner(accepted), IMAGE, short_prompts=setup),  # type: ignore[arg-type]
         is_accepted=lambda _id: True,
-        pooled=pooled,
     )
     return asyncio.run(acceptance.prepare(request, replay=replay))
 
@@ -350,83 +346,46 @@ def test_a_planner_whose_accepted_measurement_cannot_carry_a_plan_is_left_as_it_
 
 # --- what is recorded -----------------------------------------------------------------------------------------------
 
-PROMPT_PLAN = ShortPromptPlan(
-    SETUP.prompt_set,
-    SETUP.prompts_sha256,
-    processes=6,
-    trigger=("purpose final",),
-)
+PROMPT_PLAN = ShortPromptPlan(SETUP.prompt_set, SETUP.prompts_sha256, trigger=("purpose final",))
 
 
-def _landed(tmp_path: Path, behaviours: list[str], plan: ShortPromptPlan = PROMPT_PLAN, name: str = "landed") -> Path:
+def _landed(tmp_path: Path, behaviour: str, plan: ShortPromptPlan = PROMPT_PLAN, name: str = "landed") -> Path:
     directory = tmp_path / name
-    for relative, data in outputs_files(plan, behaviours).items():
+    for relative, data in outputs_files(plan, behaviour).items():
         (directory / relative).parent.mkdir(parents=True, exist_ok=True)
         (directory / relative).write_bytes(data)
     return directory
 
 
-def test_six_clean_processes_state_zero_mismatches_and_no_inconsistency(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6))
+def test_the_tests_own_server_that_answered_every_prompt_is_a_complete_check_that_compares_nothing_by_itself(tmp_path):
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, "good"))
 
-    assert check.status == SHORT_PROMPTS_COMPLETE and check.reason == "" and check.processes == (0, 1, 2, 3, 4, 5)
-    assert check.self_consistency is not None and check.self_consistency.mismatches == (0,) * 6
-    assert check.inconsistency == 0
-    assert check.miss_probability_one_third == pytest.approx(0.0878, abs=1e-4)
+    assert check.status == SHORT_PROMPTS_COMPLETE and check.reason == "" and check.processes == (0,)
+    assert check.inconsistency is None, "the pool is what compares it"
+    assert check.miss_probability_one_third == pytest.approx(2 / 3)
     assert (check.prompts, check.compared_by, check.outputs) == (64, "tokens", "short_prompts/outputs.json")
     assert check.trigger == ("purpose final",)
 
 
-def test_a_defect_in_two_of_six_launches_is_counted_and_located_in_the_candidates_own_processes(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good", "bad", "good", "good", "bad", "good"]))
+def test_a_server_that_did_not_answer_makes_the_check_incomplete_and_says_why(tmp_path):
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, "fail"))
 
-    own = check.self_consistency
-    assert own is not None and [bool(n) for n in own.mismatches] == [False, True, False, False, True, False]
-    first = own.first_difference
-    assert first is not None and (first.process, first.position) == (1, 1) and first.prompt_tokens <= 16
+    assert check.status == SHORT_PROMPTS_INCOMPLETE and check.reason == "process 0: did not answer (test)"
+    assert check.processes == () and check.inconsistency is None, "nothing compared is not a count of zero"
 
 
-def test_a_process_that_did_not_come_up_makes_the_check_incomplete_and_says_which(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good", "fail", "good", "good", "good", "good"]))
-
-    assert check.status == SHORT_PROMPTS_INCOMPLETE and "process 1: did not come up (test)" in check.reason
-    assert check.processes == (0, 2, 3, 4, 5) and check.processes_planned == 6
-    assert check.self_consistency is not None and len(check.self_consistency.mismatches) == 5
-
-
-def test_a_run_that_stopped_at_the_cap_is_incomplete_with_the_cap_as_the_reason(tmp_path):
-    landed = _landed(tmp_path, ["good", "good"])
+def test_an_outputs_file_with_no_process_is_an_incomplete_check_that_says_so(tmp_path):
+    landed = _landed(tmp_path, "good")
     path = landed / SHORT_PROMPTS_DIR / OUTPUTS_FILE
-    document = json.loads(path.read_text())
-    document["stopped"] = "the phase cap leaves no room for another process"
-    path.write_text(json.dumps(document))
+    path.write_text(json.dumps({**json.loads(path.read_text()), "processes": []}))
 
     check = consistency_of(PROMPT_PLAN, landed)
 
-    assert check.status == SHORT_PROMPTS_INCOMPLETE and "phase cap" in check.reason and check.processes == (0, 1)
-
-
-def test_one_process_alone_has_no_self_consistency_and_is_incomplete_when_more_were_planned(tmp_path):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"]))
-
-    assert check.self_consistency is None and check.status == SHORT_PROMPTS_INCOMPLETE
-
-
-def test_the_tests_own_server_alone_is_a_complete_check_that_compares_nothing_by_itself(tmp_path):
-    own = replace(PROMPT_PLAN, processes=1)
-
-    check = consistency_of(own, _landed(tmp_path, ["good"], own))
-
-    assert check.status == SHORT_PROMPTS_COMPLETE and check.processes == (0,)
-    assert check.self_consistency is None and check.inconsistency is None, "the pool is what compares it"
-
-
-@pytest.mark.parametrize("behaviours", [["fail"] * 6, []])
-def test_when_no_process_answered_nothing_was_compared_and_the_check_says_so(tmp_path, behaviours):
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, behaviours))
-
-    assert check.status == SHORT_PROMPTS_INCOMPLETE and check.processes == () and check.self_consistency is None
-    assert check.inconsistency is None, "nothing compared is not a count of zero"
+    assert (check.status, check.reason, check.processes) == (
+        SHORT_PROMPTS_INCOMPLETE,
+        "the test's own server answered no prompt",
+        (),
+    )
 
 
 def test_a_bundle_with_no_outputs_file_is_an_incomplete_check_not_a_clean_one(tmp_path):
@@ -435,60 +394,12 @@ def test_a_bundle_with_no_outputs_file_is_an_incomplete_check_not_a_clean_one(tm
     check = consistency_of(PROMPT_PLAN, tmp_path / "empty")
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "no readable short_prompts/outputs.json" in check.reason
-    assert check.processes == () and check.self_consistency is None
+    assert check.processes == ()
 
 
 def test_outputs_of_another_prompt_set_are_not_read_as_the_asked_for_one(tmp_path):
     other = replace(PROMPT_PLAN, prompts_sha256="9" * 64)
 
-    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, ["good"] * 6, other))
+    check = consistency_of(PROMPT_PLAN, _landed(tmp_path, "good", other))
 
     assert check.status == SHORT_PROMPTS_INCOMPLETE and "another prompt set" in check.reason
-
-
-def test_a_late_drift_in_one_process_is_located_at_its_token_and_the_prompt_is_long(tmp_path):
-    three = replace(PROMPT_PLAN, processes=3)
-
-    check = consistency_of(three, _landed(tmp_path, ["good", "drift", "good"], three))
-
-    difference = check.self_consistency.first_difference
-    assert difference is not None and (difference.process, difference.position) == (1, 31)
-    assert difference.prompt_tokens > 16 and check.inconsistency == 1
-
-
-@pytest.mark.parametrize(
-    ("purpose", "pooled", "processes"),
-    [
-        (Purpose.INTEGRATION, 0, 6),
-        (Purpose.INTEGRATION, 2, 4),
-        (Purpose.FINAL, 5, 1),
-        (Purpose.FINAL, 9, 1),
-        (Purpose.EXPLORE, 0, 1),
-        (Purpose.CONFIRM, 1, 1),
-        (Purpose.BASELINE, 0, 1),
-    ],
-    ids=["merge-empty", "merge-short", "final-one-short", "final-full", "explore", "confirm", "baseline"],
-)
-def test_only_a_merge_test_or_a_final_candidate_boots_fresh_processes_up_to_the_packs_count(purpose, pooled, processes):
-    plan = _plan(_purposed(purpose, consistency_check=True), PARENT)
-    assert plan is not None
-
-    assert with_extra_processes(plan, _purposed(purpose, consistency_check=True), pooled).processes == processes
-
-
-def test_acceptance_asks_the_pool_of_the_candidates_recipe_and_plans_what_it_lacks(tmp_path):
-    asked: list[PoolKey] = []
-
-    def pooled(key: PoolKey) -> int:
-        asked.append(key)
-        return 2
-
-    final = _prepare(req(purpose=Purpose.FINAL), "", setup=SETUP, accepted=_accepted(tmp_path), pooled=pooled)
-    explore = _prepare(
-        req(server_args="--attention-backend aiter"), "", setup=SETUP, accepted=_accepted(tmp_path), pooled=pooled
-    )
-
-    assert final.environment.short_prompts.processes == 4, "its own server and three fresh ones make six"
-    assert explore.environment.short_prompts.processes == 1, "an explore uses what it has"
-    assert asked[0] == PoolKey(final.recipe_digest, SETUP.prompts_sha256, 32)
-    assert asked[1].recipe_digest == explore.recipe_digest != final.recipe_digest

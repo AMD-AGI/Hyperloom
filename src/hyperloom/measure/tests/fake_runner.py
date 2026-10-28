@@ -28,8 +28,9 @@ checks}`` signs what the runner says of its cards into the manifest; ``fake_note
 is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
 the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
 bundle written then can be verified again.
-``fake_short_prompts: [good, bad, ...]`` leaves the outputs of a short-prompt check whose processes behave so, when the
-sheet asks for the check (``bad``: wrong for short prompts, ``drift``: one long prompt differs late, ``fail``: did not come up).
+``fake_short_prompts: good`` leaves the outputs of a short-prompt check whose one process, the test's own server, behaves
+so, when the sheet asks for the check (``bad``: wrong for short prompts, ``drift``: one long prompt differs late, ``fail``:
+did not answer).
 ``fake_long_context: {broken: [family, ...], served: N}`` leaves the outputs of a long-context check whose server loses those
 task families (``niah``, ``tracking``, ``words``) and serves ``served`` tokens, when the sheet asks for the check.
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
@@ -304,8 +305,8 @@ def _manifest(
 
 
 def _short_prompt_files(out: Path, spec: MeasurementSpec, config: dict[str, Any]) -> dict[str, bytes]:
-    """The outputs of the short-prompt check the sheet asks for, as the processes named by ``fake_short_prompts`` (a list of
-    ``good``, ``bad``, ``drift`` or ``fail``) would leave them."""
+    """The outputs of the short-prompt check the sheet asks for, as the test's own server would leave them when it behaves
+    as ``fake_short_prompts`` (``good``, ``bad``, ``drift`` or ``fail``) says."""
     plan = spec.procedure.short_prompts
     if plan is None or "fake_short_prompts" not in config:
         return {}

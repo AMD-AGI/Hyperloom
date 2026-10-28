@@ -78,7 +78,6 @@ from hyperloom.measure.phases import (
     OTHER,
     REPRO_CASE,
     ROUND_COLLECT,
-    SHORT_PROMPTS,
     TEARDOWN,
     PhaseRecorder,
 )
@@ -90,7 +89,7 @@ from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_MEASURE, ROLE_WARMUP, RoundShape, read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
-from hyperloom.measure.short_prompts.rounds import PassFailed, Serving, run_passes
+from hyperloom.measure.short_prompts.rounds import Serving, write_answered
 from hyperloom.measure.short_prompts.staging import load_prompt_set
 from hyperloom.measure.short_prompts.prompts import PromptSetError
 from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
@@ -911,62 +910,16 @@ def _run_case(run: _Run, port: int) -> None:
         _fail_case(run, str(exc))
 
 
-class _FreshServers:
-    """The fresh processes of the short-prompt check: boot-only rounds ``short<index>`` of the point's own launch, as a
-    repro test's is, each in a scratch directory of its own so that its logs and reports are not the test's."""
-
-    def __init__(self, run: _Run) -> None:
-        self._run = run
-        self._lifecycle: _Lifecycle | None = None
-        self._model = _model_of(run.call)
-
-    def should_stop(self) -> bool:
-        return self._run.stopped_rc is not None
-
-    async def start(self, index: int, deadline: float) -> Serving:
-        run = self._run
-        run.call = dataclasses.replace(run.call, session_deadline_sec=deadline)
-        lifecycle = _Lifecycle(run)
-        if not lifecycle.eligible:
-            raise PassFailed(f"the server cannot be held up for the check ({lifecycle.reason})")
-        self._lifecycle = lifecycle
-        boot = await _boot_server(run, lifecycle, 0, f"short{index}")
-        if _is_failure(boot):
-            run.add(0, boot)
-            raise PassFailed(f"the server did not come up ({boot.error_class or boot.status})")
-        run.phases.begin(SHORT_PROMPTS)
-        return Serving(f"http://127.0.0.1:{lifecycle.port}", self._model)
-
-    async def stop(self) -> None:
-        if self._lifecycle is not None:
-            self._lifecycle.teardown()
-            self._lifecycle = None
-
-
-@contextlib.contextmanager
-def _fresh_servers(run: _Run) -> Iterator[_FreshServers]:
-    """The fresh processes run apart from the test: on a copy of the call whose output is a scratch directory, so their
-    rounds, logs and reports are not the test's."""
-    scratch = Path(tempfile.mkdtemp(prefix="hl-short-"))
-    try:
-        apart = dataclasses.replace(run.call, output_dir=scratch, result_dir=None)
-        yield _FreshServers(_Run(apart, run.unset_envs, phases=run.phases))
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-        run.phases.begin(OTHER)
-
-
 def _model_of(call: TestCall) -> str:
     return str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or "")
 
 
 async def _short_prompts(run: _Run) -> None:
-    """Write the short-prompt check: process 0 (the test's own server), then the fresh ones the plan asks for, apart from
-    the test; a failure of the check is the check's (``outputs.json`` says), never the test's."""
+    """Write the short-prompt check: the test's own server's answers, or why it gave none; a failure of the check is the
+    check's (``outputs.json`` says), never the test's."""
     first = run.held.short if run.held is not None else not_held(_held_checks_of(run.call), _NOT_HELD)
     if first is not None:
-        with _fresh_servers(run) as servers:
-            await run_passes(first, servers, Path(run.call.output_dir))
+        write_answered(first, Path(run.call.output_dir))
 
 
 async def _long_context_unheld(run: _Run) -> None:

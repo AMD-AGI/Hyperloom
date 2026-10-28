@@ -142,10 +142,10 @@ class TestCall:
     #: The shared compiled-code cache this test uses (design 4.21): the backend seeds its directories before the server
     #: starts and stages what the compilers added once a test succeeds. ``None`` runs the test as it always did.
     jit: JitCacheSession | None = None
-    #: The short-prompt consistency check this test runs after its rounds, on fresh server processes of its own launch
+    #: The short-prompt consistency check this test runs after its rounds, on the test's own server; it boots none
     #: (``measure.short_prompts``); ``None`` runs no check. It never changes the test's rounds or its outcome.
     short_prompts: ShortPromptPlan | None = None
-    #: The long-context check this test runs after its rounds, on a fresh server of its own launch
+    #: The long-context check this test runs after its rounds, on the test's own server; it boots none
     #: (``measure.long_context``); ``None`` runs no check. It never changes the test's rounds or its outcome.
     long_context: LongContextPlan | None = None
     #: The tuned tables the test's rebuilt aiter patches, by their path below aiter's ``configs``: the patched file, or

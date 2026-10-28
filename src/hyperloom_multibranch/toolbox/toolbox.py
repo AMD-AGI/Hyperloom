@@ -22,7 +22,6 @@ from typing import Any, Literal
 from hyperloom.contracts.measurement import (
     AttachmentRef,
     FailureClass,
-    Purpose,
     TestKind,
     TestRequest,
     TestResult,
@@ -59,7 +58,7 @@ from hyperloom_multibranch.toolbox.analysis import (
     analysis_request,
     root_profile_request,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, EarlierBaselines, check_kind
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import landed_agentx_baseline
@@ -75,7 +74,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
 )
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.long_context import with_root_reading
-from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey, ShortPromptPool, pooled_result
+from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL, JobStatus, ToolJobs, ToolRequest
@@ -103,8 +102,8 @@ class ToolboxStores:
     ``sink`` takes the requests, results and withdrawals, ``health`` holds the quarantine list, ``claims`` hands the
     claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
     ``builds`` drives the native build store; without one no test waits for a build. ``short_prompt_pool`` keeps the
-    short-prompt answers of every test per recipe (``short_prompt_pool``); without one no test's check is pooled and every
-    merge test and final candidate boots the pack's full count of fresh processes.
+    short-prompt answers of every test per recipe (``short_prompt_pool``); without one no test's check is pooled and each
+    test is judged on its own server's answers alone.
     """
 
     log: SubmissionLog
@@ -157,8 +156,6 @@ class RealToolbox:
             acceptance,
             is_accepted=self._is_accepted,
             live_profile=self._live_profile,
-            pooled=self._pool_count,
-            earlier_baselines=self._earlier_baselines,
         )
         self._runner = AttemptRunner(
             executor,
@@ -572,22 +569,6 @@ class RealToolbox:
                 return entry.request_id
         return None
 
-    def _earlier_baselines(self, request: TestRequest, recipe_digest: str) -> EarlierBaselines:
-        """The BASELINE tests of the recipe whose digest is ``recipe_digest`` the submit log holds as accepted before
-        ``request`` (all of them for a request not logged yet), and how many of those have no outcome. Read from the log,
-        so a restarted toolbox re-preparing a request counts what the one before it counted, less what has ended since."""
-        accepted = unfinished = 0
-        for entry in self._log.entries():
-            if request.request_id is not None and entry.request_id == request.request_id:
-                break
-            if entry.aborted or entry.recipe_digest != recipe_digest:
-                continue
-            if entry.request.get("purpose") != Purpose.BASELINE.value:
-                continue
-            accepted += 1
-            unfinished += entry.outcome is None and not entry.settled
-        return EarlierBaselines(accepted, unfinished)
-
     @staticmethod
     def _holds_profile(entry: LogEntry) -> bool:
         if entry.outcome is None:
@@ -687,9 +668,6 @@ class RealToolbox:
         result = await asyncio.to_thread(self._pooled, item.request_id, result)
         result = with_root_reading(item.request, result, self._log.entries())
         return replace(result, request_id=item.request_id, queued_at=item.queued_at, builds=builds)
-
-    def _pool_count(self, key: PoolKey) -> int:
-        return 0 if self._pool is None else self._pool.count(key)
 
     def _pooled(self, request_id: str, result: TestResult) -> TestResult:
         """``result`` with its short-prompt check compared over every process pooled for its recipe; as it is when the

@@ -41,9 +41,9 @@ class _Servers(_ShortServers):
         super().__init__(*args, **kwargs)
         self.asked: list[int] = []  # the requests each server had when it was stopped
 
-    def start(self, index: int, port: int) -> None:
+    def start(self, name: str, port: int) -> None:
         self.live = FakeServer(port=port).__enter__()
-        self.started.append(index)
+        self.started.append(name)
 
     def stop(self) -> None:
         if self.live is not None:
@@ -51,14 +51,8 @@ class _Servers(_ShortServers):
         super().stop()
 
 
-class _CheckGrid(_ShortGrid):
-    """``run_grid`` that brings the test's server up for the round that holds it."""
-
-    prefix = "long"
-
-
-def _grid(monkeypatch, tmp_path: Path, **servers: Any) -> _CheckGrid:
-    grid = _CheckGrid(tmp_path, _Servers(monkeypatch, **servers))
+def _grid(monkeypatch, tmp_path: Path, **servers: Any) -> _ShortGrid:
+    grid = _ShortGrid(tmp_path, _Servers(monkeypatch, **servers))
     monkeypatch.setattr(local, "run_grid", grid)
     return grid
 
@@ -77,7 +71,7 @@ def test_a_planned_test_asks_its_own_server_after_its_measured_round_and_boots_n
 
     assert [kwargs["grid"][0].name for kwargs in grid.calls] == ["test"], "no second boot"
     assert grid.calls[0]["launch"].server_lifecycle["cleanup"] is False, "Magpie leaves the server up for the check"
-    assert (grid.servers.started, grid.servers.teardowns) == ([0], 1), "one server, torn down after the check"
+    assert (grid.servers.started, grid.servers.teardowns) == (["test"], 1), "one server, torn down after the check"
     found = read_outputs(tmp_path / "out")
     assert [e.status for e in found.prompts] == [PROMPT_OK] * 64 and found.served_context == 4096
     assert found.boot_seconds == pytest.approx(0.0, abs=0.5), "no server was booted for the check"

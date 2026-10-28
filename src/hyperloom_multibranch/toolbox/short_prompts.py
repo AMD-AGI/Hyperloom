@@ -12,7 +12,7 @@ candidate to, and a final candidate) or when the request sets ``consistency_chec
 check, never remove one the rule demands. A toolbox given no :class:`ShortPromptSetup` runs no check and refuses nothing.
 
 *Switched on.* The check is on by default: a test that runs it answers the prompts on its own server after its rounds, in
-seconds; only a merge test or a final candidate whose recipe's pool is short boots fresh processes. A builder gives the toolbox the setup: from its options, or from the host environment's
+seconds, and no test boots a server for the check. A builder gives the toolbox the setup: from its options, or from the host environment's
 ``HYPERLOOM_SHORT_PROMPTS`` (the key of the staged entry; ``off`` turns the check off) when it names none, and without
 either the set ``measure.short_prompts.build`` stages for the session model's tokenizer with its default seed, when it is
 staged (:func:`default_short_prompts`; the set depends on the tokenizer, so a host that cannot find it runs no check and
@@ -21,10 +21,7 @@ logs why). A builder whose runners read this host's runner cache reads what it i
 
 *What against.* The outputs of server processes of one recipe are compared with each other only: the test's own, and
 every process the toolbox pooled for the same recipe (``short_prompt_pool``). Every test that runs the check adds its own
-server (process 0); a merge test (``integration``) or a final candidate whose recipe has fewer pooled processes than the
-pack's ``processes`` also boots fresh ones up to that count (:func:`with_extra_processes`), and so does the session's last
-BASELINE test, once, for the root (the floor then rests on the same count as every candidate the gate holds to it); an
-explore is judged over the processes it has. A comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8
+server (process 0) and no other, so a recipe is judged over the processes its tests have. A comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8
 KV, quantized GEMMs), and a defect that is wrong in every process is the accuracy evaluation's to see.
 
 *What is recorded.* :func:`consistency_of` reads the landed ``outputs.json`` and states counts and positions
@@ -48,7 +45,7 @@ from hyperloom.contracts.consistency import (
     OutputDifference,
     ShortPromptConsistency,
 )
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
 from hyperloom.measure.compile import BlobStore, CompileError, patch_targets
 from hyperloom.measure.short_prompts.compare import Comparison, Difference, Side, compare_outputs
@@ -93,7 +90,6 @@ __all__ = [
     "short_prompt_rules",
     "staged_short_prompts",
     "touch_lines",
-    "with_extra_processes",
 ]
 
 #: The host environment variable that names the staged prompt set (its key) when a builder is given no setup.
@@ -111,10 +107,7 @@ _MAX_LINE_CHARS = 200
 _MAX_REASONS = 32
 _CHECKED_KINDS = (TestKind.TEST, TestKind.SWEEP)
 _UTF8 = "utf-8"
-_MAX_FAILED_SHOWN = 3
-#: The tests whose recipe the gate reads over the pack's full count of processes: what reaches integration, and what
-#: ships. A defect in one launch in three escapes two processes about 44% of the time and six about 9%.
-_FULL_COUNT_PURPOSES = (Purpose.INTEGRATION, Purpose.FINAL)
+_NOT_ANSWERED = "the test's own server answered no prompt"
 
 
 @dataclass(frozen=True)
@@ -239,7 +232,6 @@ class ShortPromptRules:
     """The rule pack's facts about the check, read as the toolbox uses them."""
 
     touch: re.Pattern[str]
-    processes: int
     max_new_tokens: int
     phase_cap_sec: float
     always_purposes: frozenset[str]
@@ -252,7 +244,6 @@ def short_prompt_rules() -> ShortPromptRules:
     try:
         return ShortPromptRules(
             touch=re.compile(SHORT_PROMPT_TOUCH),
-            processes=int(values["processes"]),
             max_new_tokens=int(values["max_new_tokens"]),
             phase_cap_sec=float(values["phase_cap_sec"]),
             always_purposes=frozenset(values["always_purposes"].split()),
@@ -370,8 +361,7 @@ def decide(
 ) -> ShortPromptPlan | None:
     """The check ``request`` runs, or ``None``: its purpose is one the pack always checks, the caller forces it, or the
     change from ``parent`` to ``candidate`` touches what the pack says affects attention, the KV cache or prefill
-    (``files`` reads the files a patch changes). The plan asks the test's own server only; :func:`with_extra_processes`
-    adds the fresh ones a short pool needs."""
+    (``files`` reads the files a patch changes). The plan asks the test's own server only."""
     if setup is None or request.kind not in _CHECKED_KINDS:
         return None
     rules = short_prompt_rules()
@@ -384,22 +374,10 @@ def decide(
     return ShortPromptPlan(
         prompt_set=setup.prompt_set,
         prompts_sha256=setup.prompts_sha256,
-        processes=1,
         max_new_tokens=rules.max_new_tokens,
         phase_cap_sec=rules.phase_cap_sec,
         trigger=bounded_reasons(reasons),
     )
-
-
-def with_extra_processes(
-    plan: ShortPromptPlan, request: TestRequest, pooled: int, *, root_top_up: bool = False
-) -> ShortPromptPlan:
-    """``plan`` with the fresh processes ``request`` boots after its own server's answers: for a merge test, a final
-    candidate or the root's top-up (``root_top_up``: the session's last BASELINE test, see ``Acceptance``), as many as the
-    recipe's pool (``pooled`` processes so far) lacks of the pack's ``processes``; for any other test, none."""
-    if request.purpose not in _FULL_COUNT_PURPOSES and not root_top_up:
-        return plan
-    return replace(plan, processes=max(1, short_prompt_rules().processes - pooled))
 
 
 # --- what is recorded ----------------------------------------------------------------------------------------------
@@ -414,12 +392,11 @@ def output_counts(side: Side | None) -> OutputCounts | None:
     return None if side is None else OutputCounts(side.mismatches, _difference(side.first))
 
 
-def _why_incomplete(plan: ShortPromptPlan, found: OutputsFile, completed: int) -> str:
-    if completed == plan.processes:
+def _why_incomplete(found: OutputsFile) -> str:
+    if found.completed:
         return ""
     failed = [f"process {e.index}: {e.reason}" for e in found.processes if e.status == FAILED]
-    parts = ([found.stopped] if found.stopped else []) + failed[:_MAX_FAILED_SHOWN]
-    return "; ".join(parts) or f"{completed} of {plan.processes} processes answered every prompt"
+    return "; ".join(failed) or _NOT_ANSWERED
 
 
 def _incomplete(plan: ShortPromptPlan, reason: str) -> ShortPromptConsistency:
@@ -430,11 +407,9 @@ def _incomplete(plan: ShortPromptPlan, reason: str) -> ShortPromptConsistency:
         prompts=0,
         max_new_tokens=plan.max_new_tokens,
         trigger=plan.trigger,
-        processes_planned=plan.processes,
         processes=(),
         miss_probability_one_third=miss_probability(0),
         compared_by="",
-        self_consistency=None,
     )
 
 
@@ -451,18 +426,14 @@ def consistency_of(plan: ShortPromptPlan, directory: Path) -> ShortPromptConsist
     if (found.prompt_set, found.prompts_sha256) != (plan.prompt_set, plan.prompts_sha256):
         return _incomplete(plan, "the bundle's outputs are for another prompt set than the one the test asked for")
     if not found.completed:
-        return _incomplete(plan, _why_incomplete(plan, found, 0))
+        return _incomplete(plan, _why_incomplete(found))
     return _consistency(plan, found, compare_outputs(found.completed, found.prompts))
 
 
 def rederive(recorded: ShortPromptConsistency, directory: Path) -> ShortPromptConsistency:
     """The check ``recorded`` claims, derived again from the outputs file of the verified bundle at ``directory`` alone."""
     plan = ShortPromptPlan(
-        "rederived",
-        recorded.prompt_set_sha256,
-        processes=recorded.processes_planned,
-        max_new_tokens=recorded.max_new_tokens,
-        trigger=recorded.trigger,
+        "rederived", recorded.prompt_set_sha256, max_new_tokens=recorded.max_new_tokens, trigger=recorded.trigger
     )
     try:
         found = parse_outputs(read_outputs_document(directory))
@@ -470,13 +441,13 @@ def rederive(recorded: ShortPromptConsistency, directory: Path) -> ShortPromptCo
         return _incomplete(plan, str(exc))
     plan = replace(plan, prompt_set=found.prompt_set, prompts_sha256=found.prompts_sha256)
     if not found.completed:
-        return _incomplete(plan, _why_incomplete(plan, found, 0))
+        return _incomplete(plan, _why_incomplete(found))
     return _consistency(plan, found, compare_outputs(found.completed, found.prompts))
 
 
 def _consistency(plan: ShortPromptPlan, found: OutputsFile, comparison: Comparison) -> ShortPromptConsistency:
     completed = found.completed
-    reason = _why_incomplete(plan, found, len(completed))
+    reason = _why_incomplete(found)
     return ShortPromptConsistency(
         status=SHORT_PROMPTS_INCOMPLETE if reason else SHORT_PROMPTS_COMPLETE,
         reason=reason,
@@ -484,10 +455,8 @@ def _consistency(plan: ShortPromptPlan, found: OutputsFile, comparison: Comparis
         prompts=len(found.prompts),
         max_new_tokens=found.max_new_tokens,
         trigger=plan.trigger,
-        processes_planned=plan.processes,
         processes=tuple(sorted(completed)),
         miss_probability_one_third=miss_probability(len(completed)),
         compared_by=comparison.compared_by,
-        self_consistency=output_counts(comparison.self_consistency),
         outputs=f"{SHORT_PROMPTS_DIR}/{OUTPUTS_FILE}",
     )

@@ -6,8 +6,8 @@
 Both checks judge the recipe's answers, not one server process, so the server the test measured on is as good as a fresh
 one and costs no boot (InferenceX already evaluates on the measured server: ``local._eval_then_measure``). The local backend
 holds the server up past its last measured round (Magpie would stop it at the end of that round) and runs
-:func:`run_held_checks` before the teardown: the short-prompt check's process 0 (``short_prompts.rounds.answer_held``; its
-fresh processes, when the toolbox plans any, boot after the teardown) and the whole long-context check.
+:func:`run_held_checks` before the teardown: the short-prompt check (``short_prompts.rounds.answer_held``) and the
+long-context check. Neither boots a server of its own.
 
 Before the checks the server's prefix cache, and with it HiCache's host tier, is flushed where the framework exposes a
 flush (sglang's ``/flush_cache``). A server that exposes none, or refuses the flush, keeps its cache: the checks' prompts
@@ -147,7 +147,7 @@ class HeldAnswers:
 
 async def run_held_checks(checks: HeldChecks, server: HeldServer, phases: PhaseRecorder) -> HeldAnswers:
     """Flush the server's prefix cache, then ask it the ``checks``. The long-context check writes its outputs below the
-    test's output directory here; the short-prompt check's answers are returned, to be written with its fresh processes'.
+    test's output directory here; the short-prompt check's answers are returned, to be written after the rounds.
     The phases are the checks'."""
     phases.begin(SHORT_PROMPTS if checks.short_prompts is not None else LONG_CONTEXT)
     flush = await asyncio.to_thread(flush_prefix_cache, server.serving.base_url, server.framework)

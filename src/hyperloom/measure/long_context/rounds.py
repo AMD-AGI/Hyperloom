@@ -3,9 +3,9 @@
 
 """The pass of the check: one server of the test's own launch answers every prompt, and what it answered is recorded.
 
-How a server is started and stopped is the backend's (``short_prompts.rounds.PassHost``: the local backend boots the point's
-own launch as a boot-only round). This module owns the order, the time budget and what is recorded. A launch that serves
-less context than the prompts need is refused before a server starts; a server that does not come up, a request that fails
+The server is the test's own, which the backend gives (``short_prompts.rounds.PassHost``); the check boots none. This module
+owns the order, the time budget and what is recorded. A launch that serves less context than the prompts need is refused
+before a prompt is sent; a server that cannot be reached, a request that fails
 and a phase cap that leaves prompts unsent each end the check ``incomplete`` with the reason, never as a pass.
 """
 

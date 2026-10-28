@@ -155,7 +155,6 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "SGLANG_CUDA_GRAPH_DECODE_BS": _SGLANG_CUDA_GRAPH_DECODE_BS,
     "SGLANG_IMAGE_AITER_CONFIGS": "/sgl-workspace/aiter/aiter/configs",
     "SHORT_PROMPT_CHECK": {
-        "processes": "6",
         "max_new_tokens": "32",
         "phase_cap_sec": "1200",
         "always_purposes": "baseline final",

@@ -978,7 +978,6 @@ def test_an_agentx_test_whose_client_cannot_be_patched_still_runs_and_the_status
 SHORT_PROMPTS = {
     "prompt_set": "short-prompts-0123456789abcdef",
     "prompts_sha256": "a" * 64,
-    "processes": 6,
     "max_new_tokens": 32,
     "phase_cap_sec": 1200.0,
     "trigger": ["purpose final"],

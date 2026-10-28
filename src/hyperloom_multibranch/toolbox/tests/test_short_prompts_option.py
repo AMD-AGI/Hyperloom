@@ -531,7 +531,7 @@ async def test_both_builders_with_no_options_run_the_check_with_the_session_mode
     for toolbox in (local, hosted):
         assert toolbox._acceptance._short_prompts == setup
         plan = await _planned(toolbox, purpose=Purpose.FINAL)
-        assert plan is not None and plan.prompt_set == setup.prompt_set and plan.processes == 6
+        assert plan is not None and plan.prompt_set == setup.prompt_set
         assert await _planned(toolbox, **_QUIET) is None, "on by default, still only under the triggers"
     monkeypatch.setenv(SHORT_PROMPTS_ENV, SHORT_PROMPTS_OFF)
     assert _hosted(tmp_path / "off")._acceptance._short_prompts is None

@@ -536,11 +536,10 @@
         "short_prompts": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The short-prompt consistency check the runner runs after the test's rounds: fresh server processes of the test's own launch answer a staged set of short prompts greedily. Absent when the test runs none.",
+          "description": "The short-prompt consistency check the runner runs after the test's rounds: the test's own server answers a staged set of short prompts greedily; the check boots no server. Absent when the test runs none.",
           "required": [
             "prompt_set",
             "prompts_sha256",
-            "processes",
             "max_new_tokens",
             "phase_cap_sec",
             "trigger"
@@ -553,11 +552,6 @@
             "prompts_sha256": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$"
-            },
-            "processes": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
             },
             "max_new_tokens": {
               "type": "integer",
@@ -590,7 +584,7 @@
         "long_context": {
           "type": "object",
           "additionalProperties": false,
-          "description": "The long-context check the runner runs after the test's rounds: a fresh server of the test's own launch answers a staged set of long synthetic prompts greedily. Absent when the test runs none.",
+          "description": "The long-context check the runner runs after the test's rounds: the test's own server answers a staged set of long synthetic prompts greedily; the check boots no server. Absent when the test runs none.",
           "required": [
             "prompt_set",
             "prompts_sha256",

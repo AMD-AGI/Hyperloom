@@ -100,8 +100,8 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     [
         ((short_prompt_check(0, 1, 0, 0, 0, 0), short_prompt_check(0, 0, 2, 0, 0, 0), None), 2),
         ((short_prompt_check(0, 0, 0, 0, 0, 0), None, short_prompt_check(0, 0, 0, 0, 0, 0)), 0),
-        ((short_prompt_check(0, 3, planned=6), short_prompt_check(1, 0, 0, 0, 0, 0), None), 3),
-        ((short_prompt_check(0, planned=6), None, None), None),
+        ((short_prompt_check(0, 3, complete=False), short_prompt_check(1, 0, 0, 0, 0, 0), None), 3),
+        ((short_prompt_check(0, complete=False), None, None), None),
     ],
     ids=["largest-of-those-checked", "clean-is-zero", "incomplete-still-counted", "nothing-compared"],
 )

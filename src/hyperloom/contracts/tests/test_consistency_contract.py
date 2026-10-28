@@ -23,6 +23,20 @@ from hyperloom.contracts.measurement import MeasurementError, Purpose, TestKind,
 DIFFERENCE = OutputDifference(1, "s05", "sequential", 7, 1, "abc", "aXY")
 CLEAN = OutputCounts((0, 0, 0))
 FOUND = OutputCounts((0, 2, 0), DIFFERENCE)
+#: What a test's check records: its own server's outcome, and the pool of its recipe.
+RECORDED_KEYS = {
+    "status",
+    "reason",
+    "prompt_set_sha256",
+    "prompts",
+    "max_new_tokens",
+    "trigger",
+    "processes",
+    "miss_probability_one_third",
+    "compared_by",
+    "outputs",
+    "pooled",
+}
 
 
 def _check(**overrides: object) -> ShortPromptConsistency:
@@ -33,11 +47,9 @@ def _check(**overrides: object) -> ShortPromptConsistency:
         "prompts": 64,
         "max_new_tokens": 32,
         "trigger": ("purpose final",),
-        "processes_planned": 3,
-        "processes": (0, 1, 2),
-        "miss_probability_one_third": 0.296,
+        "processes": (0,),
+        "miss_probability_one_third": 0.667,
         "compared_by": "tokens",
-        "self_consistency": FOUND,
         "outputs": "short_prompts/outputs.json",
     }
     return ShortPromptConsistency(**{**fields, **overrides})  # type: ignore[arg-type]
@@ -58,11 +70,11 @@ def test_a_check_round_trips_through_json_in_a_result():
 
     assert _roundtrip(result).short_prompt_consistency == _check()
     document = result.to_document()["short_prompt_consistency"]
-    assert document["self_consistency"]["first_difference"]["position"] == 1
-    assert "reference" not in document, "the check compares its own processes only"
+    assert document["processes"] == [0], "the test's own server, the one process a check has"
+    assert set(document) == RECORDED_KEYS, "nothing of a parent's outputs or of a test's own other processes"
 
 
-def test_a_check_recorded_while_it_compared_with_the_parent_still_decodes_and_its_reference_is_left_out():
+def test_a_check_recorded_while_it_compared_with_the_parent_or_planned_processes_decodes_without_them():
     old = {
         **_check().to_document(),
         "self_consistency": {**FOUND.to_document(), "unstable_prompts": 0},
@@ -77,21 +89,23 @@ def test_a_check_recorded_while_it_compared_with_the_parent_still_decodes_and_it
     decoded = TestResult.from_document({**_result().to_document(), "short_prompt_consistency": old})
 
     assert decoded.short_prompt_consistency == _check()
-    assert "reference" not in decoded.to_document()["short_prompt_consistency"]
+    assert set(decoded.to_document()["short_prompt_consistency"]) == RECORDED_KEYS
 
 
 @pytest.mark.parametrize(
-    ("counts", "inconsistency"),
-    [(FOUND, 2), (CLEAN, 0), (None, None)],
-    ids=["one-process-differs", "all-agree", "not-compared"],
+    ("pooled", "inconsistency"),
+    [
+        (PooledConsistency("sha256:" + "1" * 64, ("a#0", "b#0", "c#0"), "tokens", FOUND), 2),
+        (PooledConsistency("sha256:" + "1" * 64, ("a#0", "b#0", "c#0"), "tokens", CLEAN), 0),
+        (PooledConsistency("sha256:" + "1" * 64, ("a#0",), "tokens", None), None),
+        (None, None),
+    ],
+    ids=["one-process-differs", "all-agree", "one-pooled", "no-pool"],
 )
-def test_the_inconsistency_is_the_most_prompts_one_process_answers_differently_and_none_when_not_compared(
-    counts, inconsistency
+def test_the_inconsistency_is_the_most_prompts_one_pooled_process_answers_differently_and_none_when_not_compared(
+    pooled, inconsistency
 ):
-    single = {"processes_planned": 3, "processes": (0,), "status": SHORT_PROMPTS_INCOMPLETE, "reason": "two failed"}
-    check = _check(self_consistency=counts) if counts is not None else _check(**single, self_consistency=None)
-
-    assert check.inconsistency == inconsistency, "nothing compared is None, never a count of zero"
+    assert _check(pooled=pooled).inconsistency == inconsistency, "nothing compared is None, never a count of zero"
 
 
 def test_a_result_with_no_check_has_no_key_and_a_document_written_before_it_loads_with_none():
@@ -107,12 +121,11 @@ def test_an_incomplete_check_with_no_process_and_an_absent_reference_round_trips
         reason="no process answered",
         processes=(),
         compared_by="",
-        self_consistency=None,
         miss_probability_one_third=1.0,
         outputs="",
     )
 
-    assert _roundtrip(nothing).self_consistency is None and nothing.inconsistency is None
+    assert _roundtrip(nothing).processes == () and nothing.inconsistency is None
 
 
 @pytest.mark.parametrize(
@@ -120,18 +133,13 @@ def test_an_incomplete_check_with_no_process_and_an_absent_reference_round_trips
     [
         ({"status": "passed"}, "status must be one of"),
         ({"status": SHORT_PROMPTS_INCOMPLETE, "reason": ""}, "incomplete consistency check says why"),
-        ({"processes_planned": 4}, "complete exactly when every planned process completed"),
-        ({"processes": (0, 0, 1)}, "distinct and no more than planned"),
-        ({"processes": (0, 1, 2, 3)}, "distinct and no more than planned"),
+        ({"processes": ()}, "complete exactly when the test's own server answered every prompt"),
+        ({"status": SHORT_PROMPTS_INCOMPLETE, "reason": "x"}, "complete exactly when the test's own server answered"),
+        ({"processes": (0, 1)}, "one process is the test's own server"),
+        ({"processes": (1,)}, "one process is the test's own server"),
         ({"prompt_set_sha256": "x"}, "lowercase hex sha256"),
         ({"miss_probability_one_third": 1.5}, "is a probability"),
         ({"compared_by": "vibes"}, "compared_by must be one of"),
-        ({"self_consistency": OutputCounts((0, 0))}, "counts every completed process"),
-        (
-            {"processes_planned": 1, "processes": (0,), "self_consistency": OutputCounts((0,))},
-            "needs two processes",
-        ),
-        ({"self_consistency": "clean"}, "must be OutputCounts"),
         ({"outputs": "/abs/path"}, "relative path"),
     ],
 )
@@ -158,7 +166,7 @@ def test_the_parts_of_a_check_refuse_what_breaks_them(build, message):
 def test_a_check_document_is_read_strictly():
     document = _check().to_document()
 
-    for broken in ({**document, "self_consistency": 3}, {**document, "processes": "012"}, {**document, "status": None}):
+    for broken in ({**document, "processes": [0, 1]}, {**document, "processes": "012"}, {**document, "status": None}):
         with pytest.raises(MeasurementError):
             ShortPromptConsistency.from_document(broken)
 
@@ -214,12 +222,12 @@ POOLED = PooledConsistency(
 
 
 def test_a_pooled_comparison_round_trips_and_is_the_inconsistency_the_gate_reads():
-    check = _roundtrip(_check(processes_planned=1, processes=(0,), self_consistency=None, pooled=POOLED))
+    check = _roundtrip(_check(pooled=POOLED))
 
     assert check.pooled == POOLED and (POOLED.count, POOLED.inconsistency) == (3, 2)
-    assert check.inconsistency == 2, "the pooled count, not the test's own (which compared nothing)"
+    assert check.inconsistency == 2, "the pooled count: a test's own server compares with nothing on its own"
     assert _check(pooled=replace(POOLED, processes=POOLED.processes[:1], counts=None)).inconsistency is None
-    assert _check().inconsistency == 2 and _check().pooled is None, "a record made without a pool reads its own"
+    assert _check().inconsistency is None and _check().pooled is None, "a record made without a pool compared nothing"
 
 
 @pytest.mark.parametrize(

@@ -329,7 +329,6 @@ def _short_prompts(**changes: Any) -> dict[str, Any]:
     plan = {
         "prompt_set": "short-prompts-0123456789abcdef",
         "prompts_sha256": "a" * 64,
-        "processes": 6,
         "max_new_tokens": 32,
         "phase_cap_sec": 1200.0,
         "trigger": ["purpose final", "arg --attention-backend aiter"],
@@ -344,7 +343,7 @@ def test_a_sheet_that_asks_for_the_short_prompt_check_carries_the_plan_and_the_s
 
     spec = MeasurementSpec.from_document(document)
 
-    assert spec.procedure.short_prompts is not None and spec.procedure.short_prompts.processes == 6
+    assert spec.procedure.short_prompts is not None and spec.procedure.short_prompts.max_new_tokens == 32
     assert list(VALIDATOR.iter_errors(document)) == []
     assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
 
@@ -358,7 +357,8 @@ def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_un
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"processes": 0}, "must be at least 1"),
+        ({"max_new_tokens": 0}, "must be at least 1"),
+        ({"processes": 6}, "unknown key 'processes'"),
         ({"prompts_sha256": "nope"}, "does not match"),
         ({"prompt_set": "Bad Key"}, "does not match"),
         ({"phase_cap_sec": "slow"}, "expected a number"),

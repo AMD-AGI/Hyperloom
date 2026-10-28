@@ -176,8 +176,8 @@ async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked()
         (0, short_prompt_check(0, 0, 0, 0, 0, 0), False),
         (None, short_prompt_check(0, 9, 0, 0, 0, 0), False),
         (1, None, False),
-        (1, short_prompt_check(0, 9, planned=6), False),
-        (1, short_prompt_check(0, planned=6), False),
+        (1, short_prompt_check(0, 9, complete=False), False),
+        (1, short_prompt_check(0, complete=False), False),
     ],
     ids=["above", "above-zero", "at", "clean", "no-floor", "no-check", "incomplete", "nothing-compared"],
 )

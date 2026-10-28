@@ -1,36 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The processes of the check: the test's own server answers first, then fresh server processes, once per planned extra.
+"""The check's one process: the test's own server, asked after its measured rounds and before its teardown.
 
-Process 0 is the test's own server, asked after its measured rounds and before its teardown (:func:`answer_held`); it costs
-the seconds the prompts take. Processes 1 to ``processes - 1`` are fresh servers of the same launch, started and stopped one
-after another (:func:`run_passes`); the toolbox plans them only where the recipe's pooled processes fall short of the pack's
-count for a merge test or a final candidate. How a server is started and stopped is the backend's (``PassHost``): the local
-backend boots the point's own launch the way a ``repro`` test does. This module owns the order, the time budget and what is
-recorded. A process that fails to start, or fails to answer a prompt, is recorded as failed with its reason and the next one
-is tried; the check stops early, and says why, when the phase cap leaves no room for another process. A failed or skipped
-process is never a clean one.
-
-The fresh processes run after the test's own rounds, so the test's server has booted and its ready stamp below the test's
-output directory says how long that took. The cap is sized from it: ``processes * (boot + answers) * (1 +
-CAP_MARGIN_FRACTION) + CAP_MARGIN_SEC``, ``answers`` being the longest a process of this check took to answer the prompts,
-and ``boot`` the longest boot measured (the test's, then each process's). It is sized again after every process. The plan's
-``phase_cap_sec`` is the cap only while no boot is measured, and the cap of the test's own server's answers.
+The server is the one the test itself brought up (:func:`answer_held`); the check boots none, so it costs the seconds the
+prompts take. How the server is reached is the backend's (``PassHost``). This module owns the time cap and what is
+recorded: a server that cannot be reached, or fails to answer a prompt, is recorded as failed with its reason, and a failed
+process is never a clean one. :func:`write_answered` leaves the answers in ``outputs.json``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.short_prompts.client import CompletionError, discover_model, request_timeout, run_prompts
 from hyperloom.measure.short_prompts.outputs import FAILED, OK, ProcessEntry, completions_to_outputs, write_outputs
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
@@ -38,27 +25,17 @@ from hyperloom.measure.short_prompts.prompts import Prompt
 
 __all__ = [
     "Answered",
-    "CAP_MARGIN_FRACTION",
-    "CAP_MARGIN_SEC",
     "PassFailed",
     "PassHost",
     "Serving",
     "answer_held",
     "model_of",
-    "run_passes",
+    "write_answered",
 ]
-
-_PHASE_CAP_STOP = "the phase cap leaves no room for another process"
-_RUN_STOPPED = "the run was stopped"
-#: The margin a cap sized from measured times leaves over them: a share of them, and a fixed time on top.
-CAP_MARGIN_FRACTION = 0.25
-CAP_MARGIN_SEC = 120.0
-
-_LOG = logging.getLogger(__name__)
 
 
 class PassFailed(Exception):
-    """A server process that could not be started; the message is the reason recorded for it."""
+    """A server that could not be reached; the message is the reason recorded for it."""
 
 
 @dataclass(frozen=True)
@@ -70,28 +47,29 @@ class Serving:
 
 
 class PassHost(Protocol):
-    """Starts and stops the server processes of a check."""
+    """Gives a check the test's own server; it starts no server of its own."""
 
     async def start(self, index: int, deadline: float) -> Serving:
-        """Start process ``index``, to be ready before ``deadline`` (a ``time.monotonic()`` instant).
+        """The server of process ``index`` (the test's own: 0), to answer before ``deadline`` (a ``time.monotonic()``
+        instant).
 
         Raises:
-            PassFailed: The process did not come up.
+            PassFailed: There is no server to ask.
         """
         ...
 
     async def stop(self) -> None:
-        """Stop the process ``start`` started; called after every start, also one that raised."""
+        """Release what ``start`` gave; called after every start, also one that raised."""
         ...
 
     def should_stop(self) -> bool:
-        """Whether the run is being stopped, so no further process is to be started."""
+        """Whether the run is being stopped, so the check is to end."""
         ...
 
 
 @dataclass(frozen=True)
 class _Budget:
-    """The check's time: when it must end on the clock ``run_passes`` was given."""
+    """The check's time: when it must end on the clock :func:`answer_held` was given."""
 
     deadline: float
     clock: Callable[[], float]
@@ -99,33 +77,6 @@ class _Budget:
     def monotonic_deadline(self) -> float:
         """The same instant on ``time.monotonic()``, which the requests are timed by."""
         return time.monotonic() + (self.deadline - self.clock())
-
-
-@dataclass
-class _Measured:
-    """The longest server boot and prompt-answering time measured so far, which the check's cap is sized from."""
-
-    boot: float | None
-    answers: float = 0.0
-
-    def saw(self, entry: ProcessEntry) -> None:
-        """A process of the check that answered every prompt measured a boot and an answering time."""
-        if entry.status != OK:
-            return
-        boot = _positive(entry.boot_seconds)
-        if boot is not None:
-            self.boot = max(self.boot or 0.0, boot)
-        self.answers = max(self.answers, _positive(entry.query_seconds) or 0.0)
-
-    def cap(self, plan: ShortPromptPlan) -> float:
-        """The check's cap: sized from the measured times once a boot is measured, the plan's until then."""
-        if self.boot is None:
-            return plan.phase_cap_sec
-        return plan.processes * (self.boot + self.answers) * (1 + CAP_MARGIN_FRACTION) + CAP_MARGIN_SEC
-
-
-def _positive(seconds: float | None) -> float | None:
-    return seconds if seconds is not None and math.isfinite(seconds) and seconds > 0 else None
 
 
 def model_of(serving: Serving, deadline: float) -> str:
@@ -184,41 +135,8 @@ async def answer_held(
     return Answered(plan, prompts, entry)
 
 
-async def run_passes(
-    answered: Answered, host: PassHost, output_dir: Path, *, clock: Callable[[], float] = time.monotonic
-) -> tuple[ProcessEntry, ...]:
-    """Run the planned fresh processes (1 to ``plan.processes - 1``) one after another after process 0 (``answered``,
-    :func:`answer_held`), write ``outputs.json`` below ``output_dir`` and return the entries.
-
-    ``output_dir`` is the test's own output directory, whose ready stamps say how long the test's server took to boot.
-    ``clock`` is the ``time.monotonic()`` that the deadline handed to the host is on.
-    """
-    plan, prompts, first = answered.plan, answered.prompts, answered.entry
-    started = clock()
-    measured = _Measured(_positive(boot_seconds(Path(output_dir))))
-    if first.status == OK:  # its server was already up: it measured an answering time, not a boot
-        measured.answers = _positive(first.query_seconds) or 0.0
-    budget = _Budget(started + measured.cap(plan), clock)
-    _LOG.info(
-        "short-prompt check capped at %.0f s (the plan's cap is %.0f s)", budget.deadline - started, plan.phase_cap_sec
-    )
-    infos = [prompt.info() for prompt in prompts]
-    entries: list[ProcessEntry] = [first]
-    longest = 0.0
-    stopped = ""
-    for index in range(1, plan.processes):
-        left = budget.deadline - clock()
-        if host.should_stop():
-            stopped = _RUN_STOPPED
-        elif left <= 0 or (len(entries) > 1 and left < longest):
-            stopped = _PHASE_CAP_STOP
-        if stopped:
-            break
-        began = clock()
-        entries.append(await _one_process(plan, prompts, host, index, budget))
-        longest = max(longest, clock() - began)
-        measured.saw(entries[-1])
-        budget = _Budget(started + measured.cap(plan), clock)
-        write_outputs(output_dir, plan, infos, "", entries)
-    write_outputs(output_dir, plan, infos, stopped, entries)
-    return tuple(entries)
+def write_answered(answered: Answered, output_dir: Path) -> ProcessEntry:
+    """Write ``outputs.json`` below ``output_dir`` (the test's own output directory) for ``answered``, the test's own
+    server's answers (:func:`answer_held`), and return its entry."""
+    write_outputs(output_dir, answered.plan, [prompt.info() for prompt in answered.prompts], [answered.entry])
+    return answered.entry

@@ -154,9 +154,7 @@ AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
 SGLANG_CUDA_GRAPH_CAPTURE_END = _PACK.pattern("sglang_cuda_graph_capture_end")
 SGLANG_CUDA_GRAPH_DECODE_BS = _PACK.pattern("sglang_cuda_graph_decode_bs")
 
-SHORT_PROMPT_CHECK = _PACK.names(
-    "short_prompt_check", "processes", "max_new_tokens", "phase_cap_sec", "always_purposes"
-)
+SHORT_PROMPT_CHECK = _PACK.names("short_prompt_check", "max_new_tokens", "phase_cap_sec", "always_purposes")
 SHORT_PROMPT_TOUCH = _PACK.pattern("short_prompt_touch")
 
 _image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
