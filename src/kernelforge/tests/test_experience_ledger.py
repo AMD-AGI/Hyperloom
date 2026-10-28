@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the per-run experience ledger (loop/experience.py)."""
+"""Unit tests for the per-run experience ledger (workflows/forge_loop/memory/experience.py)."""
 
 from __future__ import annotations
 

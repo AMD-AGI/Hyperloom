@@ -66,7 +66,7 @@ def forge_loop_prompts(monkeypatch):
 # edits, both diffed line by line against the previous rendering: the four
 # prompts stopped naming `build`/`test`/`bench`/`pmc`/`registers` as tools --
 # this loop has Bash and the driver, those tools do not exist, and the framing
-# paragraph in orchestrator/agent.py used to spend a sentence per session
+# paragraph in workflows/forge_loop/roles/agent.py used to spend a sentence per session
 # translating the names back into shell -- and triton's Gluon-escalation section
 # deferred its mechanics to the two cards it already routes to, keeping the
 # trigger, the ownership claim and the route resident (see

@@ -93,7 +93,7 @@ class Experiment:
     changes_reverted: list[str] = field(default_factory=list)
 
     # NEW: total LLM token spend for the whole run, summed from terminal
-    # provider usage records (see tracker/usage.py). Canonical
+    # provider usage records (see agent_backends/usage.py). Canonical
     # keys: input_tokens / output_tokens / cache_creation_input_tokens /
     # cache_read_input_tokens / total_cost_usd / cost_available / cost_source /
     # calls. Empty until the loop finishes (or when no agent ran), so an external

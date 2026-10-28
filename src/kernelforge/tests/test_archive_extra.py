@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Extra unit tests for the candidate archive (loop/archive.py)."""
+"""Extra unit tests for the candidate archive (workflows/forge_loop/campaign/archive.py)."""
 
 from __future__ import annotations
 

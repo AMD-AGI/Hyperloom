@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the in-memory index cache on loop/archive.py."""
+"""Unit tests for the in-memory index cache on workflows/forge_loop/campaign/archive.py."""
 
 from __future__ import annotations
 

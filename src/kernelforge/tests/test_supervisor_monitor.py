@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the AVO self-supervision monitor (loop/supervisor.py)."""
+"""Unit tests for the AVO self-supervision monitor (workflows/forge_loop/search/supervisor.py)."""
 
 from __future__ import annotations
 

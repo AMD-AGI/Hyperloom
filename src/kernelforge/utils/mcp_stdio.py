@@ -3,7 +3,7 @@
 
 """Newline-delimited JSON-RPC transport shared by the stdio MCP servers.
 
-``knowledge.pr_knowledge.mcp_server`` and ``orchestrator.specialist_probe_server``
+``knowledge.pr_knowledge.mcp_server`` and ``workflows.forge_loop.roles.specialist_probe_server``
 speak the same wire protocol to the same clients; only the tool set behind
 ``tools/call`` differs. Keeping the
 envelope here means a protocol fix -- an error code, a method the client starts

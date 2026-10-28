@@ -31,7 +31,7 @@ from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 log = logging.getLogger(__name__)
 
-# forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see loop.runner), so it is
+# forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see workflows.forge_loop.iteration.runner), so it is
 # present in the captured output even when the loop is later hard-killed.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
 

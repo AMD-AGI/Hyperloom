@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for orchestrator/supervisor.py pure logic (no LLM/subprocess)."""
+"""Unit tests for workflows/forge_loop/roles/supervisor.py pure logic (no LLM/subprocess)."""
 
 from __future__ import annotations
 

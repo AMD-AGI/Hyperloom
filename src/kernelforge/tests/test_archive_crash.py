@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for how a CRASHed iteration is archived and surfaced to the next agent prompt (loop/archive.py)."""
+"""Unit tests for how a CRASHed iteration is archived and surfaced to the next agent prompt (workflows/forge_loop/campaign/archive.py)."""
 
 from __future__ import annotations
 

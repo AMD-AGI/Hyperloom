@@ -269,7 +269,7 @@ class Config:
     local_knowledge_dir: Path = field(default=None)
 
     # Bounded scratch measurement for the read-only planning specialists (see
-    # orchestrator.specialists.SpecialistProbeConfig). On by default: a
+    # workflows.forge_loop.roles.specialists.SpecialistProbeConfig). On by default: a
     # specialist that can only argue about a dispatch constant is the failure
     # this answers, and the probe's own budgets are what make it safe. The two
     # budgets are the analysis PHASE's, shared by every specialist of the round.

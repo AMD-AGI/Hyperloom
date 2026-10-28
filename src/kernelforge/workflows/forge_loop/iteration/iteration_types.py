@@ -86,7 +86,7 @@ class IterationConfig:
     target_functions: list[str] = field(default_factory=list)
 
     # Supervisor self-supervision (AVO): when the search stalls, a supervisor LLM (a different model family than the
-    # implementer — see orchestrator/supervisor.py) reviews the trajectory and injects fresh directions INSTEAD of the
+    # implementer — see workflows/forge_loop/roles/supervisor.py) reviews the trajectory and injects fresh directions INSTEAD of the
     # loop stopping at the first plateau.
     supervise_after: int = 3  # consecutive no-improvement iters that trigger
     supervise_cooldown: int = 3  # min iterations between interventions

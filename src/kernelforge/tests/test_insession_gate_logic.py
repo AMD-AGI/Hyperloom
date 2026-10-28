@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the in-session gate decision logic (loop/insession_gate.py)."""
+"""Unit tests for the in-session gate decision logic (workflows/forge_loop/gate/insession_gate.py)."""
 
 from __future__ import annotations
 

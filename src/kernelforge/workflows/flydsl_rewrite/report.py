@@ -12,7 +12,7 @@ from kernelforge.workflows.flydsl_rewrite import protocol
 from kernelforge.workflows.flydsl_rewrite.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
 from kernelforge.utils.durable_io import atomic_write_text
 
-# The nested forge-loop sentinel is suppressed while its stdout is streamed by rewrite_by_flydsl.optimize, so this is
+# The nested forge-loop sentinel is suppressed while its stdout is streamed by workflows.flydsl_rewrite.optimize, so this is
 # the only one a caller sees.
 SENTINEL = protocol.RESULT_SENTINEL
 

@@ -205,8 +205,8 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
 | `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
 | `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
-| `kf-tools-foundation` | `kernelforge.utils` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
-| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `orchestrator.specialist_probe_server`) do not reach `agent_backends`, `cli` or `loop`, so a server starts without the agent runtime |
+| `kf-tools-foundation` | `kernelforge.utils` imports no other kernelforge package |
+| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `workflows.forge_loop.roles.specialist_probe_server`) do not reach `agent_backends`, `cli` or the forge-loop beyond its roles, so a server starts without the agent runtime or the iteration loop |
 | `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
@@ -214,7 +214,7 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.workflows.forge_loop.api` for the loop), never one of its modules |
 | `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
 
-Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package is added to the `kf-public-interfaces` list.
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package or workflow under `kernelforge/workflows/` is added to the `kf-public-interfaces` list.
 
 Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
 

@@ -47,7 +47,7 @@ class LockedRunMixin:
     ) -> LoopAgents:
         """Load durable state, open the session segment, and seed the campaign clock."""
         self._search_actors = agents.search_actors
-        # The loop's progress is read off a pipe (rewrite_by_flydsl.optimize captures stdout
+        # The loop's progress is read off a pipe (workflows.flydsl_rewrite.optimize captures stdout
         # and may hard-kill the run), so every print has to leave the buffer as it is made.
         # One line-buffered stream covers all of them; a ``print`` rebind would only reach
         # the module it is made in.

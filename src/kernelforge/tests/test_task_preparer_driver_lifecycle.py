@@ -471,7 +471,7 @@ def _prepare_a_driver_the_agent_repairs(tmp_path, monkeypatch, driver_relpath: s
 
 def test_a_driver_git_ignores_is_prepared_in_place_without_a_commit(tmp_path, monkeypatch):
     """The rewrite controller stages a driver in a folder that hides itself from git
-    (kernel_rewrite_controller/worktree.py), so repairing it leaves nothing to commit."""
+    (workflows/rewrite_controller/worktree.py), so repairing it leaves nothing to commit."""
     base = tmp_path / "base"
 
     def record_base(workspace):
