@@ -106,6 +106,10 @@ class GateService:
         with _judgeable():
             return await self._rule.retest(judgement, retest, parent)
 
+    async def request_confirm(self, request_id: str) -> str:
+        record = await self._notebook.record(request_id)
+        return await self._toolbox.submit_test(retest_request(record, self._rule))
+
     async def accuracy_passes(self, request_id: str) -> bool:
         record = await self._measured(request_id)
         with _judgeable():

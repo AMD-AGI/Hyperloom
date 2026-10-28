@@ -218,6 +218,14 @@ async def test_an_agentx_candidate_is_refused_nothing_on_its_short_prompt_check_
     assert record.result.short_prompt_consistency.inconsistency == 9, "the check stays on the test's result"
 
 
+def test_a_retest_asked_before_its_first_has_a_result_runs_on_any_node():
+    unmeasured = replace(_checked(1100.0, None), result=None)
+
+    retest = retest_request(unmeasured, InferenceXRule(None, 64))
+
+    assert (retest.retest_of, retest.avoid_nodes, retest.purpose) == ("r1", (), Purpose.CONFIRM)
+
+
 async def test_the_retest_of_a_test_that_forced_the_short_prompt_check_forces_it_too():
     first = _checked(1100.0, short_prompt_check(0, 3, 0))
     forced = replace(first, request=replace(first.request, consistency_check=True))

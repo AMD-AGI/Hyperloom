@@ -156,8 +156,9 @@ def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
 
 def retest_request(first: TestRecord, rule: Rule) -> TestRequest:
     """The confirming retest of ``first``: the same change and files on the same parent, off the node that measured it,
-    with the short-prompt check ``first`` was forced to run, so a defect it found can be seen twice."""
-    sandbox = _result(first).sandbox
+    with the short-prompt check ``first`` was forced to run, so a defect it found can be seen twice. One asked before
+    ``first`` has a result runs on any node."""
+    sandbox = first.result.sandbox if first.result is not None else None
     node = sandbox.node_name if sandbox is not None else None
     return TestRequest(
         kind=TestKind.TEST,

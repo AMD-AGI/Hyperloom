@@ -258,6 +258,27 @@ async def test_asking_again_after_a_restart_reuses_the_retest_asked_for(session)
     assert len(session.retests()) == 1
 
 
+async def test_a_confirm_asked_before_the_first_is_measured_is_the_retest_its_gain_is_judged_with(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST))
+
+    confirm = await session.gate.request_confirm(merge)
+    judgement = await session.gate.compare(merge)
+
+    (retest,) = session.retests()
+    assert (retest.request_id, retest.retest_of) == (confirm, merge)
+    assert (judgement.verdict, judgement.request_ids) == (Verdict.IMPROVED, (merge, confirm))
+
+
+async def test_a_flat_first_is_judged_without_the_confirm_asked_ahead_of_it(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+
+    confirm = await session.gate.request_confirm(merge)
+    judgement = await session.gate.compare(merge)
+
+    assert (judgement.verdict, judgement.request_ids) == (Verdict.FLAT, (merge,))
+    assert [retest.request_id for retest in session.retests()] == [confirm]
+
+
 async def test_a_withdrawn_test_is_not_measured(tmp_path):
     session = _Session(tmp_path / "notebook")
     await session.record_root()

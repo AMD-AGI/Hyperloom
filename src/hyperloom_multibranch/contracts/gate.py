@@ -84,6 +84,10 @@ class SessionGate(Protocol):
     async def compare(self, request_id: str) -> Judgement:
         """Judge the test against its parent's recorded value, retesting a gain on another node before it counts."""
 
+    async def request_confirm(self, request_id: str) -> str:
+        """Submit the test's confirming retest before it has a result, returning its id; :meth:`compare` judges a gain
+        with it, and a caller whose test needs no confirm withdraws it."""
+
     async def accuracy_passes(self, request_id: str) -> bool:
         """Whether the test clears the accuracy gate every commit clears."""
 
