@@ -144,7 +144,10 @@ class ProposalBench(CoordinatorCollaborator):
             await self.on_stack_adopted()
 
     async def on_stack_adopted(self) -> None:
-        """Queue the moved stack's cycle batch before the dispatcher's next pass hands the lanes to an integrate."""
+        """Queue the cycle batch the phase owes (a resumed or moved stack) before a dispatcher pass hands off the lanes.
+
+        Called after an adopted settlement and ahead of each tick's dispatcher pass; idempotent.
+        """
         if str(self.shared_state.phase or "").upper() == PHASE_FRAMEWORK_AGENT:
             await self.enqueue_cycle_batch()
 

@@ -677,8 +677,7 @@ class Coordinator:
         try:
             # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
             await self.await_within_session_bound(
-                self.phase_machine.advance_phase_if_needed,
-                stage="advance_phase_pre_reactor",
+                self.phase_machine.advance_phase_if_needed, stage="advance_phase_pre_reactor"
             )
         except Exception as exc:
             log.exception("phase advance before reactors failed")
@@ -695,7 +694,6 @@ class Coordinator:
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
-            # A cycle batch the phase owes (a resumed or moved stack) is queued before this pass can hand off its lanes.
             await self.phase_framework.on_stack_adopted()
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
