@@ -256,8 +256,9 @@ def redistribute_budget_pct(
     """Move disabled work-phase shares to enabled work phases.
 
     FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
-    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb. A SWEEP without its sweep only drains and validates on entry,
-    which the session budget alone gates, so a share there would just shrink the phases before it.
+    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb. A SWEEP whose concurrency
+    sweep is off only drains and validates on entry, which the session budget
+    alone gates, so a share there would just shrink the phases before it.
     """
     out = dict(base)
     toggles = {PHASE_FRAMEWORK_AGENT: optimize_enabled, PHASE_KERNEL_AGENT: kernel_enabled, PHASE_SWEEP: sweep_enabled}

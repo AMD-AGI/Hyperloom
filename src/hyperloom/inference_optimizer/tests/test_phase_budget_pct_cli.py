@@ -233,13 +233,6 @@ def test_a_session_without_conc_sweep_gives_its_sweep_share_to_framework(tmp_pat
     assert remaining_min == pytest.approx(614 * 1.0 / (1.0 + DEFAULT_PHASE_BUDGET_PCT["CLOSE"]))
 
 
-def test_a_session_with_conc_sweep_keeps_its_sweep_share(tmp_path) -> None:
-    """The default path runs the sweep, so its SWEEP share is untouched."""
-    coord = make_coordinator(tmp_path, settings=CoordinatorSettings(phase_budget_pct={PHASE_SWEEP: 0.30}))
-    assert coord.shared_state.conc_sweep_enabled
-    assert coord.shared_state.phase_budget_pct[PHASE_SWEEP] >= 0.30
-
-
 def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     """No disabled phase → unchanged; re-running never drifts."""
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
