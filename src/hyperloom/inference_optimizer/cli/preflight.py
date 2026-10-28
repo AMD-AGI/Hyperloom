@@ -834,9 +834,26 @@ def _check_tracelens_cli() -> dict[str, Any]:
     raise SystemExit(2)
 
 
+def _installed_tracelens_pin() -> str:
+    """The TraceLens revision this checkout's installer pins, read from the installer itself."""
+    script = Path(__file__).resolve().parent.parent / "assets" / "install_kernel_tools.sh"
+    match = re.search(r'^TRACELENS_REF="([0-9a-fA-F]{40})"$', script.read_text(encoding="utf-8"), re.MULTILINE)
+    return match.group(1) if match else ""
+
+
 def _check_tracelens_root_exists() -> dict[str, Any]:
-    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight."""
+    """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight, and an installer checkout behind its pin."""
     override = os.environ.get("TRACELENS_ROOT")
+    pin = _installed_tracelens_pin()
+    name = Path(override).name if override else ""
+    if override and name.startswith("TraceLens@") and pin and name != f"TraceLens@{pin}":
+        print(
+            f"ERROR: TRACELENS_ROOT={override} is the checkout an earlier install pinned, but this code pins "
+            f"TraceLens@{pin}. Re-run src/hyperloom/inference_optimizer/assets/install.sh to update it. "
+            f"Refusing to start.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if not override or Path(override).is_dir():
         return {
             "status": "applied",

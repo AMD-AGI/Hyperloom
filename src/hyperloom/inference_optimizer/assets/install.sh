@@ -202,6 +202,8 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 
 DRY_RUN=0
 CHECK_ONLY=0
+# Keys --check-only finds behind the pins this checkout installs; a non-empty list fails the check.
+_STALE_KEYS=()
 
 usage() {
   cat <<'EOF'
@@ -1445,11 +1447,19 @@ for spec in specs:
 # root after import.
 ensure_magpie() {
   log "ensuring Magpie package ${MAGPIE_PACKAGE_SPEC}"
+  # An older install wrote MAGPIE_PATH into .env; one that no longer holds the package is not an override to keep.
+  if [ "$MAGPIE_PATH_EXPLICIT" -eq 1 ] && [ ! -f "${MAGPIE_PATH}/Magpie/__init__.py" ]; then
+    warn "MAGPIE_PATH=${MAGPIE_PATH} holds no Magpie package; resolving it from the installed package instead"
+    MAGPIE_PATH_EXPLICIT=0
+  fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
     if "$PYTHON" -c "import Magpie" >/dev/null 2>&1; then
       log "Magpie importable"
     else
       warn "Magpie not importable (check-only mode, skipping pip install)"
+    fi
+    if [ "$MAGPIE_PATH_EXPLICIT" -eq 0 ] && ! "$PYTHON" "${_script_dir}/check_magpie.py" "$MAGPIE_REF" >/dev/null 2>&1; then
+      _STALE_KEYS+=("MAGPIE_REF")
     fi
     return 0
   fi
@@ -2019,6 +2029,9 @@ _probe_framework_source_roots
 pin_framework_image_baselines
 
 _prune_dep_cache "InferenceX" "Magpie"
+if [ "${#_STALE_KEYS[@]}" -gt 0 ]; then
+  die "behind the pinned revisions: ${_STALE_KEYS[*]}. Rerun install.sh without --check-only to update them."
+fi
 log "install complete"
 log "kernel-agent env file written: ${KERNEL_AGENT_ENV}"
 log ""

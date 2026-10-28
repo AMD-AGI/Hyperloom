@@ -172,6 +172,10 @@ if [ -n "${GEAK_ROOT:-}" ]; then
   if [ "$(dirname "${_geak_root_canonical}")" != "${_geak_cache_root}" ] \
      || [[ "$(basename "${_geak_root_canonical}")" != GEAK@* ]]; then
     _geak_root_is_operator_override=1
+  else
+    # As for TraceLens: a cache path re-resolves to the current GEAK_REF, and the runner inside it follows.
+    GEAK_ROOT=""
+    GEAK_E2E_RUNNER=""
   fi
 fi
 # GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
@@ -750,6 +754,7 @@ ensure_tracelens() {
   elif [ ! -d "$TRACELENS_ROOT/.git" ]; then
     if [ "$CHECK_ONLY" -eq 1 ]; then
       warn "TraceLens checkout missing/incomplete at ${TRACELENS_ROOT} (check-only mode, skipping clone)"
+      _STALE_KEYS+=("TRACELENS_ROOT")
     elif [ "$DRY_RUN" -eq 1 ]; then
       [ -e "$TRACELENS_ROOT" ] && log "would: rm -rf ${TRACELENS_ROOT} (incomplete, not a git repo)"
       log "would: git clone --depth 1 ${TRACELENS_REPO} ${TRACELENS_ROOT}"
@@ -1038,6 +1043,9 @@ ensure_geak() {
   elif [ ! -d "${GEAK_ROOT}/.git" ]; then
     if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
       mkdir -p "${GEAK_ROOT}"
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+      _STALE_KEYS+=("GEAK_ROOT")
     fi
     if [[ "$GEAK_REF" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
       run git init -q "${GEAK_ROOT}"

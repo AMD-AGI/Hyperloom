@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX and TraceLens revisions.
+"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX and TraceLens revisions and GEAK's ref.
 
 Installer-managed tool paths stay out of ``.env``, so a later install cannot read them back as operator overrides.
 """
@@ -68,7 +68,7 @@ def test_tool_roots_in_dotenv_are_left_to_the_operator(tmp_path: Path, managed: 
     dotenv.parent.mkdir()
     dotenv.write_text("".join(f"{key}={value}\n" for key, value in entries.items()), encoding="utf-8")
 
-    _source_kernel_tools(tmp_path, entries, "write_env_file")
+    _source_kernel_tools(tmp_path, {**entries, "GEAK_REF": "1" * 40}, "write_env_file")
 
     lines = dotenv.read_text(encoding="utf-8").splitlines()
     for key, value in entries.items():
@@ -76,6 +76,18 @@ def test_tool_roots_in_dotenv_are_left_to_the_operator(tmp_path: Path, managed: 
             assert not any(line.startswith(f"{key}=") for line in lines), key
         else:
             assert f"{key}={value}" in lines, key
+
+
+def test_geak_cache_root_and_runner_follow_the_ref(tmp_path: Path) -> None:
+    ref = "1" * 40
+    old = tmp_path / "cache" / "GEAK@0000000"
+    exports = {"GEAK_REF": ref, "GEAK_ROOT": old, "GEAK_E2E_RUNNER": old / "interface" / "run_e2e.py"}
+
+    printed = _source_kernel_tools(tmp_path, exports, 'printf "%s\\n%s" "$GEAK_ROOT" "$GEAK_E2E_RUNNER"')
+    root, runner = printed.split("\n")
+
+    assert root == str(tmp_path / "cache" / f"GEAK@{ref}")
+    assert runner == f"{root}/interface/run_e2e.py"
 
 
 @pytest.mark.parametrize("stale", [True, False], ids=["stale-cache-checkout", "operator-checkout"])

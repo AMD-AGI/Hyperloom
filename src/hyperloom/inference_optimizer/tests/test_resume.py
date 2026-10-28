@@ -732,6 +732,18 @@ class TestTracelensRootEnvCorrection:
         monkeypatch.setenv("TRACELENS_ROOT", str(good))
         cli_preflight._check_tracelens_root_exists()
 
+    def test_check_root_exits_when_an_installer_checkout_is_behind_the_pin(self, tmp_path, monkeypatch):
+        pinned = tmp_path / f"TraceLens@{cli_preflight._installed_tracelens_pin()}"
+        stale = tmp_path / "TraceLens@0000000"
+        pinned.mkdir()
+        stale.mkdir()
+        monkeypatch.setenv("TRACELENS_ROOT", str(pinned))
+        cli_preflight._check_tracelens_root_exists()
+        monkeypatch.setenv("TRACELENS_ROOT", str(stale))
+        with pytest.raises(SystemExit) as excinfo:
+            cli_preflight._check_tracelens_root_exists()
+        assert excinfo.value.code == 2
+
 
 @pytest.mark.asyncio
 async def test_resume_preserves_custom_workload_paths(session_dir):

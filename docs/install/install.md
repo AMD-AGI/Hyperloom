@@ -242,6 +242,10 @@ through the kernel-agent env file, not `.env`. To override a TraceLens or GEAK
 checkout persistently, write its path into `.env` yourself; the installer
 leaves a path outside its cache as written. Export `MAGPIE_PATH` or
 `INFERENCEX_PATH` in the shell to override those.
+After a code update that moves a pin, `install.sh --check-only` exits non-zero
+and names each stale key (`TRACELENS_ROOT`, `GEAK_ROOT`, `MAGPIE_REF`), and the
+optimizer's preflight refuses to start on a `TraceLens@<sha>` checkout that is
+not the pinned one; rerun `install.sh` to update them.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
