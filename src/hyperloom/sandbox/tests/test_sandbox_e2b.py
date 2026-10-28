@@ -27,6 +27,7 @@ from hyperloom.sandbox import CreateOptions, OutputSinks, RunSettings
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _LineSink
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
+    SandboxCreateFailed,
     SandboxDenied,
     SandboxGone,
     SandboxQuotaExceeded,
@@ -198,6 +199,55 @@ def test_create_with_an_idempotency_key_is_replayed_after_a_server_error(
     sb = _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
     assert sb.sandbox_id == "sbx-1"
     assert len(service.calls("POST", "/v2/sandboxes")) == 3
+
+
+#: Agent Sandbox's answer to a create whose sandbox failed while starting (joint hosted run 4), word for word: the E2B
+#: error body (the SDK requires its ``code``) with the reason code beside it, and in ``message``, which the SDK keeps.
+CREATE_FAILED_MESSAGE = "sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+CREATE_FAILED_BODY = {"code": 500, "reason": "sandbox_create_failed", "message": CREATE_FAILED_MESSAGE}
+#: How a gateway cuts a create that is still pending: its 180 s limit, or the service's context cancelled under it.
+GATEWAY_CUTS = [
+    (504, {"code": 504, "message": "context canceled"}),
+    (504, b"<html>504 Gateway Time-out</html>"),
+]
+
+
+def _keys_sent(service: _Service) -> list[str]:
+    return [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [CREATE_FAILED_BODY, {"code": 500, "message": "workload sbx-1 phase Failed"}],
+    ids=["sandbox_create_failed", "phase_failed"],
+)
+def test_a_create_whose_sandbox_failed_is_final_and_not_replayed(
+    service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (500, body), (201, SANDBOX))
+    with pytest.raises(SandboxCreateFailed) as failed:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert str(failed.value) == f"500: {body['message']}", "the platform's own message is kept"
+    assert _keys_sent(service) == ["k-1"], "a replay of the key would only find the failed sandbox or make another"
+
+
+@pytest.mark.parametrize("cut", GATEWAY_CUTS, ids=["context_canceled", "gateway_page"])
+def test_a_create_cut_by_the_gateway_is_replayed_and_finds_the_pending_sandbox(
+    service: _Service, provider: E2BSandboxProvider, cut: tuple[int, Any]
+) -> None:
+    service.reply("POST", "/v2/sandboxes", cut, (201, SANDBOX))
+    sb = _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert sb.sandbox_id == "sbx-1"
+    assert _keys_sent(service) == ["k-1", "k-1"], "the replay carries the same key"
+
+
+def test_a_replay_after_a_cut_that_finds_the_sandbox_failed_stops_there(
+    service: _Service, provider: E2BSandboxProvider
+) -> None:
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (500, CREATE_FAILED_BODY), (201, SANDBOX))
+    with pytest.raises(SandboxCreateFailed, match="phase Failed"):
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert _keys_sent(service) == ["k-1", "k-1"]
 
 
 def test_a_503_on_create_is_final_even_with_an_idempotency_key(service: _Service, provider: E2BSandboxProvider) -> None:

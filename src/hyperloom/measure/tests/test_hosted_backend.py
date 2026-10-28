@@ -32,7 +32,7 @@ from hyperloom.measure.tests.hosted_fixtures import (
     point_yaml,
     runner_template,
 )
-from hyperloom.sandbox.socket import SandboxGone
+from hyperloom.sandbox.socket import SandboxCreateFailed, SandboxGone
 
 
 @pytest.fixture
@@ -377,6 +377,26 @@ def test_no_sandbox_within_the_start_timeout_is_an_infrastructure_failure(rig, t
         holder.kill()
     assert outcome.returncode == HOSTED_RUNNER_UNAVAILABLE_RC
     assert (outcome.failure_class.value, outcome.failure_reason) == ("infra", "runner_start_timeout")
+
+
+def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_the_platforms_message(
+    rig, tmp_path, monkeypatch
+) -> None:
+    r = rig(gpus=1)
+    keys: list[str] = []
+    message = "500: sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+
+    def failing(template, *, role, timeout_sec, metadata, options=None):
+        keys.append(metadata["agent-sandbox.io/idempotency-key"])
+        raise SandboxCreateFailed(message)
+
+    monkeypatch.setattr(r.provider, "create", failing)
+    _, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_INFRA_FAILURE_RC
+    assert (outcome.failure_class.value, outcome.failure_reason) == ("infra", "sandbox_create_failed")
+    assert outcome.stderr == f"sandbox_create_failed: {message}"
+    assert keys == ["run-1:req-1:1"], "one create, its key not replayed"
+    assert r.backend._pool.active == 0
 
 
 def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path) -> None:

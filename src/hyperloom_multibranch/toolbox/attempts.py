@@ -10,8 +10,8 @@ attempts into the request's single result:
   ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
   repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
   likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`) is retried once, and its node is not reported either. One that
-  says nothing about the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost) is
-  retried like any other, and its node is not reported.
+  says nothing about the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a
+  sandbox that failed before it ran) is retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -54,12 +54,16 @@ ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT})
 RUNNER_START_FAILED = "runner_start_failed"
 #: The hosted backend's ``error_class`` when it lost the sandbox (``hyperloom.measure.hosted.RUNNER_LOST``).
 RUNNER_LOST = "runner_lost"
+#: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
+#: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
+SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 #: Infrastructure failures retried like any other but never held against the node they ran on. A runner that could not
 #: start failed on what its sandbox was given (the template, an entry of the runner cache that is not what its manifest
 #: recorded, a signing key mounted read-only), which any node gives it alike. A lost runner is most often the platform
 #: taking its sandbox back when the node's allocation ended, which the toolbox cannot tell from a node that died; a node
-#: that is sick shows it in the failures that stay held against it (the card guard, GPU and node faults).
-NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset({RUNNER_START_FAILED, RUNNER_LOST})
+#: that is sick shows it in the failures that stay held against it (the card guard, GPU and node faults). A sandbox that
+#: failed before it ran failed on its template or what the platform mounted, and was never placed on a node it could blame.
+NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset({RUNNER_START_FAILED, RUNNER_LOST, SANDBOX_CREATE_FAILED})
 #: Infrastructure failures whose node is not reported.
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.

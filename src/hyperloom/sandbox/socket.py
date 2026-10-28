@@ -27,6 +27,7 @@ __all__ = [
     "CommandResult",
     "Role",
     "Sandbox",
+    "SandboxCreateFailed",
     "SandboxDenied",
     "SandboxError",
     "SandboxGone",
@@ -72,6 +73,16 @@ class SandboxGone(SandboxError):
 
     A create that carries an idempotency key whose sandbox has ended raises it too: the key is spent, and a new key
     makes a new sandbox.
+    """
+
+
+class SandboxCreateFailed(SandboxError):
+    """The platform made the sandbox a create asked for, and the sandbox failed before it ran (its workload reached the
+    terminal ``Failed`` phase: its container exited while starting, say).
+
+    The create is over: its idempotency key now names a failed sandbox, so repeating it with the same key only makes the
+    platform report the key spent or make another sandbox that fails the same way. It says nothing about a node either
+    (the sandbox had none that could be blamed); a caller treats it as an infrastructure failure of this one attempt.
     """
 
 

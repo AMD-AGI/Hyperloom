@@ -25,6 +25,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     NODE_BLAMELESS_INFRA_REASONS,
     RUNNER_LOST,
     RUNNER_START_FAILED,
+    SANDBOX_CREATE_FAILED,
     AttemptRunner,
     TestJob,
 )
@@ -119,20 +120,28 @@ CACHE_REASON = (
     "the manifest recorded: 3980 files and 54915363 bytes, the manifest has 3457 and 46986171"
 )
 LOST_REASON = f"{RUNNER_LOST}: the sandbox could not be read"
+#: What the hosted backend reports for the Agent Sandbox answer of joint hosted run 4, word for word.
+CREATE_FAILED_REASON = (
+    f"{SANDBOX_CREATE_FAILED}: 500: sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
+)
 
 
 @pytest.mark.parametrize(
-    "reason", [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON], ids=["signing_key", "runner_cache", "runner_lost"]
+    "reason",
+    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON],
+    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed"],
 )
 async def test_a_runner_that_could_not_start_or_was_lost_is_retried_and_not_held_against_the_node(reason) -> None:
     result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 4, "retried in fresh sandboxes like any infrastructure failure"
+    assert [job.attempt for job in executor.jobs] == [1, 2, 3, 4], "each attempt is a new idempotency key"
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
     assert reported == [], "the sandbox's delivery or the platform's reclaim, not the node, ended the attempt"
 
 
 def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() -> None:
-    assert NODE_BLAMELESS_INFRA_REASONS == {"runner_start_failed", "runner_lost"}
+    assert NODE_BLAMELESS_INFRA_REASONS == {"runner_start_failed", "runner_lost", "sandbox_create_failed"}
     assert NODE_BLAMELESS_INFRA_REASONS <= INFRA_ERROR_CLASSES
     assert RUNNER_LOST == hosted.RUNNER_LOST
+    assert SANDBOX_CREATE_FAILED == hosted.SANDBOX_CREATE_FAILED

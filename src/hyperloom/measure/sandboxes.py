@@ -206,6 +206,8 @@ class SandboxPool:
                 full (``SandboxQuotaExceeded``) is not raised: the create waits for a sandbox to end and is repeated,
                 until the test is stopped (``PoolClosed``).
             SandboxGone: Every key the attempt tried was spent (the sandbox of each had ended).
+            SandboxCreateFailed: The platform made the sandbox and it failed before it ran; the attempt is over and
+                no other key is tried (the slot is given back).
         """
         template = self.template_for(gpu_count)
         lifetime = int(timeout_sec + self._slack)
@@ -301,7 +303,9 @@ class SandboxPool:
         An attempt number comes back when its sandbox ended before the attempt was journalled (a restart, a sheet that
         could not be sent), and the service refuses a create with the key of a sandbox that ended (``SandboxGone``): the
         create is repeated with the attempt's next key, ``<key>:r1``, ``<key>:r2`` and so on, the same sequence every
-        time, so a replay still finds a sandbox that is running. A full quota (``SandboxQuotaExceeded``) says nothing
+        time, so a replay still finds a sandbox that is running. A sandbox the platform made and that failed before it
+        ran (``SandboxCreateFailed``) ends the attempt: its key is not replayed and no next key is tried, because each
+        would only make another sandbox that fails the same way. A full quota (``SandboxQuotaExceeded``) says nothing
         about a node and is no failure of the test: the create waits for a sandbox to end and is repeated.
         """
         base = metadata[IDEMPOTENCY_KEY]

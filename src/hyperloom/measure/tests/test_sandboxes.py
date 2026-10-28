@@ -22,10 +22,21 @@ from hyperloom.measure.sandboxes import (
     SandboxPool,
     sandbox_priority,
 )
+from hyperloom.sandbox.e2b import E2BSandboxProvider
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
+from hyperloom.sandbox.tests.test_sandbox_e2b import (
+    CREATE_FAILED_BODY,
+    CREATE_FAILED_MESSAGE,
+    FAST,
+    KEY_MEASUREMENT,
+    SANDBOX,
+    _Service,
+    service,  # noqa: F401 (the canned service the end-to-end case runs against)
+)
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     CreateOptions,
+    SandboxCreateFailed,
     SandboxGone,
     SandboxInfo,
     SandboxQuotaExceeded,
@@ -254,6 +265,37 @@ def test_a_create_that_finds_every_key_spent_is_gone_and_gives_the_slot_back() -
     with pytest.raises(SandboxGone):
         _acquire(pool)
     assert len(provider.calls) == sandboxes._MAX_SPENT_KEYS + 1 and pool.active == 0
+
+
+def test_a_sandbox_that_failed_before_it_ran_ends_the_attempt_without_another_key() -> None:
+    provider = _Provider()
+    provider.failures = [SandboxCreateFailed(f"500: {CREATE_FAILED_MESSAGE}")]
+    pool = _pool(provider, max_parallel_tests=1)
+    with pytest.raises(SandboxCreateFailed, match="phase Failed"):
+        _acquire(pool)
+    assert [call["metadata"][IDEMPOTENCY_KEY] for call in provider.calls] == ["run-1:req-1:1"]
+    assert pool.active == 0, "the slot is given back"
+    provider.failures = []
+    runner = _acquire(pool, attempt=2)
+    assert runner.metadata[IDEMPOTENCY_KEY] == "run-1:req-1:2", "the next attempt is a new key"
+
+
+def test_a_failed_sandbox_is_created_once_against_the_platform_of_joint_run_4(service: _Service) -> None:
+    """Agent Sandbox answers a failed sandbox with a 500, then reports its key spent (410), and a new key makes another
+    sandbox that fails the same way: one acquire made three sandboxes in 27 s until the session was killed."""
+    spent = (410, {"code": 410, "message": "idempotency_key_spent: sbx-f7f56db77ec7244ae34d9886d2ed9dde"})
+    service.reply("POST", "/v2/sandboxes", *[(500, CREATE_FAILED_BODY), spent] * 20, (201, SANDBOX))
+    service.reply("GET", "/v2/sandboxes", (200, []))  # the pool counts the run's live sandboxes before it creates
+    provider = E2BSandboxProvider(
+        {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
+    )
+    pool = SandboxPool(provider, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1))
+    with pytest.raises(SandboxCreateFailed, match="sandbox_create_failed"):
+        _acquire(pool)
+    assert [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")] == [
+        "run-1:req-1:1"
+    ]
+    assert pool.active == 0
 
 
 def test_a_slot_freed_twice_is_freed_once() -> None:

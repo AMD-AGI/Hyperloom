@@ -72,6 +72,7 @@ from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall,
 from hyperloom.measure.spec import MeasurementSpec, blob_input_path, fingerprint, spec_sha256
 from hyperloom.sandbox.socket import (
     Sandbox,
+    SandboxCreateFailed,
     SandboxDenied,
     SandboxError,
     SandboxGone,
@@ -94,6 +95,9 @@ __all__ = [
 STOPPED_RETURNCODE = -917
 STOPPED_REASON = "orchestrator_cancelled"
 RUNNER_LOST = "runner_lost"
+#: The platform made a test's sandbox and it failed before it ran (``SandboxCreateFailed``); the reason carries the
+#: platform's message.
+SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 HOSTED_DIR_NAME = "hosted"
 BACKEND_NAME = "hosted"
 READY_PATH, SPEC_PATH = "/in/READY", "/in/spec.json"
@@ -423,6 +427,8 @@ class HostedMeasurementBackend:
             return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout", str(exc))
         except SandboxGone as exc:
             return _infra(call, HOSTED_INFRA_FAILURE_RC, RUNNER_LOST, f"the sandbox ended during creation: {exc}")
+        except SandboxCreateFailed as exc:
+            return _infra(call, HOSTED_INFRA_FAILURE_RC, SANDBOX_CREATE_FAILED, str(exc))
         except SandboxDenied as exc:
             return _refusal(call, HOSTED_SPEC_REJECTED_RC, "sandbox_denied", str(exc))
         except PoolClosed:
