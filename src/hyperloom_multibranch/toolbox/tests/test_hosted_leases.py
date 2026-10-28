@@ -42,10 +42,11 @@ from hyperloom_multibranch.toolbox.hosted_leases import (
     GrantLimits,
     HostedBranchLeases,
     LeaseTuning,
-    templates_by_cards,
 )
 
-_NAMES = ("run-dev-g1", "run-dev-g2", "run-dev-g4", "run-dev-g8")
+#: The ``dev`` templates by card count; the names are opaque, the cards are the keys.
+_BY_CARDS = {1: "run-dev-a1", 2: "run-dev-b7", 4: "run-dev-c3", 8: "run-dev-d0"}
+_NAMES = tuple(_BY_CARDS.values())
 _RETRY = RetryPolicy(budget_sec=3.0, first_delay_sec=0.02, max_delay_sec=0.1)
 #: Quick enough for a test, slow enough that the second attempt is not the first.
 _FAST = LeaseTuning(wait_sec=20.0, first_backoff_sec=0.02, max_backoff_sec=0.05)
@@ -127,7 +128,7 @@ def make(tmp_path: Path) -> Iterator[Make]:
         provider = _Recorder(
             E2BSandboxProvider(standin.keys, api_url=standin.api_url, sandbox_url=standin.sandbox_url, retry=retry)
         )
-        session = DevSession("run-1", tp, templates or templates_by_cards(_NAMES))
+        session = DevSession("run-1", tp, templates or _BY_CARDS)
         leases = HostedBranchLeases(provider, GrantLimits(sandboxes, gpus, 400.0, 600), session, tuning)
         made.append(Hosted(standin, provider, leases))
         return made[-1]
@@ -153,13 +154,13 @@ async def test_the_lease_is_a_dev_sandbox_of_the_sessions_cards(make: Make) -> N
     lease = await hosted.leases.lease("b02", 4)
     assert isinstance(lease, BranchLease)
     assert (lease.branch_id, lease.gpu_ids, lease.root, dict(lease.env)) == ("b02", (0, 1, 2, 3), Path("/app/work"), {})
-    assert lease.template == "run-dev-g4" and lease.remaining_cards == 4
+    assert lease.template == _BY_CARDS[4] and lease.remaining_cards == 4
     info = lease.sandbox.info()
-    assert info.template == "run-dev-g4"
+    assert info.template == _BY_CARDS[4]
     assert info.metadata[PURPOSE_KEY] == LEASE_PURPOSE and info.metadata[BRANCH_ID_KEY] == "b02"
     assert info.metadata[RUN_ID_KEY] == "run-1"
     assert info.metadata[IDEMPOTENCY_KEY].startswith("run-1:")
-    assert hosted.provider.creates[0][0] == "run-dev-g4"
+    assert hosted.provider.creates[0][0] == _BY_CARDS[4]
 
 
 def test_the_default_working_directory_of_a_lease_is_the_one_under_the_envd_file_root() -> None:
@@ -268,7 +269,7 @@ async def test_the_sandbox_lives_no_longer_than_the_grants_runtime(make: Make) -
 
 
 async def test_the_toolbox_is_told_whenever_cards_come_back(make: Make) -> None:
-    hosted = make(gpus=8, tp=2, templates={2: "not-a-template-g2"})
+    hosted = make(gpus=8, tp=2, templates={2: "not-a-template"})
     told: list[str] = []
     hosted.leases.on_release = lambda: told.append("back")
     with pytest.raises(RequestRejected):
@@ -397,7 +398,7 @@ async def test_a_wait_that_is_not_a_number_of_seconds_is_refused_before_anything
 
 
 async def test_a_create_the_service_refuses_gives_the_promise_back(make: Make) -> None:
-    hosted = make(templates={2: "not-a-template-g2"})
+    hosted = make(templates={2: "not-a-template"})
     with pytest.raises(SandboxDenied):
         await hosted.leases.lease("b02", 2)
     assert hosted.leases.capacity().leased_cards == 0 and hosted.running() == []
@@ -455,9 +456,9 @@ async def test_close_ends_every_lease_and_the_sandboxes_of_this_run_no_lease_hol
     hosted = make(gpus=8, tp=1)
     a, b = await hosted.leases.lease("b02", 1), await hosted.leases.lease("b03", 1)
     ours = {PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-1", BRANCH_ID_KEY: "gone"}
-    stray = hosted.provider.create("run-dev-g1", role="dev", timeout_sec=60, metadata=ours)
+    stray = hosted.provider.create(_BY_CARDS[1], role="dev", timeout_sec=60, metadata=ours)
     others = [
-        hosted.provider.create("run-dev-g1", role="dev", timeout_sec=60, metadata=metadata)
+        hosted.provider.create(_BY_CARDS[1], role="dev", timeout_sec=60, metadata=metadata)
         for metadata in ({**ours, RUN_ID_KEY: "run-2"}, {PURPOSE_KEY: "other", RUN_ID_KEY: "run-1"})
     ]
     await asyncio.to_thread(hosted.leases.close)
@@ -484,19 +485,6 @@ async def test_a_lease_still_waiting_when_the_toolbox_closes_is_refused(make: Ma
 # -- the pieces ------------------------------------------------------------------------------------------------------
 
 
-def test_templates_are_chosen_by_the_cards_their_names_end_in() -> None:
-    assert templates_by_cards(["ar-1-dev-g2", "ar-1-dev-g1", "ar-1-dev-g8"]) == {
-        1: "ar-1-dev-g1",
-        2: "ar-1-dev-g2",
-        8: "ar-1-dev-g8",
-    }
-    assert templates_by_cards(["a-g4", "a-g4"]) == {4: "a-g4"}
-    with pytest.raises(ValueError, match="does not name its cards"):
-        templates_by_cards(["ar-1-dev"])
-    with pytest.raises(ValueError, match="both have 2 cards"):
-        templates_by_cards(["a-dev-g2", "b-dev-g2"])
-
-
 @pytest.mark.parametrize(
     "bad",
     [
@@ -515,7 +503,7 @@ def test_a_grant_has_something_to_run_on(bad: dict[str, Any]) -> None:
 
 def test_the_session_needs_a_template_of_its_own_card_count_and_a_run() -> None:
     with pytest.raises(ValueError, match="no dev template has the session's 4 cards"):
-        DevSession("run-1", 4, {1: "a-g1", 2: "a-g2"})
+        DevSession("run-1", 4, {1: "a", 2: "b"})
     with pytest.raises(ValueError, match="run id"):
-        DevSession("", 1, {1: "a-g1"})
-    assert DevSession("run-1", 2, {1: "a-g1", 2: "a-g2"}).template == "a-g2"
+        DevSession("", 1, {1: "a"})
+    assert DevSession("run-1", 2, {1: "a", 2: "b"}).template == "b"

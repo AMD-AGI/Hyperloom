@@ -38,7 +38,6 @@ from hyperloom_multibranch.toolbox.hosted_leases import (
     GrantLimits,
     HostedBranchLeases,
     LeaseTuning,
-    templates_by_cards,
 )
 from hyperloom_multibranch.toolbox.leased_toolbox import (
     LeasedToolbox,
@@ -59,6 +58,7 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
 __all__ = [
     "DEV_TEMPLATES",
+    "MEASUREMENT_TEMPLATES",
     "RUNNER_TEMPLATES",
     "SOURCE_SHA_ENV",
     "HostedOptions",
@@ -68,8 +68,9 @@ __all__ = [
     "parallel_tests_for",
 ]
 
-#: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads; the others are the sub-runs'.
-RUNNER_TEMPLATES, DEV_TEMPLATES = "runner", "dev"
+#: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads, named as the grant names them;
+#: the others are the sub-runs'. ``runner`` is the older name of ``measurement``, read when ``measurement`` is absent.
+MEASUREMENT_TEMPLATES, RUNNER_TEMPLATES, DEV_TEMPLATES = "measurement", "runner", "dev"
 #: What the runner's start-up script installs from: the full commit hash that names its entry of the runner cache. It
 #: and ``MANIFEST_PIN_ENV`` (when the host has the manifest's digest) are the runner template's accepted create
 #: environment, passed on every ``measurement`` create.
@@ -91,8 +92,10 @@ class HostedToolboxInputs:
         sandbox_url: Its data plane (``E2B_SANDBOX_URL``).
         measurement_key: The API key of the ``measurement`` role, as the string itself. Never in ``repr`` or a log.
         sandbox_templates: The template list as the host gave it (``HYPERLOOM_SANDBOX_TEMPLATES``, parsed). The toolbox
-            reads the roles ``runner`` and ``dev``; a role's value is one name, a list of names or a mapping whose values
-            are names, and each name carries its card count as the suffix ``-g<cards>`` (``ar-01ja-runner-g8``).
+            reads the roles ``measurement`` (or its older name ``runner``, never both) and ``dev``; a role's value maps
+            a card count, a decimal string, to the template name the grant issued for it
+            (``{"measurement": {"1": "<name>", "8": "<name>"}}``). A name is opaque: its cards are its key, never read
+            from the name, so a role given as a bare name or a list says no card count and is refused.
         source_sha: The full lowercase commit hash that names the runner cache entry the runner's start-up script
             installs from (``HYPERLOOM_SOURCE_SHA``).
         source_repo: Accepted and not used: the sealed runner has no network and installs from the runner cache, so it
@@ -242,28 +245,61 @@ class HostedToolbox(LeasedToolbox):
             await asyncio.to_thread(self.backend.close)
 
 
-def _names(templates: Mapping[str, object], role: str) -> list[str]:
-    """The template names of ``role``: none when the list has no such role."""
+def _role_templates(templates: Mapping[str, object], role: str) -> dict[int, str]:
+    """Card count to template name for ``role``: none when the list has no such role.
+
+    Raises:
+        ValueError: When the role's value is not a mapping of card counts (decimal strings of at least 1) to names, or
+            two keys name one card count; the message names the role.
+    """
     value = templates.get(role)
     if value is None:
-        return []
-    if isinstance(value, str):
-        names: list[object] = [value]
-    elif isinstance(value, Mapping):
-        names = list(value.values())
-    elif isinstance(value, (list, tuple)):
-        names = list(value)
-    else:
-        names = [value]
-    if not all(isinstance(name, str) and name for name in names):
-        raise ValueError(f"the {role!r} templates must be names: a name, or a list or mapping of names")
-    return names  # type: ignore[return-value]
+        return {}
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError(
+            f'the {role!r} templates must map card counts to names ({{"<cards>": "<name>"}}); a bare name or a list '
+            "does not say its cards"
+        )
+    by_cards: dict[int, str] = {}
+    for key, name in value.items():
+        cards = _cards(key)
+        if cards is None or not isinstance(name, str) or not name.strip():
+            raise ValueError(f"the {role!r} templates must map card counts (decimal, >= 1) to names; got key {key!r}")
+        if by_cards.setdefault(cards, name) != name:
+            raise ValueError(f"the {role!r} templates name {cards} cards twice")
+    return by_cards
+
+
+def _cards(key: object) -> int | None:
+    if isinstance(key, str) and key.isascii() and key.isdecimal() and int(key) >= 1:
+        return int(key)
+    return None
+
+
+def _measurement_templates(templates: Mapping[str, object]) -> dict[int, str]:
+    """The ``measurement`` role's templates, read from ``runner`` when only that older name is given.
+
+    Raises:
+        ValueError: When both names are given, or neither.
+    """
+    if MEASUREMENT_TEMPLATES in templates and RUNNER_TEMPLATES in templates:
+        raise ValueError(
+            f"the template list gives both {MEASUREMENT_TEMPLATES!r} and its older name {RUNNER_TEMPLATES!r}; "
+            "which one the tests run on is ambiguous"
+        )
+    role = RUNNER_TEMPLATES if RUNNER_TEMPLATES in templates else MEASUREMENT_TEMPLATES
+    by_cards = _role_templates(templates, role)
+    if not by_cards:
+        raise ValueError(f"the template list has no {MEASUREMENT_TEMPLATES!r} role")
+    return by_cards
 
 
 def _runner_template(inputs: HostedToolboxInputs) -> str:
-    by_cards = templates_by_cards(_names(inputs.sandbox_templates, RUNNER_TEMPLATES))
+    by_cards = _measurement_templates(inputs.sandbox_templates)
     if inputs.tp not in by_cards:
-        raise ValueError(f"no runner template has the session's {inputs.tp} cards; templates serve {sorted(by_cards)}")
+        raise ValueError(
+            f"no {MEASUREMENT_TEMPLATES!r} template has the session's {inputs.tp} cards; templates serve {sorted(by_cards)}"
+        )
     return by_cards[inputs.tp]
 
 
@@ -280,7 +316,7 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     grant = inputs.grant()
     if grant is None or inputs.dev_key is None:
         return None
-    dev = templates_by_cards(_names(inputs.sandbox_templates, DEV_TEMPLATES))
+    dev = _role_templates(inputs.sandbox_templates, DEV_TEMPLATES)
     return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
 
 

@@ -1033,7 +1033,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
         "E2B_API_URL": "http://service.invalid",
         "E2B_SANDBOX_URL": "http://sandboxes.invalid",
         "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
-        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"runner": "ar-runner-g2"}),
+        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": {"2": "ar-01ja-measurement"}}),
         "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",
         "HYPERLOOM_SOURCE_SHA": "c" * 40,
         "USER_DATA_PATH": str(workspace),

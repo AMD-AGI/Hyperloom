@@ -29,6 +29,8 @@ import pytest
 import hyperloom
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import TestResult, Validity
+from hyperloom.hosted.host_info import read_host_info
+from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
 from hyperloom.measure import signing
 from hyperloom.measure.hosted_log import STATE_SENT
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
@@ -71,9 +73,12 @@ from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanne
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL
 
-_RUNNERS = ("run-runner-g1", "run-runner-g2")
-_NARROW = "run-narrow-g1"  # a runner template that accepts the commit but not the manifest pin
-_DEVS = ("run-dev-g1", "run-dev-g2")
+#: Template names are opaque (no card count in them): a template's cards are its key in the template list.
+_RUNNERS = ("ar-01ja-measurement-7f3c", "ar-01ja-measurement-b20e")
+_NARROW = "ar-01ja-narrow-55aa"  # a 1-card runner template that accepts the commit but not the manifest pin
+_DEVS = ("ar-01ja-dev-c41d", "ar-01ja-dev-9e02")
+_RUNNER_MAP = {"1": _RUNNERS[0], "2": _RUNNERS[1]}
+_DEV_MAP = {"1": _DEVS[0], "2": _DEVS[1]}
 _SOURCE_REPO, _SOURCE_SHA = "https://source.invalid/hyperloom.git", "ab" * 20
 _MANIFEST = "cd" * 32  # the SHA-256 of the manifest file of a runner cache entry
 #: What the runner no longer reads: the repository its start-up script once fetched from. The host may still send it.
@@ -216,7 +221,7 @@ def _inputs(service: Service | None, tmp_path: Path, **changed: Any) -> HostedTo
         "sandbox_url": service.standin.sandbox_url if service else "http://sandboxes.invalid",
         "measurement_key": keys["measurement"],
         "dev_key": keys["dev"],
-        "sandbox_templates": {"runner": list(_RUNNERS), "dev": {"1": _DEVS[0], "2": _DEVS[1]}, "subrun": "x-sub"},
+        "sandbox_templates": {"measurement": _RUNNER_MAP, "dev": _DEV_MAP, "subrun": {"1": "x-sub"}},
         "source_repo": _SOURCE_REPO,
         "source_sha": _SOURCE_SHA,
         "tp": 1,
@@ -325,7 +330,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "api_url": "http://service.invalid",
         "sandbox_url": "http://sandboxes.invalid",
         "measurement_key": "m-key",
-        "sandbox_templates": {"runner": {"1": "run-runner-g1"}, "dev": "run-dev-g1"},
+        "sandbox_templates": {"measurement": {"1": _RUNNERS[0]}, "dev": {"1": _DEVS[0]}},
         "source_repo": _SOURCE_REPO,
         "source_sha": _SOURCE_SHA,
         "tp": 1,
@@ -404,7 +409,7 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     assert toolbox.trace_root == tmp_path / "session" and toolbox.blobs is not None
     assert type(toolbox.provider) is E2BSandboxProvider and toolbox.provider.name == "e2b"
     assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA}, "no repository, no manifest pin"
-    assert toolbox.backend.pool.template_for(2) == "run-runner-g2"
+    assert toolbox.backend.pool.template_for(2) == _RUNNERS[1]
     assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8)
     assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
@@ -422,7 +427,9 @@ def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -
     toolbox = _toolbox(None, tmp_path, grant_limits={**_GRANT, "max_sandboxes": 3})
     assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3
     with pytest.raises(ValueError, match="a grant of 2 GPUs cannot run a test of TP=4"):
-        _toolbox(None, tmp_path, tp=4, grant_limits={**_GRANT, "max_gpus": 2}, sandbox_templates={"runner": "r-g4"})
+        _toolbox(
+            None, tmp_path, tp=4, grant_limits={**_GRANT, "max_gpus": 2}, sandbox_templates={"measurement": {"4": "r"}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -482,11 +489,33 @@ async def test_leases_need_both_the_dev_key_and_the_grant(tmp_path: Path, change
 @pytest.mark.parametrize(
     ("templates", "tp", "message"),
     [
-        ({"dev": _DEVS[0]}, 1, r"no runner template has the session's 1 cards; templates serve \[\]"),
-        ({"runner": list(_RUNNERS), "dev": _DEVS[0]}, 2, r"no dev template has the session's 2 cards"),
-        ({"runner": "runner-without-cards", "dev": _DEVS[0]}, 1, "does not name its cards"),
-        ({"runner": ["a-g1", "b-g1"], "dev": _DEVS[0]}, 1, "both have 1 cards"),
-        ({"runner": 7, "dev": _DEVS[0]}, 1, "templates must be names"),
+        ({"dev": _DEV_MAP}, 1, r"the template list has no 'measurement' role"),
+        (
+            {"measurement": _RUNNER_MAP, "dev": _DEV_MAP},
+            4,
+            r"no 'measurement' template has the session's 4 cards; "
+            r"templates serve \[1, 2\]",
+        ),
+        (
+            {"runner": {"8": "r8"}, "dev": _DEV_MAP},
+            1,
+            r"no 'measurement' template has the session's 1 cards; "
+            r"templates serve \[8\]",
+        ),
+        (
+            {"measurement": _RUNNER_MAP, "dev": {"1": _DEVS[0]}},
+            2,
+            r"no dev template has the session's 2 cards; "
+            r"templates serve \[1\]",
+        ),
+        ({"measurement": _RUNNER_MAP, "runner": _RUNNER_MAP, "dev": _DEV_MAP}, 1, "both 'measurement' and its older"),
+        ({"measurement": "opaque-name", "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts to names"),
+        ({"measurement": list(_RUNNERS), "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts"),
+        ({"measurement": _RUNNER_MAP, "dev": _DEVS[0]}, 1, "'dev' templates must map card counts to names"),
+        ({"measurement": {"one": "r"}, "dev": _DEV_MAP}, 1, "got key 'one'"),
+        ({"measurement": {"0": "r"}, "dev": _DEV_MAP}, 1, "got key '0'"),
+        ({"measurement": {"1": ""}, "dev": _DEV_MAP}, 1, "got key '1'"),
+        ({"measurement": {"1": "a", "01": "b"}, "dev": _DEV_MAP}, 1, "name 1 cards twice"),
     ],
 )
 def test_templates_that_cannot_serve_the_session_are_refused_before_anything_starts(
@@ -497,10 +526,47 @@ def test_templates_that_cannot_serve_the_session_are_refused_before_anything_sta
     assert not (tmp_path / "session" / "hosted" / "specs").exists(), "the backend was not started"
 
 
-def test_the_runner_templates_of_a_role_may_be_a_name_a_list_or_a_mapping(tmp_path: Path) -> None:
-    for runner in ("r-g1", ["r-g1", "r-g2"], {"1": "r-g1", "2": "r-g2"}):
-        inputs = _inputs(None, tmp_path, sandbox_templates={"runner": runner, "dev": "d-g1"})
-        assert hosted_toolbox._runner_template(inputs) == "r-g1"
+def test_the_grants_template_map_gives_each_role_its_cards_by_key_and_never_reads_the_name(tmp_path: Path) -> None:
+    """The map Claw builds from the grant's names: role -> {cards: opaque name}; a name that looks like another card
+    count (``-g8``) is still the template of the key it is filed under."""
+    templates = {
+        "measurement": {"1": "tpl-a", "8": "tpl-b-g1"},
+        "dev": {"1": "tpl-c", "8": "tpl-d"},
+        "subrun": {"1": "tpl-e", "8": "tpl-f"},
+    }
+    for tp, runner, dev in ((1, "tpl-a", "tpl-c"), (8, "tpl-b-g1", "tpl-d")):
+        (tmp_path / str(tp)).mkdir()
+        toolbox = _toolbox(None, tmp_path / str(tp), sandbox_templates=templates, tp=tp, grant_limits=_GRANT)
+        assert toolbox.backend.pool.template_for(tp) == runner
+        assert toolbox.leases is not None and toolbox.leases._session.template == dev
+
+
+def test_the_hosts_template_variable_reaches_the_toolbox_unchanged(tmp_path: Path) -> None:
+    """``HYPERLOOM_SANDBOX_TEMPLATES`` as Claw sets it, read by the host entry and handed on as the toolbox's inputs."""
+    templates = {"measurement": {"1": "tpl-a", "8": "tpl-b"}, "dev": {"1": "tpl-c", "8": "tpl-d"}}
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    env = {
+        "HYPERLOOM_INPUT_FILE": str(spec),
+        "HYPERLOOM_RUN_ID": "run-1",
+        "HYPERLOOM_RUN_CREATED_AT": "2026-10-28T12:00:00Z",
+        "HYPERLOOM_STATE_DIR": str(tmp_path),
+        "E2B_API_URL": "http://service.invalid",
+        "E2B_SANDBOX_URL": "http://sandboxes.invalid",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps(templates),
+        "HYPERLOOM_SOURCE_REPO": _SOURCE_REPO,
+        "HYPERLOOM_SOURCE_SHA": _SOURCE_SHA,
+    }
+    given = hosted_toolbox_inputs(read_host_info(env, require=()), session_dir=tmp_path / "session", tp=8)
+    assert given["sandbox_templates"] == templates
+    assert hosted_toolbox._runner_template(HostedToolboxInputs(**given)) == "tpl-b"  # type: ignore[arg-type]
+
+
+def test_runner_is_the_older_name_of_the_measurement_role(tmp_path: Path) -> None:
+    inputs = _inputs(None, tmp_path, sandbox_templates={"runner": {"1": "r1", "8": "r8"}, "dev": _DEV_MAP})
+    assert hosted_toolbox._runner_template(inputs) == "r1"
+    assert hosted_toolbox._runner_template(dataclasses.replace(inputs, tp=8)) == "r8"
 
 
 # -- through the stand-in ------------------------------------------------------------------------------------------
@@ -523,7 +589,7 @@ async def test_a_test_is_measured_in_a_sandbox_of_the_service_and_its_result_ver
         assert result.sandbox is not None and result.sandbox.backend == "hosted"
         assert result.sandbox.node_name == _NODE and result.sandbox.sandbox_id == record.sandbox_id
         (made,) = [c for c in service.creates if c.role == "measurement"]
-        assert made.template == "run-runner-g1" and made.metadata[IDEMPOTENCY_KEY] == f"run-1:{request_id}:1"
+        assert made.template == _RUNNERS[0] and made.metadata[IDEMPOTENCY_KEY] == f"run-1:{request_id}:1"
         assert made.metadata[RUN_ID_KEY] == "run-1"
         assert dict(made.options.envs or {}) == {SOURCE_SHA_ENV: _SOURCE_SHA}, "the commit alone: no repo, no pin"
         assert service.running("measurement") == [], "the sandbox ended with the test"
@@ -584,7 +650,7 @@ async def test_a_runner_template_that_does_not_list_a_create_environment_name_re
     toolbox = _toolbox(
         service,
         tmp_path,
-        sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)},
+        sandbox_templates={"measurement": {"1": _NARROW}, "dev": _DEV_MAP},
         runner_cache_manifest_sha256=_MANIFEST,
     )
     try:
@@ -603,7 +669,7 @@ async def test_a_runner_template_that_does_not_list_a_create_environment_name_re
 async def test_a_runner_template_that_lists_only_the_commit_runs_the_test_of_a_host_with_no_manifest_digest(
     service: Service, tmp_path: Path
 ) -> None:
-    toolbox = _toolbox(service, tmp_path, sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)})
+    toolbox = _toolbox(service, tmp_path, sandbox_templates={"measurement": {"1": _NARROW}, "dev": _DEV_MAP})
     try:
         await toolbox.start()
         result = await _result_of(toolbox, await toolbox.submit_test(req()))
@@ -670,7 +736,7 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
     try:
         await toolbox.start()
         lease = await toolbox.lease_branch_sandbox("b1", 2)
-        assert lease.template == "run-dev-g2" and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
+        assert lease.template == _DEVS[1] and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
         assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8, leased_cards=2)
         assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 3
         (created,) = [c for c in service.creates if c.role == "dev"]
@@ -707,11 +773,9 @@ async def test_close_ends_this_runs_sandboxes_and_no_other_runs(service: Service
     other = service.observer()
     elsewhere = {
         "dev": other.create(
-            "run-dev-g1", role="dev", timeout_sec=600, metadata={PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-2"}
+            _DEVS[0], role="dev", timeout_sec=600, metadata={PURPOSE_KEY: LEASE_PURPOSE, RUN_ID_KEY: "run-2"}
         ),
-        "measurement": other.create(
-            "run-runner-g1", role="measurement", timeout_sec=600, metadata={RUN_ID_KEY: "run-2"}
-        ),
+        "measurement": other.create(_RUNNERS[0], role="measurement", timeout_sec=600, metadata={RUN_ID_KEY: "run-2"}),
     }
     toolbox = _toolbox(service, tmp_path, planned=_HANG)
     try:

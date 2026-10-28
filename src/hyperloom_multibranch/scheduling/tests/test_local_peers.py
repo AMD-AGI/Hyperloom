@@ -724,7 +724,7 @@ def _service_sandboxes(monkeypatch: pytest.MonkeyPatch, asked: list[tuple[Path, 
             api_url="http://service.invalid",
             sandbox_url="http://sandboxes.invalid",
             measurement_key="m-key",
-            sandbox_templates={"runner": "ar-runner-g2"},
+            sandbox_templates={"measurement": {str(tp): "ar-01ja-measurement"}},
             source_sha="c" * 40,
             tp=tp,
         )

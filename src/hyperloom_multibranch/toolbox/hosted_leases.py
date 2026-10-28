@@ -4,8 +4,8 @@
 """A branch's sandbox lease on the hosted backend: one ``dev`` sandbox of the session's card count.
 
 On the hosted backend the cards are not the application's to hand out: the sandbox service gives a sandbox the cards of
-its template (``<template>-g<cards>``, one template per card count) and counts the sandboxes, cards and GPU hours of
-every role against one grant. The lease creates the ``dev`` sandbox with the ``dev`` key and hands the caller the
+its template (one template per card count: the count is the template's key in the host's template list, never read
+from its opaque name) and counts the sandboxes, cards and GPU hours of every role against one grant. The lease creates the ``dev`` sandbox with the ``dev`` key and hands the caller the
 sandbox itself (:class:`HostedBranchLease`): commands and files go through it, so the key stays with the toolbox and a
 specialist never holds it. The application does the accounting per role: a lease's cards count as leased, and the rest
 of the grant's GPUs are what tests may run on, exactly as on the local backend.
@@ -20,11 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -44,7 +43,7 @@ from hyperloom.sandbox.socket import (
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, lease_wait, refuse_unfit_cards
 
-__all__ = ["DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning", "templates_by_cards"]
+__all__ = ["DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning"]
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +53,6 @@ DEV_ROLE: Role = "dev"
 LEASE_PURPOSE = "dev-lease"
 DEFAULT_LEASE_LIFETIME_SEC = 3600
 _CLOSING = "the toolbox is closing"
-_CARDS_SUFFIX = re.compile(r"-g(\d+)$")
 _POLL_SEC = 0.2
 
 
@@ -75,23 +73,6 @@ class GrantLimits:
     def __post_init__(self) -> None:
         if min(self.max_sandboxes, self.max_gpus, self.max_runtime_sec) < 1 or self.gpu_hours <= 0:
             raise ValueError("a grant has at least one sandbox, one GPU, one second and some GPU hours")
-
-
-def templates_by_cards(names: Iterable[str]) -> dict[int, str]:
-    """Card count to template name, for the names a grant issued: ``<template>-g<cards>``.
-
-    Raises:
-        ValueError: A name that does not end in ``-g<cards>``, or two names for one card count.
-    """
-    found: dict[int, str] = {}
-    for name in names:
-        suffix = _CARDS_SUFFIX.search(name)
-        if suffix is None:
-            raise ValueError(f"template {name!r} does not name its cards (<template>-g<cards>)")
-        cards = int(suffix.group(1))
-        if found.setdefault(cards, name) != name:
-            raise ValueError(f"templates {found[cards]!r} and {name!r} both have {cards} cards")
-    return found
 
 
 @dataclass(frozen=True)
