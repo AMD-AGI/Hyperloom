@@ -2,23 +2,33 @@
 # SPDX-License-Identifier: MIT
 
 """What a hosted session measures on: the runner cache of the run's commit, built readable by the sandbox's account
-whatever umask the entry runs under and failing the run when it cannot be had, and the peers refused as on one
-machine. The peers built on the service's sandboxes are pinned in ``test_local_peers``."""
+whatever umask the entry runs under from the session's own clone of the run's source, which a restart finds again,
+failing the run when it cannot be had and pinning every runner sandbox to it otherwise, and the peers refused as on
+one machine. The peers built on the service's sandboxes are pinned in ``test_local_peers``."""
 
 from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import stat
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from hyperloom.hosted.host_info import HostInfo, read_host_info
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
-from hyperloom_multibranch.scheduling.hosted_peers import load_hosted_peers, runner_cache_pin
+from hyperloom_multibranch.scheduling.hosted_peers import (
+    PinnedToolboxInputs,
+    load_hosted_peers,
+    runner_cache_pin,
+    runner_source,
+)
+from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.peers import PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 
@@ -88,8 +98,92 @@ def test_hosted_peers_nobody_names_the_image_of_are_refused_before_anything_is_b
     for name in ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST"):
         monkeypatch.delenv(name, raising=False)
 
-    def inputs(session_dir: Path, tp: int) -> object:
+    def inputs(layout: object, tp: int) -> object:
         raise AssertionError("no toolbox is built for peers that are refused")
 
     with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_REF"):
         load_hosted_peers(WORKLOAD, inputs)  # type: ignore[arg-type]
+
+
+def _origin(path: Path) -> str:
+    """A repository at ``path`` with one commit; its full hash."""
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
+        return done.stdout.strip()
+
+    path.mkdir(parents=True)
+    git("init", "--quiet")
+    (path / "README").write_text("source\n", encoding="utf-8")
+    git("add", "README")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "source")
+    return git("rev-parse", "HEAD")
+
+
+def test_the_runs_source_is_cloned_into_the_session_once_and_a_restart_finds_it(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    sha = _origin(origin)
+    destination = tmp_path / "session" / "MB-runner-source"
+    destination.parent.mkdir()
+
+    assert runner_source(destination, str(origin), sha) == destination
+    shutil.rmtree(origin)
+
+    assert runner_source(destination, str(origin), sha) == destination
+    found = subprocess.run(["git", "-C", str(destination), "cat-file", "-t", sha], capture_output=True, text=True)
+    assert found.stdout.strip() == "commit"
+
+
+def test_a_commit_the_source_lacks_fails_the_run_and_leaves_no_clone(tmp_path: Path) -> None:
+    origin = tmp_path / "origin"
+    _origin(origin)
+    destination = tmp_path / "MB-runner-source"
+
+    with pytest.raises(CacheBuildError, match="f" * 40):
+        runner_source(destination, str(origin), "f" * 40)
+
+    assert not destination.exists()
+
+
+def _host(tmp_path: Path, repo: Path, sha: str) -> HostInfo:
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    env = {
+        "HYPERLOOM_INPUT_FILE": str(spec),
+        "HYPERLOOM_RUN_ID": "run-1",
+        "HYPERLOOM_RUN_CREATED_AT": "2026-10-28T12:00:00Z",
+        "HYPERLOOM_STATE_DIR": str(tmp_path),
+        "E2B_API_URL": "http://service.invalid",
+        "E2B_SANDBOX_URL": "http://sandboxes.invalid",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_TEMPLATES": '{"runner": "ar-runner-g2"}',
+        "HYPERLOOM_SOURCE_REPO": str(repo),
+        "HYPERLOOM_SOURCE_SHA": sha,
+    }
+    return read_host_info(env, require=())
+
+
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_every_runner_sandbox_is_pinned_to_the_runner_cache_built_from_the_sessions_clone(
+    rig: Rig, tmp_path: Path
+) -> None:
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    cache = tmp_path / "runner-cache"
+
+    inputs = PinnedToolboxInputs(_host(tmp_path, rig.repo, rig.cache.sha), cache)(layout, 2)
+
+    entry = cache / rig.cache.sha
+    assert inputs.runner_cache_manifest_sha256 == hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
+    assert (inputs.session_dir, inputs.tp, inputs.source_sha) == (layout.toolbox, 2, rig.cache.sha)
+    assert layout.runner_source.is_dir()
+
+
+def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(rig: Rig, tmp_path: Path) -> None:
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+
+    with pytest.raises(CacheBuildError):
+        PinnedToolboxInputs(_host(tmp_path, rig.repo, "f" * 40), tmp_path / "runner-cache")(layout, 2)
+
+    assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()

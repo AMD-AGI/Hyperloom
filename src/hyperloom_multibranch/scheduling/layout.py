@@ -34,6 +34,7 @@ REPO_DIR = "MB-repo"
 BLOBS_DIR = "MB-blobs"
 BRANCHES_DIR = "MB-branches"
 SOURCE_DIR = "MB-source"
+RUNNER_SOURCE_DIR = "MB-runner-source"
 TOOLBOX_DIR = "MB-toolbox"
 INTEGRATION_DIR = "MB-integration"
 FINAL_DIR = "MB-final"
@@ -124,6 +125,11 @@ class SessionLayout:
     def source(self) -> Path:
         """The source base every branch's worktree branches off; the specialist sessions create it."""
         return self.root / SOURCE_DIR
+
+    @property
+    def runner_source(self) -> Path:
+        """A hosted session's clone of the commit the run executes, which its runner cache entry is built from."""
+        return self.root / RUNNER_SOURCE_DIR
 
     @property
     def toolbox(self) -> Path:
