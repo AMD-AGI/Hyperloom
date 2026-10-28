@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.hosted.host_info import HostInfo, read_host_info
-from hyperloom.measure.runner.cache_build import CacheBuildError
+from hyperloom.measure.runner.cache_build import RUNNER_TARGET_ENV, CacheBuildError, runner_wheel_target
+from hyperloom.measure.runner.cache_layout import manifest_from_json
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
 from hyperloom_multibranch.scheduling.hosted_peers import (
@@ -35,6 +36,9 @@ from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOpt
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
+#: The runner's interpreter, which the rig's pure-Python wheels serve whatever the test runs on.
+RUNNER_TAG = "cp310-manylinux_2_28_x86_64"
+TARGET = runner_wheel_target({RUNNER_TARGET_ENV: RUNNER_TAG})
 #: The umask of an entry that keeps everything it creates to its own account.
 PRIVATE = 0o077
 
@@ -71,14 +75,14 @@ def _umask() -> int:
 def test_the_runner_cache_is_built_readable_by_the_sandbox_and_pinned_by_its_manifest(rig: Rig, tmp_path: Path) -> None:
     cache = tmp_path / "runner-cache"
 
-    pin = runner_cache_pin(rig.repo, rig.cache.sha, cache)
+    pin = runner_cache_pin(rig.repo, rig.cache.sha, cache, TARGET)
 
     entry = cache / rig.cache.sha
     assert pin == hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
     unreadable = [path for path in entry.rglob("*") if not path.stat().st_mode & stat.S_IROTH]
     assert unreadable == [], "the sandbox reads the cache as another account"
     assert _umask() == PRIVATE, "the entry's own umask is back once the cache is built"
-    assert runner_cache_pin(rig.repo, rig.cache.sha, cache) == pin, "a second run of the commit uses the entry"
+    assert runner_cache_pin(rig.repo, rig.cache.sha, cache, TARGET) == pin, "a second run of the commit uses the entry"
 
 
 @pytest.mark.usefixtures("private_umask")
@@ -86,7 +90,7 @@ def test_a_commit_the_clone_lacks_fails_the_run_and_builds_nothing(rig: Rig, tmp
     missing = "f" * 40
 
     with pytest.raises(CacheBuildError, match=missing):
-        runner_cache_pin(rig.repo, missing, tmp_path / "runner-cache")
+        runner_cache_pin(rig.repo, missing, tmp_path / "runner-cache", TARGET)
 
     assert not (tmp_path / "runner-cache" / missing).exists()
     assert _umask() == PRIVATE
@@ -165,8 +169,9 @@ def _host(tmp_path: Path, repo: Path, sha: str) -> HostInfo:
 
 @pytest.mark.usefixtures("wheelhouse_index")
 def test_every_runner_sandbox_is_pinned_to_the_runner_cache_built_from_the_sessions_clone(
-    rig: Rig, tmp_path: Path
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     layout = SessionLayout(tmp_path / "MB-session")
     layout.root.mkdir()
     cache = tmp_path / "runner-cache"
@@ -177,13 +182,34 @@ def test_every_runner_sandbox_is_pinned_to_the_runner_cache_built_from_the_sessi
     assert inputs.runner_cache_manifest_sha256 == hashlib.sha256((entry / MANIFEST_NAME).read_bytes()).hexdigest()
     assert (inputs.session_dir, inputs.tp, inputs.source_sha) == (layout.toolbox, 2, rig.cache.sha)
     assert layout.runner_source.is_dir()
+    assert manifest_from_json((entry / MANIFEST_NAME).read_bytes()).target == TARGET.manifest_form(), (
+        "the wheels are for the runner's interpreter the host names, not the application's"
+    )
 
 
-def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(rig: Rig, tmp_path: Path) -> None:
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_a_host_that_does_not_name_the_runners_interpreter_fails_the_session_and_builds_nothing(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(RUNNER_TARGET_ENV, raising=False)
+    layout = SessionLayout(tmp_path / "MB-session")
+    layout.root.mkdir()
+    cache = tmp_path / "runner-cache"
+
+    with pytest.raises(CacheBuildError, match=f"\\${RUNNER_TARGET_ENV} must name the runner's interpreter"):
+        PinnedToolboxInputs(_host(tmp_path, rig.repo, rig.cache.sha), cache)(layout, 2)
+
+    assert not (cache / rig.cache.sha).exists()
+
+
+def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     layout = SessionLayout(tmp_path / "MB-session")
     layout.root.mkdir()
 
-    with pytest.raises(CacheBuildError):
+    with pytest.raises(CacheBuildError, match="f" * 40):
         PinnedToolboxInputs(_host(tmp_path, rig.repo, "f" * 40), tmp_path / "runner-cache")(layout, 2)
 
     assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()

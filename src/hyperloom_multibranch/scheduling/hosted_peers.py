@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
-from hyperloom.measure.runner.cache_build import CacheBuildError
+from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import attempt_timeout_sec, measurement_host, peers_on
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
@@ -81,23 +81,23 @@ def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFacto
     return peers_on(measurement_host(os.environ, workload, HostedSandboxes(inputs)), workload)
 
 
-def runner_cache_pin(source: Path, sha: str, cache_root: Path) -> str:
+def runner_cache_pin(source: Path, sha: str, cache_root: Path, target: WheelTarget) -> str:
     """The SHA-256 of the manifest of commit ``sha``'s entry in the runner cache at ``cache_root``, built from the
     clone ``source`` when it is not there yet, under umask 022 so the sandbox's account can read what was built.
 
-    The wheels are for this interpreter and come from the index pip is configured with: the application runs in the
-    framework image the runner sandboxes run.
+    The wheels are for ``target``, the runner's interpreter (the application's own is not it), and come from the index
+    pip is configured with.
 
     Raises:
         CacheBuildError: When the entry cannot be had. A runner sandbox has no network, so no test could start: the
             run fails before it measures anything.
     """
 
-    from hyperloom.measure.runner.cache_build import ensure_runner_cache
+    from hyperloom.measure.runner.cache_build import BuildOptions, ensure_runner_cache
 
     previous = os.umask(RUNNER_CACHE_UMASK)
     try:
-        return ensure_runner_cache(source, sha, cache_root).manifest_sha256
+        return ensure_runner_cache(source, sha, cache_root, BuildOptions(target=target)).manifest_sha256
     finally:
         os.umask(previous)
 
@@ -145,7 +145,8 @@ class PinnedToolboxInputs:
 
     def __call__(self, layout: SessionLayout, tp: int) -> HostedToolboxInputs:
         """Raises :class:`~hyperloom.hosted.toolbox_inputs.ToolboxInputsError` naming what the host did not give, and
-        :class:`CacheBuildError` when the commit or its runner cache entry cannot be had."""
+        :class:`CacheBuildError` when the commit or its runner cache entry cannot be had, or when
+        ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` does not name the runner's interpreter."""
 
         from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolboxInputs
@@ -153,7 +154,7 @@ class PinnedToolboxInputs:
         given = hosted_toolbox_inputs(self.host, session_dir=layout.toolbox, tp=tp)
         sha = str(given["source_sha"])
         source = runner_source(layout.runner_source, str(given["source_repo"]), sha)
-        pin = runner_cache_pin(source, sha, self.cache_root)
+        pin = runner_cache_pin(source, sha, self.cache_root, runner_wheel_target(os.environ))
         return HostedToolboxInputs(**given, runner_cache_manifest_sha256=pin)  # type: ignore[arg-type]
 
 

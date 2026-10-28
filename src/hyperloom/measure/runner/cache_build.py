@@ -40,11 +40,18 @@ distribution's own build requirements name is never fetched. The lock must there
 
 The cache must stay readable by the account the sandbox runs as: run the builder with a ``umask`` that leaves new files
 readable by others (``022``).
+
+Before the entry is renamed into place, the builder asks pip whether the requirements the sandbox installs
+(``runner-wheels.lock``) resolve for the wheel target from the entry's wheels alone (``pip install --dry-run --no-index
+--only-binary=:all:``, the sandbox's own flags), so a cache the runner could not install is refused here instead of
+failing in the sandbox. A hosted session names the runner's interpreter in ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
+(:func:`runner_wheel_target`); it never builds for its own.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import fcntl
 import hashlib
 import json
@@ -80,11 +87,13 @@ from hyperloom.measure.runner.cache_layout import (
     manifest_to_json,
     parse_lock,
     requirement_line,
+    requirements_text,
     tree_digest,
 )
 
 __all__ = [
     "BuildOptions",
+    "RUNNER_TARGET_ENV",
     "CacheBuildError",
     "CacheConflict",
     "CacheEntry",
@@ -93,6 +102,7 @@ __all__ = [
     "ensure_runner_cache",
     "exclusive",
     "main",
+    "runner_wheel_target",
 ]
 
 DEFAULT_LOCK_TIMEOUT_SEC = 1800.0
@@ -106,6 +116,12 @@ _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
 #: pip never asks a question and never checks for a newer pip.
 _PIP_QUIET = ("--disable-pip-version-check", "--no-input")
+#: The runner's interpreter and newest platform tag as one wheel tag, e.g. ``cp310-manylinux_2_28_x86_64``.
+RUNNER_TARGET_ENV = "HYPERLOOM_RUNNER_WHEEL_TARGET"
+_TARGET_TAG = re.compile(r"cp(?P<major>3)(?P<minor>[0-9]+)-manylinux_2_(?P<glibc>[0-9]+)_(?P<arch>x86_64|aarch64)")
+#: The legacy manylinux names of a glibc 2 minor version; pip accepts both spellings and downloads only what it is told.
+_LEGACY_MANYLINUX = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
+_OLDEST_GLIBC_MINOR = 5
 
 
 class CacheBuildError(CacheError):
@@ -140,6 +156,31 @@ class WheelTarget:
         for flag, values in (("--abi", self.abis), ("--platform", self.platforms)):
             args += [part for value in values for part in (flag, value)]
         return args
+
+
+def runner_wheel_target(environ: Mapping[str, str]) -> WheelTarget:
+    """The wheel target ``$HYPERLOOM_RUNNER_WHEEL_TARGET`` names: CPython ``X.Y`` (ABIs ``cpXY``, ``abi3``, ``none``) on
+    glibc ``2.N`` of one architecture, with every platform tag that glibc accepts, newest first.
+
+    Raises:
+        CacheBuildError: When the variable is unset or not of the form ``cp310-manylinux_2_28_x86_64``: the builder's
+            own interpreter is not the runner's, so nothing defaults to it.
+    """
+    value = environ.get(RUNNER_TARGET_ENV, "").strip()
+    match = _TARGET_TAG.fullmatch(value)
+    if match is None:
+        raise CacheBuildError(
+            f"${RUNNER_TARGET_ENV} must name the runner's interpreter as cpXY-manylinux_2_N_ARCH, "
+            f"e.g. cp310-manylinux_2_28_x86_64 (got {value[:80]!r})"
+        )
+    major, minor, arch = match["major"], match["minor"], match["arch"]
+    platforms: list[str] = []
+    for glibc in range(int(match["glibc"]), _OLDEST_GLIBC_MINOR - 1, -1):
+        platforms.append(f"manylinux_2_{glibc}_{arch}")
+        if glibc in _LEGACY_MANYLINUX:
+            platforms.append(f"{_LEGACY_MANYLINUX[glibc]}_{arch}")
+    platforms += [f"linux_{arch}", "any"]
+    return WheelTarget(f"{major}.{minor}", "cp", (f"cp{major}{minor}", "abi3", "none"), tuple(platforms))
 
 
 @dataclass(frozen=True)
@@ -295,6 +336,18 @@ def _wheel_entries(wheels: Path, pins: list[LockPin], built: Mapping[str, str]) 
     return tuple(entries.values())
 
 
+def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> None:
+    """Refuse an entry whose wheels alone do not satisfy what the sandbox installs, for the target's interpreter."""
+    with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
+        requirements = Path(scratch) / "runner-wheels.lock"
+        requirements.write_text(requirements_text(manifest), encoding=_UTF8)
+        install = ["--isolated", "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
+        install += [_FIND_LINKS, str(entry / WHEELS_DIR), "--only-binary=:all:", "--require-hashes", _NO_DEPS]
+        install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
+        interpreter = f"{target.implementation or ''}{target.python_version or ''}" or "the builder's interpreter"
+        _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
+
+
 def _replace_file(path: Path, text: str, mode: int | None = None) -> None:
     """Write ``text`` to ``path`` in one rename, so a reader sees the old file or the new one."""
     pending = path.with_name(f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
@@ -336,6 +389,7 @@ def _build(repo: Path, sha: str, tree: str, final: Path, options: BuildOptions) 
         entries = _wheel_entries(wheels, pins, _download_wheels(lock, wheels, pins, options))
         bootstrap = _write_bootstrap(pending)
         manifest = Manifest(sha, tree, tree_digest(source), entries, options.target.manifest_form(), bootstrap)
+        _check_installable(pending, manifest, options.target)
         (pending / MANIFEST_NAME).write_text(manifest_to_json(manifest), encoding=_UTF8)
         problems = check_entry(pending, sha, verify_hash=True)
         if problems:
