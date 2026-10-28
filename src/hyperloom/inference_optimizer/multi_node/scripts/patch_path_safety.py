@@ -19,7 +19,7 @@ except ModuleNotFoundError as exc:
         raise
     from hyperloom.common import aiter_jit_cache as _jit_cache
 
-_DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
+DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
 
 
 def resolve_kernel_backup_root() -> Path:
@@ -28,7 +28,7 @@ def resolve_kernel_backup_root() -> Path:
     Returns:
         Path: Absolute backup root from ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR``.
     """
-    raw = (os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR") or _DEFAULT_KERNEL_BACKUP_ROOT).strip()
+    raw = (os.environ.get("HYPERLOOM_MN_KERNEL_BACKUP_DIR") or DEFAULT_KERNEL_BACKUP_ROOT).strip()
     return Path(raw).resolve()
 
 

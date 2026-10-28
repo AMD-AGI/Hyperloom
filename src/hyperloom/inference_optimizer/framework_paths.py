@@ -411,6 +411,18 @@ def _env_source_roots() -> tuple[str, ...]:
     return tuple(kept)
 
 
+def point_session_framework_root(root: str, framework: str) -> None:
+    """Make ``root`` this session's explicit ``framework`` checkout.
+
+    Writes the prefixed ``_REPO_PATH`` / ``_DIR`` aliases, which outrank any
+    earlier pin, and :data:`GENERIC_FRAMEWORK_ROOT_ENV`, so every resolver
+    names ``root``.
+    """
+    name = framework.strip().upper()
+    for key in (f"{name}_REPO_PATH", f"{name}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+        os.environ[key] = root
+
+
 def resolve_session_framework_root() -> str:
     """The one source tree this session was explicitly pointed at, or ``""``.
 
@@ -590,11 +602,20 @@ _STATIC_SOURCE_LAYOUTS: tuple[str, ...] = (
     "/usr/local/lib/python3.10/dist-packages/sglang/",
     "/usr/local/lib/python3.10/dist-packages/vllm/",
     "/usr/local/lib/python3.10/dist-packages/atom/",
-    "/app/ATOM/atom/",
-    "/app/xDiT/",
     # aiter device sources often live in the sibling ``aiter_meta`` package.
     "/aiter_meta/csrc/",
 )
+
+
+def _discovered_source_roots() -> tuple[str, ...]:
+    """Installed, editable, explicit, env-supplied and image-default roots, in that order."""
+    return _merge_roots(
+        _discover_installed_framework_roots(),
+        _discover_scriptable_repo_roots(),
+        _discover_explicit_framework_root(),
+        _env_source_roots(),
+        _DEFAULT_SOURCE_ROOTS,
+    )
 
 
 def resolve_known_source_prefixes() -> tuple[str, ...]:
@@ -611,15 +632,7 @@ def resolve_known_source_prefixes() -> tuple[str, ...]:
         tuple[str, ...]: Discovered roots, image defaults, static wheel layouts
             and FlyDSL roots, de-duplicated in that order.
     """
-    return _merge_roots(
-        _discover_installed_framework_roots(),
-        _discover_scriptable_repo_roots(),
-        _discover_explicit_framework_root(),
-        _env_source_roots(),
-        _DEFAULT_SOURCE_ROOTS,
-        _STATIC_SOURCE_LAYOUTS,
-        resolve_flydsl_source_roots(),
-    )
+    return _merge_roots(_discovered_source_roots(), _STATIC_SOURCE_LAYOUTS, resolve_flydsl_source_roots())
 
 
 def resolve_kernel_search_roots() -> tuple[str, ...]:
@@ -637,14 +650,7 @@ def resolve_kernel_search_roots() -> tuple[str, ...]:
         tuple[str, ...]: Existing framework package dirs, editable checkouts,
             env-supplied and FlyDSL roots, de-duplicated in discovery order.
     """
-    merged = _merge_roots(
-        _discover_installed_framework_roots(),
-        _discover_scriptable_repo_roots(),
-        _discover_explicit_framework_root(),
-        _env_source_roots(),
-        _DEFAULT_SOURCE_ROOTS,
-        resolve_flydsl_source_roots(),
-    )
+    merged = _merge_roots(_discovered_source_roots(), resolve_flydsl_source_roots())
     return tuple(root for root in merged if Path(root.rstrip("/")).is_dir())
 
 
@@ -704,6 +710,7 @@ __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
     "FrameworkTree",
     "framework_apply_tree",
+    "point_session_framework_root",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",

@@ -21,6 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, DEFAULT_CODEX_MODEL
+from hyperloom.inference_optimizer.cli.credentials import _OFFICIAL_OPENAI_BASE_URL
+
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -618,3 +621,23 @@ def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
     assert kept["OPENAI_API_KEY"] == "key-from-caller"
     filled = _run_recipe(fragment, tmp_path, {})
     assert filled["OPENAI_API_KEY"] == "key-from-dotenv"
+
+
+def test_setup_skill_offers_the_claude_subscription_token_path() -> None:
+    """A subscription user is told how to get the token, where it goes, and what would shadow it."""
+    setup = SETUP_DOC.read_text(encoding="utf-8")
+    assert "`Claude subscription (Pro/Max)`" in setup
+    assert "claude setup-token" in setup
+    assert "CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>" in setup
+    assert "`ANTHROPIC_BASE_URL=https://api.anthropic.com`" in setup
+    for shadowing in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
+        assert f"`{shadowing}`" in setup, f"setup skill does not warn that {shadowing} outranks the subscription token"
+
+
+def test_setup_skill_offers_the_codex_backend_with_its_own_side() -> None:
+    """A Codex-only user is asked for the OpenAI side's URL, key and model, with the runtime's defaults."""
+    setup = SETUP_DOC.read_text(encoding="utf-8")
+    assert "`Claude (Anthropic)`" in setup and "`Codex (OpenAI)`" in setup and "`Both`" in setup
+    assert f"`Use default ({_OFFICIAL_OPENAI_BASE_URL})`" in setup
+    assert "OPENAI_API_KEY=<PLEASE_FILL_IN>" in setup
+    assert f"`Use default ({DEFAULT_CODEX_MODEL})`" in setup

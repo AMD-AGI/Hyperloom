@@ -12,11 +12,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ._dispatch_helpers import pump_until_settled
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 async def _build_coord(tmp_path: Path):
     """Build a minimal Coordinator rooted at ``tmp_path``."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import (
         MockBackend,
@@ -36,7 +37,7 @@ async def _build_coord(tmp_path: Path):
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -60,7 +61,9 @@ async def test_long_work_is_booked_without_a_supervisor_stamp(tmp_path, monkeypa
         return {"status": "ok"}
 
     coord.sub.register_executor("profile", execute)
-    task = await coord.tasks.create(kind="profile", params={}, idempotency_key="long-profile")
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="profile", params={}, idempotency_key="long-profile")
+    )
     try:
         await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), 5)
         await asyncio.wait_for(entered.wait(), 5)

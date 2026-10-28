@@ -11,6 +11,8 @@ import logging
 import math
 import re
 import tempfile
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,12 @@ from kernelforge.knowledge.kb_store.errors import (
 from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
+)
+from kernelforge.knowledge.kb_store.identity.run import (
+    EXPERIENCE_ARTIFACT,
+    PATCH_ARTIFACT,
+    LoopKernel,
+    resolve_loop_identity,
 )
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     find_defining_source,
@@ -266,20 +274,14 @@ def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize_run(config, workspace: str, op: str, digest: str, kernel_source: str, usage=None) -> dict[str, Any]:
-    """Summarize a run with one LLM call; returns normalized fields (never raises)."""
-    defaults = _normalize_summary({})
-    prompt = _summary_prompt(op, digest, kernel_source)
-    try:
-        reply = asyncio.run(
-            asyncio.wait_for(
-                _query_llm(config, workspace, prompt, usage=usage),
-                timeout=_LLM_TIMEOUT_SEC,
-            )
+def summarize_run(config, workspace: str, prompt: str, usage=None) -> dict[str, Any]:
+    """Summarize a run with one LLM call on ``prompt``; returns normalized fields."""
+    reply = asyncio.run(
+        asyncio.wait_for(
+            _query_llm(config, workspace, prompt, usage=usage),
+            timeout=_LLM_TIMEOUT_SEC,
         )
-    except Exception as exc:  # noqa: BLE001 - best-effort; keep defaults
-        log.warning("experience summarize LLM failed: %r", exc)
-        return defaults
+    )
     parsed = _normalize_summary(_extract_json(reply))
     log.info("experience summarize: category=%s strategy=%r", parsed["category"], parsed["strategy"][:60])
     return parsed
@@ -341,97 +343,64 @@ def _experience_markdown(
     return "".join(head + body)
 
 
+@dataclass(frozen=True)
+class RunOutcome:
+    """One run's best measured solution, its cumulative diff, and the implementation it was measured against."""
+
+    experiment_id: str
+    gpu_target: str
+    baseline_wall_ms: float | None
+    best_wall_ms: float | None
+    cumulative_diff: str
+    digest: str
+    mean_case_speedup: float | None = None
+    snr_db: float | None = None
+    reused_speedup: float | None = None
+    implementation_signature: str = ""
+    implementation_identity: dict[str, Any] | None = None
+
+
 def write_run_experience(
     *,
     config,
-    workspace: str,
-    kernel_path: str,
-    kernel_source: str,
-    kernel_backend: str,
-    gpu_target: str,
-    experiment_id: str,
-    baseline_wall_ms: float | None,
-    best_wall_ms: float | None,
-    mean_case_speedup: float | None = None,
-    cumulative_diff: str,
-    digest: str,
-    snr_db: float | None = None,
-    source_files: list[str] | None = None,
-    target_functions: list[str] | None = None,
-    operator_name: str = "",
-    implementation_signature_override: str = "",
-    implementation_identity_override: dict[str, Any] | None = None,
-    framework: str = "",
+    kernel: LoopKernel,
+    outcome: RunOutcome,
     summary_override: dict[str, Any] | None = None,
-    reused_speedup: float | None = None,
     usage=None,
 ) -> dict[str, Any]:
     """Mirror one run's best solution into the experience store. Never raises."""
     try:
         return _write_run_experience_impl(
             config=config,
-            workspace=workspace,
-            kernel_path=kernel_path,
-            kernel_source=kernel_source,
-            kernel_backend=kernel_backend,
-            gpu_target=gpu_target,
-            experiment_id=experiment_id,
-            baseline_wall_ms=baseline_wall_ms,
-            best_wall_ms=best_wall_ms,
-            mean_case_speedup=mean_case_speedup,
-            cumulative_diff=cumulative_diff,
-            digest=digest,
-            snr_db=snr_db,
-            source_files=source_files,
-            target_functions=target_functions,
-            operator_name=operator_name,
-            implementation_signature_override=implementation_signature_override,
-            implementation_identity_override=implementation_identity_override,
-            framework=framework,
+            kernel=kernel,
+            outcome=outcome,
             summary_override=summary_override,
-            reused_speedup=reused_speedup,
             usage=usage,
         )
-    except Exception as exc:  # noqa: BLE001 - a KB write must never break the loop
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: one experience publication
         reason = sanitize_read_error(exc, secrets=kb_store_secrets(config))
-        log.warning("experience write failed (skipped): %s", reason)
+        # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+        log.warning(
+            "experience write failed (skipped): %s (%s)\n%s",
+            reason,
+            type(exc).__name__,
+            "".join(traceback.format_tb(exc.__traceback__)),
+        )
         return {"written": False, "reason": reason}
 
 
 def _write_run_experience_impl(
-    *,
-    config,
-    workspace,
-    kernel_path,
-    kernel_source,
-    kernel_backend,
-    gpu_target,
-    experiment_id,
-    baseline_wall_ms,
-    best_wall_ms,
-    mean_case_speedup,
-    cumulative_diff,
-    digest,
-    snr_db,
-    source_files=None,
-    target_functions=None,
-    operator_name="",
-    implementation_signature_override="",
-    implementation_identity_override=None,
-    framework="",
-    summary_override=None,
-    reused_speedup=None,
-    usage=None,
+    *, config, kernel: LoopKernel, outcome: RunOutcome, summary_override=None, usage=None
 ) -> dict[str, Any]:
     # The hardware model addresses the record; without it the run would file its experience under a GPU-less address
     # that no read ever resolves to, so a silent write is worse than no write at all.
-    gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
+    gpu_type = config.gpu_type.strip()
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
 
-    if not isinstance(mean_case_speedup, (int, float)):
+    if not isinstance(outcome.mean_case_speedup, (int, float)):
         return {"written": False, "reason": "missing_mean_case_speedup"}
-    this_speedup = float(mean_case_speedup)
+    this_speedup = float(outcome.mean_case_speedup)
     if not math.isfinite(this_speedup) or this_speedup <= 0.0:
         return {"written": False, "reason": "invalid_mean_case_speedup"}
     # Losing to the source baseline is deliberately not a refusal: an operator whose best port is still slower than
@@ -440,58 +409,23 @@ def _write_run_experience_impl(
     #
     # A warm-started run begins already holding a recorded solution, so recording it again under this run's id would
     # file a second copy of the one it started from rather than progress.
-    if (
-        isinstance(reused_speedup, (int, float))
-        and math.isfinite(float(reused_speedup))
-        and this_speedup <= float(reused_speedup)
-    ):
+    reused = outcome.reused_speedup
+    if isinstance(reused, (int, float)) and math.isfinite(float(reused)) and this_speedup <= float(reused):
         return {"written": False, "reason": "no_improvement_over_reuse"}
-    if not (cumulative_diff or "").strip():
+    if not (outcome.cumulative_diff or "").strip():
         return {"written": False, "reason": "empty_diff"}
 
     # Deterministic identity (never LLM-inferred, so the address is stable).
-    from kernelforge.knowledge.kb_store.identity.run import (
-        EXPERIENCE_ARTIFACT,
-        PATCH_ARTIFACT,
-        resolve_loop_identity,
-    )
-
-    identity, concrete_op, framework = resolve_loop_identity(
-        kernel_path=kernel_path,
-        kernel_source=kernel_source,
-        kernel_backend=kernel_backend,
-        gpu_type=gpu_type,
-        target_functions=target_functions,
-        source_files=source_files,
-        framework=framework,
-        operator_name=operator_name,
-        producer=getattr(config, "producer", ""),
-    )
-    op = identity.kernel_name
-    backend_lang = identity.backend
-    op_source = find_defining_source(concrete_op, kernel_path, kernel_source, source_files)
-    dtypes = extract_input_dtypes(op_source, concrete_op, backend_lang)
-    if implementation_signature_override and implementation_identity_override:
-        impl_signature = str(implementation_signature_override)
-        impl_identity = dict(implementation_identity_override)
-        if hash_implementation_identity(impl_identity) != impl_signature:
-            raise ValueError("implementation identity override does not match its signature")
-    elif implementation_signature_override or implementation_identity_override:
-        raise ValueError("implementation signature and identity overrides must be supplied together")
-    else:
-        # Compatibility for direct/non-campaign callers.
-        impl_signature, impl_identity = implementation_signature(
-            workspace=workspace,
-            kernel_path=kernel_path,
-            source_files=source_files,
-            framework=framework,
-        )
+    identity, concrete_op, framework = resolve_loop_identity(kernel, gpu_type=gpu_type, producer=config.producer)
+    op_source = find_defining_source(concrete_op, kernel.kernel_path, kernel.kernel_source, kernel.source_files)
+    dtypes = extract_input_dtypes(op_source, concrete_op, identity.backend)
+    impl_signature, impl_identity = _implementation_identity(kernel, outcome, framework)
     log.info(
         "experience identity: op=%s concrete=%s framework=%s backend=%s implementation=%s",
-        op,
+        identity.kernel_name,
         concrete_op,
         framework,
-        backend_lang,
+        identity.backend,
         impl_signature[:12],
     )
 
@@ -503,44 +437,61 @@ def _write_run_experience_impl(
         log.info("experience write skipped: %s", kb.reason or "not_configured")
         return {"written": False, "reason": kb.reason or "not_configured"}
 
-    # Experience prose + category.
     if summary_override is not None:
         summary = _normalize_summary(summary_override)
     else:
         summary = summarize_run(
             config=config,
-            workspace=workspace,
-            op=op,
-            digest=digest,
-            kernel_source=kernel_source,
+            workspace=kernel.workspace,
+            prompt=_summary_prompt(identity.kernel_name, outcome.digest, kernel.kernel_source),
             usage=usage,
         )
-
-    metric = {
-        "wall_ms": best_wall_ms,
-        "baseline_wall_ms": baseline_wall_ms,
-        "speedup": round(this_speedup, 4),
-        "snr_db": snr_db,
-        "gpu_arch": gpu_target,
-    }
-    changed_files = touched_paths(cumulative_diff)
 
     # Everything a later run needs to judge and reuse this solution, minus the diff: that travels as an artifact so a
     # reader can rank candidates without pulling a patch it may not want.
     knowledge = {
-        "task_id": experiment_id,
+        "task_id": outcome.experiment_id,
         "category": summary["category"],
         "strategy": summary["strategy"],
         "recipe": summary["recipe"],
         "lessons": summary["lessons"],
-        "metric": metric,
-        "changed_files": changed_files,
+        "metric": {
+            "wall_ms": outcome.best_wall_ms,
+            "baseline_wall_ms": outcome.baseline_wall_ms,
+            "speedup": round(this_speedup, 4),
+            "snr_db": outcome.snr_db,
+            "gpu_arch": outcome.gpu_target,
+        },
+        "changed_files": touched_paths(outcome.cumulative_diff),
         "dtypes": dtypes,
         "source_files": list(impl_identity["source_paths"]),
         "implementation_signature": impl_signature,
         "implementation_identity": impl_identity,
     }
+    return _file_experience(kb, knowledge, outcome.cumulative_diff, this_speedup)
 
+
+def _implementation_identity(kernel: LoopKernel, outcome: RunOutcome, framework: str) -> tuple[str, dict]:
+    """The implementation the run was measured against: the campaign's own record of it, or one computed here."""
+    signature, identity = outcome.implementation_signature, outcome.implementation_identity
+    if signature and identity:
+        signature, identity = str(signature), dict(identity)
+        if hash_implementation_identity(identity) != signature:
+            raise ValueError("implementation identity override does not match its signature")
+        return signature, identity
+    if signature or identity:
+        raise ValueError("implementation signature and identity overrides must be supplied together")
+    # Compatibility for direct/non-campaign callers.
+    return implementation_signature(
+        workspace=kernel.workspace,
+        kernel_path=kernel.kernel_path,
+        source_files=kernel.source_files,
+        framework=framework,
+    )
+
+
+def _file_experience(kb, knowledge: dict[str, Any], cumulative_diff: str, speedup: float) -> dict[str, Any]:
+    """Stage the run's patch and experience page, and file them in the store as one candidate."""
     with tempfile.TemporaryDirectory(prefix="forge-loop-kb-") as staging:
         patch_path = Path(staging) / PATCH_ARTIFACT
         # Bytes, not text: writing through a text handle would translate the newlines a patch has to reproduce
@@ -548,39 +499,25 @@ def _write_run_experience_impl(
         patch_path.write_bytes(cumulative_diff.encode("utf-8"))
         experience_path = Path(staging) / EXPERIENCE_ARTIFACT
         experience_path.write_text(
-            _experience_markdown(
-                canonical_id=kb.canonical_id,
-                knowledge=knowledge,
-                patch_name=PATCH_ARTIFACT,
-            ),
+            _experience_markdown(canonical_id=kb.canonical_id, knowledge=knowledge, patch_name=PATCH_ARTIFACT),
             encoding="utf-8",
         )
         # The store names a record after its own content, so an LLM-written summary of a solution this run already
         # recorded is filed as a second record: same patch, same speedup, richer prose.
-        outcome = kb.write_candidate(
-            knowledge,
-            files={
-                PATCH_ARTIFACT: patch_path,
-                EXPERIENCE_ARTIFACT: experience_path,
-            },
-            speedup=this_speedup,
+        written = kb.write_candidate(
+            knowledge, files={PATCH_ARTIFACT: patch_path, EXPERIENCE_ARTIFACT: experience_path}, speedup=speedup
         )
 
-    if not outcome.get("written"):
-        return {"written": False, "reason": outcome.get("reason") or "write_failed"}
+    if not written.get("written"):
+        return {"written": False, "reason": written.get("reason") or "write_failed"}
 
-    solution = str(outcome.get("solution") or "")
-    log.info(
-        "experience written: %s (speedup %.3f, champion=%s)",
-        solution,
-        this_speedup,
-        outcome.get("champion"),
-    )
+    solution = str(written.get("solution") or "")
+    log.info("experience written: %s (speedup %.3f, champion=%s)", solution, speedup, written.get("champion"))
     return {
         "written": True,
         "kernel": kb.canonical_id,
         "solution": solution,
-        "session_id": outcome.get("session_id", ""),
-        "champion": bool(outcome.get("champion")),
-        "speedup": this_speedup,
+        "session_id": written.get("session_id", ""),
+        "champion": bool(written.get("champion")),
+        "speedup": speedup,
     }

@@ -46,11 +46,6 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        # The model asking to close early. A run whose infrastructure actually
-        # failed carries baseline_failed or signal instead, so this value marks
-        # a normal closeout; the close collector keeps the escalation flag
-        # either way.
-        "robustness_escalated",
     }
 )
 
@@ -58,9 +53,9 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
 ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
-#: that cannot run the combo, an argv the installed parser refuses, a bring-up
-#: round that expired unreaped, a supervisor that found the coordinator dead
-#: or its tick wedged, or an agent's LLM backend that stopped answering.
+#: that cannot run the combo, an argv the installed parser refuses, a supervisor
+#: that found the coordinator dead or its tick wedged, or an agent's LLM backend
+#: that stopped answering.
 INFRASTRUCTURE_STOP_REASONS: frozenset[str] = frozenset(
     {ENV_FAULT, ARGV_INVALID, DIED_STOP_REASON, WEDGED_STOP_REASON, BACKEND_UNHEALTHY_STOP_REASON}
 )
@@ -91,16 +86,16 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "signal",
         "unknown",
         "custom",
-        "robustness_escalated",
         "prelude_baseline_failed",
         # The baseline is over ``--max-latency-ms``, or reported no end-to-end latency: every candidate is graded
         # against it, so there is no configuration the run could reach that would satisfy the constraint.
         "baseline_over_latency_budget",
+        # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
+        "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         "active_inferencex_checkout_missing",
-        "no_kernel_skipped",
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
@@ -113,7 +108,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
         # max-position field (both crash at load).
         "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
+        # Two baseline attempts failed argument or configuration validation.
         "baseline_arg_error",
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
@@ -129,8 +124,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
         ENV_FAULT,
         ARGV_INVALID,
-        # A bring-up round expired with nothing confirming its holder dead, so
-        # it keeps excluding the machine.
         # The out-of-band supervisor found the coordinator's process gone; it
         # reaches a report through the terminal artifact the supervisor writes.
         DIED_STOP_REASON,

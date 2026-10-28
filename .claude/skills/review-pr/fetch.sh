@@ -30,6 +30,16 @@ REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/
 
 mkdir -p "$WORK"
 
+# The skill's version and the reviewer's model, which the card's Checked line names. The version is this directory's
+# tree hash at HEAD, so two cards that name the same one ran the same skill text; uncommitted edits to it add +dirty.
+SKILL_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+SKILL_TREE=$(git -C "$SKILL_DIR" rev-parse --short=12 HEAD:./) \
+  || die "cannot name this skill's version: $SKILL_DIR is not in a git checkout"
+if [ -n "$(git -C "$SKILL_DIR" status --porcelain -- .)" ]; then
+  SKILL_TREE="$SKILL_TREE+dirty"
+fi
+printf 'skill: %s\nmodel: %s\n' "$SKILL_TREE" "${ANTHROPIC_MODEL:-${PR_REVIEW_MODEL:-unknown}}" > "$WORK/skill.txt"
+
 # GitHub computes mergeability lazily: the first read of a cold PR returns UNKNOWN and only
 # starts the background job. Queried once, meta.txt says UNKNOWN for every PR nobody looked at
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
@@ -138,7 +148,8 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
   --jq '.statuses[] | [.context, .state, (.target_url // "")] | @tsv' >> "$WORK/ci.txt"
 
 # Only the author, users with write access and this bot reach comments.txt, so an outside comment
-# cannot steer the review.
+# cannot steer the review. Each entry names its time: the three lists are written one after another,
+# so their order does not tell a re-review which card came last (references/re-review.md).
 raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 gh api --paginate --slurp "repos/$REPO/pulls/$PR/reviews" | jq -s '[.[][][]]' > "$raw/reviews.json"
@@ -158,22 +169,40 @@ done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
 
 jq -nr --slurpfile t "$raw/trusted.json" '
   def trusted: select(.user.login | IN($t[0][]));
-  (input[] | trusted | select((.body // "") != "") | "[REVIEW \(.user.login) \(.state)]\n\(.body)\n"),
-  (input[] | trusted | "[INLINE \(.user.login)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
-  (input[] | trusted | "[COMMENT \(.user.login)]\n\(.body)\n")' \
+  (input[] | trusted | select((.body // "") != "")
+    | "[REVIEW \(.user.login) \(.state) \(.submitted_at // "pending")]\n\(.body)\n"),
+  (input[] | trusted
+    | "[INLINE \(.user.login) \(.created_at)] \(.path):\(.line // .original_line // 0)\n\(.body)\n"),
+  (input[] | trusted | "[COMMENT \(.user.login) \(.created_at)]\n\(.body)\n")' \
   "$raw"/{reviews,inline,issue}.json > "$WORK/comments.txt"
 
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather
 # than with one REST call per PR.
+OPEN_PR_LIMIT=100
+gh pr list --repo "$REPO" --state open --limit "$OPEN_PR_LIMIT" \
+  --json number,title,url,files,changedFiles > "$raw/openprs.json"
+LISTED_PRS=$(jq length "$raw/openprs.json")
+# gh stops short of the limit only when it ran out of open PRs, so only a full list needs the total.
+OPEN_PRS=$LISTED_PRS
+if [ "$LISTED_PRS" -ge "$OPEN_PR_LIMIT" ]; then
+  # shellcheck disable=SC2016  # $owner and $name are GraphQL variables, not shell ones
+  OPEN_PRS=$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO#*/}" \
+    -f query='query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) { pullRequests(states: OPEN) { totalCount } } }' \
+    --jq '.data.repository.pullRequests.totalCount')
+  case "$OPEN_PRS" in
+    '' | *[!0-9]*) die "cannot read the open-PR count for $REPO" ;;
+  esac
+fi
 # shellcheck disable=SC2016  # $p is a jq variable, not a shell one
-gh pr list --repo "$REPO" --state open --limit 100 --json number,title,url,files,changedFiles \
-  --jq '.[] | . as $p | $p.files[].path
-        | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
-  > "$WORK/.openprs.tsv"
-# gh lists only the first 100 files of each PR. A larger PR overlapping this one on file 101
-# is then invisible here, and an empty openprs.txt reads as "no in-flight conflict" (rule V4),
-# so the PRs whose lists were cut are named rather than dropped.
+jq -r '.[] | . as $p | $p.files[].path
+       | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
+  "$raw/openprs.json" > "$raw/openprs.tsv"
+# gh lists only the newest OPEN_PR_LIMIT open PRs and the first 100 files of each. A PR past
+# the limit, or a larger PR overlapping this one on file 101, is then invisible here, and an
+# empty openprs.txt reads as "no in-flight conflict" (rule V4), so each cut is named in a
+# PARTIAL line rather than dropped.
 awk -v self="$PR" -F'\t' '
   NR == FNR { want[$0] = 1; next }
   $1 == self { next }
@@ -192,11 +221,14 @@ awk -v self="$PR" -F'\t' '
     for (k in cut)
       printf "# PARTIAL: #%s changes %s files, only its first 100 were compared\n", k, cut[k]
   }
-' "$WORK/files.txt" "$WORK/.openprs.tsv" > "$WORK/openprs.txt"
-rm -f "$WORK/.openprs.tsv"
+' "$WORK/files.txt" "$raw/openprs.tsv" > "$WORK/openprs.txt"
+if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
+  printf '# PARTIAL: %s has %s open PRs, only the newest %s were compared\n' \
+    "$REPO" "$OPEN_PRS" "$LISTED_PRS" >> "$WORK/openprs.txt"
+fi
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt; do
+  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

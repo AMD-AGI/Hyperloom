@@ -3,26 +3,18 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from .assessment import (
-    ASK_RETRYABLE,
-    AUTO_FAIL,
-    AUTO_RECOVER,
-    Assessment,
-    build_assessment,
-    classify_attempt,
-    derive_status,
-)
-from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
-from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import RunOneAttemptFn, run_one_attempt
+from .assessment import Assessment, build_assessment, classify_attempt, classify_unfinished_attempt, derive_status
+from .outcomes import ASK_RETRYABLE, AUTO_FAIL, AUTO_RECOVER, OutcomeId, SUCCESS_TAGS
+from .result_collector import ATTEMPT_MARKER_FILES, collect_artifacts
+from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_attempt
 
-
-_COUNTER_FILE = "requantize_attempts.txt"
 
 # Upstream git URL for the Quark repo; quoted in the quark_root_missing error so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
@@ -35,27 +27,66 @@ class QuantSkillRunResult:
     status: str  # "success" | "partial" | "failed"
     quantized_model_dir: Path | None
     assessment: Assessment
+    # The directory this run's attempts wrote into; None when the run failed before it started.
+    run_dir: Path | None = None
 
 
-# counter file
+_RUNS_DIR = "runs"
 
 
-def _read_counter(workspace: Path) -> int:
-    """Read the persisted requantize-attempt counter."""
-    f = workspace / _COUNTER_FILE
-    if not f.is_file():
-        return 0
-    try:
-        return int(f.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
-        return 0
+def _new_run_dir(workspace: Path) -> Path:
+    """Create ``<workspace>/runs/<utc-timestamp>-<random>`` for one run, never reusing an existing one.
+
+    Every file a run writes, the exported model included, has to outlive the run without another run of the
+    same model reading or overwriting it, so each run gets a directory of its own.
+    """
+    runs = workspace / _RUNS_DIR
+    runs.mkdir(parents=True, exist_ok=True)
+    while True:
+        run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
+        try:
+            (runs / run_id).mkdir()
+        except FileExistsError:
+            continue
+        return runs / run_id
 
 
-def _bump_counter(workspace: Path) -> int:
-    """Increment and persist the requantize-attempt counter."""
-    n = _read_counter(workspace) + 1
-    (workspace / _COUNTER_FILE).write_text(str(n), encoding="utf-8")
-    return n
+_ARCHIVE_INFIX = ".attempt_"
+
+
+def _archive_earlier_end(workspace: Path) -> None:
+    """Rename the markers an earlier attempt of this run left to the next free ``.attempt_<k>``.
+
+    Archiving is what lets the next attempt be judged on its own files.
+    """
+    present = [name for name in ATTEMPT_MARKER_FILES if (workspace / name).is_file()]
+    archived = [
+        int(suffix)
+        for name in ATTEMPT_MARKER_FILES
+        for path in workspace.glob(f"{name}{_ARCHIVE_INFIX}*")
+        if (suffix := path.name.removeprefix(f"{name}{_ARCHIVE_INFIX}")).isdigit()
+    ]
+    index = max(archived, default=0) + 1
+    for name in present:
+        (workspace / name).replace(workspace / f"{name}{_ARCHIVE_INFIX}{index}")
+
+
+async def _run_and_classify(
+    attempt: AttemptContext, run_attempt: RunOneAttemptFn, *, model: str | None, log: Callable[[str], None] | None
+) -> OutcomeId | None:
+    """Run one attempt and classify it on the files it wrote itself.
+
+    An attempt has to write an end of its own: without one, an earlier attempt's
+    model and reports would pass as its result, and an attempt that wrote
+    nothing would read as a clean success.
+    """
+    workspace = attempt.workspace
+    _archive_earlier_end(workspace)
+    sdk_error = (await run_attempt(attempt, model=model, log=log)).sdk_error or None
+    artifacts = collect_artifacts(workspace)
+    if not attempt_ended(artifacts):
+        return classify_unfinished_attempt(sdk_error, phase=artifacts.last_phase)
+    return classify_attempt(artifacts, sdk_error=sdk_error, acceptable_eval_gap=attempt.acceptable_eval_gap)
 
 
 # interactive prompt
@@ -85,10 +116,10 @@ def _ask_operator(message: str) -> bool:
 # retry decision
 
 
-def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
-    """Look for the hypothesis written by SKILL.md for the NEXT attempt."""
+def _fix_hypothesis_path(workspace: Path, attempt_number: int) -> Path:
+    """Where SKILL.md writes its hypothesis for the attempt after ``attempt_number``."""
 
-    return (workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md").is_file()
+    return workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md"
 
 
 @dataclass(frozen=True)
@@ -103,8 +134,7 @@ class _RetryDecision:
 def _decide_next_step(
     outcome: OutcomeId | None,
     *,
-    workspace: Path,
-    attempt_number: int,
+    fix_hypothesis: Path,
     interactive: bool,
     max_requantize_attempts: int,
     counter: int,
@@ -136,18 +166,17 @@ def _decide_next_step(
             )
         return _RetryDecision(retry=False, note="eval_gap_exceeded_rejected")
 
-    # Only ASK_RETRYABLE + UNCLASSIFIED_FAILURE increment the counter.
-    if outcome in ASK_RETRYABLE or outcome == UNCLASSIFIED_FAILURE:
+    # Only ASK_RETRYABLE + unclassified_failure increment the counter.
+    if outcome in ASK_RETRYABLE or outcome == OutcomeId.unclassified_failure:
         if counter >= max_requantize_attempts:
             return _RetryDecision(
                 retry=False,
                 note=f"max_attempts_exhausted:counter={counter}/{max_requantize_attempts}",
             )
-        if not _has_fix_hypothesis(workspace, attempt_number):
+        if not fix_hypothesis.is_file():
             return _RetryDecision(retry=False, note="no_fix_hypothesis")
         if interactive and not _ask_operator(
-            f"[quantization-agent] Outcome `{outcome}` → fix hypothesis at "
-            f"fix_hypothesis_attempt_{attempt_number + 1}.md. Retry? [y/N]: "
+            f"[quantization-agent] Outcome `{outcome}` → fix hypothesis at {fix_hypothesis.name}. Retry? [y/N]: "
         ):
             return _RetryDecision(retry=False, note="operator_declined_retry")
         return _RetryDecision(retry=True, note="")
@@ -194,45 +223,33 @@ async def quantize_via_prompt(
 
     interactive_resolved = _resolve_interactive(interactive)
     run_attempt: RunOneAttemptFn = runner_fn or run_one_attempt
+    run_dir = _new_run_dir(workspace_path)
 
     attempts_list: list[OutcomeId | None] = []
     notes: list[str] = []
     last_outcome: OutcomeId | None = None
-    artifacts: CollectedArtifacts | None = None
 
     attempt_n = 1
     while True:
-        attempt_result = await run_attempt(
+        attempt = AttemptContext(
             user_prompt=prompt,
-            workspace=workspace_path,
+            workspace=run_dir,
             quark_root=quark_root_path,
             attempt_number=attempt_n,
             acceptable_eval_gap=acceptable_eval_gap,
             interactive=interactive_resolved,
             previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
-            model=model,
-            log=log,
         )
-
-        artifacts = collect_artifacts(workspace_path)
-        outcome = classify_attempt(
-            workspace_path,
-            sdk_error=attempt_result.sdk_error or None,
-            last_phase=artifacts.last_phase,
-            acceptable_eval_gap=acceptable_eval_gap,
-            artifacts=artifacts,
-        )
+        outcome = await _run_and_classify(attempt, run_attempt, model=model, log=log)
         attempts_list.append(outcome)
         last_outcome = outcome
 
-        counter = _read_counter(workspace_path)
         decision = _decide_next_step(
             outcome,
-            workspace=workspace_path,
-            attempt_number=attempt_n,
+            fix_hypothesis=_fix_hypothesis_path(run_dir, attempt_n),
             interactive=interactive_resolved,
             max_requantize_attempts=max_requantize_attempts,
-            counter=counter,
+            counter=attempt_n - 1,
         )
         if decision.note:
             notes.append(decision.note)
@@ -243,26 +260,24 @@ async def quantize_via_prompt(
         if not decision.retry:
             break
 
-        new_counter = _bump_counter(workspace_path)
         if log:
-            log(
-                f"quantization-agent: retrying after outcome={outcome} "
-                f"(counter={new_counter}/{max_requantize_attempts})"
-            )
+            log(f"quantization-agent: retrying after outcome={outcome} (retry {attempt_n}/{max_requantize_attempts})")
         attempt_n += 1
 
-    assessment = build_assessment(attempts_list, workspace=workspace_path, artifacts=artifacts, notes=tuple(notes))
+    artifacts = collect_artifacts(run_dir)
+    assessment = build_assessment(attempts_list, artifacts=artifacts, notes=tuple(notes))
 
-    status = derive_status(assessment, artifacts)  # type: ignore[arg-type]
+    status = derive_status(assessment, artifacts)
     quantized_model_dir = (
         artifacts.quantized_model_dir
-        if artifacts and status != "failed" and artifacts.quantized_model_dir and artifacts.has_weights
+        if status != "failed" and artifacts.quantized_model_dir and artifacts.has_weights
         else None
     )
     return QuantSkillRunResult(
         status=status,
         quantized_model_dir=quantized_model_dir,
         assessment=assessment,
+        run_dir=run_dir,
     )
 
 

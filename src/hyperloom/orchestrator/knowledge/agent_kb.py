@@ -9,22 +9,18 @@ import hashlib
 import logging
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_bytes, atomic_write_json
+from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_bytes, atomic_write_json
 
 from .remote_recipe._vendor.kb_store_client import (
     FILES_MEMBER_ROOT,
     KBStoreError,
     KnowledgeSections,
 )
-from .remote_recipe.models import (
-    CONFIG_SECTION,
-    KERNEL_SECTION,
-    PATCH_SECTION,
-    RECIPE_SECTIONS,
-)
+from .remote_recipe.models import CONFIG_SECTION, KERNEL_SECTION, PATCH_SECTION
 from .remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = logging.getLogger(__name__)
@@ -113,9 +109,8 @@ class DraftArtifactSink:
         self._sources[source_key] = ref
         return ref
 
-    def write(self, text: str, *, rel: str, kind: str) -> str:
+    def write(self, text: str, *, rel: str) -> str:
         """Stage a document the builder synthesised rather than found on disk."""
-        del kind  # the ref already carries the column and kind
         self._members[rel] = text.encode("utf-8")
         return rel
 
@@ -196,12 +191,12 @@ class _ColumnKB:
                     if destination.read_bytes() != content:
                         raise KBStoreError(f"artifact ref already has different bytes: {ref}")
                     continue
-                atomic_write_bytes(destination, content, make_parents=True)
+                atomic_write_bytes(destination, content, options=WriteOptions(make_parents=True))
                 created.append(destination)
             atomic_write_json(
                 self._sections.root / _SECTIONS_MEMBER / f"{self.SECTION}.json",
                 {"knowledge": dict(document), "files": all_refs},
-                ensure_ascii=False,
+                fmt=JsonFormat(ensure_ascii=False),
             )
         except (KBStoreError, OSError, ValueError) as exc:
             for destination in created:
@@ -234,6 +229,17 @@ class ConfigKB(_ColumnKB):
                 "extra_envs": dict(envs) if isinstance(envs, Mapping) else {},
             }
         )
+
+
+@dataclass(frozen=True)
+class OverlayProvenance:
+    """How one patch-column overlay was captured, as its provenance row records it."""
+
+    base_sha: str = ""
+    complete: bool = True
+    artifacts_outside_root: int = 0
+    realized: bool = True
+    host_origin: Mapping[str, Any] | None = None
 
 
 class PatchKB(_ColumnKB):
@@ -310,16 +316,7 @@ class PatchKB(_ColumnKB):
             return []
         return [ref for ref, _content in members]
 
-    def stage_provenance(
-        self,
-        *,
-        stack_index: int,
-        base_sha: str = "",
-        complete: bool = True,
-        artifacts_outside_root: int = 0,
-        realized: bool = True,
-        host_origin: Mapping[str, Any] | None = None,
-    ) -> bool:
+    def stage_provenance(self, stack_index: int, provenance: OverlayProvenance) -> bool:
         """Record how the overlay at ``stack_index`` was captured."""
         if self._sections is None:
             return False
@@ -329,12 +326,12 @@ class PatchKB(_ColumnKB):
             return False
         row = {
             "stack_index": index,
-            "base_sha": str(base_sha or ""),
-            "complete": bool(complete),
-            "artifacts_outside_root": max(0, int(artifacts_outside_root or 0)),
-            "realized": bool(realized),
+            "base_sha": str(provenance.base_sha or ""),
+            "complete": bool(provenance.complete),
+            "artifacts_outside_root": max(0, int(provenance.artifacts_outside_root or 0)),
+            "realized": bool(provenance.realized),
         }
-        if origin := _host_origin(host_origin):
+        if origin := _host_origin(provenance.host_origin):
             row[HOST_ORIGIN_KEY] = origin
         document, _ = self._staged()
         rows = [
@@ -459,12 +456,8 @@ def _stack_index(value: Any) -> int:
 
 
 __all__ = [
-    "CONFIG_SECTION",
-    "KERNEL_SECTION",
-    "PATCH_SECTION",
-    "RECIPE_SECTIONS",
     "ConfigKB",
-    "DraftArtifactSink",
     "KernelAgentKB",
+    "OverlayProvenance",
     "PatchKB",
 ]

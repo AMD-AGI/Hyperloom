@@ -55,7 +55,6 @@ def test_record_writes_all_files_and_meta(tmp_path):
             best_mean_case_speedup_before=1.0,
             kernel_source="print(1)\n",
             change_diff="+ added\n",
-            pmc_full="PMC SUMMARY",
             validation_text="validation ok",
             plan="vectorize",
         )
@@ -63,7 +62,6 @@ def test_record_writes_all_files_and_meta(tmp_path):
     assert d is not None
     assert (d / "flash.py").read_text() == "print(1)\n"
     assert (d / "change.diff").exists()
-    assert (d / "profile.txt").read_text() == "PMC SUMMARY"
     assert (d / "validation.txt").exists()
     meta = archive.load_meta(1)
     assert meta["decision"] == "KEEP"
@@ -285,7 +283,6 @@ def test_incomplete_metadata_shapes_are_rejected(tmp_path, payload):
     (directory / "meta.json").write_text(json.dumps(payload))
 
     assert archive._inspect_complete_meta(directory, 1) == ("incomplete", None)
-    assert archive._complete_meta(directory, 1) is None
     # A directory the archive cannot vouch for never reaches the index.
     assert archive.load_index() == []
 

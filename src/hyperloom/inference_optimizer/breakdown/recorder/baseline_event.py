@@ -8,25 +8,30 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
     bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
     graded_axes as _graded_axes,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
 )
 from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
-from .event_timeline import finish_event, open_event
+from .event_sink import EventSink
+from .event_timeline import EventHeader, finish_event, open_event
+from .sections import BASELINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +58,6 @@ ROW_ROUND = "round"
 
 # Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
 RUN_INITIAL = "initial"
-RUN_AFTER_EVAL_FAILURE = "retry_after_eval_failure"
 RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
 
 # The executor's round labels, mirrored so a consumer selects the measured pass without matching on prose.
@@ -107,7 +111,6 @@ __all__ = [
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",
-    "RUN_AFTER_EVAL_FAILURE",
     "RUN_AFTER_MOE_RUNNER_FAILURE",
     "RUN_INITIAL",
     "SECTION_ACTION",
@@ -115,7 +118,9 @@ __all__ = [
     "SECTION_ROUND",
     "SECTION_RUN",
     "BaselineEventRecorder",
-    "assemble_baseline_action",
+    "BaselineInvocation",
+    "BaselineRequest",
+    "BaselineRound",
     "assemble_baseline_actions",
     "assemble_baseline_ext",
     "anchoring_eval_from_action",
@@ -152,9 +157,7 @@ def record_action_decision(
     """
     if not str(task_id or "") or not str(decision or ""):
         return
-    from .event_sink import make_sink
-
-    sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
+    sink = EventSink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
         log.debug(
             "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
@@ -171,23 +174,10 @@ def record_action_decision(
     _republish_closed_event(sink.event_id)
 
 
-def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> dict[str, Any]:
-    """The event-level fragment: its timeline sequence and its own start time.
-
-    An event holds every measurement of one phase and cycle, and the timeline
-    orders events by ``start_time``, so the event's start is the first action's
-    -- read from here -- and never the closing action's, which would file the
-    event at whichever measurement happened to finish last.
-    """
-    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    return rows[0] if rows else {}
-
-
 def _republish_closed_event(event: str) -> None:
     """Re-assemble a closed event so a fragment written after it is published."""
-    from .assembler import baseline_event_parts
+    from .assembler import event_parts
     from .construct import republish_closed_event
-    from .event_rows import rows_for_event
 
     def _end_time(parts: Mapping[str, list[dict[str, Any]]], header: dict[str, Any]) -> str:
         action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
@@ -197,11 +187,9 @@ def _republish_closed_event(event: str) -> None:
         return max(ends)
 
     republish_closed_event(
-        event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        event_type=EVENT_TYPE,
-        kind=EVENT_KIND,
-        load_parts=lambda: baseline_event_parts(event),
+        load_parts=lambda: event_parts(BASELINE_EVENT_SECTIONS, event=event),
         assemble=assemble_baseline_ext,
         end_time=_end_time,
     )
@@ -223,10 +211,8 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
     decides the throughput unit.
     """
     return {
-        # Named as the V5 section names it, which is what a consumer selects on.
-        "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
-        # The name above is the serving case; an image framework measures
-        # img/s through the same key, so the unit must be stated.
+        # Whole-server output rate. An image framework measures img/s through the same key, so the unit is stated.
+        "output_throughput": _float_or_none(result.get("output_throughput")),
         "throughput_unit": framework_registry.throughput_unit(framework),
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
@@ -467,26 +453,50 @@ def anchoring_eval_from_timeline(timeline: Sequence[Mapping[str, Any]]) -> dict[
     return anchoring_eval_from_action(candidates[-1][1])
 
 
+@dataclass(frozen=True)
+class BaselineRequest:
+    """The dispatch one baseline action records as its request."""
+
+    task_id: str = ""
+    task_kind: str = ""
+    reason: str = ""
+    framework: str = ""
+    establishes_quality_ref: bool = False
+    params: Mapping[str, Any] | None = None
+    failure_streak_before: Any = None
+    total_failures_before: Any = None
+
+
+@dataclass(frozen=True)
+class BaselineInvocation:
+    """What one pass declares it launches the server under."""
+
+    framework_args: str = ""
+    extra_envs: Mapping[str, Any] | None = None
+    config_path: Any = ""
+    framework: str = ""
+    model_path: str = ""
+    args_mode: str = ""
+
+
+@dataclass(frozen=True)
+class BaselineRound:
+    """One Magpie benchmark round as the executor timed it."""
+
+    label: str
+    started_at: str
+    duration_sec: float | None
+    timeout_sec: Any = None
+    result: Mapping[str, Any] | None = None
+
+
 class BaselineEventRecorder:
     """Records one baseline action's facts into whichever event owns it."""
 
-    def __init__(
-        self,
-        sink: RecordSink,
-        *,
-        task_id: str = "",
-        task_kind: str = "",
-        reason: str = "",
-        framework: str = "",
-        establishes_quality_ref: bool = False,
-        params: dict[str, Any] | None = None,
-        failure_streak_before: Any = None,
-        total_failures_before: Any = None,
-        owns_event: bool = True,
-    ):
+    def __init__(self, sink: EventSink, request: BaselineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event.
 
-        ``task_kind`` is stated because this executor also measures
+        ``request.task_kind`` is stated because this executor also measures
         ``replay_warm_recipe``. ``establishes_quality_ref`` says whether this
         run defines the session's accuracy reference; a measurement that does
         not is held to a different gate, and which gate applied is not
@@ -504,10 +514,10 @@ class BaselineEventRecorder:
         self._closed = False
         self._run_index = 0
         self._rounds = 0
-        params = _as_dict(params)
-        self._task_id = str(task_id or "")
+        params = _as_dict(request.params)
+        self._task_id = str(request.task_id or "")
         self._action_id = self._task_id or "unnamed"
-        self._framework = str(framework or "")
+        self._framework = str(request.framework or "")
         self._sink.record(
             SECTION_ACTION,
             {
@@ -515,15 +525,15 @@ class BaselineEventRecorder:
                 "start_time": self._start_time,
                 "request": {
                     "task_id": self._task_id,
-                    "task_kind": str(task_kind or ""),
-                    "reason": str(reason or ""),
-                    "framework": str(framework or ""),
-                    "establishes_quality_ref": bool(establishes_quality_ref),
+                    "task_kind": str(request.task_kind or ""),
+                    "reason": str(request.reason or ""),
+                    "framework": str(request.framework or ""),
+                    "establishes_quality_ref": bool(request.establishes_quality_ref),
                     "config_path": str(params.get("config_path") or ""),
                     "output_dir": str(params.get("output_dir") or ""),
                     "requested_timeout_sec": _int_or_none(params.get("timeout_sec")),
-                    "failure_streak_before": _int_or_none(failure_streak_before),
-                    "total_failures_before": _int_or_none(total_failures_before),
+                    "failure_streak_before": _int_or_none(request.failure_streak_before),
+                    "total_failures_before": _int_or_none(request.total_failures_before),
                 },
             },
             row_type=ROW_ACTION,
@@ -551,12 +561,9 @@ class BaselineEventRecorder:
         if not self._owns_event:
             return
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
         )
 
     def begin_run(self, *, attempt_reason: str) -> int:
@@ -594,17 +601,7 @@ class BaselineEventRecorder:
             natural_ids=(self._action_id, str(int(run_index))),
         )
 
-    def record_invocation(
-        self,
-        *,
-        run_index: int,
-        framework_args: str = "",
-        extra_envs: Mapping[str, Any] | None = None,
-        config_path: Any = "",
-        framework: str = "",
-        model_path: str = "",
-        args_mode: str = "",
-    ) -> None:
+    def record_invocation(self, *, run_index: int, invocation: BaselineInvocation) -> None:
         """Record what this pass is about to launch the server under.
 
         Called at the launch, by the frame that resolved the args, the only
@@ -615,37 +612,29 @@ class BaselineEventRecorder:
         answer, the framework's own defaults; ``args_mode`` (``append`` or
         ``replace``) decides whether the string is the whole of the request.
         """
-        invocation: dict[str, Any] = {
-            "framework_args": str(framework_args or ""),
+        block: dict[str, Any] = {
+            "framework_args": str(invocation.framework_args or ""),
             "framework_args_source": ARGS_FROM_LAUNCH,
-            "args_mode": str(args_mode or ""),
-            "extra_envs": {str(key): str(value) for key, value in _as_dict(extra_envs).items()},
-            "config_path": str(config_path or ""),
-            "framework": str(framework or ""),
-            "model_path": str(model_path or ""),
+            "args_mode": str(invocation.args_mode or ""),
+            "extra_envs": {str(key): str(value) for key, value in _as_dict(invocation.extra_envs).items()},
+            "config_path": str(invocation.config_path or ""),
+            "framework": str(invocation.framework or ""),
+            "model_path": str(invocation.model_path or ""),
         }
         self._sink.record(
             SECTION_RUN,
-            {"task_id": self._task_id, "run_index": int(run_index), "invocation": invocation},
+            {"task_id": self._task_id, "run_index": int(run_index), "invocation": block},
             row_type=ROW_RUN,
             natural_ids=(self._action_id, str(int(run_index))),
         )
         # The action's copy is the last pass to launch, the one its adopted
         # measurement was taken under. Repeated writes deep-merge.
-        self._record_action({"invocation": invocation})
+        self._record_action({"invocation": block})
 
-    def record_round(
-        self,
-        *,
-        run_index: int,
-        label: str,
-        started_at: str,
-        duration_sec: float | None,
-        timeout_sec: Any = None,
-        result: Mapping[str, Any] | None = None,
-    ) -> None:
+    def record_round(self, *, run_index: int, round_: BaselineRound) -> None:
         """Record one Magpie benchmark round."""
-        payload = _as_dict(result)
+        label = round_.label
+        payload = _as_dict(round_.result)
         self._rounds += 1
         self._sink.record(
             SECTION_ROUND,
@@ -656,10 +645,10 @@ class BaselineEventRecorder:
                 "ordinal": self._rounds,
                 "label": str(label),
                 "status": str(payload.get("status") or "failed"),
-                "start_time": str(started_at or ""),
+                "start_time": str(round_.started_at or ""),
                 "end_time": _now_iso(),
-                "duration_sec": duration_sec,
-                "timeout_sec": _int_or_none(timeout_sec),
+                "duration_sec": round_.duration_sec,
+                "timeout_sec": _int_or_none(round_.timeout_sec),
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
                 "measurement": _measurement(payload, self._framework),
                 "timing": _timing(payload),
@@ -695,7 +684,6 @@ class BaselineEventRecorder:
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
                 "materialized_config": str(payload.get("materialized_config") or ""),
                 "warmup_round_tput": _float_or_none(payload.get("warmup_round_tput")),
-                "convergence": _as_dict(payload.get("baseline_convergence")) or None,
                 "accuracy_stage": _as_dict(payload.get("accuracy_stage")) or None,
                 "eval_failure": _eval_failure(payload) or None,
                 "cold_anchor": dropped or None,
@@ -754,24 +742,24 @@ class BaselineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import baseline_event_parts
+        from .assembler import event_parts
+        from .construct import event_header
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            parts = baseline_event_parts(self.event_id)
+            parts = event_parts(BASELINE_EVENT_SECTIONS, event=self.event_id)
             ext, derived = assemble_baseline_ext(parts, event=self.event_id)
-            # This action's own start only dates the event when the shell write
+            # The timeline orders events by ``start_time``, so the event is
+            # dated by its first action's open, never by whichever action closes
+            # last. This action's own start only dates it when the shell write
             # failed, leaving this close as the first thing to put it on the
             # timeline.
-            opened_at = str(_event_header(parts, event=self.event_id).get("start_time") or "")
+            opened_at = str(event_header(parts, SECTION_EVENT, self.event_id).get("start_time") or "")
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, opened_at or self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=opened_at or self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:
@@ -851,7 +839,6 @@ def assemble_baseline_actions(
                 "run_eval_disabled": bool(row.get("run_eval_disabled")),
                 "materialized_config": str(row.get("materialized_config") or ""),
                 "warmup_round_tput": row.get("warmup_round_tput"),
-                "convergence": row.get("convergence"),
                 "accuracy_stage": row.get("accuracy_stage"),
                 "eval_failure": row.get("eval_failure"),
                 "cold_anchor": row.get("cold_anchor"),
@@ -860,20 +847,6 @@ def assemble_baseline_actions(
             }
         )
     return actions
-
-
-def assemble_baseline_action(
-    parts: Mapping[str, list[dict[str, Any]]],
-    *,
-    event: str,
-    task_id: str,
-) -> dict[str, Any] | None:
-    """Assemble one baseline action out of its recorded rows."""
-    wanted = str(task_id or "")
-    for action in assemble_baseline_actions(parts, event=event):
-        if str(action.get("task_id") or "") == wanted:
-            return action
-    return None
 
 
 def assemble_baseline_ext(
@@ -892,16 +865,9 @@ def assemble_baseline_ext(
 
 
 def make_baseline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
+    request: BaselineRequest = BaselineRequest(),
     *,
-    task_id: str = "",
-    task_kind: str = "",
-    reason: str = "",
-    framework: str = "",
-    establishes_quality_ref: bool = False,
-    params: dict[str, Any] | None = None,
-    failure_streak_before: Any = None,
-    total_failures_before: Any = None,
     owns_event: bool = True,
 ) -> BaselineEventRecorder | None:
     """Build a recorder, or ``None`` when ``sink`` is absent.
@@ -911,17 +877,6 @@ def make_baseline_recorder(
     """
     if sink is None:
         return None
-    recorder = BaselineEventRecorder(
-        sink,
-        task_id=task_id,
-        task_kind=task_kind,
-        reason=reason,
-        framework=framework,
-        establishes_quality_ref=establishes_quality_ref,
-        params=params,
-        failure_streak_before=failure_streak_before,
-        total_failures_before=total_failures_before,
-        owns_event=owns_event,
-    )
+    recorder = BaselineEventRecorder(sink, request, owns_event=owns_event)
     recorder.begin()
     return recorder

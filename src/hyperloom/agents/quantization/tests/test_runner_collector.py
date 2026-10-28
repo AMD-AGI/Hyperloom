@@ -39,46 +39,14 @@ async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
         return _gen()
 
     result = await runner.run_one_attempt(
-        user_prompt="quantize",
-        workspace=tmp_path / "ws",
-        quark_root=tmp_path,
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path),
         skill_path=skill,
-        sdk_query_factory=_factory,
-        sdk_options_cls=_Options,
         log=logs.append,
+        sdk=runner.ClaudeAgentSdk(query=_factory, options_cls=_Options),
     )
     # SDK error captured, not raised.
     assert "sdk blew up" in result.sdk_error
     assert any("WARNING" in line for line in logs)
-
-
-async def test_run_one_attempt_options_typeerror_fallback(tmp_path: Path) -> None:
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("contract", encoding="utf-8")
-
-    class _Options:
-        def __init__(self, **kwargs):
-            if "cwd" in kwargs:
-                raise TypeError("older sdk has no cwd")
-            self.kwargs = kwargs
-
-    async def _empty_gen():
-        if False:  # pragma: no cover
-            yield None
-
-    def _factory(*, prompt, options):
-        return _empty_gen()
-
-    result = await runner.run_one_attempt(
-        user_prompt="quantize",
-        workspace=tmp_path / "ws",
-        quark_root=tmp_path,
-        skill_path=skill,
-        model="some-model",
-        sdk_query_factory=_factory,
-        sdk_options_cls=_Options,
-    )
-    assert result.sdk_error == ""
 
 
 def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
@@ -87,12 +55,9 @@ def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         asyncio.run(
             runner.run_one_attempt(
-                user_prompt="x",
-                workspace=tmp_path / "ws",
-                quark_root=tmp_path,
+                runner.AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=tmp_path),
                 skill_path=tmp_path / "nope_SKILL.md",
-                sdk_query_factory=lambda **k: iter(()),
-                sdk_options_cls=dict,
+                sdk=runner.ClaudeAgentSdk(query=lambda **k: iter(()), options_cls=dict),
             )
         )
 
@@ -131,12 +96,82 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
     assert (path, present, err) == (None, True, "pyyaml_missing")
 
 
-def test_scan_hypothesis_attempts_missing_dir(tmp_path: Path) -> None:
-    # Nonexistent workspace -> empty tuple.
-    assert rc._scan_hypothesis_attempts(tmp_path / "does_not_exist") == ()
+async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.common import llm_config
+    from hyperloom.common.deepseek_task import DeepSeekTaskResult
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _drive(request, owed=None):
+        seen["request"], seen["owed"] = request, owed
+        return DeepSeekTaskResult(text="quantized", error="")
+
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(runner, "run_deepseek_task", _drive)
+    logs: list[str] = []
+
+    result = await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path, attempt_number=2),
+        skill_path=skill,
+        model="deepseek-v4-flash",
+        log=logs.append,
+    )
+
+    request = seen["request"]
+    assert request.cwd == tmp_path / "ws" and request.writable
+    assert request.child_env is not None
+    assert seen["owed"] is not None
+    assert result.sdk_error == ""
+    assert any("DeepSeek runner" in line and "attempt=2" in line for line in logs)
 
 
-def test_scan_hypothesis_attempts_sorted(tmp_path: Path) -> None:
-    (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
-    (tmp_path / "fix_hypothesis_attempt_1.md").write_text("x", encoding="utf-8")
-    assert rc._scan_hypothesis_attempts(tmp_path) == (1, 2)
+def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_an_eval_result(tmp_path: Path) -> None:
+    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``.
+
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not
+    an end: the attempt still owes the eval report, or the reason it skipped it.
+    """
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "last_phase.txt").write_text("export\n", encoding="utf-8")
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "last_phase.txt").write_text("eval\n", encoding="utf-8")
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "eval_skipped.txt").write_text("no eval environment\n", encoding="utf-8")
+    assert runner._attempt_finished(tmp_path)
+
+
+def test_a_blocked_attempt_is_finished(tmp_path: Path) -> None:
+    (tmp_path / "blocked.md").write_text("outcome: must_have_weights_missing\n", encoding="utf-8")
+
+    assert runner._attempt_finished(tmp_path)
+
+
+async def test_an_interactive_attempt_is_not_continued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its checkpoints wait for an answer a headless session never gets."""
+    from hyperloom.common import llm_config
+    from hyperloom.common.deepseek_task import DeepSeekTaskResult
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _drive(request, owed=None):
+        seen["owed"] = owed
+        return DeepSeekTaskResult()
+
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(runner, "run_deepseek_task", _drive)
+
+    await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="q", workspace=tmp_path / "ws", quark_root=tmp_path, interactive=True),
+        skill_path=skill,
+    )
+
+    assert seen["owed"] is None

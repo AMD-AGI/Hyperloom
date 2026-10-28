@@ -17,9 +17,10 @@ from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_STRICT,
     STRATEGY_THREE_WAY,
     STRATEGY_UNION,
+    ConflictQuery,
+    LandingContext,
     _resolver_backend,
     apply_patch_resolving_conflicts,
-    llm_resolution_available,
 )
 from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 
@@ -194,7 +195,7 @@ async def test_neighbouring_edits_are_absorbed_by_three_way(repo: Path, patches:
     incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 4"))
     _land(repo, landed)
 
-    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed])
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, LandingContext(landed_patches=[landed]))
 
     assert outcome.applied, outcome.error
     assert outcome.strategy == STRATEGY_THREE_WAY
@@ -209,11 +210,7 @@ async def test_two_lanes_inserting_at_one_anchor_are_unioned(repo: Path, patches
     _land(repo, landed)
 
     outcome = await apply_patch_resolving_conflicts(
-        repo,
-        incoming,
-        operator_id="stage2",
-        landed_operator_ids=["stage1"],
-        landed_patches=[landed],
+        repo, incoming, LandingContext(operator_id="stage2", landed_operator_ids=["stage1"], landed_patches=[landed])
     )
 
     assert outcome.applied, outcome.error
@@ -238,9 +235,9 @@ async def test_a_third_lane_merges_on_top_of_two_already_merged(repo: Path, patc
         outcome = await apply_patch_resolving_conflicts(
             repo,
             lane,
-            operator_id=lane.stem,
-            landed_operator_ids=[patch.stem for patch in landed],
-            landed_patches=landed,
+            LandingContext(
+                operator_id=lane.stem, landed_operator_ids=[patch.stem for patch in landed], landed_patches=landed
+            ),
         )
         assert outcome.applied, (lane.stem, outcome.error)
         assert outcome.strategy == STRATEGY_UNION
@@ -293,7 +290,9 @@ async def test_an_openai_only_box_resolves_through_codex(
     incoming = _capture_patch(repo, patches, "stage2", _insert_helpers(_LANE_TWO_SHARED_HELPER))
     _land(repo, landed)
 
-    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=None)
+    outcome = await apply_patch_resolving_conflicts(
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=None
+    )
 
     assert outcome.applied, outcome.error
     assert outcome.strategy == STRATEGY_LLM
@@ -315,7 +314,7 @@ def test_a_dual_configured_box_keeps_the_claude_resolver(monkeypatch: pytest.Mon
 
 
 def test_a_box_credentialed_for_neither_side_has_no_resolver() -> None:
-    assert not llm_resolution_available()
+    assert _resolver_backend() == ""
 
 
 async def test_a_rejected_patch_leaves_nothing_of_the_file_it_created(repo: Path, patches: Path) -> None:
@@ -338,7 +337,9 @@ async def test_a_union_that_duplicates_a_helper_is_rejected_without_a_resolver(r
     incoming = _capture_patch(repo, patches, "stage2", _insert_helpers(_LANE_TWO_SHARED_HELPER))
     _land(repo, landed)
 
-    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=None)
+    outcome = await apply_patch_resolving_conflicts(
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=None
+    )
 
     assert not outcome.applied
     assert "redefines module-level _sweep_flag" in outcome.note()
@@ -348,7 +349,7 @@ async def test_a_union_that_duplicates_a_helper_is_rejected_without_a_resolver(r
 def _resolver_returning(text: str):
     """A resolver that replaces every conflicted region with *text*."""
 
-    async def resolve(**_: object) -> str:
+    async def resolve(*_: object) -> str:
         return text
 
     return resolve
@@ -359,22 +360,22 @@ async def test_resolver_is_shown_one_region_and_its_context(repo: Path, patches:
     landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
     incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
     _land(repo, landed)
-    seen: list[dict[str, str]] = []
+    seen: list[ConflictQuery] = []
 
-    async def resolve(**kwargs: str) -> str:
-        seen.append(kwargs)
+    async def resolve(query: ConflictQuery) -> str:
+        seen.append(query)
         return "    return x * 4 * 8\n    return x * 8\n"
 
-    await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=resolve)
+    await apply_patch_resolving_conflicts(repo, incoming, LandingContext(landed_patches=[landed]), resolver=resolve)
 
     assert len(seen) == 1
-    region = seen[0]["region"]
+    region = seen[0].region
     assert region.splitlines()[0].startswith("<<<<<<<")
     assert "return x * 4" in region and "return x * 8" in region
     # The untouched body of the file is context, never part of the answer.
     assert "def report(values):" not in region
-    assert "import os" in seen[0]["context_before"]
-    assert "def report(values):" in seen[0]["context_after"]
+    assert "import os" in seen[0].context_before
+    assert "def report(values):" in seen[0].context_after
 
 
 async def test_resolver_output_lands_when_it_keeps_both_sides(repo: Path, patches: Path) -> None:
@@ -385,7 +386,7 @@ async def test_resolver_output_lands_when_it_keeps_both_sides(repo: Path, patche
     outcome = await apply_patch_resolving_conflicts(
         repo,
         incoming,
-        landed_patches=[landed],
+        LandingContext(landed_patches=[landed]),
         resolver=_resolver_returning('    if os.environ.get("LANE_TWO"):\n        return x * 8\n    return x * 4\n'),
     )
 
@@ -410,7 +411,7 @@ async def test_a_dedented_first_line_is_put_back_where_the_markers_were(repo: Pa
     outcome = await apply_patch_resolving_conflicts(
         repo,
         incoming,
-        landed_patches=[landed],
+        LandingContext(landed_patches=[landed]),
         resolver=_resolver_returning('if os.environ.get("LANE_TWO"):\n        return x * 8\n    return x * 4\n'),
     )
 
@@ -427,7 +428,7 @@ async def test_a_union_that_duplicates_a_helper_escalates_to_the_resolver(repo: 
     _land(repo, landed)
     asked = 0
 
-    async def resolve(**_: object) -> str:
+    async def resolve(*_: object) -> str:
         nonlocal asked
         asked += 1
         return (
@@ -437,7 +438,9 @@ async def test_a_union_that_duplicates_a_helper_escalates_to_the_resolver(repo: 
             '_TILE_N = _sweep_flag("TILE_N", "0")\n'
         )
 
-    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=resolve)
+    outcome = await apply_patch_resolving_conflicts(
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=resolve
+    )
 
     assert asked == 1
     assert outcome.applied, outcome.error
@@ -456,10 +459,12 @@ async def test_a_resolver_that_raises_costs_the_lane_and_nothing_else(repo: Path
     incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
     _land(repo, landed)
 
-    async def explode(**_: object) -> str:
+    async def explode(*_: object) -> str:
         raise RuntimeError("claude-agent-sdk is not installed")
 
-    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=explode)
+    outcome = await apply_patch_resolving_conflicts(
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=explode
+    )
 
     assert not outcome.applied
     assert "resolver call failed" in outcome.note()
@@ -473,10 +478,7 @@ async def test_resolver_dropping_the_incoming_side_is_rejected(repo: Path, patch
     _land(repo, landed)
 
     outcome = await apply_patch_resolving_conflicts(
-        repo,
-        incoming,
-        landed_patches=[landed],
-        resolver=_resolver_returning("    return x * 4\n"),
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=_resolver_returning("    return x * 4\n")
     )
 
     assert not outcome.applied
@@ -490,10 +492,7 @@ async def test_resolver_dropping_a_landed_keep_is_rejected(repo: Path, patches: 
     _land(repo, landed)
 
     outcome = await apply_patch_resolving_conflicts(
-        repo,
-        incoming,
-        landed_patches=[landed],
-        resolver=_resolver_returning("    return x * 8\n"),
+        repo, incoming, LandingContext(landed_patches=[landed]), resolver=_resolver_returning("    return x * 8\n")
     )
 
     assert not outcome.applied

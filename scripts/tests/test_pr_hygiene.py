@@ -14,7 +14,14 @@ import pytest
 import yaml
 
 import pr_hygiene
-from pr_hygiene import check_exemption, is_production_python, main, parse_numstat_z, template_findings
+from pr_hygiene import (
+    PullRequestRef,
+    check_exemption,
+    is_production_python,
+    main,
+    parse_numstat_z,
+    template_findings,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
@@ -35,7 +42,7 @@ def _workflow(name: str) -> dict:
         ("src/hyperloom/orchestrator/tests/test_x.py", False),
         ("scripts/tests/test_pr_hygiene.py", False),
         ("src/kernelforge/test/helpers.py", False),
-        ("scripts/test_conc_sweep_flow.py", False),
+        ("src/hyperloom/test_x.py", False),
         ("src/hyperloom/conftest.py", False),
         ("src/hyperloom/x_test.py", False),
         ("docs/conf.py", False),
@@ -173,7 +180,7 @@ def _labeled(login: str, name: str = "size-exception") -> dict:
     ],
 )
 def test_exemption_requires_write_access_of_last_labeler(events, perm, granted, reason):
-    got = check_exemption(["size-exception"], "o/r", "7", "tok", get=_fake_get(events, perm))
+    got = check_exemption(["size-exception"], PullRequestRef("o/r", "7", "tok"), get=_fake_get(events, perm))
     assert got.granted is granted
     assert reason in got.reason
 
@@ -182,7 +189,7 @@ def test_no_label_never_calls_api():
     def boom(*_a):
         raise AssertionError("API called without the label")
 
-    assert check_exemption(["other"], "o/r", "7", "tok", get=boom).granted is False
+    assert check_exemption(["other"], PullRequestRef("o/r", "7", "tok"), get=boom).granted is False
 
 
 # ----------------------------------------------------------------------------- template
@@ -302,7 +309,8 @@ def test_cli_reference_check_moved_out_of_docs_workflow():
 
 def test_diff_coverage_step_is_pr_only_and_pinned():
     job = _workflow("tests-coverage.yml")["jobs"]["coverage"]
-    assert job["steps"][0]["with"]["fetch-depth"] == 2
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 2
     step = next(s for s in job["steps"] if s.get("name") == "Diff coverage (changed lines >= 80%)")
     assert "github.event_name == 'pull_request'" in step["if"]
     assert '"diff-cover==9.7.1"' in step["run"]

@@ -10,82 +10,15 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
+
+from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS, resolve_compute_peak_provenance
 
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL
 
-# Compact AMD MAX-ACHIEVABLE (sustained) peak specs — same convention as the session roofline ceiling.
-_PEAK_TFLOPS_MI300: dict[str, float] = {
-    "bf16": 708.0,
-    "bfloat16": 708.0,
-    "f16": 654.0,
-    "fp16": 654.0,
-    "float16": 654.0,
-    "fp8": 1273.0,
-    "f8": 1273.0,
-    "float8_e4m3fn": 1273.0,
-    "float8_e5m2": 1273.0,
-    "fp32": 163.0,
-    "f32": 163.0,
-    "float32": 163.0,
-}
-_PEAK_TFLOPS_MI325: dict[str, float] = {
-    "bf16": 843.0,
-    "bfloat16": 843.0,
-    "f16": 794.0,
-    "fp16": 794.0,
-    "float16": 794.0,
-    "fp8": 1519.0,
-    "f8": 1519.0,
-    "float8_e4m3fn": 1519.0,
-    "float8_e5m2": 1519.0,
-    "fp32": 194.0,
-    "f32": 194.0,
-    "float32": 194.0,
-}
-
-_VENDOR_PEAK_TFLOPS_MI300: dict[str, float] = {
-    "bf16": 1307.4,
-    "bfloat16": 1307.4,
-    "f16": 1307.4,
-    "fp16": 1307.4,
-    "float16": 1307.4,
-    "fp8": 2614.9,
-    "f8": 2614.9,
-    "float8_e4m3fn": 2614.9,
-    "float8_e5m2": 2614.9,
-    "fp32": 163.4,
-    "f32": 163.4,
-    "float32": 163.4,
-}
-_VENDOR_PEAK_TFLOPS_MI355: dict[str, float] = {
-    "bf16": 2516.6,
-    "bfloat16": 2516.6,
-    "f16": 2516.6,
-    "fp16": 2516.6,
-    "float16": 2516.6,
-    "fp8": 5033.2,
-    "f8": 5033.2,
-    "float8_e4m3fn": 5033.2,
-    "float8_e5m2": 5033.2,
-    "mxfp4": 10066.4,
-    "fp4": 10066.4,
-    "float4": 10066.4,
-    "fp32": 157.3,
-    "f32": 157.3,
-    "float32": 157.3,
-}
-_HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
-    "mi308x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
-    "mi325x": {"hbm_bw_gbps": 6000.0, "peak_tflops": _PEAK_TFLOPS_MI325},
-}
-_VENDOR_HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _VENDOR_PEAK_TFLOPS_MI300},
-    "mi308x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _VENDOR_PEAK_TFLOPS_MI300},
-    "mi325x": {"hbm_bw_gbps": 6000.0, "peak_tflops": _VENDOR_PEAK_TFLOPS_MI300},
-    "mi355x": {"hbm_bw_gbps": 8000.0, "peak_tflops": _VENDOR_PEAK_TFLOPS_MI355},
-}
+#: TraceLens short dtype names -> the session roofline's precision tags.
+_SHORT_DTYPE_TAGS: dict[str, str] = {"f16": "fp16", "f8": "fp8", "f32": "fp32"}
 
 _DTYPE_BYTES: dict[str, float] = {
     "f32": 4.0,
@@ -111,18 +44,6 @@ _OPERAND_RE = re.compile(r"\(([\d,\s]*)\)\s*(\w+)?")
 
 def _dtype_bytes(tag: str) -> float:
     return _DTYPE_BYTES.get((tag or "").strip().lower(), 2.0)
-
-
-def _resolve_hw_spec(gpu_type: str) -> tuple[dict[str, Any], str, str] | None:
-    """Return hardware spec plus peak convention for the bypass estimate."""
-    gpu_key = (gpu_type or "").strip().lower()
-    spec = _HW_SPECS.get(gpu_key)
-    if spec is not None:
-        return spec, "achievable", "Hyperloom max-achievable sustained peak"
-    spec = _VENDOR_HW_SPECS.get(gpu_key)
-    if spec is not None:
-        return spec, "vendor", "AMD vendor theoretical peak"
-    return None
 
 
 def _parse_operands(shape_str: str) -> list[tuple[tuple[int, ...], str]]:
@@ -184,10 +105,8 @@ def _sdpa_flops_bytes(four_d: list[tuple[int, ...]], dbytes: float) -> tuple[flo
 def _estimate_flops_bytes(
     category: str, operands: list[tuple[tuple[int, ...], str]], dbytes: float
 ) -> tuple[float, float, dict[str, Any]] | None:
-    """Estimate ``(flops, bytes, meta)`` for one representative call, or ``None``."""
-    if not operands:
-        return None
-    cat = (category or "").lower()
+    """Estimate ``(flops, bytes, meta)`` for one non-empty operand list, or ``None``."""
+    cat = category.lower()
 
     if cat == "gemm":
         two_d = [d for d, _ in operands if len(d) >= 2]
@@ -235,17 +154,24 @@ def _estimate_flops_bytes(
     return None
 
 
-def compute_roofline(
-    *,
-    category: str,
-    shape_str: str,
-    gpu_time_us: float,
-    call_count: int = 1,
-    gpu_type: str = "",
-    dtype: str = "",
-) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class KernelAggregate:
+    """One kernel's measured launches: its category, operand shape and dtype, and total GPU time."""
+
+    category: str
+    shape_str: str
+    gpu_time_us: float
+    call_count: int = 1
+    dtype: str = ""
+
+
+def compute_roofline(aggregate: KernelAggregate, *, gpu_type: str = "") -> dict[str, Any] | None:
     """Analytical roofline for one kernel aggregate, or ``None`` when unestimable."""
-    operands = _parse_operands(shape_str)
+    category = aggregate.category
+    gpu_time_us = aggregate.gpu_time_us
+    call_count = aggregate.call_count
+    dtype = aggregate.dtype
+    operands = _parse_operands(aggregate.shape_str)
     if not operands:
         return None
     op_dtype = (dtype or operands[0][1] or "bf16").strip().lower()
@@ -257,38 +183,37 @@ def compute_roofline(
     if flops <= 0 or nbytes <= 0:
         return None
 
-    resolved = _resolve_hw_spec(gpu_type)
-    if resolved is None:
+    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    if spec is None:
         return None
-    spec, peak_convention, peak_source = resolved
-    peak_tflops = spec["peak_tflops"].get(op_dtype, spec["peak_tflops"].get("bf16", 0.0))
-    peak_flops = peak_tflops * 1e12
+    peak = resolve_compute_peak_provenance(gpu_type, _SHORT_DTYPE_TAGS.get(op_dtype, op_dtype))
+    if peak["compute_peak_tflops"] <= 0:
+        peak = resolve_compute_peak_provenance(gpu_type, "bf16")
+    peak_flops = peak["compute_peak_tflops"] * 1e12
     peak_bw = spec["hbm_bw_gbps"] * 1e9
 
+    # Every HW_SPECS GPU carries a positive HBM bandwidth and a positive bf16 peak.
     ai = flops / nbytes  # FLOPs/byte
-    machine_balance = (peak_flops / peak_bw) if peak_bw > 0 else 0.0
-    bound_type = "compute_bound" if (machine_balance > 0 and ai >= machine_balance) else "memory_bound"
+    machine_balance = peak_flops / peak_bw
+    bound_type = "compute_bound" if ai >= machine_balance else "memory_bound"
 
     out: dict[str, Any] = {
         "bound_type": bound_type,
         "arithmetic_intensity": round(ai, 4),
         "flops_per_byte": round(ai, 4),
         "roofline_source": _RL_ANALYTICAL,
-        "compute_peak_convention": peak_convention,
-        "compute_peak_tflops": peak_tflops,
-        "compute_peak_source": peak_source,
+        **peak,
         **est_meta,
     }
     # Per-call achieved throughput from measured time -> efficiency.
     calls = max(int(call_count or 1), 1)
     per_call_s = (float(gpu_time_us) / calls) / 1e6 if gpu_time_us else 0.0
-    if per_call_s > 0 and peak_flops > 0:
+    if per_call_s > 0:
         raw_eff = (flops / per_call_s) / peak_flops * 100.0
         out["efficiency_percent"] = round(min(raw_eff, 100.0), 3)
         out["compute_utilization_pct"] = out["efficiency_percent"]
         if raw_eff > 100.0:
             out["roofline_estimate_capped"] = True
-    if per_call_s > 0 and peak_bw > 0:
         raw_bw = (nbytes / per_call_s) / peak_bw * 100.0
         out["bandwidth_utilization_pct"] = round(min(raw_bw, 100.0), 3)
         if raw_bw > 100.0:
@@ -303,4 +228,4 @@ def compute_roofline(
     return out
 
 
-__all__ = ["compute_roofline"]
+__all__ = ["KernelAggregate", "compute_roofline"]

@@ -11,10 +11,11 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from .discover import (
     COMPUTE_CATEGORIES,
+    DiscoveryTarget,
     LlmFn,
     _output_schema_block,
     fusion_constraints,
@@ -25,7 +26,6 @@ from .discover import (
     stream_ordered_kernels,
 )
 from .models import Recipe
-from .vllm_passes import PassState
 
 log = logging.getLogger("forge_fusion")
 
@@ -142,9 +142,6 @@ def resolve_anchor(trace_path: str | Path, anchor: KernelAnchor) -> AnchorReport
         raise AnchorResolutionError(f"no GPU kernel events in {trace_path}: nothing to anchor on")
 
     wanted = collapse_whitespace(anchor.name)
-    if not wanted:
-        raise AnchorResolutionError("empty kernel name")
-
     sites: list[tuple[tuple[Any, Any], int]] = []
     for key, ordered in streams.items():
         for index, event in enumerate(ordered):
@@ -283,20 +280,17 @@ def anchor_trace_evidence(report: AnchorReport) -> dict[str, Any]:
     }
 
 
-def build_anchored_discovery_prompt(
-    *,
-    model_type: str,
-    framework: str,
-    source_files: Sequence[str],
-    report: AnchorReport,
-    shapes: dict[str, Any],
-    repo_scope: bool = False,
-    repo_root: str = "",
-) -> str:
-    """Assemble a discovery prompt whose target is fixed and whose fusion is not."""
+def build_anchored_discovery_prompt(target: DiscoveryTarget, source_files: Sequence[str], report: AnchorReport) -> str:
+    """Assemble a discovery prompt whose target is fixed and whose fusion is not; ``source_files`` are embedded."""
+    model_type, framework, shapes, repo_scope = (
+        target.model_type,
+        target.install.framework,
+        target.shapes,
+        target.repo_scope,
+    )
     if repo_scope:
         source_block = render_repo_scope_brief(
-            repo_root,
+            target.repo_root,
             source_files,
             model_type=model_type,
             framework=framework,
@@ -352,18 +346,11 @@ replace. {reach}
 
 
 def discover_anchored_recipes(
-    *,
-    model_type: str,
-    framework: str,
-    source_file: str,
-    shapes: dict[str, Any],
+    target: DiscoveryTarget,
     report: AnchorReport,
     llm_fn: LlmFn,
+    *,
     category_shares: Optional[dict[str, float]] = None,
-    pass_probe: Optional[Callable[[str], PassState]] = None,
-    framework_root: str = "",
-    repo_scope: bool = False,
-    repo_root: str = "",
 ) -> list[Recipe]:
     """Propose fusions built around one named kernel.
 
@@ -371,11 +358,12 @@ def discover_anchored_recipes(
     verdict: the operator named a kernel, which overrides a trace-wide judgement
     that there was nothing worth fusing.
 
-    ``repo_scope`` turns ``source_file`` into a mere entry point: nothing is
+    Repo scope turns the source file into a mere entry point: nothing is
     embedded, the whole repository is proposable, and a proposal may name several
     files. That is the difference between needing to know where the chain lives
     and being able to go and find out.
     """
+    source_file, repo_scope = target.source_file, target.repo_scope
     in_scope = [source_file] if source_file and Path(source_file).is_file() else []
     if not in_scope and not repo_scope:
         log.warning("anchored discovery: model source unreadable (%s); cannot propose a fusion", source_file)
@@ -383,33 +371,12 @@ def discover_anchored_recipes(
     if repo_scope:
         log.info(
             "anchored discovery: repo scope over %s (entry point: %s)",
-            repo_root or "the working directory",
+            target.repo_root or "the working directory",
             ", ".join(Path(p).name for p in in_scope) or "none resolved",
         )
 
-    prompt = build_anchored_discovery_prompt(
-        model_type=model_type,
-        framework=framework,
-        source_files=in_scope,
-        report=report,
-        shapes=shapes,
-        repo_scope=repo_scope,
-        repo_root=repo_root,
-    )
-    recipes = parse_discovered_recipes(
-        llm_fn(prompt),
-        model_type=model_type,
-        framework=framework,
-        source_file=source_file,
-        shapes=shapes,
-        category_shares=category_shares,
-        pass_probe=pass_probe,
-        framework_root=framework_root,
-        explicit_target=True,
-        in_scope_files=in_scope,
-        repo_scope=repo_scope,
-        repo_root=repo_root,
-    )
+    prompt = build_anchored_discovery_prompt(target, in_scope, report)
+    recipes = parse_discovered_recipes(llm_fn(prompt), target, category_shares=category_shares, explicit_target=True)
     evidence = anchor_trace_evidence(report)
     for recipe in recipes:
         recipe.trace_kernels = dict(evidence)

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
@@ -108,7 +108,7 @@ def _sdk_available() -> bool:
 
     try:
         return importlib.util.find_spec("langfuse") is not None
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return False
 
 
@@ -121,7 +121,7 @@ def _to_ns(dt: Any) -> int | None:
 
         if isinstance(dt, datetime):
             return int(dt.timestamp() * 1_000_000_000)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return None
     return None
 
@@ -179,10 +179,7 @@ def _end_obs(obs: Any, end_dt: Any) -> None:
     try:
         obs.end(end_time=end_time)
     except (TypeError, ValueError):
-        try:
-            obs.end()
-        except Exception:  # noqa: BLE001
-            pass
+        obs.end()
 
 
 def _otel_attr_value(v: Any) -> Any:
@@ -195,7 +192,7 @@ def _otel_attr_value(v: Any) -> Any:
         import json
 
         return json.dumps(v, ensure_ascii=False, default=str)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError):
         return str(v)
 
 
@@ -212,35 +209,26 @@ def _set_trace_attrs(
         return
     except AttributeError:
         pass  # v4: no update_trace
-    except Exception:
-        log.debug("langfuse: update_trace failed", exc_info=True)
-        return
     otel = getattr(span, "_otel_span", None)
     if otel is None or not hasattr(otel, "set_attribute"):
         log.debug("langfuse: no OTEL span to set trace attrs on")
         return
-    try:
-        if name is not None:
-            otel.set_attribute("langfuse.trace.name", name)
-        if session_id is not None:
-            otel.set_attribute("session.id", session_id)
-        for k, v in (metadata or {}).items():
-            clean = _otel_attr_value(v)
-            if clean is None:
-                continue  # OTEL rejects None
-            try:
-                otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
-            except Exception:  # noqa: BLE001 — skip unserialisable values
-                continue
-    except Exception:
-        log.debug("langfuse: setting OTEL trace attrs failed", exc_info=True)
+    if name is not None:
+        otel.set_attribute("langfuse.trace.name", name)
+    if session_id is not None:
+        otel.set_attribute("session.id", session_id)
+    for k, v in (metadata or {}).items():
+        clean = _otel_attr_value(v)
+        if clean is None:
+            continue  # OTEL rejects None
+        otel.set_attribute(f"langfuse.trace.metadata.{k}", clean)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     """Load a JSONL file into a list of dict records."""
     from hyperloom.common.jsonio import read_jsonl
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
+    return read_jsonl(path)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -285,7 +273,6 @@ def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "wall_ms": row.get("wall_ms"),
         "snr_db": row.get("snr_db"),
         "validation_passed": row.get("validation_passed"),
-        "pmc_diagnosis": row.get("pmc_diagnosis"),
     }
 
 
@@ -384,7 +371,7 @@ class LangfuseEmitter:
             return False
         try:
             from langfuse import get_client  # type: ignore[import-not-found]
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self._disabled_reason = "sdk_missing"
             log.warning(
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
@@ -484,10 +471,7 @@ class LangfuseEmitter:
         """Buffer a token row; emit the Generation if its text half is in."""
         if not self._enabled:
             return
-        try:
-            self._buffer(row, half="llm")
-        except Exception:
-            log.debug("langfuse: record_llm_call failed", exc_info=True)
+        self._buffer(row, half="llm")
 
     def record_conversation(self, row: dict[str, Any]) -> None:
         """Buffer a conversation row; emit the Generation if its tokens are in."""
@@ -522,7 +506,6 @@ class LangfuseEmitter:
         name: str,
         agent: str,
         output: Any,
-        phase: str = lfmap.UNPHASED,
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
     ) -> bool:
@@ -531,7 +514,7 @@ class LangfuseEmitter:
             return False
         try:
             start = lfmap.parse_ts(ts)
-            parent = self._ensure_agent_span(phase, agent, start)
+            parent = self._ensure_agent_span(lfmap.UNPHASED, agent, start)
             obs = _start_obs(
                 parent,
                 name=name,
@@ -543,7 +526,7 @@ class LangfuseEmitter:
             )
             _end_obs(obs, start)
             self._counts["kb_spans_sent"] += 1
-        except Exception:
+        except Exception:  # isolation boundary: one KB span row
             self._counts["errors"] += 1
             log.debug("langfuse: record_kb_span failed", exc_info=True)
             return False
@@ -590,7 +573,7 @@ class LangfuseEmitter:
             else:
                 self._counts["generations_token_only"] += 1
             return True
-        except Exception:
+        except Exception:  # isolation boundary: one Langfuse generation
             self._counts["errors"] += 1
             log.debug("langfuse: emit generation failed", exc_info=True)
             return False
@@ -624,7 +607,7 @@ class LangfuseEmitter:
         for name, step in steps.items():
             try:
                 step()
-            except Exception:
+            except Exception:  # isolation boundary: one flush step
                 failed = True
                 self._counts["errors"] += 1
                 log.debug("langfuse: flush step %s failed", name, exc_info=True)
@@ -809,12 +792,12 @@ class LangfuseEmitter:
         while self._unended_spans:
             self._safe_end(self._unended_spans.pop())
 
-    @staticmethod
-    def _safe_end(span: Any) -> None:
-        """End a span, swallowing any errors."""
+    def _safe_end(self, span: Any) -> None:
+        """End a span; a failure is counted in the receipt's ``errors``."""
         try:
             span.end()
-        except Exception:
+        except Exception:  # isolation boundary: one span end
+            self._counts["errors"] += 1
             log.debug("langfuse: span end failed", exc_info=True)
 
     def _flush_pending_halves(self) -> None:
@@ -1014,7 +997,7 @@ class LangfuseEmitter:
                     metadata=score.get("metadata") or {},
                 )
             self._counts["scores_sent"] += 1
-        except Exception:
+        except Exception:  # isolation boundary: one decision Score
             self._counts["errors"] += 1
             log.debug(
                 "langfuse: create_score failed for %s",
@@ -1093,13 +1076,9 @@ class LangfuseEmitter:
             atomic_write_json(
                 _receipt_path(self.session_dir),
                 _stamp_receipt_hash(receipt),
-                indent=2,
-                sort_keys=True,
-                make_parents=True,
-                fsync=True,
-                fsync_dir=True,
+                options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True),
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.debug("langfuse: receipt write failed", exc_info=True)
         record_metadata_langfuse(self.session_dir, receipt)
 

@@ -25,6 +25,7 @@ from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.campaign_setup import resolve_campaign
 from kernelforge.tests.test_campaign_setup import _base_args, _git_workspace
 from kernelforge.tests.test_loop_runner import _make_loop, _unused_supervisor
+from kernelforge.loop.iteration import iteration_types
 
 
 def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None):
@@ -328,8 +329,9 @@ def test_new_file_only_candidate_is_named_and_taken_off_the_tree(tmp_path, monke
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "configs/tuned.json"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -344,8 +346,7 @@ def test_new_file_only_candidate_outside_the_allowlist_is_still_reported(tmp_pat
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "notes.txt"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=_new_file_agent(workspace, "notes.txt"), supervisor_fn=_unused_supervisor)
         )
     )
 
@@ -503,8 +504,9 @@ def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(tmp_path
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "configs/tuned.json"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -584,9 +586,9 @@ def test_keep_gate_sized_move_alone_no_longer_counts_as_coverage():
 
 
 def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
-    from kernelforge.loop.scoring import KEEP_MIN_MARGIN_FRACTION
+    from kernelforge.evaluation.scoring import KEEP_MIN_MARGIN_FRACTION
 
-    assert runner_module.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
+    assert iteration_types.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
     loop = _coverage_loop({"decode-t64": 10.0})
     loop.ic = replace(loop.ic, config_coverage_min_move_ratio=0.2)
     loop.results = [_keep(1, {"decode-t64": 9.0})]
@@ -625,8 +627,7 @@ def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, mo
     """The allowlist has to arrive through the real construction path."""
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
-    args = _base_args(workspace, kernel, driver)
-    args["commit_new_paths"] = ["configs/*.json", " ", "configs/*.json"]
+    args = _base_args(workspace, kernel, driver, commit_new_paths=("configs/*.json", " ", "configs/*.json"))
 
     resolved = resolve_campaign(**args)
 
@@ -643,8 +644,7 @@ def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, mo
 def test_campaign_configuration_refuses_a_recursive_allowlist_pattern(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
-    args = _base_args(workspace, kernel, driver)
-    args["commit_new_paths"] = ["configs/**/*.json"]
+    args = _base_args(workspace, kernel, driver, commit_new_paths=("configs/**/*.json",))
 
     with pytest.raises(ValueError, match=r"\*\*"):
         resolve_campaign(**args)
@@ -811,12 +811,12 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeyp
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert (workspace / "forge_experiments" / "pending_keep.json").is_file()
 
     resumed = _campaign_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
     resumed.ic = replace(resumed.ic, commit_new_paths=["configs/*.json"])
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert operator.read_text() == '{"kept": true}\n'

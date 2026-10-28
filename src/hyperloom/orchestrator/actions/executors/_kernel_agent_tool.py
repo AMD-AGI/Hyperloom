@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from hyperloom.orchestrator.kernel import apply_kernel_patch
 
@@ -71,11 +72,9 @@ def _final_content_snapshot(
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
-        descriptors = apply_kernel_patch.parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
-        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+        targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
+        writes = [t.path for t in targets if t.op is PatchOp.WRITE]
+    except (OSError, ValueError):
         return snapshot_dir
     if not writes:
         return snapshot_dir
@@ -87,7 +86,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -100,9 +99,9 @@ def _maybe_apply_kernel_patch(
 ) -> HandlerResult:
     """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
 
-    Resolves a backup root under the session's patches dir when none is given,
-    then delegates to the tool with rebuild / dry-run / target options pulled
-    from the payload.
+    Backs the apply up under the session's patches dir, where a multi-node
+    resume finds kept patches to restore, then delegates to the tool with
+    rebuild / dry-run / target options pulled from the payload.
 
     Args:
         payload (dict): Request payload carrying ``patch_path`` plus
@@ -122,12 +121,12 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, kernel_patch_backup_root
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
     # Same fold as the integrate workspace: a fusion sibling keys this dir by its
     # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
+    backup_root = kernel_patch_backup_root(session_dir, fs_safe_id(kid))
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None
@@ -137,18 +136,20 @@ def _maybe_apply_kernel_patch(
         repo_root=repo_root,
     )
     return apply_kernel_patch.apply_kernel_patch(
-        patch_path=patch_path,
-        target_file=target_file,
-        backup_root=backup_root,
-        kernel_id=kid,
-        artifact_paths=_artifact_paths_from_payload(payload),
-        rebuild_command=payload.get("rebuild_command"),
-        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
-        skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        dry_run=bool(payload.get("dry_run_patch", False)),
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
+        apply_kernel_patch.KernelPatchRequest(
+            patch_path=patch_path,
+            target_file=target_file,
+            backup_root=backup_root,
+            kernel_id=kid,
+            artifact_paths=_artifact_paths_from_payload(payload),
+            rebuild_command=payload.get("rebuild_command"),
+            rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
+            skip_rebuild=bool(payload.get("skip_rebuild", False)),
+            dry_run=bool(payload.get("dry_run_patch", False)),
+            snapshot_dir=snapshot_dir,
+            repo_root=repo_root,
+            producer_manifest=str(payload.get("producer_manifest") or "").strip() or None,
+        )
     )
 
 
@@ -172,27 +173,15 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = apply_kernel_patch.parse_patch_manifest(patch_text)
-    if not descriptors:
-        raise ValueError(f"patch has no file operations: {patch}")
-
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
+    targets = repo_relative_manifest(patch_text)
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
         shutil.rmtree(snap)
     snap.mkdir(parents=True, exist_ok=True)
 
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
+    for target in targets:
+        rel = Path(target.path)
         if not rel.parts or rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
@@ -204,7 +193,7 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
+        elif not target.is_new:
             # ``git show HEAD:`` failed and this is a MODIFY (not a create):
             # non-git repo_root (e.g. vLLM/sglang under site-packages/
             # dist-packages) or an untracked-but-present file. Fall back to the
@@ -254,9 +243,9 @@ def materialize_unified_patch_snapshot(
         msg = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
 
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    for target in targets:
+        if target.op is PatchOp.WRITE and not (snap / target.path).is_file():
+            raise RuntimeError(f"snapshot missing final content for {target.path}")
     return str(snap)
 
 
@@ -277,7 +266,7 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.revert_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as exc:
         return {
             "status": "failed",
             "error_class": "patch_revert_exception",
@@ -299,7 +288,7 @@ def _maybe_finalize_kernel_patch(
         return {"status": "skipped", "reason": "no applied patch manifest"}
     try:
         return apply_kernel_patch.finalize_kernel_patch(apply_result["manifest_path"])
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return {
             "status": "failed",
             "error_class": "patch_finalize_exception",
@@ -375,7 +364,7 @@ async def _run_subprocess(
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
-        from ._subprocess_kill import run_with_session_kill
+        from ._subprocess_kill import RoundWatch, run_with_session_kill
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
@@ -396,8 +385,7 @@ async def _run_subprocess(
         cp = run_with_session_kill(
             cmd,
             env=child_env,
-            timeout=timeout_sec,
-            text=True,
+            watch=RoundWatch(timeout=timeout_sec),
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""

@@ -16,10 +16,6 @@ rather than at author time: the step vocabulary is checked so a producer that
 starts emitting a new step name surfaces as a warning instead of passing
 unnoticed.
 
-Historical per-turn agent fragments are exported as the top-level
-``robustness`` key; the close block preserves historical close-out findings
-without fetching new findings.
-
 **The section is written twice, and the first pass is deliberately partial.**
 ``session_breakdown`` is itself a step in the middle of the sequence, so when
 the breakdown is written the steps after it have not run yet. The recording
@@ -42,32 +38,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
+
 from ..recorder.close_out import SESSION_BREAKDOWN_PATH
-from ._common import (
-    _dict_rows,
-    _mapping,
-)
+from ..workflow_contract import workflow_contract
 
 
-# The step vocabulary the CLOSE sequencer actually emits. ``fact_finalize`` is
-# in the runtime but was missing from the V6 field design, which is a gap in
-# the contract rather than in the producer; unknown names are passed through
-# and warned about so drift surfaces instead of being silently dropped.
-_KNOWN_STEPS = frozenset(
-    {
-        "sequencer_started",
-        "geak_rebench_drain",
-        "stack_revalidation",
-        "post_opt_roofline",
-        "fact_finalize",
-        "report",
-        "session_breakdown",
-        "langfuse_flush",
-        "artifact_package",
-        "ndjson_drain",
-        "done",
-    }
-)
+# The step vocabulary the CLOSE sequencer emits, as the workflow contract
+# publishes it; unknown names are passed through and warned about so drift
+# surfaces instead of being silently dropped.
+_KNOWN_STEPS = frozenset(row["step"] for row in workflow_contract()["close_sequence"]["steps"])
 
 # The status vocabulary the sequencer actually writes.
 _KNOWN_STATUSES = frozenset({"running", "done", "failed", "skipped"})
@@ -123,31 +103,6 @@ def collect_v6_close(
     return _unclosed()
 
 
-def _robustness_block(recorded: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the close-out's robustness verdict.
-
-    Args:
-        recorded (dict[str, Any]): The close fragment, holding the escalation
-            verdict and the findings read at close time.
-
-    Returns:
-        dict[str, Any]: The block. ``findings`` is present only when the ladder
-            wrote some, because an empty list would claim a ladder that ran and
-            found nothing.
-    """
-    block = _mapping(recorded.get("robustness"))
-    assembled: dict[str, Any] = {
-        "escalated": bool(block.get("escalated")),
-        # Recorded alongside the verdict so a reader can check the escalation
-        # against the reason it was drawn from.
-        "stop_reason": str(recorded.get("stop_reason") or ""),
-    }
-    if block.get("findings") is not None:
-        assembled["findings"] = _dict_rows(block.get("findings"))
-        assembled["findings_total"] = int(block.get("findings_total") or 0)
-    return assembled
-
-
 def _recorded_close(
     recorded: dict[str, Any],
     *,
@@ -155,14 +110,13 @@ def _recorded_close(
 ) -> dict[str, Any]:
     """Put the recorded close-out on the wire.
 
-    The verdict, the timestamps, the artifact paths and the escalation are all
+    The verdict, the timestamps and the artifact paths are all
     read straight through: each was stated by the step that knew it. Only the
     only the step vocabulary is checked.
     """
-    steps = [_close_step(row) for row in _dict_rows(recorded.get("steps"))]
+    steps = [_close_step(row) for row in dict_rows(recorded.get("steps"))]
     _warn_unknown_vocabulary(steps, warnings)
-    artifacts = _mapping(recorded.get("artifacts"))
-    write_back = recorded.get("kb_write_back")
+    artifacts = to_mapping(recorded.get("artifacts"))
     close: dict[str, Any] = {
         # A fragment with no status was opened by a producer that then failed
         # to write one; it is still an un-settled close-out.
@@ -171,7 +125,6 @@ def _recorded_close(
         "end_time": str(recorded.get("end_time") or ""),
         "close_sequence_done": bool(recorded.get("close_sequence_done")),
         "steps": steps,
-        "robustness": _robustness_block(recorded),
         "artifacts": {
             "final_json_path": artifacts.get("final_json_path") or None,
             "final_md_path": artifacts.get("final_md_path") or None,
@@ -182,26 +135,12 @@ def _recorded_close(
     for key in ("sequence_schema_version", "source"):
         if recorded.get(key):
             close[key] = recorded[key]
-    # Absent when the session never attempted a publication. Left out rather
-    # than emitted empty: the key is the record that it was tried, so an empty
-    # one would claim an attempt that never happened.
-    if isinstance(write_back, dict) and write_back:
-        close["kb_write_back"] = write_back
-    # Same rule as the publication above: absent when the close-out never got
-    # far enough to snapshot the progress, because an empty curve and a session
-    # that made no progress are different claims.
-    progress = recorded.get("roofline_progress")
-    if isinstance(progress, dict) and progress:
-        close["roofline_progress"] = progress
-    baseline = recorded.get("baseline_progress")
-    if isinstance(baseline, dict) and baseline:
-        close["baseline_progress"] = baseline
-    candidate = recorded.get("geak_candidate")
-    if isinstance(candidate, dict) and candidate:
-        close["geak_candidate"] = candidate
-    recipe = recorded.get("final_recipe")
-    if isinstance(recipe, dict) and recipe:
-        close["final_recipe"] = recipe
+    # Absent when the close-out never got that far, rather than emitted empty: an empty publication claims an attempt
+    # that never happened, and an empty curve and a session that made no progress are different claims.
+    for key in ("kb_write_back", "roofline_progress", "baseline_progress", "geak_candidate", "final_recipe"):
+        section = recorded.get(key)
+        if isinstance(section, dict) and section:
+            close[key] = section
     return close
 
 
@@ -243,10 +182,6 @@ def _unclosed() -> dict[str, Any]:
         "end_time": "",
         "close_sequence_done": False,
         "steps": [],
-        "robustness": {
-            "escalated": False,
-            "stop_reason": "",
-        },
         "artifacts": {
             "final_json_path": None,
             "final_md_path": None,

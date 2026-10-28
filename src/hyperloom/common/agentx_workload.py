@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
-AIPERF_CLIENT_SCRIPT = "aiperf_client.sh"
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
-AGENTX_CLIENT_SCRIPTS = frozenset({AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT})
+AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
+
+# Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
+# re-parented away from the client, so reaping the round's process tree never reaches it.
+AGENTX_SERVER_PIDFILE = "agentx_server.pid"
 
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
 MLPERF_CORPUS = "agentic_combined_v6"
 MLPERF_SMOKE_FLOW = "smoke_test"
-MLPERF_FULL_FLOW = "full"
 MLPERF_SMOKE_TRAJECTORIES = 150
 MLPERF_CANONICAL_TRAJECTORIES = 613
 
@@ -45,18 +47,34 @@ MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
 
 def agentic_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return ``mlperf`` or ``aiperf`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
+    """Return ``mlperf`` or ``magpie`` from ``HYPERLOOM_AGENTIC_BACKEND``."""
     runtime = os.environ if env is None else env
-    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "aiperf"
+    return "mlperf" if str(runtime.get(BACKEND_ENV) or "").strip().lower() == "mlperf" else "magpie"
 
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
     return agentic_backend(env) == "mlperf"
 
 
+def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
+    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
+
+    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
+    carries it. A conc-sweep rung that only changes ``CONC`` would then be
+    recorded at one concurrency and measured at another.
+    """
+    if not is_mlperf_backend(envs):
+        return
+    conc = envs.get("CONC")
+    if conc not in (None, ""):
+        envs["AGENTIC_CONCURRENCY"] = str(conc)
+
+
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:
     """The Magpie ``benchmark_script`` this AgentX backend pins."""
-    return MLPERF_CLIENT_SCRIPT if is_mlperf_backend(env) else AIPERF_CLIENT_SCRIPT
+    if not is_mlperf_backend(env):
+        raise ValueError("AgentX serving and replay are managed by Magpie; no Hyperloom client script exists")
+    return MLPERF_CLIENT_SCRIPT
 
 
 def is_agentx_client_script(name: str | None) -> bool:

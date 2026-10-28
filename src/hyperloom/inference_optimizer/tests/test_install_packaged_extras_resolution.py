@@ -12,11 +12,11 @@ on the default sys.path. pip discovers installed distributions from sys.path and
 does NOT scan the cwd, so with REPO_ROOT absent from PYTHONPATH the name misses
 the local wheel and resolves from the package index instead -- installing the
 last PUBLISHED release's metadata. An extra introduced in the version under
-development is then invisible, so the pre-release gate can never exercise it.
+development is then invisible, so a packaged install never gets it.
 
 The failure is silent in both directions: the neighbouring
 `import hyperloom.inference_optimizer` guard runs as `python -` (cwd on
-sys.path), so it passes from the leg root even when pip cannot see the wheel.
+sys.path), so it passes from REPO_ROOT even when pip cannot see the wheel.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _extract_func(name: str) -> str:
 
 
 # Records the PYTHONPATH each pip invocation actually carried; every import probe
-# succeeds so the run reaches the pip call the way a healthy leg does.
+# succeeds so the run reaches the pip call the way a healthy install does.
 _FAKE_PYTHON = textwrap.dedent(
     """\
     #!/usr/bin/env python3
@@ -77,8 +77,8 @@ def _harness(target_root: Path) -> str:
 
 
 def _run(tmp_path: Path, *, pythonpath: str | None = None):
-    """Run the packaged branch from the leg root, as the pre-release gate does."""
-    target_root = tmp_path / "leg-root"
+    """Run the packaged branch from a `pip install --target` root."""
+    target_root = tmp_path / "target-root"
     target_root.mkdir()
     fake_py = tmp_path / "fakepy"
     fake_py.write_text(_FAKE_PYTHON, encoding="utf-8")

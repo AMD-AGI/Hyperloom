@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
 
 
@@ -390,18 +390,10 @@ def test_levers_are_registered_with_their_state():
     """A registered lever records whether it is currently on."""
     state = _state()
     switches = _chain()
-    assert state.record_authored_framework_levers(
-        switches,
-        default_on=False,
-        specialist_task_id="t-1",
-        stack_delta_pct=-0.4,
-    )
+    assert state.record_authored_framework_levers(switches, default_on=False)
     rows = state.authored_framework_levers
     assert [r["switch"] for r in rows] == ["HL_HOIST", "HL_CACHE", "HL_DERIVED", "HL_STANDALONE"]
     assert all(r["default_on"] is False for r in rows)
-    assert rows[0]["specialist_task_id"] == "t-1"
-    assert rows[0]["stack_delta_pct"] == pytest.approx(-0.4)
-    assert rows[0]["enabler"] is True
     assert rows[0]["attributed_gain_pct"] is None
 
 
@@ -418,11 +410,10 @@ def test_re_registering_preserves_a_measured_attribution():
     """A measurement outranks a re-registration; losing it would re-bench the lever."""
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
-    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5, source="additive")
+    state.record_framework_lever_attribution("HL_CACHE", gain_pct=7.5)
     state.record_authored_framework_levers(_chain(), default_on=True)
     row = next(r for r in state.authored_framework_levers if r["switch"] == "HL_CACHE")
     assert row["attributed_gain_pct"] == pytest.approx(7.5)
-    assert row["attribution_source"] == "additive"
 
 
 def test_registering_nothing_is_a_noop():
@@ -435,7 +426,7 @@ def test_registering_nothing_is_a_noop():
 def test_attribution_of_an_unknown_switch_is_ignored():
     """A stale attribution cannot invent a lever row."""
     state = _state()
-    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0, source="additive") is False
+    assert state.record_framework_lever_attribution("HL_GHOST", gain_pct=1.0) is False
 
 
 def _entry_parsed(switch: str) -> dict[str, Any]:
@@ -478,7 +469,7 @@ def test_already_attributed_levers_are_not_re_benched():
     state = _state()
     state.record_authored_framework_levers(_chain(), default_on=False)
     for row in state.authored_framework_levers:
-        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0, source="additive")
+        state.record_framework_lever_attribution(row["switch"], gain_pct=1.0)
     assert framework_lever_grid(state) == []
 
 
@@ -654,7 +645,7 @@ async def _run_rewrite_integrate(
     benched_envs: dict[str, str] = {}
     legs: list[dict[str, Any]] = []
 
-    async def _fake_bench(**kwargs):
+    async def _fake_bench(bench, **kwargs):
         legs.append(dict(kwargs))
         is_parity = bool(kwargs.get("unset_envs"))
         if is_parity:
@@ -673,7 +664,7 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -794,7 +785,7 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
-    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
 
     from .conftest import make_coordinator
 
@@ -1041,20 +1032,17 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
-    async def _raising_bench(**_kwargs):
-        raise RuntimeError("bench harness exploded")
+    async def _raising_bench(*_args, **_kwargs):
+        raise OSError("bench harness exploded")
 
     monkeypatch.setattr(executor, "_bench_patch", _raising_bench)
     verdict = await executor._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=100.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=100.0
     )
     assert verdict["ran"] is True
     assert verdict["ok"] is False
@@ -1064,14 +1052,11 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=0.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=0.0
     )
     assert verdict["ran"] is False
     assert "no positive base throughput" in verdict["reason"]
@@ -1080,12 +1065,11 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
     from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={"enable_switch_off_parity": False},
-        output_root=tmp_path,
-        specialist_task_id="t",
+        _PatchBench(params={"enable_switch_off_parity": False}, output_root=tmp_path, specialist_task_id="t"),
         switch_manifest=_chain(),
         base_tput=100.0,
     )

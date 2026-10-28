@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import SweepBudget
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _aiter_jit, _ray_serving, _server_lifecycle, benchmark_backend
 from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
@@ -49,7 +51,9 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", MagicMock())
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])
-    monkeypatch.setattr(gr, "ensure_eval_probe_patched", lambda *args: True)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._inferencex_patcher.ensure_eval_probe_patched", lambda *args: True
+    )
     monkeypatch.setattr(conc_sweep, "_build_roofline_ceiling", lambda *args, **kwargs: None)
     base = tmp_path / "baseline.yaml"
     base.write_text(
@@ -65,7 +69,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(conc_sweep, "materialize_config_with_envs", lambda *args, **kwargs: base)
+    monkeypatch.setattr(conc_sweep, "prepare_grid_benchmark_config", lambda *args, **kwargs: base)
     state = shared_state.SharedState()
     state.baseline_tput = 100.0
     state.baseline_runtime_sec = 5.0
@@ -162,8 +166,8 @@ def test_session_deadline_is_shared_across_rungs_and_anchor(sweep_run, persisten
     assert [call["grid"][0].name for call in calls] == [
         f"{arm}_conc{conc}" for arm in ("optimized", "baseline") for conc in (8, 4, 2)
     ]
-    assert [call.get("session_deadline_sec") for call in calls] == [10100.0] * 6
-    assert [call.get("variant_expected_sec") for call in calls] == [5.0] * 6
+    assert [call["stop"].session_deadline_sec for call in calls] == [10100.0] * 6
+    assert [call["stop"].variant_expected_sec for call in calls] == [5.0] * 6
     assert [call.session_deadline_sec for call in backend.calls] == [10100.0] * 6
     assert clock.elapsed == 30.0
 
@@ -193,7 +197,7 @@ def test_budget_exhaustion_stops_ladder_and_preserves_attribution(sweep_run, pat
     assert len(backend.calls) == len(prefix) + 1
     assert len(calls) == len(backend.calls)
     assert len(bounds) == 1
-    assert all(call.get("session_deadline_sec") == 10040.0 for call in calls)
+    assert all(call["stop"].session_deadline_sec == 10040.0 for call in calls)
     assert all(call.session_deadline_sec == 10040.0 for call in backend.calls)
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == ("total_budget_exhausted" if sweep_budget else SESSION_TIME_EXHAUSTED_CLASS)
@@ -233,7 +237,7 @@ def test_unbounded_session_keeps_unbounded_grid(sweep_run):
     assert payload["status"] == "succeeded"
     assert payload["budget_exhausted"] is False
     assert len(backend.calls) == 6
-    assert all(call.get("session_deadline_sec") is None for call in calls)
+    assert all(call["stop"].session_deadline_sec is None for call in calls)
     assert clock.elapsed == 30.0
 
 
@@ -252,7 +256,7 @@ def test_two_hour_sweep_admits_work_below_hard_cap(sweep_run, persistent, baseli
     assert payload["status"] == "succeeded"
     assert len(backend.calls) == 6
     assert clock.elapsed == 30.0
-    assert [call.get("variant_expected_sec") for call in calls] == [baseline_runtime_sec] * 6
+    assert [call["stop"].variant_expected_sec for call in calls] == [baseline_runtime_sec] * 6
     assert [call.session_deadline_sec for call in backend.calls] == [17080.0] * 6
     assert all(call.timeout == 7800.0 for call in backend.calls)
     assert len(bounds) == 1
@@ -320,9 +324,9 @@ def test_boot_retries_share_total_budget_and_preserve_stop_source(sweep_run, usa
     report = json.loads(Path(payload["report_json_path"]).read_text(encoding="utf-8"))
     assert report["budget_skip_reason"] == payload["budget_skip_reason"]
     recorded_skips = [
-        call.kwargs["point"]
+        call.args[1].point
         for call in recorder.record_variant.call_args_list
-        if call.kwargs["point"]["status"] == "skipped"
+        if call.args[1].point["status"] == "skipped"
     ]
     assert recorded_skips and {point["error_class"] for point in recorded_skips} == {error_class}
     recorder.finish.assert_called_once_with(payload, stop_reason="")
@@ -360,17 +364,16 @@ def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_ru
     if persistent:
         _server_lifecycle.teardown_lifecycle_server.assert_called_once()
     recorded_skips = [
-        call.kwargs for call in recorder.record_variant.call_args_list if call.kwargs["point"]["status"] == "skipped"
+        call.args[1] for call in recorder.record_variant.call_args_list if call.args[1].point["status"] == "skipped"
     ]
     assert recorded_skips
-    assert all(call["stage"] == "budget_skip" and call["budget_remaining_sec"] == 4.0 for call in recorded_skips)
+    assert all(rung.stage == "budget_skip" and rung.budget_remaining_sec == 4.0 for rung in recorded_skips)
     recorder.record_budget.assert_called_once_with(
-        declared_total_sec=total,
-        granted_total_sec=total,
-        rung_cost_sec=5.0,
-        raised=False,
-        gate_active=True,
-        deadline=clock.wall() - clock.elapsed + total,
+        SweepBudget(
+            declared_total_sec=total,
+            rung_cost_sec=5.0,
+            deadline=clock.wall() - clock.elapsed + total,
+        )
     )
 
 
@@ -400,12 +403,11 @@ def test_the_agentx_ladder_keeps_the_declared_budget(sweep_run):
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
     recorder.record_budget.assert_called_once_with(
-        declared_total_sec=9000,
-        granted_total_sec=9000,
-        rung_cost_sec=6660.0,
-        raised=False,
-        gate_active=True,
-        deadline=clock.wall() - clock.elapsed + 9000,
+        SweepBudget(
+            declared_total_sec=9000,
+            rung_cost_sec=6660.0,
+            deadline=clock.wall() - clock.elapsed + 9000,
+        )
     )
 
 
@@ -436,7 +438,7 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
     original_grid = conc_sweep.run_grid
 
     async def attributed_grid(**kwargs):
-        kwargs["deadline_stop"] = sweep_stop
+        kwargs["stop"] = replace(kwargs["stop"], deadline_stop=sweep_stop)
         return await original_grid(**kwargs)
 
     monkeypatch.setattr(conc_sweep, "run_grid", attributed_grid)

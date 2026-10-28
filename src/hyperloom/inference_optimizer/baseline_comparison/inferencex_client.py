@@ -17,9 +17,10 @@ import zlib
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
-from .types import BenchmarkMode
+from .types import BaselineQuery
 
 log = logging.getLogger(__name__)
 
@@ -97,14 +98,6 @@ def _fetch_raw(url: str) -> bytes:
 def base_url() -> str:
     """Public accessor for the resolved API base URL (honours env override)."""
     return _base_url()
-
-
-def _to_int(value: object) -> int | None:
-    """Best-effort integer coercion used by dimension filtering."""
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
 
 
 def fetch_rows(model_api_name: str) -> list[dict] | None:
@@ -201,17 +194,10 @@ def fetch_agentic_interactivity(benchmark_ids: list[str | int]) -> dict[str, flo
     return result
 
 
-def find_reference_rows(
-    rows: list[dict],
-    *,
-    hardware: str,
-    isl: int | None,
-    osl: int | None,
-    precision: str = "",
-    benchmark_mode: BenchmarkMode = "synthetic",
-) -> list[dict]:
-    """Filter matching single-node rows without treating agentic lengths as fixed shapes."""
-    hw = str(hardware or "").strip().casefold()
+def find_reference_rows(rows: list[dict], query: BaselineQuery) -> list[dict]:
+    """Filter single-node rows matching ``query`` without treating agentic lengths as fixed shapes."""
+    isl, osl = query.isl, query.osl
+    hw = query.gpu.strip().casefold()
     matched = [
         r
         for r in rows
@@ -220,7 +206,7 @@ def find_reference_rows(
         and not bool(r.get("is_multinode"))
         and not bool(r.get("disagg"))
     ]
-    if benchmark_mode == "agentx":
+    if query.benchmark_mode == "agentx":
         matched = [r for r in matched if r.get("benchmark_type") == "agentic_traces"]
     else:
         matched = [
@@ -228,10 +214,10 @@ def find_reference_rows(
             for r in matched
             if isl is not None
             and osl is not None
-            and _to_int(r.get("isl")) == int(isl)
-            and _to_int(r.get("osl")) == int(osl)
+            and to_int(r.get("isl")) == int(isl)
+            and to_int(r.get("osl")) == int(osl)
         ]
-    prec = str(precision or "").strip().casefold()
+    prec = query.precision.strip().casefold()
     if prec:
         matched = [r for r in matched if str(r.get("precision") or "").strip().casefold() == prec]
     return matched

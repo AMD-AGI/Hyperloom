@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.3"
+version = "1.1.4"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,16 +36,34 @@ llm = [
     "openai>=1.50",
     "httpx>=0.27",
 ]
+# The DeepSeek Harness agent runtime, lazy-imported by the harness role. Kept
+# out of ``llm`` because no role selects it on credentials alone: it is reachable
+# only by naming it, so a deployment that does not is not made to carry it.
+deepseek = [
+    "deepseek-harness-sdk>=0.1.5rc1",
+]
 # Critic-agent web tools (web_search / web_fetch).
 web = [
     "markdownify>=0.11",
     "cachetools>=5.3",
+]
+# The Experience KB service on a PostgreSQL server (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs; a workspace's
+# service keeps its database in SQLite and needs none of this. The connection pool checks each connection it hands
+# out, which needs psycopg-pool 3.2.
+kb-service = [
+    "PyYAML>=6.0",
+    "psycopg[binary]>=3.2,<4",
+    "psycopg-pool>=3.2,<4",
 ]
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
+# What only a hosted run needs, on top of ``runtime``. Empty until the pieces that need
+# a dependency (the events writer, the MCP server, an E2B provider) land; the lock file
+# ``requirements/app.lock`` is compiled from ``runtime`` and ``hosted``.
+hosted = []
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
 # the ROCm build is supplied by the container image and a bare specifier would
 # resolve to the CUDA wheel from PyPI.
@@ -90,6 +108,8 @@ forge-profiling = [
 test = [
     "hyperloom-inference_optimizer[runtime]",
     "hyperloom-inference_optimizer[ci]",
+    # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
+    "hyperloom-inference_optimizer[kb-service]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     "jsonschema>=4.18",
@@ -139,6 +159,7 @@ hyperloom = "hyperloom.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; this is for interactive use.
 kernelforge = "kernelforge.cli:main"
+hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 
@@ -148,8 +169,8 @@ hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 # subdirectories that are NOT packages. ``packages.find.exclude`` keeps
 # ``*.tests`` out of the *package* list, but the sweep then re-added the very
 # same files as package *data*: the wheel shipped 627 test entries before forge
-# was vendored and 833 after (all of ``kernelforge/tests/`` and
-# ``kernelforge/gemm_tune/tests/``). ``scripts/check_wheel_contents.py`` has
+# was vendored and 833 after (all under ``kernelforge/tests/``).
+# ``scripts/check_wheel_contents.py`` has
 # been reporting this; it is the ``packaging.yml`` wheel-contents job.
 #
 # Turning the sweep off makes ``[tool.setuptools.package-data]`` below the sole
@@ -204,10 +225,10 @@ exclude = [
 ".cursor/skills/hyperloom-setup" = [
     "src/hyperloom/skills/hyperloom-setup/SKILL.md",
 ]
-# Deploys the global Experience KB that workspaces push to and pull from.
-".agents/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".claude/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
-".cursor/skills/hyperloom-global-kb" = ["src/hyperloom/skills/hyperloom-global-kb/SKILL.md"]
+# Operates any Experience KB service with the hyperloom-kb CLI: labels, restores, exclusions, sync.
+".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+".cursor/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
@@ -224,6 +245,9 @@ exclude = [
 
 [tool.setuptools.package-data]
 hyperloom = [
+    "plugs/profiles/*.json",
+    "contracts/*.json",
+    "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
 ]
@@ -233,6 +257,7 @@ hyperloom = [
     "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
+    "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
@@ -251,7 +276,7 @@ hyperloom = [
     "assets/slurm/*.sh.in",
     "references/*.md",
 ]
-# Critic LLM skill assets, mounted by the A2A / Codex chat server host.
+# Critic LLM skill assets, loaded into the Critic prompt preamble by CriticAgentBackend.
 "hyperloom.agents.critic" = [
     "SKILL.md",
     "README.md",
@@ -312,11 +337,9 @@ asyncio_mode = "auto"
 testpaths = [
     "src/**/tests",
     "scripts/tests",
-    "tools/kbmine/tests",
 ]
-pythonpath = ["src", ".", "scripts", "tools/kbmine"]
+pythonpath = ["src", ".", "scripts"]
 markers = [
-    "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
 ]
 
@@ -406,9 +429,27 @@ omit = [
     "src/kernelforge/fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
-    "src/kernelforge/mcp_server/tools/bench.py",
-    "src/kernelforge/mcp_server/tools/registers.py",
+    "src/kernelforge/evaluation/benchmark/runner.py",
+    "src/kernelforge/evaluation/profiling/registers.py",
     "src/kernelforge/loop/runner.py",
+    # ... and the per-job modules it was split into, which answer to the same hardware.
+    "src/kernelforge/loop/iteration/attempt_verdict.py",
+    "src/kernelforge/loop/iteration/best_publication.py",
+    "src/kernelforge/loop/iteration/campaign_report.py",
+    "src/kernelforge/loop/iteration/campaign_runtime.py",
+    "src/kernelforge/loop/iteration/case_coverage.py",
+    "src/kernelforge/loop/iteration/ceiling_runtime.py",
+    "src/kernelforge/loop/iteration/iteration_phases.py",
+    "src/kernelforge/loop/iteration/iteration_types.py",
+    "src/kernelforge/loop/iteration/keep_checkpoint.py",
+    "src/kernelforge/loop/iteration/lane_runtime.py",
+    "src/kernelforge/loop/iteration/locked_run.py",
+    "src/kernelforge/loop/iteration/outcome_runtime.py",
+    "src/kernelforge/loop/iteration/resume_recovery.py",
+    "src/kernelforge/loop/iteration/round_admission.py",
+    "src/kernelforge/loop/iteration/scoring_runtime.py",
+    "src/kernelforge/loop/iteration/supervisor_review.py",
+    "src/kernelforge/loop/iteration/workspace_git.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
@@ -445,7 +486,7 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
-    "-m", "not critic_agent_e2e and not targeted_build_e2e",
+    "-m", "not targeted_build_e2e",
     "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
@@ -453,8 +494,6 @@ pytest_ci_args = [
 xdist_workers = 2
 # GitHub matrix shards the suite is split across (pytest-split).
 total_shards = 6
-# Repository variable name: when truthy, CI skips fail_under enforcement.
-relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
 # ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
@@ -507,13 +546,18 @@ cyclomatic-complexity = 20
 # limit: cognitive complexity weights nesting, so a value past 30 is a function
 # a reader has to re-read rather than read.
 cognitive-complexity = 30
-# Physical lines, ``def`` through the last line, decorators excluded, comments
-# and docstrings included: a function no longer fits one screen past 80, and
-# most of this tree's functions stay well under (the review trigger is ~60).
-function-lines = 80
-# pylint R1702 default: past five nested blocks, the innermost line depends on
-# six conditions at once; extract the inner loop or invert a condition.
-nested-blocks = 5
+# Lines of code in the body: the ``def`` lines, decorators, blank, comment and
+# docstring lines do not count. Past 50 a function rarely does one thing; split
+# it along its steps.
+function-lines = 50
+# Past four nested blocks the innermost line depends on five conditions at
+# once; extract the inner loop or invert a condition.
+nested-blocks = 4
+# pylint R0913 default: past five, a call site no longer reads as a sentence and the
+# values travel together anyway -- pass the object they come from, or name them in a
+# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
+# parameters do.
+function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.
 module-lines = 1200
@@ -521,12 +565,17 @@ module-lines = 1200
 duplicated-lines = 0
 # Any vulture finding at dead-code-min-confidence counts.
 dead-code = 0
+# Entries directly in a directory: its modules and the subdirectories holding one.
+# Past 50 a reader can no longer scan the listing for the module they need;
+# group the modules into subpackages by responsibility.
+directory-entries = 50
 
 # Exact versions: the script refuses to measure with any other, because each
 # release can change what a metric counts. CI installs these same pins.
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
+radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
@@ -588,24 +637,23 @@ extend-select = [
     "LOG",  # correct logging API use
     "A",  # do not shadow builtins
     "C4",  # comprehension / collection-call idioms
+    "B006",  # no mutable default arguments
+    "B012",  # no return / break / continue inside finally
 ]
 # Still off pending a team decision -- each rewrites hundreds of lines that the
-# open PRs touch: "I" (import sorting), "UP" (pyupgrade). "B", "SIM" and the
-# rest of "RUF" carry a backlog and belong behind a ratchet, not a hard gate.
+# open PRs touch: "I" (import sorting), "UP" (pyupgrade). The rest of "B",
+# "SIM" and the rest of "RUF" carry a backlog and belong behind a ratchet, not a
+# hard gate.
 
 [tool.ruff.lint.flake8-builtins]
 # ``aiter`` is AMD's kernel library, imported under its own name throughout;
 # the builtin ``aiter`` (async iterator) is never used in this tree.
 ignorelist = ["aiter"]
 
-# C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: the tree carries a
-# backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. The code-metrics gate above measures it at 20 on the files a
-# change touches. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-# [tool.ruff.lint.mccabe]
-# max-complexity = 10
+# C901 (mccabe) stays off: the style guide's complexity trigger (10) and the
+# code-metrics gate's ceiling (20) are counted with radon, which also counts every
+# and / or, ternary, comprehension and assert. Measure on demand:
+#   radon cc -s -n C src/hyperloom src/kernelforge
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and
@@ -625,7 +673,7 @@ ignorelist = ["aiter"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
-# shared with kernelforge.llm rather than redeclared here.
+# shared with kernelforge.agent_backends rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
 # Sphinx reads the module-level name ``copyright``.
 "docs/conf.py" = ["A001"]
@@ -633,7 +681,7 @@ ignorelist = ["aiter"]
 # ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
 # Renaming them would break keyword callers / the override.
 "src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
-"src/kernelforge/llm/git.py" = ["A002"]
+"src/kernelforge/tools/git.py" = ["A002"]
 "src/hyperloom_kb/http_service.py" = ["A002"]
 # Naive local-time timestamps are part of these files' on-disk / directory-name
 # formats (persisted ``isoformat()`` strings, log-clock parsing); making them

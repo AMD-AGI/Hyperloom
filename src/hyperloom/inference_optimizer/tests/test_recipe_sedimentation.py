@@ -15,8 +15,12 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB, RecipeUpsert
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    attempt_provenance,
+    recipe_attrs_from_state,
+)
 
 
 def _make_coordinator(tmp_path: Path) -> Coordinator:
@@ -34,7 +38,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(recipe_kb=kb),
+        advisory=AdvisoryServices(knowledge_plane=SimpleNamespace(recipe_kb=kb)),
     )
 
 
@@ -67,7 +71,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         },
     )
 
-    kept, kept_by_gap, reverted = coord.recipe_journal._collect_attempt_provenance()
+    kept, kept_by_gap, reverted = attempt_provenance(coord.shared_state)
     assert kept == {"mtp_on": "https://pr/123"}
     assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
     assert len(reverted) == 1
@@ -106,7 +110,7 @@ def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     row = next(x for x in attrs["what_worked"] if x["name"] == "k007")
     assert row["source"] == "https://pr/777"
 
@@ -142,7 +146,7 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     ww = attrs["what_worked"]
     mtp = next(x for x in ww if x["name"] == "mtp_on")
     assert mtp["source"] == "https://pr/123"
@@ -174,7 +178,7 @@ def test_sediment_toggle_off_keeps_recipe_ephemeral(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     mtp = next(x for x in attrs["what_worked"] if x["name"] == "mtp_on")
     assert "source" not in mtp
 
@@ -215,21 +219,23 @@ def test_experience_rows_survive_the_kb_round_trip(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb2")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        # Exactly what recipe_journal._build_recipe_attrs_from_state emits.
-        what_worked=[
-            {
-                "name": "mtp_on",
-                "extra_server_args": "--speculative-num-steps 3",
-                "extra_envs": {"VLLM_MTP": "1"},
-                "gain_pct": 4.2,
-                "source": "https://pr/123",
-            }
-        ],
-        what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            # Exactly what recipe_journal.recipe_attrs_from_state emits.
+            what_worked=[
+                {
+                    "name": "mtp_on",
+                    "extra_server_args": "--speculative-num-steps 3",
+                    "extra_envs": {"VLLM_MTP": "1"},
+                    "gain_pct": 4.2,
+                    "source": "https://pr/123",
+                }
+            ],
+            what_failed=[{"name": "bad_flag", "reason": "reverted", "gain_pct": -1.0}],
+        ),
     )
     row = store.get_recipe(canonical_id=cid) or {}
 
@@ -258,12 +264,14 @@ def test_an_experience_row_that_stored_a_description_still_names_its_variant(tmp
     store = LocalRecipeStore(root=tmp_path / "kb_legacy")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[{"description": "mtp_on", "measured_impact": "+4.2%"}],
-        what_failed=[{"description": "", "reason": "OOM"}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[{"description": "mtp_on", "measured_impact": "+4.2%"}],
+            what_failed=[{"description": "", "reason": "OOM"}],
+        )
     )
     row = store.get_recipe(canonical_id=cid) or {}
     assert (row.get("what_worked") or [])[0].get("name") == "mtp_on"
@@ -275,12 +283,14 @@ def test_an_experience_row_keeps_a_key_this_module_never_heard_of(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb_forward")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[{"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}],
-        what_failed=[{"name": "bad_flag", "reason": "reverted", "error_class": "OOMError"}],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[{"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}],
+            what_failed=[{"name": "bad_flag", "reason": "reverted", "error_class": "OOMError"}],
+        )
     )
     row = store.get_recipe(canonical_id=cid) or {}
     assert (row.get("what_worked") or [])[0] == {"name": "mtp_on", "gain_pct": 4.2, "fingerprint": "abc123"}
@@ -337,11 +347,13 @@ def test_a_malformed_experience_row_fails_at_the_boundary(tmp_path, bad_row):
     store = LocalRecipeStore(root=tmp_path / "kb_bad")
     with pytest.raises(TypeError):
         store.put_recipe(
-            canonical_id="inference:m:h:f:text:a:1:fp4",
-            model="m",
-            hardware="h",
-            framework_name="f",
-            what_worked=[bad_row],
+            RecipeUpsert(
+                canonical_id="inference:m:h:f:text:a:1:fp4",
+                model="m",
+                hardware="h",
+                framework_name="f",
+                what_worked=[bad_row],
+            )
         )
 
 
@@ -351,14 +363,16 @@ def test_proven_items_reach_the_scout_through_a_stored_recipe(tmp_path):
     store = LocalRecipeStore(root=tmp_path / "kb3")
     cid = "inference:m:h:f:text:a:1:fp4"
     store.put_recipe(
-        canonical_id=cid,
-        model="m",
-        hardware="h",
-        framework_name="f",
-        what_worked=[
-            {"name": "mtp_on", "source": "https://pr/123"},
-            {"name": "fp8_kv"},
-        ],
+        RecipeUpsert(
+            canonical_id=cid,
+            model="m",
+            hardware="h",
+            framework_name="f",
+            what_worked=[
+                {"name": "mtp_on", "source": "https://pr/123"},
+                {"name": "fp8_kv"},
+            ],
+        )
     )
     # The shape recipe_kb_t0 hands to SharedState on a hit.
     coord.shared_state.warm_start_recipe = {

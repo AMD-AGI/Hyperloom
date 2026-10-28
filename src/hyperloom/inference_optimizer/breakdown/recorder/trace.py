@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -151,42 +152,47 @@ def _emit(section: str, fields: list[str]) -> None:
     log.log(TRACE, "breakdown %s", redact_secret_values(" ".join(fields)))
 
 
-def trace_write(
-    *,
-    section: str,
-    kind: str,
-    operation: str,
-    target: Path,
-    payload: Mapping[str, Any],
-    producer: str,
-    seq: int,
-    ts: str,
-    size: int,
-    existed: bool,
-    previous: Mapping[str, Any] | None = None,
-    error: BaseException | None = None,
-) -> None:
+@dataclass(frozen=True)
+class WriteTrace:
+    """One fragment write, or the failure of one, as the trace reports it."""
+
+    section: str
+    kind: str
+    operation: str
+    target: Path
+    payload: Mapping[str, Any]
+    producer: str
+    seq: int
+    ts: str
+    size: int
+    existed: bool
+    previous: Mapping[str, Any] | None = None
+    error: BaseException | None = None
+
+
+def trace_write(write: WriteTrace) -> None:
     """Log one fragment write, or the failure of one."""
     if not trace_enabled():
         return
+    section = write.section
     try:
         fields = [
             f"section={section}",
-            f"kind={kind}",
-            f"op={operation}",
-            "outcome=" + ("failed" if error is not None else "replaced" if existed else "created"),
-            _entity(payload),
-            f"producer={producer}",
-            f"seq={seq}",
-            f"ts={ts}",
-            f"bytes={size}",
-            f"file={target.name}",
+            f"kind={write.kind}",
+            f"op={write.operation}",
+            "outcome=" + ("failed" if write.error is not None else "replaced" if write.existed else "created"),
+            _entity(write.payload),
+            f"producer={write.producer}",
+            f"seq={write.seq}",
+            f"ts={write.ts}",
+            f"bytes={write.size}",
+            f"file={write.target.name}",
         ]
-        if previous is not None:
-            fields.append(_changed(previous, payload))
+        if write.previous is not None:
+            fields.append(_changed(write.previous, write.payload))
         fields.append(_call_site())
-        if error is not None:
-            fields.append(f"error={type(error).__name__}:{_short(error)}")
+        if write.error is not None:
+            fields.append(f"error={type(write.error).__name__}:{_short(write.error)}")
         _emit(section, fields)
     except Exception:
         log.log(TRACE, "breakdown trace failed for section=%s", section, exc_info=True)
@@ -228,6 +234,7 @@ if env_bool(TRACE_ENV):
 __all__ = [
     "TRACE",
     "TRACE_ENV",
+    "WriteTrace",
     "enable_trace",
     "trace_enabled",
     "trace_skip",

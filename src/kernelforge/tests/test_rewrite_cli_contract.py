@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from kernelforge.cli import main
 from kernelforge.rewrite_by_flydsl import protocol
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests.conftest import SRC_ROOT
 
 
 def _rewrite_command():
@@ -88,8 +88,8 @@ def test_the_logical_op_name_is_one_required_option():
 def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=()):
     captured: dict = {}
 
-    def fake_run_rewrite(**kwargs):
-        captured.update(kwargs)
+    def fake_run_rewrite(request, config):
+        captured.update(request=request, config=config)
         return {"success": True}
 
     monkeypatch.setattr(
@@ -124,11 +124,11 @@ def test_the_logical_op_name_selects_the_workload(monkeypatch, tmp_path):
     result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name")
 
     assert result.exit_code == 0
-    assert captured["op_name"] == "vllm::softmax"
-    assert captured["prepare_driver"] is True
-    assert captured["invocation_spec_file"] == ""
-    assert captured["applyback_import_modules"] == ()
-    assert captured["max_applyback_attempts"] == 2
+    assert captured["request"].subject.op_name == "vllm::softmax"
+    assert captured["request"].driver.prepare_driver is True
+    assert captured["request"].driver.invocation_spec_file == ""
+    assert captured["request"].applyback_import_modules == ()
+    assert captured["request"].applyback.max_applyback_attempts == 2
 
 
 def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
@@ -184,7 +184,7 @@ def test_default_rewrite_gpu_type_ignores_environment(
     )
 
     assert result.exit_code == 0
-    assert captured["rewrite_kb_enabled"] is True
+    assert captured["request"].rewrite_kb_enabled is True
     assert captured["config"].gpu_type == "mi355x"
 
 
@@ -201,14 +201,14 @@ def test_no_rewrite_kb_bypasses_remote_credentials(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0
-    assert captured["rewrite_kb_enabled"] is False
+    assert captured["request"].rewrite_kb_enabled is False
 
 
 def test_driver_preparation_options_are_forwarded(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def capture(**kwargs):
-        captured.update(kwargs)
+    def capture(request, config):
+        captured.update(request=request, config=config)
         return {"success": True}
 
     monkeypatch.setattr(
@@ -244,10 +244,10 @@ def test_driver_preparation_options_are_forwarded(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0
-    assert captured["prepare_driver"] is False
-    assert captured["invocation_spec_file"] == str(invocation)
-    assert captured["applyback_import_modules"] == ("sample.ops.softmax",)
-    assert captured["max_applyback_attempts"] == 3
+    assert captured["request"].driver.prepare_driver is False
+    assert captured["request"].driver.invocation_spec_file == str(invocation)
+    assert captured["request"].applyback_import_modules == ("sample.ops.softmax",)
+    assert captured["request"].applyback.max_applyback_attempts == 3
 
 
 @pytest.mark.parametrize(("flags", "expected"), [([], False), (["--roofline-ceiling", "on"], True)])
@@ -255,8 +255,8 @@ def test_the_roofline_ceiling_is_off_unless_asked_for_and_reaches_the_rewrite(mo
     """An estimate costs the OPTIMIZE budget a profiler pass and an analyst session, so it is opt-in here too."""
     captured: dict = {}
 
-    def capture(**kwargs):
-        captured.update(kwargs)
+    def capture(request, config):
+        captured.update(request=request, config=config)
         return {"success": True}
 
     monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", capture)
@@ -281,7 +281,7 @@ def test_the_roofline_ceiling_is_off_unless_asked_for_and_reaches_the_rewrite(mo
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["roofline_ceiling"] is expected
+    assert captured["request"].roofline_ceiling is expected
 
 
 def test_the_rewrite_offers_the_same_roofline_switch_as_forge_loop():
@@ -304,7 +304,7 @@ def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
     driver = tmp_path / "driver.py"
     driver.write_text("print('drive')\n")
 
-    def fail(**kwargs):
+    def fail(*args, **kwargs):
         raise AssertionError("an unsupported framework must not start a rewrite")
 
     monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", fail)
@@ -337,8 +337,8 @@ def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
 def test_an_advertised_framework_is_accepted(monkeypatch, tmp_path, framework):
     captured: dict = {}
 
-    def capture(**kwargs):
-        captured.update(kwargs)
+    def capture(request, config):
+        captured.update(request=request, config=config)
         return {"success": True}
 
     monkeypatch.setattr("kernelforge.rewrite_by_flydsl.run_rewrite", capture)
@@ -366,4 +366,4 @@ def test_an_advertised_framework_is_accepted(monkeypatch, tmp_path, framework):
     )
 
     assert result.exit_code == 0
-    assert captured["framework"] == framework
+    assert captured["request"].subject.framework == framework

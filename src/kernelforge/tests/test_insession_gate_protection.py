@@ -6,8 +6,9 @@ from pathlib import Path
 
 import kernelforge.loop.insession_gate as gate_module
 import pytest
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.insession_gate import InSessionGate
-from kernelforge.llm.git import GitError
+from kernelforge.tools.git import GitError
 
 
 def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
@@ -32,12 +33,10 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     )
 
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(kernel),
-        target_files=[str(kernel)],
     )
     return gate, workspace
 
@@ -58,15 +57,52 @@ def test_declared_source_hint_cannot_override_protection(tmp_path: Path):
     driver.write_text("print('driver')\n")
     config.write_text("task: protected\n")
     gate = InSessionGate(
-        driver_script=str(driver),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "kernel.py"), target_files=[str(config)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(workspace / "kernel.py"),
-        target_files=[str(config)],
     )
 
     assert gate._is_protected(str(config))
+
+
+def _gate_with_protected_config(tmp_path: Path):
+    """A gate whose driver and whose config.yaml are both protected."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    driver = workspace / "forge_driver.py"
+    config = workspace / "config.yaml"
+    driver.write_text("print('driver')\n")
+    config.write_text("task: protected\n")
+    return InSessionGate(
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "kernel.py"), target_files=[str(config)]),
+        baseline_case_times={"case": 1.0},
+        best_mean_case_speedup=1.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "denied"),
+    [
+        ("rm $(python -c 'import os\nprint(1)') forge_driver.py", True),
+        ("xargs python -c 'a=1\nb=2' rm forge_driver.py", True),
+        ("python -c 'a\nb' \"x; cp y config.yaml\"", False),
+    ],
+    ids=["substitution", "wrapped", "quoted-shell-text"],
+)
+def test_a_multi_line_python_c_payload_does_not_split_the_command(tmp_path: Path, command: str, denied: bool):
+    """A ``python -c`` program is one quoted word, so its newlines are not the shell's.
+
+    Blanking the payload but keeping its newlines splits what follows across
+    lines, leaves each half with an unmatched quote, and so separates a write
+    verb from the protected path it names: the first two commands write the
+    driver and must be denied. The third is the other direction -- shell text
+    inside the quoted program belongs to the program, not to the command.
+    """
+    gate = _gate_with_protected_config(tmp_path)
+
+    assert bool(gate._bash_deny_reason(command)) is denied
 
 
 def test_non_target_implementation_edits_are_counted(tmp_path: Path):
@@ -240,6 +276,49 @@ def test_python_rename_and_replace_apis_protect_both_paths(tmp_path: Path):
     assert all(gate._bash_deny_reason(command) for command in commands)
 
 
+def test_python_shutil_apis_protect_both_of_their_paths(tmp_path: Path):
+    gate, workspace = _gate(tmp_path)
+    driver = workspace / "forge_driver.py"
+    commands = [
+        f"python -c \"import shutil; shutil.copy('scratch.py', {str(driver)!r})\"",
+        f"python -c \"import shutil; shutil.copy2({str(driver)!r}, 'saved.py')\"",
+        f"python -c \"import shutil; shutil.copyfile('scratch.py', {str(driver)!r})\"",
+        f"python -c \"import shutil; shutil.move({str(driver)!r}, 'saved.py')\"",
+        f'python -c "import shutil; shutil.rmtree({str(workspace / "scripts" / "task_runner.py")!r})"',
+    ]
+
+    assert all(gate._bash_deny_reason(command) for command in commands)
+
+
+def test_a_composed_protected_path_is_still_resolved(tmp_path: Path):
+    gate, workspace = _gate(tmp_path)
+    commands = [
+        "python -c \"import os; open(os.path.join({!r}, 'forge_driver.py'), 'w').write('x')\"".format(str(workspace)),
+        "python -c \"from pathlib import Path; (Path({!r}) / 'forge_driver.py').write_text('x')\"".format(
+            str(workspace)
+        ),
+        "python -c \"from pathlib import Path; Path({!r}).resolve().write_text('x')\"".format(
+            str(workspace / "forge_driver.py")
+        ),
+        # The name is bound once and written through later, which is how a script usually names its output.
+        "python -c \"from pathlib import Path; out = Path({!r}); out.write_text('x')\"".format(
+            str(workspace / "config.yaml")
+        ),
+    ]
+
+    assert all(gate._bash_deny_reason(command) for command in commands)
+
+
+def test_a_heredoc_that_is_not_fed_to_python_is_not_scanned_as_shell(tmp_path: Path):
+    gate, _workspace = _gate(tmp_path)
+    command = """cat <<'DOC'
+rm forge_driver.py
+DOC
+"""
+
+    assert not gate._bash_deny_reason(command)
+
+
 def test_stop_detects_protected_snapshot_changes(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
 
@@ -258,7 +337,7 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     async def _corr(**_kwargs):
         return {"passed": True, "message": ""}
 
-    async def _bench(**_kwargs):
+    async def _bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 0.5,
@@ -365,12 +444,10 @@ def test_snapshot_covers_driver_and_glob_only_harness(tmp_path: Path):
     harness.write_text("print('harness')\n")
 
     gate = InSessionGate(
-        driver_script=str(driver),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(kernel),
-        target_files=[str(kernel)],
     )
 
     snapshot = gate._protected_snapshot
@@ -392,9 +469,8 @@ def test_snapshot_recurses_nested_globs_and_protected_directories(tmp_path: Path
     # Recreate the gate after protected files exist so they become the baseline.
     kernel = workspace / "aiter" / "csrc" / "kernel.cu"
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(kernel),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel)),
     )
     nested_glob.write_text("changed\n")
     nested_dir.write_text("changed\n")
@@ -466,9 +542,8 @@ def test_restore_protected_files_restores_nested_and_removes_added(
     nested.write_text("original\n")
     kernel = workspace / "aiter" / "csrc" / "kernel.cu"
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(kernel),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel)),
     )
     nested.write_text("changed\n")
     added = workspace / "other" / "tests" / "new_oracle.bin"
@@ -508,13 +583,10 @@ def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: 
 
     def build(**extra):
         return InSessionGate(
-            driver_script=str(driver),
-            snr_threshold=30.0,
+            GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+            GateScope(kernel_file=str(kernel), target_files=[str(kernel)], **extra),
             baseline_case_times={"case": 1.0},
             best_mean_case_speedup=1.0,
-            kernel_file=str(kernel),
-            target_files=[str(kernel)],
-            **extra,
         )
 
     gate = build(workspace=workspace)

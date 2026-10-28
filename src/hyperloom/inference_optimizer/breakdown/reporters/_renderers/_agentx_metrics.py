@@ -13,7 +13,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ..base import as_dict, md_kv_list
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import md_kv_list
 
 #: ``perf`` key -> label, ordered as a reader needs them rather than alphabetically: the objective, then the two
 #: guards that can veto it, then the comparability inputs a pair is refused on, then the latency detail, then what
@@ -55,17 +58,17 @@ _DECIDING_AXES = ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90")
 def has_graded_axes(perf: Any) -> bool:
     """Whether *perf* carries an axis that exists only when the AgentX verdict ran.
 
-    A synthetic round carries the graded axes as nulls, and rendering the block for it would claim the session was
-    graded on axes it never had; emptiness is how a non-AgentX round says so. Deliberately narrower than the table
+    A synthetic round carries the AgentX-only axes as nulls and at most ``output_tput_per_gpu``, so the block stays
+    hidden: rendering it would claim the session was graded on axes it never had. Deliberately narrower than the table
     it gates: a row being *displayed* beside the objective does not make it evidence the objective was measured.
     """
-    axes = as_dict(perf)
+    axes = to_mapping(perf)
     return any(axes.get(key) is not None for key in _DECIDING_AXES)
 
 
 def graded_axes_facts(perf: Any, *, label: str) -> list[str]:
     """One fact per frontier axis the round measured, prefixed by *label*."""
-    axes = as_dict(perf)
+    axes = to_mapping(perf)
     facts: list[str] = []
     for key in _HEADLINE:
         value = axes.get(key)
@@ -80,5 +83,5 @@ def render_graded_axes(perf: Any) -> str:
     """The graded axes as a KV block; empty when the round measured none of them."""
     if not has_graded_axes(perf):
         return ""
-    axes = as_dict(perf)
+    axes = to_mapping(perf)
     return md_kv_list([(label, axes.get(key)) for key, label in _GRADED_ROWS])

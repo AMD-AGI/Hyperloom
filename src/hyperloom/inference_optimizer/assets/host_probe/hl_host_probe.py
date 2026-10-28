@@ -9,12 +9,14 @@ import atexit
 import importlib.abc
 import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
 import time
 import weakref
 
+log = logging.getLogger(__name__)
 
 SCHEMA = "hyperloom.host_probe/1"
 
@@ -347,7 +349,7 @@ class HostProbe:
                 # allocation but is all there is.
                 try:
                     generation = -int(value.data_ptr())
-                except Exception:  # noqa: BLE001 - meta/fake tensors have no storage
+                except RuntimeError:  # sparse tensors have no storage
                     generation = -1
             return base + (generation, int(getattr(value, "_version", -1) or -1))
         if isinstance(value, (tuple, list)) and depth < _MAX_CONTAINER_DEPTH:
@@ -419,8 +421,8 @@ class HostProbe:
                         nbytes=nbytes,
                         shape_sig=probe._shape_signature(args),
                     )
-                except Exception:  # noqa: BLE001 - never break the benchmark
-                    pass
+                except Exception:
+                    log.debug("host call record failed for %s", api, exc_info=True)
 
         wrapper._hl_host_probe = True  # type: ignore[attr-defined]
         try:
@@ -456,8 +458,8 @@ class HostProbe:
                                 nbytes=int(getattr(self, "nbytes", 0) or 0),
                                 shape_sig=probe._shape_signature((self,)),
                             )
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception:
+                            log.debug("host call record failed for %s", api, exc_info=True)
                     return result
 
                 wrapper._hl_host_probe = True  # type: ignore[attr-defined]
@@ -554,7 +556,8 @@ class HostProbe:
                     if stats.started:
                         stats.wall_s += time.perf_counter() - stats.started
                         stats.started = 0.0
-        except Exception:  # noqa: BLE001 - a profile hook must never raise
+        except Exception:
+            log.debug("profile hook failed", exc_info=True)
             return
 
     def _sample_args(self, frame, stats: _CallStats) -> None:
@@ -697,8 +700,8 @@ class HostProbe:
                 f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
                 self.report(),
             )
-        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
-            sys.stderr.write(f"[hl_host_probe] could not write report: {exc!r}\n")
+        except Exception as exc:
+            log.warning("could not write host probe report: %s", exc, exc_info=True)
             return ""
 
 
@@ -732,17 +735,13 @@ def install_from_env() -> "HostProbe | None":
         for part in str(os.environ.get("HYPERLOOM_HOST_PROBE_ROOTS", "") or "").split(os.pathsep)
         if part.strip()
     )
-    try:
-        probe = HostProbe(
-            out_dir=out_dir,
-            roots=roots,
-            deep=_env_on("HYPERLOOM_HOST_PROBE_DEEP"),
-            max_sites=_env_int("HYPERLOOM_HOST_PROBE_MAX_SITES", _DEFAULT_MAX_SITES),
-            arg_samples=_env_int("HYPERLOOM_HOST_PROBE_ARG_SAMPLES", _DEFAULT_ARG_SAMPLES),
-        ).install()
-    except Exception as exc:  # noqa: BLE001 - installation must never break the run
-        sys.stderr.write(f"[hl_host_probe] install failed: {exc!r}\n")
-        return None
+    probe = HostProbe(
+        out_dir=out_dir,
+        roots=roots,
+        deep=_env_on("HYPERLOOM_HOST_PROBE_DEEP"),
+        max_sites=_env_int("HYPERLOOM_HOST_PROBE_MAX_SITES", _DEFAULT_MAX_SITES),
+        arg_samples=_env_int("HYPERLOOM_HOST_PROBE_ARG_SAMPLES", _DEFAULT_ARG_SAMPLES),
+    ).install()
     _ACTIVE = probe
     return probe
 

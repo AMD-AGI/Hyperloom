@@ -12,7 +12,6 @@ import sys
 import pytest
 
 from hyperloom.common.provenance import (
-    PROVENANCE_SOURCE,
     build_provenance,
     detect_gfx_arch,
     server_args_hash,
@@ -46,6 +45,16 @@ def test_env_only_mapping():
     assert p["dtype"] == "bf16"
     assert p["concurrency"] == 64
     assert p["isl"] == 1024 and p["osl"] == 1024 and p["max_model_len"] == 2048
+
+
+def test_target_product_wins_over_runner_in_provenance():
+    p = build_provenance(
+        args=None,
+        env={"TARGET_GPU_TYPE": "r9700", "GPU_TYPE": "gfx12"},
+        probe=False,
+    )
+    assert p["gpu_type"] == "r9700"
+    assert p["gfx_arch"] == "gfx1201"
 
 
 def test_args_override_env():
@@ -175,11 +184,6 @@ def test_server_args_from_args_list_preferred_over_env():
     assert p["server_args"] == ["--x", "1"]
 
 
-def test_source_tag_default_and_custom():
-    assert build_provenance(env={}, probe=False)["_provenance_source"] == PROVENANCE_SOURCE
-    assert build_provenance(env={}, probe=False, source="wp1_stub")["_provenance_source"] == "wp1_stub"
-
-
 def test_int_coercion_rejects_garbage():
     p = build_provenance(env={"ISL": "abc", "TP": " 4 ", "OSL": ""}, probe=False)
     assert p["isl"] is None
@@ -239,10 +243,37 @@ def test_read_first_line(tmp_path):
     assert _prov._read_first_line(tmp_path / "nope.txt") == ""
 
 
-def test_detect_image_none_when_absent(monkeypatch):
-    # no image env vars and no marker files -> None (markers absent on runner).
+@pytest.fixture
+def pid1_cgroup(monkeypatch, tmp_path):
+    """Write PID 1's cgroup text for ``detect_image`` to read, with no marker files present."""
     monkeypatch.setattr(_prov, "_read_first_line", lambda p: "")
+    path = tmp_path / "cgroup"
+    monkeypatch.setattr(_prov, "_PID1_CGROUP", path)
+    return lambda text: path.write_text(text, encoding="utf-8")
+
+
+def test_detect_image_env_wins_over_markers(monkeypatch):
+    monkeypatch.setattr(_prov, "_read_first_line", lambda p: "myrepo/img:tag")
+    assert _prov.detect_image({"CONTAINER_IMAGE": " env/img:1 "}) == "env/img:1"
+
+
+def test_detect_image_none_when_absent(pid1_cgroup):
+    # no image env vars, no marker files, and no PID 1 cgroup file -> None.
     assert _prov.detect_image({}) is None
+
+
+@pytest.mark.parametrize(
+    ("cgroup", "expected"),
+    [
+        ("12:devices:/docker/0123456789abcdef0123\n7:cpu:/other\n", "unknown@0123456789ab"),
+        ("0::/system.slice/containerd-aaaabbbbccccdddd.scope\n", "unknown@aaaabbbbcccc"),
+        ("12:devices:/user.slice/0123456789abcdef0123\n", None),
+        ("0::/\n", None),
+    ],
+)
+def test_detect_image_falls_back_to_the_cgroup_container_id(pid1_cgroup, cgroup, expected):
+    pid1_cgroup(cgroup)
+    assert _prov.detect_image({}) == expected
 
 
 def test_detect_image_from_marker(monkeypatch):
@@ -250,9 +281,11 @@ def test_detect_image_from_marker(monkeypatch):
     assert _prov.detect_image({}) == "myrepo/img:tag"
 
 
-def test_detect_image_probe_false_skips_markers(monkeypatch):
-    # probe=False must be hermetic: no marker reads even if a marker would match (else provenance becomes
+def test_detect_image_probe_false_skips_markers(monkeypatch, pid1_cgroup):
+    # probe=False must be hermetic: no marker or cgroup reads even if one would match (else provenance becomes
     # host-dependent and non-reproducible for hashing).
+    pid1_cgroup("12:devices:/docker/0123456789abcdef0123\n")
+
     def _boom(p):
         raise AssertionError("marker file must not be read when probe=False")
 

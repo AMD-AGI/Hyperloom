@@ -8,9 +8,11 @@ from dataclasses import dataclass
 import pytest
 
 import kernelforge.agent_backends.codex as codex_backend
+import hyperloom.common.entry_points as entry_points
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,
+    AgentRuntimeSettings,
     AgentProvider,
     AgentProviderUnavailableError,
     AgentRunResult,
@@ -139,14 +141,15 @@ def test_builtin_model_ownership_predicates() -> None:
     """Recognize each built-in provider's model family without env coupling."""
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
-    assert claude.default_model == "claude-opus-5"
-    assert codex.default_model == "gpt-5.6-sol"
+    assert claude.default_model == "claude-opus-5-5"
+    assert codex.default_model == "gpt-6-astra"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
     # The gateway's deployment name is suffixed; the family predicate has to
     # keep recognising it or the default id routes to no provider at all.
     assert codex.owns_model("gpt-5.6-sol")
+    assert codex.owns_model(codex.default_model)
     assert codex.owns_model("o3-mini")
     assert codex.owns_model("internal-codex-preview")
     assert not codex.owns_model("olmo-7b")
@@ -206,7 +209,7 @@ def test_fallback_provider_failure_raises_combined_error() -> None:
     """When both the primary and fallback providers fail, both names are reported."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", unavailable=True)
-    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
     with pytest.raises(
         AgentProviderUnavailableError,
         match="offlinecli unavailable:.*fallback backupcli unavailable",
@@ -231,13 +234,66 @@ def test_broken_entry_point_is_isolated(monkeypatch) -> None:
                 return [_EntryPoint()]
             return []
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
     monkeypatch.setattr(registry, "_plugin_errors", {})
     registry.discover_agent_providers(force=True)
     assert "brokencli" in registry._plugin_errors
     with pytest.raises(ValueError, match="plugin error"):
         get_agent_provider("brokencli")
+
+
+def test_a_broken_entry_point_is_logged_once(monkeypatch, caplog) -> None:
+    """The shared helper logs the load failure; the registry must not log it a second time."""
+
+    class _EntryPoint:
+        name = "brokencli"
+
+        @staticmethod
+        def load():
+            raise RuntimeError("boom")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            return [_EntryPoint()] if group == registry.PROVIDER_ENTRY_POINT_GROUP else []
+
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    with caplog.at_level("WARNING"):
+        registry.discover_agent_providers(force=True)
+    assert [r.getMessage() for r in caplog.records if "brokencli" in r.getMessage()] == [
+        f"failed to load entry point brokencli of group {registry.PROVIDER_ENTRY_POINT_GROUP}: boom"
+    ]
+
+
+def test_two_entry_points_with_one_name_record_the_second_as_a_plugin_error(monkeypatch) -> None:
+    """The helper yields both; the registry keeps the first and records the duplicate."""
+    first, second = (AgentProvider(name="dupcli", factory=lambda _runtime: None, default_model="m") for _ in range(2))
+
+    def _entry(provider):
+        class _EntryPoint:
+            name = "dupcli"
+
+            @staticmethod
+            def load():
+                return lambda: provider
+
+        return _EntryPoint()
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            return [_entry(first), _entry(second)] if group == registry.PROVIDER_ENTRY_POINT_GROUP else []
+
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    monkeypatch.setattr(registry, "_providers", {})
+    registry.discover_agent_providers(force=True)
+    assert registry._providers["dupcli"] is first
+    assert "already registered" in registry._plugin_errors["dupcli"]
 
 
 def test_select_prefers_model_owning_provider() -> None:
@@ -287,6 +343,41 @@ def test_a_plugin_does_not_outrank_a_provider_whose_credential_is_absent(
     assert registry.select_default_agent_provider().name == "firstparty"
 
 
+def test_a_provider_whose_check_raises_is_skipped(only_registered_providers) -> None:
+    """A raising provider predicate counts as "no" instead of breaking the selection."""
+
+    def _broken(_model):
+        raise RuntimeError("model table unreadable")
+
+    register_agent_provider(
+        AgentProvider(
+            name="brokencli",
+            factory=lambda runtime: _FakeBackend(name=runtime.provider),
+            default_model="broken-model",
+            owns_model=_broken,
+        )
+    )
+    _register_owning_fake("goodcli", owns_prefix="good")
+
+    assert registry.select_default_agent_provider("good-1").name == "goodcli"
+
+
+def test_entry_point_discovery_failure_is_recorded(monkeypatch) -> None:
+    """Unreadable package metadata disables plugins instead of raising."""
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            raise OSError("metadata unreadable")
+
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+
+    assert registry._plugin_errors == {"<discovery>": "OSError: metadata unreadable"}
+
+
 def test_select_unknown_model_uses_registration_order(
     only_registered_providers,
 ) -> None:
@@ -301,10 +392,7 @@ def test_custom_provider_uses_generic_runtime() -> None:
     """Construct a custom backend without changing any core dispatch code."""
     _register_fake("testcli")
     runtime = resolve_agent_runtime(
-        "testcli",
-        executable="/tmp/testcli",
-        timeout_sec=77,
-        options={"flag": "value"},
+        "testcli", settings=AgentRuntimeSettings(executable="/tmp/testcli", timeout_sec=77, options={"flag": "value"})
     )
 
     backend = create_registered_backend(runtime)
@@ -320,10 +408,7 @@ def test_generic_fallback_uses_registered_provider() -> None:
     """Fall back without hard-coding either provider name in dispatch."""
     _register_fake("offlinecli", unavailable=True)
     _register_fake("backupcli", model="backup-model")
-    runtime = resolve_agent_runtime(
-        "offlinecli",
-        fallback_provider="backupcli",
-    )
+    runtime = resolve_agent_runtime("offlinecli", settings=AgentRuntimeSettings(fallback_provider="backupcli"))
 
     backend = create_registered_backend(runtime)
 
@@ -364,7 +449,7 @@ def test_external_entry_point_provider_is_discovered(monkeypatch) -> None:
             assert group == registry.PROVIDER_ENTRY_POINT_GROUP
             return [_EntryPoint()]
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
 
     assert get_agent_provider("externalcli") is provider
@@ -405,12 +490,14 @@ def test_builtin_codex_consumes_generic_runtime() -> None:
     runtime = resolve_agent_runtime(
         "codex",
         model="gpt-test",
-        executable="/tmp/missing-codex",
-        timeout_sec=91,
-        reasoning_effort="medium",
-        sandbox_mode="workspace-write",
-        precheck=False,
-        fallback_provider="",
+        settings=AgentRuntimeSettings(
+            executable="/tmp/missing-codex",
+            timeout_sec=91,
+            reasoning_effort="medium",
+            sandbox_mode="workspace-write",
+            precheck=False,
+            fallback_provider="",
+        ),
     )
 
     backend = create_registered_backend(runtime)
@@ -434,8 +521,7 @@ def test_builtin_codex_uses_generic_fallback_on_preflight(monkeypatch) -> None:
     _register_fake("codexbackup", model="fallback-model")
     runtime = resolve_agent_runtime(
         "codex",
-        executable="/tmp/definitely-missing-codex",
-        fallback_provider="codexbackup",
+        settings=AgentRuntimeSettings(executable="/tmp/definitely-missing-codex", fallback_provider="codexbackup"),
     )
 
     backend = create_registered_backend(runtime)

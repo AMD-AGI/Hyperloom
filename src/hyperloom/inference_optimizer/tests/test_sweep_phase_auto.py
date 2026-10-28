@@ -9,12 +9,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -26,10 +28,13 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
 
 # Fixtures
@@ -58,37 +63,24 @@ class _StubTaskRegistry:
     def __init__(self):
         self._tasks: dict[str, Any] = {}
 
-    async def create_or_return_existing(
-        self,
-        *,
-        kind: str,
-        params: dict,
-        idempotency_key: str,
-        requires_lanes: list | None = None,
-        allowed_tools: list | None = None,
-        side_effects: list | None = None,
-        lease_ttl_sec: int = 0,
-        task_id: str | None = None,
-        dispatch_class: str | None = None,
-        dispatch_origin: dict | None = None,
-    ):
+    async def create_or_return_existing(self, spec):
         from hyperloom.orchestrator.state.task_registry import Task
 
-        self.last_lease_ttl_sec = lease_ttl_sec
-        existing = self._tasks.get(idempotency_key)
+        self.last_lease_ttl_sec = spec.lease_ttl_sec
+        existing = self._tasks.get(spec.idempotency_key)
         if existing is not None:
             return existing, True
         import uuid as _uuid
 
         task = Task(
-            task_id=task_id or _uuid.uuid4().hex,
-            kind=kind,
+            task_id=spec.task_id or _uuid.uuid4().hex,
+            kind=spec.kind,
             state="queued",
-            params=dict(params),
-            idempotency_key=idempotency_key,
-            requires_lanes=list(requires_lanes) if requires_lanes else [],
+            params=dict(spec.params),
+            idempotency_key=spec.idempotency_key,
+            requires_lanes=list(spec.requires_lanes) if spec.requires_lanes else [],
         )
-        self._tasks[idempotency_key] = task
+        self._tasks[spec.idempotency_key] = task
         return task, False
 
 
@@ -116,13 +108,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
     )
-    c.shared_state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/kernel.cu",
-        },
-    }
+    seed_kernel_keep(c.shared_state, "k004", micro=4.21, source_file="/tmp/kernel.cu", artifact="/tmp/optimized.cu")
     calls: list[str] = []
 
     async def _fake_integrate_handler(payload, *, session_dir):
@@ -152,7 +138,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -166,38 +152,17 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
             {"kernel_id": "k004", "gpu_pct": 10.0},
         ],
     }
-    state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/rmsnorm.cu",
-        },
-        "k001": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.51,
-            "last_source_file": "/tmp/moe.cu",
-        },
-    }
+    seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
+    seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
     """A recorded NEEDS_REVIEW attempt should not auto-rerun the same patch."""
     state = SharedState()
-    state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/rmsnorm.cu",
-        },
-        "k001": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.51,
-            "last_source_file": "/tmp/moe.cu",
-        },
-    }
+    seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
+    seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
     state.record_kernel_integrate_result(
         {
             "status": "ok",
@@ -211,8 +176,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -504,6 +468,7 @@ async def test_stack_validation_preserves_actual_measurement(
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
     c.shared_state.baseline_accuracy = 0.9
+    c.shared_state.current_best["workload_identity"] = "fixed-workload"
     c.shared_state.current_best.update(
         total_throughput=20000.0,
         e2e_norm_intvty_p90=400.0,
@@ -532,7 +497,10 @@ async def test_stack_validation_preserves_actual_measurement(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 64,
-        "submission_valid": submission_valid,
+        "benchmark_backend": "magpie_agentx" if agentx else "synthetic",
+        "benchmark_valid": submission_valid,
+        "diagnostic_only": False,
+        "workload_identity": "fixed-workload",
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
         "accuracy": 0.9,
         "ttft_mean_ms": 20.0,
@@ -805,7 +773,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
@@ -832,9 +800,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
     c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
 
-    await c.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
-    )
+    await c.phase_sweep.on_enter_sweep(Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}))
 
     assert validation_calls == [["k004", "k001"]]
     assert c.shared_state.current_best["variant_name"] == "+".join(validation_calls[0])
@@ -855,13 +821,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
     c.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
     ]
-    c.shared_state.kernel_opt_attempts = {
-        "k_new": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 2.0,
-            "last_source_file": "/tmp/new.cu",
-        },
-    }
+    seed_kernel_keep(c.shared_state, "k_new", micro=2.0, source_file="/tmp/new.cu", artifact="/tmp/new_opt.cu")
     captured_payloads = []
 
     async def _fake_integrate_handler(payload, *, session_dir):
@@ -902,7 +862,7 @@ async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
@@ -927,7 +887,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     assert "internal-sweep-phase_entry" not in coord.tasks._tasks
@@ -944,7 +904,7 @@ async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
     ]
     coord.shared_state.conc_sweep_concs = []
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
 
     task = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
@@ -960,15 +920,13 @@ async def test_on_enter_sweep_idempotent_on_reentry(coord):
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     task1 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     coord.shared_state.phase_history.append(
         {"to_phase": "SWEEP", "reason": "re_entry_test", "evidence": {}},
     )
-    await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="SWEEP", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_sweep.on_enter_sweep(Transition(from_phase="SWEEP", to_phase="SWEEP", reason="test", evidence={}))
     task2 = coord.tasks._tasks["internal-conc_sweep-phase_entry"]
     assert task1 is task2
     assert len(coord.tasks._tasks) == 1
@@ -979,7 +937,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
@@ -987,7 +945,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     ]
     # Should not raise
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     evidence = coord.shared_state.phase_history[-1]["evidence"]
     assert "auto_conc_sweep_error" in evidence
@@ -1010,7 +968,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     coord.shared_state.remaining_minutes = lambda: 1.0
 
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
 
     assert coord.tasks._tasks == {}
@@ -1100,7 +1058,7 @@ async def test_on_enter_sweep_skips_when_conc_sweep_disabled(coord):
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -1124,7 +1082,7 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -1143,7 +1101,7 @@ async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_swee
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert coord.tasks._tasks == {}
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -1161,7 +1119,7 @@ async def test_on_enter_sweep_still_enqueues_when_the_session_budget_fits(coord)
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     assert coord.shared_state.last_conc_sweep == {}
@@ -1179,7 +1137,7 @@ async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
         {"to_phase": "SWEEP", "reason": "cycle_reloop", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
     evidence = coord.shared_state.phase_history[-1]["evidence"]
@@ -1195,7 +1153,7 @@ async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
     await coord.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
     )
     assert "internal-conc_sweep-phase_entry" in coord.tasks._tasks
 
@@ -1215,7 +1173,7 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     # Seed state at KERNEL boundary as if a kernel_no_more_leverage just fired
     coord.shared_state.phase = "KERNEL"
@@ -1265,7 +1223,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.kernel_enabled = False
     coord.shared_state.phase_history = [
@@ -1295,6 +1253,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
@@ -1470,11 +1429,10 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     monkeypatch,
 ):
     """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
 
     seen: dict[str, object] = {}
 
-    def _fake_accuracy_gate(bench_result, *, session_dir, workspace, server_args=""):
+    def _fake_accuracy_gate(bench_result, *, baseline_accuracy, workspace, server_args=""):
         # The lane must hand the gate the args the bench server ran under, or a context too small to host an eval
         # reads as a broken eval.
         seen["server_args"] = server_args
@@ -1490,7 +1448,7 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
             "source_file": "/tmp/result.json",
         }
 
-    monkeypatch.setattr(krh, "_grade_integrate_accuracy", _fake_accuracy_gate)
+    monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", _fake_accuracy_gate)
 
     c = _stack_validation_coordinator(tmp_path)
     stack = _ledger_rows(c, ["k001", "k004"])
@@ -1510,17 +1468,17 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     monkeypatch,
 ):
     """Non-KEEP + partial revert must set top-level status='failed'."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
 
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_revert_kernel_patch",
         lambda apply_result: {"status": "partial", "reason": "mn_revert_failed"},
     )
     monkeypatch.setattr(
-        krh,
+        integrate_outcomes,
         "_maybe_apply_kernel_patch",
         lambda payload, *, session_dir, kernel_id=None: {
             "status": "ok",
@@ -1747,7 +1705,7 @@ async def test_stack_members_selected_patch_ignores_other_patch_history(historic
 @pytest.mark.asyncio
 async def test_stack_members_checkpoint_selects_exact_patch_among_history(historical_stack_coord, monkeypatch):
     from hyperloom.inference_optimizer.session.session_binding import session_scope
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     c = historical_stack_coord
     selected = c.phase_kernel_stack._positive_needs_review_integrates()
@@ -1777,8 +1735,8 @@ async def test_stack_members_checkpoint_selects_exact_patch_among_history(histor
     c.shared_state = SharedState.from_dict(c.shared_state.to_dict())
     apply = Mock(side_effect=AssertionError("recovery must not apply patches"))
     revert = Mock(side_effect=AssertionError("completed validation must not revert"))
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", apply)
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", apply)
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", revert)
 
     with session_scope(c.session_dir):
         assert await c.phase_kernel_stack.recover_interrupted_stack_validation() is True
@@ -1856,13 +1814,13 @@ def test_stack_members_invalid_refused_before_marking(tmp_path, monkeypatch, cas
 @pytest.mark.asyncio
 async def test_stack_members_legacy_display_id_is_not_split_during_selection(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
-    from hyperloom.orchestrator.kernel import request_handlers as krh
+    from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     c = _stack_validation_coordinator(tmp_path)
     c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "a+b", "tput": 110.0}]
-    monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
-    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_apply_kernel_patch", Mock(return_value={"status": "failed"}))
+    monkeypatch.setattr(integrate_outcomes, "_maybe_revert_kernel_patch", Mock(return_value={"status": "ok"}))
     monkeypatch.setattr(baseline_mod, "BaselineExecutor", Mock(side_effect=AssertionError("unexpected benchmark")))
     before = deepcopy(c.shared_state.to_dict())
     with pytest.raises(ValueError, match="(?i)stack|member"):
@@ -2073,7 +2031,7 @@ async def test_a_sweep_entry_that_settles_an_owed_unwind_still_validates(tmp_pat
 
     with session_scope(tmp_path):
         await c.phase_sweep.on_enter_sweep(
-            Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+            Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={})
         )
 
     assert stuck.read_text(encoding="utf-8") == _STACK_ORIGINAL_SOURCE
@@ -2189,9 +2147,7 @@ async def _enter_at_resume(c: Coordinator, report: dict[str, Any]) -> None:
 async def _enter_at_sweep(c: Coordinator, report: dict[str, Any]) -> None:
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    await c.phase_sweep.on_enter_sweep(
-        Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
-    )
+    await c.phase_sweep.on_enter_sweep(Transition(from_phase="KERNEL", to_phase="SWEEP", reason="test", evidence={}))
 
 
 @pytest.mark.asyncio

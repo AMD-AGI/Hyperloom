@@ -9,18 +9,19 @@
 
 from __future__ import annotations
 
+import pytest
 
-from hyperloom.orchestrator.trace_analysis._bypass_roofline import compute_roofline
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
+from hyperloom.orchestrator.trace_analysis._bypass_roofline import KernelAggregate, compute_roofline
 
 
 def test_large_square_gemm_is_compute_bound():
     # (4096,4096)x(4096,4096) bf16: AI ~= 4096/3 ~= 1365 FLOPs/byte, well above the MI300X bf16 machine balance (~134)
     # -> compute bound; efficiency in (0,100].
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=500.0,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=500.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r is not None
@@ -33,10 +34,7 @@ def test_large_square_gemm_is_compute_bound():
 def test_skinny_gemm_can_be_memory_bound():
     # A skinny GEMM (small M) has low AI -> memory bound.
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(8,2560) bf16<br>(2560,2560) bf16",
-        gpu_time_us=50.0,
-        call_count=1,
+        KernelAggregate(category="GEMM", shape_str="(8,2560) bf16<br>(2560,2560) bf16", gpu_time_us=50.0, call_count=1),
         gpu_type="mi300x",
     )
     assert r is not None
@@ -45,10 +43,9 @@ def test_skinny_gemm_can_be_memory_bound():
 
 def test_elementwise_is_memory_bound():
     r = compute_roofline(
-        category="Elementwise",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=100.0,
-        call_count=1,
+        KernelAggregate(
+            category="Elementwise", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=100.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r is not None
@@ -60,10 +57,9 @@ def test_elementwise_is_memory_bound():
 def test_roofline_attainment_is_binding_side():
     # compute-bound GEMM: attainment == compute utilization.
     g = compute_roofline(
-        category="GEMM",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=500.0,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=500.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert g["bound_type"] == "compute_bound"
@@ -71,10 +67,9 @@ def test_roofline_attainment_is_binding_side():
     # memory-bound elementwise: attainment == bandwidth utilization, NOT the compute-side efficiency_percent (which
     # reads ~0 for a memory-bound kernel).
     e = compute_roofline(
-        category="Elementwise",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=200.0,
-        call_count=1,
+        KernelAggregate(
+            category="Elementwise", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=200.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert e["bound_type"] == "memory_bound"
@@ -85,10 +80,12 @@ def test_roofline_attainment_is_binding_side():
 def test_convolution_estimates_bound():
     # VAE-style conv: input (2,320,64,64), weight (320,320,3,3).
     r = compute_roofline(
-        category="Convolution",
-        shape_str="(2,320,64,64) bf16<br>(320,320,3,3) bf16",
-        gpu_time_us=800.0,
-        call_count=1,
+        KernelAggregate(
+            category="Convolution",
+            shape_str="(2,320,64,64) bf16<br>(320,320,3,3) bf16",
+            gpu_time_us=800.0,
+            call_count=1,
+        ),
         gpu_type="mi300x",
     )
     assert r is not None
@@ -99,10 +96,9 @@ def test_convolution_estimates_bound():
 def test_vendor_gemm_gets_bound_even_without_source():
     # A vendor GEMM (non-rewritable) still gets an analytical bound purely from shapes + measured time.
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(2048,2240) bf16<br>(2240,2240) bf16",
-        gpu_time_us=300.0,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(2048,2240) bf16<br>(2240,2240) bf16", gpu_time_us=300.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r is not None and r["bound_type"] in ("compute_bound", "memory_bound")
@@ -110,16 +106,16 @@ def test_vendor_gemm_gets_bound_even_without_source():
 
 def test_unestimable_returns_none():
     # Unknown category / no usable shapes -> None (leave placeholder).
-    assert compute_roofline(category="Others", shape_str="(128,128) bf16", gpu_time_us=10.0) is None
-    assert compute_roofline(category="GEMM", shape_str="", gpu_time_us=10.0) is None
-    assert compute_roofline(category="GEMM", shape_str="(128,) bf16", gpu_time_us=10.0) is None  # only 1-D
+    assert compute_roofline(KernelAggregate(category="Others", shape_str="(128,128) bf16", gpu_time_us=10.0)) is None
+    assert compute_roofline(KernelAggregate(category="GEMM", shape_str="", gpu_time_us=10.0)) is None
+    assert (
+        compute_roofline(KernelAggregate(category="GEMM", shape_str="(128,) bf16", gpu_time_us=10.0)) is None
+    )  # only 1-D
 
 
 def test_mi355x_uses_vendor_peak_when_achievable_absent():
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(128,128) bf16<br>(128,128) bf16",
-        gpu_time_us=10.0,
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
         gpu_type="mi355x",
     )
     assert r is not None
@@ -128,11 +124,40 @@ def test_mi355x_uses_vendor_peak_when_achievable_absent():
     assert r["bandwidth_utilization_pct"] > 0.0
 
 
+def test_r9700_uses_vendor_peak():
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type="r9700",
+    )
+    assert r is not None
+    assert r["compute_peak_convention"] == "vendor"
+    assert r["compute_peak_tflops"] == 191.0
+
+
+@pytest.mark.parametrize("gpu", ["mi300x", "mi308x", "mi325x", "mi355x", "r9700"])
+def test_peak_is_the_session_roofline_compute_peak(gpu):
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type=gpu,
+    )
+    assert r is not None
+    provenance = resolve_compute_peak_provenance(gpu, "bf16")
+    assert {k: r[k] for k in provenance} == provenance
+
+
+def test_mi308x_uses_vendor_peak():
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type="mi308x",
+    )
+    assert r is not None
+    assert r["compute_peak_convention"] == "vendor"
+    assert r["compute_peak_tflops"] == 1307.4
+
+
 def test_unknown_gpu_returns_none():
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(128,128) bf16<br>(128,128) bf16",
-        gpu_time_us=10.0,
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
         gpu_type="not-a-gpu",
     )
     assert r is None
@@ -142,10 +167,9 @@ def test_efficiency_capped_flag_when_estimate_overshoots():
     # Implausibly tiny time -> estimated achieved FLOPS >> peak -> clamped to 100% AND flagged, so a capped 100% isn't
     # mistaken for a real measurement.
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=0.001,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=0.001, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r["efficiency_percent"] == 100.0
@@ -154,10 +178,9 @@ def test_efficiency_capped_flag_when_estimate_overshoots():
 
 def test_efficiency_not_capped_or_flagged_in_normal_case():
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=500.0,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=500.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r["efficiency_percent"] < 100.0
@@ -168,18 +191,18 @@ def test_sdpa_flops_match_attention_formula():
     # Q/K/V (B,H,S,D): attention flops = 4*B*H*S*S*D; bytes = 3*B*H*S*D*dtype_bytes.
     b, h, s, d = 2, 8, 1024, 64
     shp = f"({b},{h},{s},{d}) bf16<br>({b},{h},{s},{d}) bf16<br>({b},{h},{s},{d}) bf16"
-    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    r = compute_roofline(
+        KernelAggregate(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1), gpu_type="mi300x"
+    )
     expected_ai = round((4.0 * b * h * s * s * d) / (2.0 * 3 * b * h * s * d), 4)
     assert r["arithmetic_intensity"] == expected_ai
 
 
 def test_gpu_and_dtype_change_peak():
     # fp8 has ~2x the bf16 peak on MI300X -> same GEMM/time yields lower efficiency%.
-    common = dict(
-        category="GEMM", shape_str="(4096,4096) X<br>(4096,4096) X", gpu_time_us=500.0, call_count=1, gpu_type="mi300x"
-    )
-    bf16 = compute_roofline(**{**common, "dtype": "bf16"})
-    fp8 = compute_roofline(**{**common, "dtype": "fp8"})
+    common = dict(category="GEMM", shape_str="(4096,4096) X<br>(4096,4096) X", gpu_time_us=500.0, call_count=1)
+    bf16 = compute_roofline(KernelAggregate(**common, dtype="bf16"), gpu_type="mi300x")
+    fp8 = compute_roofline(KernelAggregate(**common, dtype="fp8"), gpu_type="mi300x")
     assert bf16 and fp8
     assert fp8["efficiency_percent"] < bf16["efficiency_percent"]
 
@@ -191,10 +214,12 @@ def test_depthwise_conv_uses_group_channels_not_input_channels():
     # Depthwise conv: input (2,11200,32,32), weight (Cout=11200, Cin/groups=1, 3, 3).
     B, C, HW, Cout, wc, R, S = 2, 11200, 32, 11200, 1, 3, 3
     r = compute_roofline(
-        category="Convolution",
-        shape_str=f"({B},{C},{HW},{HW}) bf16<br>({Cout},{wc},{R},{S}) bf16",
-        gpu_time_us=2862.0,
-        call_count=20,
+        KernelAggregate(
+            category="Convolution",
+            shape_str=f"({B},{C},{HW},{HW}) bf16<br>({Cout},{wc},{R},{S}) bf16",
+            gpu_time_us=2862.0,
+            call_count=20,
+        ),
         gpu_type="mi325x",
     )
     assert r is not None
@@ -211,10 +236,12 @@ def test_dense_conv_flops_unchanged_by_wc_fix():
     # A dense conv has wc == Cin, so switching c -> wc must not change it.
     B, Cin, HW, Cout, R, S = 2, 320, 64, 320, 3, 3
     r = compute_roofline(
-        category="Convolution",
-        shape_str=f"({B},{Cin},{HW},{HW}) bf16<br>({Cout},{Cin},{R},{S}) bf16",
-        gpu_time_us=800.0,
-        call_count=1,
+        KernelAggregate(
+            category="Convolution",
+            shape_str=f"({B},{Cin},{HW},{HW}) bf16<br>({Cout},{Cin},{R},{S}) bf16",
+            gpu_time_us=800.0,
+            call_count=1,
+        ),
         gpu_type="mi300x",
     )
     assert r is not None
@@ -234,7 +261,9 @@ def test_sdpa_cross_attention_infers_bshd_layout():
     shp = (
         f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{H},{Sq},{Skv}) bf16"
     )
-    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1, gpu_type="mi300x")
+    r = compute_roofline(
+        KernelAggregate(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1), gpu_type="mi300x"
+    )
     assert r is not None
     flops = 4.0 * B * H * Sq * Skv * D
     dbytes = 2.0
@@ -248,7 +277,9 @@ def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
     # shapes -> heuristic (H=smaller) AND the row is flagged roofline_layout_inferred so the estimate is honest.
     B, H, S, D = 2, 8, 1024, 64
     shp = f"({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16"
-    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    r = compute_roofline(
+        KernelAggregate(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1), gpu_type="mi300x"
+    )
     assert r is not None
     # heuristic picks H=min(8,1024)=8, Sq=Skv=1024 -> classic 4*B*H*S*S*D.
     flops = 4.0 * B * H * S * S * D
@@ -263,7 +294,9 @@ def test_sdpa_score_tensor_disambiguates_shared_seqlen():
     # so the authoritative score (B,Hq,Sq,Skv) must resolve H=Hq.
     B, S, Hq, Hkv, D = 2, 256, 16, 4, 64
     shp = f"({B},{S},{Hq},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>({B},{Hq},{S},{S}) bf16"
-    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
+    r = compute_roofline(
+        KernelAggregate(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1), gpu_type="mi300x"
+    )
     assert r is not None
     flops = 4.0 * B * Hq * S * S * D
     nbytes = 2.0 * (B * S * Hq * D + B * S * Hkv * D + B * S * Hkv * D)
@@ -275,7 +308,9 @@ def test_sdpa_cross_attention_shared_dim_without_score():
     # -> not inferred.
     B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
     shp = f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16"
-    r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1, gpu_type="mi300x")
+    r = compute_roofline(
+        KernelAggregate(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1), gpu_type="mi300x"
+    )
     assert r is not None
     flops = 4.0 * B * H * Sq * Skv * D
     nbytes = 2.0 * (B * Sq * H * D + B * Skv * H * D + B * Skv * H * D)
@@ -287,10 +322,9 @@ def test_efficiency_uses_achievable_peak_not_vendor():
     # Per-kernel efficiency% must use the max-achievable peak (708 TFLOPS bf16 mi300x), not the vendor dense peak
     # (1307.4).
     r = compute_roofline(
-        category="GEMM",
-        shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
-        gpu_time_us=500.0,
-        call_count=1,
+        KernelAggregate(
+            category="GEMM", shape_str="(4096,4096) bf16<br>(4096,4096) bf16", gpu_time_us=500.0, call_count=1
+        ),
         gpu_type="mi300x",
     )
     assert r is not None

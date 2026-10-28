@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     make_roofline_executor,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -335,13 +335,13 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
     with p1, p2:
         result = await executor(ctx)
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "recovered"
     assert result["last_profile_trace"] == "/tmp/recovered.trace.json.gz"
-    assert result["profile_recovered"] is True
     assert result["profile_warning"]["error_class"] == "subprocess_nonzero"
     assert "Profiling is not in progress" in result["profile_warning"]["error"]
     assert state.last_profile_trace == "/tmp/recovered.trace.json.gz"
-    assert state.last_profile_status == "succeeded"
+    assert state.last_profile_status == "recovered"
+    assert state.profile_trace_usable()
     assert state.last_trace_analyze["analysis_md_path"] == str(md)
 
 
@@ -369,7 +369,7 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "profile_failed"
     assert result["phase"] == "profile"
-    assert "profile_recovered" not in result
+    assert "profile_warning" not in result
     assert state.last_profile_trace == "/old/trace.gz"
 
 
@@ -794,7 +794,7 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.task_id == "t-roofline-1-profile"
     assert child.task.idempotency_key == "roofline:t-1-profile"
     assert child.task.state == "running"
-    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92", "disable_run_eval": True}
+    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
     assert child.extra["session_dir"] == "/sess"
     assert child.lease is parent.lease
 
@@ -895,11 +895,13 @@ def test_record_action_attempt_populates_last_roofline_and_history():
     s = SharedState()
     s.record_action_attempt(
         action="roofline",
-        task_id="t-rf-1",
-        status="succeeded",
-        decision="promoted",
-        result={"snapshot_id": 3},
-        extras={"analysis_md_path": "/p/analysis.md"},
+        attempt=ActionAttempt(
+            task_id="t-rf-1",
+            status="succeeded",
+            decision="promoted",
+            result={"snapshot_id": 3},
+            extras={"analysis_md_path": "/p/analysis.md"},
+        ),
     )
     assert s.last_roofline
     assert s.last_roofline.get("status") == "succeeded"
@@ -915,10 +917,7 @@ def test_record_action_attempt_caps_roofline_history():
     for i in range(25):
         s.record_action_attempt(
             action="roofline",
-            task_id=f"t-{i}",
-            status="succeeded",
-            decision="promoted",
-            result={"snapshot_id": i},
+            attempt=ActionAttempt(task_id=f"t-{i}", status="succeeded", decision="promoted", result={"snapshot_id": i}),
         )
     assert len(s.roofline_attempts) == 20
     assert s.roofline_attempts[-1].get("task_id") == "t-24"
@@ -1006,126 +1005,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_profile_status == "succeeded"
 
 
-# N11: strip base64 image data URLs from analysis.md.
-def test_strip_passes_text_through_when_no_base64_url():
-    md = "# Analysis\n\nNo images here, just text.\nSome markdown link: [foo](https://example.com/bar)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert out == md
-
-
-def test_strip_empty_input_returns_empty():
-    assert SharedState._strip_base64_data_urls("") == ""
-
-
-def test_strip_handles_none_gracefully():
-    assert SharedState._strip_base64_data_urls(None) is None or SharedState._strip_base64_data_urls(None) == ""
-
-
-def test_strip_replaces_data_image_png_payload():
-    md = (
-        "## Section\n"
-        "![Performance Improvement](data:image/png;base64,"
-        "iVBORw0KGgoAAAANSUhEUgAACB8AAAN8CAYAAAAa5)\n"
-        "Trailing text\n"
-    )
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/png;base64" not in out
-    assert "iVBORw0KGgo" not in out
-    assert "stripped" in out.lower()
-    assert "Performance Improvement" in out
-    assert "Trailing text" in out
-    assert "## Section" in out
-
-
-def test_strip_replaces_data_image_jpeg_too():
-    md = "![Foo](data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "stripped" in out.lower()
-    assert "Foo" in out
-
-
-def test_strip_replaces_data_image_svg_xml_base64():
-    md = "![chart](data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "chart" in out
-
-
-def test_strip_replaces_multiple_images_independently():
-    md = "![a](data:image/png;base64,AAA)\ntext\n![b](data:image/png;base64,BBB)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "AAA" not in out and "BBB" not in out
-    assert out.count("stripped") == 2
-    assert "stripped: base64 image — a" in out
-    assert "stripped: base64 image — b" in out
-
-
-def test_strip_does_not_touch_regular_image_urls():
-    md = "![chart](https://example.com/perf.png)\n![fig](./local/figure.svg)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert out == md
-
-
-def test_strip_preserves_empty_alt_text():
-    md = "![](data:image/png;base64,iVBOR)\n"
-    out = SharedState._strip_base64_data_urls(md)
-    assert "data:image/" not in out
-    assert "image" in out
-
-
-def test_strip_reduces_real_r1_report_by_90pct_plus():
-    import os
-
-    p = "/shared/user1/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
-    if not os.path.exists(p):
-        pytest.skip(f"sample analysis.md not present at {p}")
-    with open(p, encoding="utf-8") as f:
-        md = f.read()
-    if "data:image/" not in md:
-        pytest.skip(
-            "sample analysis.md no longer contains base64 data URLs "
-            "(file overwritten by a later session); can't validate "
-            "the ≥80% reduction claim without the original artefact"
-        )
-    before = len(md)
-    stripped = SharedState._strip_base64_data_urls(md)
-    after = len(stripped)
-    reduction_pct = (1 - after / before) * 100
-    assert reduction_pct > 80, (
-        f"N11 must reduce real R1 analysis.md by ≥80%; got before={before} after={after} reduction={reduction_pct:.1f}%"
-    )
-    assert "Executive Summary" in stripped
-    assert "Idle %" in stripped
-    assert "fmoe_fp8_blockscale_g1u1" in stripped or "MoE" in stripped
-
-
-def test_format_analysis_md_full_strips_base64_before_injection(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
-    s = SharedState()
-    s.last_trace_analyze = {
-        "roofline_snapshot_id": 1,
-        "roofline_baseline_gain_at_snapshot": 0.0,
-        "analysis_md_text": (
-            "# Test\n\n"
-            "## Executive Summary\nGPU idle 64%\n"
-            "![chart](data:image/png;base64,iVBORw0KGgoAAAANSUhEUg)\n"
-            "## Recommendations\nP1: kernel_opt fmoe\n"
-        ),
-        "analysis_md_path": "/p/analysis.md",
-    }
-    rendered = s._format_analysis_md_full()
-    assert "data:image/" not in rendered
-    assert "iVBORw0KGgo" not in rendered
-    assert "Executive Summary" in rendered
-    assert "GPU idle 64%" in rendered
-    assert "P1: kernel_opt fmoe" in rendered
-    assert "=== TraceLens Analysis (snapshot #1" in rendered
-    assert "=== End TraceLens Analysis ===" in rendered
-
-
-def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", raising=False)
+def test_format_analysis_md_pointer_points_at_the_tool_instead_of_inlining():
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 7,
@@ -1133,46 +1013,10 @@ def test_format_analysis_md_full_defaults_to_pointer_not_inline(monkeypatch):
         "analysis_md_text": "# Report\nverbatim body text\n",
         "analysis_md_path": "/p/analysis.md",
     }
-    rendered = s._format_analysis_md_full()
+    rendered = s._format_analysis_md_pointer()
     assert "verbatim body text" not in rendered
     assert "show_analysis_md" in rendered
     assert "snapshot #7" in rendered
-
-
-def test_format_analysis_md_full_no_strip_when_no_image(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
-    s = SharedState()
-    s.last_trace_analyze = {
-        "roofline_snapshot_id": 1,
-        "roofline_baseline_gain_at_snapshot": 0.0,
-        "analysis_md_text": "# Report\nText only\n",
-        "analysis_md_path": "/p/analysis.md",
-    }
-    rendered = s._format_analysis_md_full()
-    assert "# Report" in rendered
-    assert "Text only" in rendered
-
-
-def test_strip_keeps_surrounding_markdown_intact():
-    md = (
-        "# H1\n\n"
-        "## H2\n"
-        "Some text\n\n"
-        "![chart](data:image/png;base64,xxxxxxxxxxxxxxxxxxxxxxxxxxxxx)\n\n"
-        "## H2-2\n"
-        "| col | val |\n"
-        "|-----|-----|\n"
-        "| a   | 1   |\n\n"
-        "```python\nprint('hi')\n```\n"
-    )
-    out = SharedState._strip_base64_data_urls(md)
-    assert "# H1" in out
-    assert "## H2" in out
-    assert "## H2-2" in out
-    assert "| col | val |" in out
-    assert "```python" in out
-    assert "print('hi')" in out
-    assert "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in out
 
 
 # N26: RooflineExecutor auto-retries trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.
@@ -1210,13 +1054,13 @@ def _ta_empty_chunk_failure(
     return {
         "status": "failed",
         "error": (
-            f"RuntimeError: steady_state_chunk_empty: requested "
+            f"RuntimeError: steady_state_chunk_low_quality: requested "
             f"--steady-state-mode={requested} but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "severity": "blocking",
                 "requested_mode": requested,
                 "selected_chunk": f"/tmp/{requested}.json.gz",
@@ -1342,7 +1186,7 @@ def test_extract_picks_first_non_empty_mode():
     assert out is not None
     mode, w = out
     assert mode == "prefilldecode"
-    assert w["code"] == "steady_state_chunk_empty"
+    assert w["code"] == "steady_state_chunk_low_quality"
 
 
 def test_extract_handles_missing_chunk_warning():
@@ -1478,7 +1322,7 @@ async def test_no_retry_when_no_alternate_modes(tmp_path):
 
     assert result["status"] == "failed"
     assert result.get("phase") == "trace_analyze"
-    assert "steady_state_chunk_empty" in str(result.get("error") or "")
+    assert "steady_state_chunk_low_quality" in str(result.get("error") or "")
     assert calls["n"] == 1
     assert state.last_trace_analyze == {}
 
@@ -1512,13 +1356,13 @@ async def test_retry_failure_propagates_without_third_attempt(tmp_path):
     fail2 = {
         "status": "failed",
         "error": (
-            "RuntimeError: steady_state_chunk_empty: requested "
+            "RuntimeError: steady_state_chunk_low_quality: requested "
             "--steady-state-mode=prefilldecode but the selected chunk has "
             "zero GPU events"
         ),
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "requested_mode": "prefilldecode",
                 "non_empty_modes": ["decode_only"],
             },
@@ -1621,7 +1465,7 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
     assert stamp.get("applied") is True
     assert stamp.get("from_mode") == "mixed"
     assert stamp.get("to_mode") == "prefilldecode"
-    assert stamp.get("source_warning_code") == "steady_state_chunk_empty"
+    assert stamp.get("source_warning_code") == "steady_state_chunk_low_quality"
 
 
 @pytest.mark.asyncio
@@ -1675,7 +1519,7 @@ async def test_431_zero_hot_with_degraded_trace_appends_warning(tmp_path):
     assert "cuda_graph_attribution_degraded" in codes, warnings
     w = next(w for w in warnings if w.get("code") == "cuda_graph_attribution_degraded")
     assert w["capture_traces_present"] is True
-    assert "--enforce-eager" in w["message"]
+    assert "--compilation-config.cudagraph_mode NONE" in w["message"]
 
 
 @pytest.mark.asyncio

@@ -13,16 +13,18 @@ from pathlib import Path
 import pytest
 
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling import analyst as analyst_module
 from kernelforge.roofline_ceiling.analyst import (
+    AnalystSession,
     CeilingAnalysisError,
+    CeilingTask,
     build_request,
     load_role,
     run_ceiling_analysis,
 )
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
-from kernelforge.roofline_ceiling.evidence import EvidenceBundle
+from kernelforge.roofline_ceiling.evidence import EvidenceBundle, PerformanceRun
 from kernelforge.roofline_ceiling.report import DOCUMENT_FILENAME, REPORT_FILENAME
 
 _GOOD = {"cases": {"c0": 12.8}, "mean_ideal_ms": 12.8}
@@ -85,22 +87,23 @@ def _bundle(tmp_path) -> EvidenceBundle:
         artifacts_dir=artifacts,
         observed_ms={"c0": 40.0},
         notes=("kernel trace unavailable: nothing",),
+        scored_case_ids=("c0",),
     )
 
 
-def _analyse(backend, tmp_path, **overrides):
-    kwargs = {
-        "workdir": str(tmp_path),
-        "output_dir": tmp_path / "out",
+def _task(tmp_path, **overrides) -> CeilingTask:
+    fields = {
+        "run": PerformanceRun(["bash", "-c", "python3 driver.py"], str(tmp_path)),
         "kernel_files": ["kernel.py"],
         "driver_script": "driver.py",
-        "performance_command": ["bash", "-c", "python3 driver.py"],
-        "case_ids": ["c0"],
         "case_params": {},
-        "evidence": _bundle(tmp_path),
     }
-    kwargs.update(overrides)
-    return asyncio.run(run_ceiling_analysis(backend, **kwargs))
+    fields.update(overrides)
+    return CeilingTask(**fields)
+
+
+def _analyse(backend, tmp_path):
+    return asyncio.run(run_ceiling_analysis(backend, _task(tmp_path), _bundle(tmp_path), tmp_path / "out"))
 
 
 # --- the role document ---------------------------------------------------------
@@ -146,14 +149,15 @@ def test_the_request_names_the_machine_rather_than_supplying_its_roofs(tmp_path)
     """The analyst measures the peaks itself; handing it any would pre-empt that."""
     request = json.loads(
         build_request(
-            kernel_files=["kernel.py"],
-            driver_script="driver.py",
-            performance_command=["bash", "-c", "run"],
-            case_ids=["c0"],
-            case_params={"tokens": 1},
-            evidence=_bundle(tmp_path),
-            output_dir=str(tmp_path / "out"),
-            tools_dir=str(tmp_path / "tools"),
+            CeilingTask(
+                run=PerformanceRun(["bash", "-c", "run"], str(tmp_path)),
+                kernel_files=["kernel.py"],
+                driver_script="driver.py",
+                case_params={"tokens": 1},
+            ),
+            _bundle(tmp_path),
+            str(tmp_path / "out"),
+            str(tmp_path / "tools"),
         )
     )
 
@@ -166,14 +170,15 @@ def test_the_request_names_the_machine_rather_than_supplying_its_roofs(tmp_path)
 def test_the_request_spells_out_both_files_and_where_they_go(tmp_path):
     request = json.loads(
         build_request(
-            kernel_files=[],
-            driver_script="",
-            performance_command=[],
-            case_ids=["c0"],
-            case_params={},
-            evidence=_bundle(tmp_path),
-            output_dir=str(tmp_path / "out"),
-            tools_dir=str(tmp_path / "tools"),
+            CeilingTask(
+                run=PerformanceRun([], str(tmp_path)),
+                kernel_files=[],
+                driver_script="",
+                case_params={},
+            ),
+            _bundle(tmp_path),
+            str(tmp_path / "out"),
+            str(tmp_path / "tools"),
         )
     )
 
@@ -186,14 +191,15 @@ def test_the_request_spells_out_both_files_and_where_they_go(tmp_path):
 def test_the_request_hands_over_the_evidence_it_collected(tmp_path):
     request = json.loads(
         build_request(
-            kernel_files=[],
-            driver_script="",
-            performance_command=[],
-            case_ids=["c0"],
-            case_params={},
-            evidence=_bundle(tmp_path),
-            output_dir=str(tmp_path / "out"),
-            tools_dir=str(tmp_path / "tools"),
+            CeilingTask(
+                run=PerformanceRun([], str(tmp_path)),
+                kernel_files=[],
+                driver_script="",
+                case_params={},
+            ),
+            _bundle(tmp_path),
+            str(tmp_path / "out"),
+            str(tmp_path / "tools"),
         )
     )
 
@@ -270,14 +276,11 @@ def _git_workspace(root: Path) -> Path:
 
 def _guarded(workspace: Path, scratch: Path) -> WorkspaceGuard:
     spec = analyst_module._spec(
-        system_prompt="",
         user_prompt="",
         workdir=str(workspace),
-        model="",
-        timeout_sec=60,
+        session=AnalystSession(model="", timeout_sec=60, turns=1),
         writable_dirs=[str(scratch)],
         protected_paths=["kernel.py", "driver.py"],
-        turns=1,
     )
     guard = WorkspaceGuard(spec)
     guard.prepare()

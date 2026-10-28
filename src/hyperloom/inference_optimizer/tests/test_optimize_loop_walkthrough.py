@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import TASK_STATES
 
 from ._geak_helpers import stop_geak_before_launch
 
@@ -93,9 +94,8 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
         state = coord.shared_state
         assert state.phase == ps.PHASE_FRAMEWORK_AGENT
         assert state.phase_budget_pct[ps.PHASE_FRAMEWORK_AGENT] > 0.0
-        queued = await coord.tasks.queued()
-        running = await coord.tasks.running()
-        kinds = {str((t.params or {}).get("task_kind") or "") for t in (*queued, *running)}
+        tasks = [task for task_state in TASK_STATES for task in await coord.tasks.by_state(task_state)]
+        kinds = {str((t.params or {}).get("task_kind") or "") for t in tasks}
         assert kinds & {"candidate_discovery", "framework_local_explore"}
     finally:
         await coord.stop()
@@ -103,29 +103,30 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("backend_order", "result_field", "result_key", "expected"),
+    ("kernel_optimizer", "result_field", "result_key", "expected"),
+    # GEAK is skipped for want of KERNEL budget. The forge controller starts on what is left of the KERNEL slice after
+    # one benchmark round (the hard cap, with no measured baseline) and finds no opportunity.
     [
-        ("", "geak_result", "error_class", "insufficient_budget"),
+        ("geak", "geak_result", "error_class", "insufficient_budget"),
         ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
     ],
     ids=["geak", "forge"],
 )
 async def test_both_arms_dry_walks_the_rest_of_the_chain(
     session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    backend_order: str,
+    kernel_optimizer: str,
     result_field: str,
     result_key: str,
     expected: str,
 ):
     """With nothing left to try, the run reaches CLOSE through every phase, on either kernel route."""
-    from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
-
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
+    from hyperloom.orchestrator.lever import LEVER_CONFIG
+    from hyperloom.orchestrator.state.attempt_ledger import AttemptRow, record_attempt_row
 
     coord = _coordinator(session_dir)
     try:
         state = coord.shared_state
+        state.kernel_optimizer = kernel_optimizer
         state.baseline_tput = 1500.0
         state.max_minutes = 180
         # Source arm: no local exploration, and discovery past its retries.
@@ -133,19 +134,21 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
         state.framework_agent_empty_discoveries = 99
         # Config arm: a run of benched variants past the streak floor, none adopted.
         for i in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK + 1):
-            record_config_attempt(
+            record_attempt_row(
                 state,
-                task_id=f"explore-{i}",
-                round_id=f"round-{i}",
-                fingerprint=f"fp-{i}",
-                variant_name=f"variant-{i}",
-                outcome="REVERT",
-                adopted=False,
-                gain_pct=0.01,
-                before_tput=1500.0,
-                after_tput=1500.15,
-                error_class="",
-                provenance="default_grid",
+                AttemptRow(
+                    lever_kind=LEVER_CONFIG,
+                    task_id=f"explore-{i}",
+                    round_id=f"round-{i}",
+                    fingerprint=f"fp-{i}",
+                    variant_name=f"variant-{i}",
+                    outcome="REVERT",
+                    adopted=False,
+                    gain_pct=0.01,
+                    before_tput=1500.0,
+                    after_tput=1500.15,
+                    provenance="default_grid",
+                ),
             )
         state.save(session_dir)
 

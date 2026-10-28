@@ -15,9 +15,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_INTVTY
+from hyperloom.common.perf_metric import GRADED_INTVTY, VERDICT_KEEP, GradedComparison, perf_snapshot_from_mapping
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -64,7 +65,7 @@ def _coord(session_dir: Path, *, baseline: float = 1000.0, anchor: float = 1000.
 
 def _rows() -> list[dict[str, Any]]:
     """The adoption rows the run recorded."""
-    ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+    ext, _status = stack_event.assemble_stack_ext(event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id())
     return ext["adoptions"]["rows"]
 
 
@@ -103,7 +104,9 @@ def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
         coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
         coord.writeback.lift_to_current_best("integrate", 1250.0, {"name": "second"})
 
-        ext, status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        ext, status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
         assert ext["attributed_gain_pct"] == 25.0
         assert ext["chain_total_gain_pct"] == 25.0
         assert ext["unattributed_gain_pct"] == 0.0
@@ -222,6 +225,85 @@ def test_an_agentx_lift_keeps_a_winner_with_comparability_axes(session_dir, monk
         assert coord.shared_state.current_best["request_error_rate"] == 0.0
 
 
+def _agentx_coord(session_dir: Path, *, with_baseline_axes: bool) -> Coordinator:
+    """A coordinator graded on p50 whose session baseline is an output rate on a different scale."""
+    coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+    coord.shared_state.benchmark_mode = "agentx"
+    coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+    axes = {
+        "output_throughput": 1000.0,
+        "total_throughput": 20000.0,
+        "e2e_norm_intvty_p50": 87.9,
+        "e2e_norm_intvty_p90": 33.7,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+    }
+    coord.shared_state.current_best = {
+        "action": "baseline",
+        "tput": 1000.0,
+        **axes,
+        "extra_server_args": "",
+        "extra_envs": {},
+    }
+    if with_baseline_axes:
+        coord.shared_state.baseline_perf = perf_snapshot_from_mapping(axes) or {}
+    return coord
+
+
+def _agentx_winner(name: str, *, output: float, p50: float, p90: float) -> dict[str, Any]:
+    return {
+        "name": name,
+        "output_throughput": output,
+        "total_throughput": 20000.0,
+        "e2e_norm_intvty_p50": p50,
+        "e2e_norm_intvty_p90": p90,
+        "duration_seconds": 3600.0,
+        "request_error_rate": 0.0,
+    }
+
+
+def test_an_agentx_chain_is_attributed_on_the_graded_axis(session_dir, monkeypatch):
+    """Both sides of every contribution are p50; the output baseline is not the denominator."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _agentx_coord(session_dir, with_baseline_axes=True)
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1100.0, _agentx_winner("first", output=1100.0, p50=93.2, p90=38.3)
+        )
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1150.0, _agentx_winner("second", output=1150.0, p50=99.0, p90=41.0)
+        )
+
+        rows = _rows()
+        assert [row["baseline_tput"] for row in rows] == [87.9, 87.9]
+        assert rows[0]["contribution_pct"] == pytest.approx((93.2 - 87.9) / 87.9 * 100, abs=1e-5)
+        assert rows[1]["contribution_pct"] == pytest.approx((99.0 - 93.2) / 87.9 * 100, abs=1e-5)
+        ext, _status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
+        assert ext["baseline_tput"] == 87.9
+        assert ext["chain_total_gain_pct"] == pytest.approx((99.0 - 87.9) / 87.9 * 100, abs=1e-5)
+        assert ext["unattributed_gain_pct"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_an_agentx_adoption_without_a_graded_baseline_is_unmeasured(session_dir, monkeypatch):
+    """No p50 baseline to divide by means no contribution, not one divided by the output baseline."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _agentx_coord(session_dir, with_baseline_axes=False)
+        assert coord.writeback.lift_to_current_best(
+            "explore", 1100.0, _agentx_winner("first", output=1100.0, p50=93.2, p90=38.3)
+        )
+
+        rows = _rows()
+        assert rows[0]["baseline_tput"] is None
+        assert rows[0]["contribution_pct"] is None
+        ext, _status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
+        assert ext["guards"][stack_event.GUARD_UNMEASURED] == 1
+
+
 def test_a_refused_lift_records_nothing(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1200.0)
@@ -285,7 +367,9 @@ def test_geak_config_promotion_records_engine_without_kernel_credit(
         assert entry["lever_kind"] == "config"
         assert entry["operation_kind"] == operation_kind
         assert not entry.get("accepted_kernels")
-        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        ext, _status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
         row = ext["adoptions"]["rows"][0]
         assert row["source"] == stack_event.SOURCE_KERNEL
         assert row["backend"] == "geak"
@@ -335,20 +419,42 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         coord.shared_state.cumulative_gain_validated = 10.0
         coord.shared_state.cumulative_gain_validated_stack_len = len(coord.shared_state.optimization_stack)
         _se.record_validation(
-            stack_len=coord.shared_state.cumulative_gain_validated_stack_len,
-            baseline_tput=1000.0,
-            validated_tput=1100.0,
-            validated_gain_pct=10.0,
-            source="writeback",
+            _se.StackValidation(
+                stack_len=coord.shared_state.cumulative_gain_validated_stack_len,
+                graded=GradedComparison(
+                    objective="",
+                    candidate=1100.0,
+                    reference=1000.0,
+                    verdict=VERDICT_KEEP,
+                ),
+                validated_gain_pct=10.0,
+                source="writeback",
+            ),
         )
 
-        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        ext, _status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
         settled = ext["validations"]["settled"]
         assert settled["stack_len"] == 1
         assert settled["validated_gain_pct"] == pytest.approx(10.0)
         assert ext["validations"]["at_head"] is True
         # The whole-stack figure and the ledger were measured independently.
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
+
+
+def test_a_validation_row_carries_the_per_gpu_output_of_the_figure_it_settled_on(session_dir):
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.tp = 8
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
+
+        assert coord.writeback.validate(1120.0, {"ttft_mean_ms": 100.0})
+
+        ext, _status = stack_event.assemble_stack_ext(
+            event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+        )
+        assert ext["validations"]["settled"]["perf"]["output_tput_per_gpu"] == pytest.approx(140.0)
 
 
 def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir, monkeypatch):
@@ -380,9 +486,13 @@ def test_an_unreadable_spool_on_finish_does_not_raise(session_dir, monkeypatch):
         stack_event.record_adoption(
             stack_index=0,
             entry={"action": "explore", "variant_name": "kept"},
-            throughput_before=1000.0,
-            throughput_after=1100.0,
             baseline_tput=1000.0,
+            graded=GradedComparison(
+                objective="",
+                candidate=1100.0,
+                reference=1000.0,
+                verdict=VERDICT_KEEP,
+            ),
         )
         monkeypatch.setattr(
             "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",

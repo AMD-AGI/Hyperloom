@@ -24,7 +24,6 @@ from hyperloom.common.llm_config import (
     chat_completion,
     anthropic_messages,
     apply_reasoning_effort,
-    aresponse,
     build_http_timeout,
     claude_sdk_env_options,
     deepseek_compat_env,
@@ -37,11 +36,12 @@ from hyperloom.common.llm_config import (
     get_async_anthropic_client,
     get_async_openai_client,
     get_openai_client,
-    openai_client_kwargs,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
+    DEFAULT_DEEPSEEK_HARNESS_MODEL,
     provider_model_defaults,
     resolve_forge_llm_model,
+    resolve_openai_client_config,
 )
 from hyperloom.common.llm_headers import parse_custom_headers
 
@@ -116,19 +116,19 @@ def test_derive_openai_base_url_is_case_insensitive():
 
 def test_openai_kwargs_reads_openai_custom_headers():
     """The OpenAI/Codex client applies OPENAI_CUSTOM_HEADERS verbatim."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://llm.example.invalid/Unified/v1",
             "OPENAI_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
-    )
+    ).as_kwargs()
     assert kwargs["default_headers"] == {"Ocp-Apim-Subscription-Key": "ak-header"}
 
 
 def test_openai_kwargs_ignores_anthropic_custom_headers():
     """The OpenAI/Codex client never reads ANTHROPIC_CUSTOM_HEADERS, and explicit OpenAI-side config wins over the Anthropic host."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://api.openai.com/v1",
@@ -136,7 +136,7 @@ def test_openai_kwargs_ignores_anthropic_custom_headers():
             "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
             "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: ak-header",
         }
-    )
+    ).as_kwargs()
     assert kwargs["api_key"] == "openai-token"
     assert kwargs["base_url"] == "https://api.openai.com/v1"
     # Empty headers are omitted from kwargs entirely.
@@ -160,7 +160,7 @@ _CODEX_ONLY_ENV = {
 
 def test_anthropic_only_deployment_resolves_through_derivation():
     """No OpenAI-side config at all: derive the base URL, auth with the gateway token."""
-    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    kwargs = resolve_openai_client_config(env=dict(_ANTHROPIC_ONLY_ENV)).as_kwargs()
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
     assert kwargs["api_key"] == "gateway-token"
 
@@ -169,12 +169,12 @@ def test_anthropic_only_deployment_falls_back_to_anthropic_api_key():
     """ANTHROPIC_AUTH_TOKEN is preferred, but ANTHROPIC_API_KEY alone also authenticates."""
     env = dict(_ANTHROPIC_ONLY_ENV)
     del env["_".join(("ANTHROPIC", "AUTH", "TOKEN"))]
-    assert openai_client_kwargs(env=env)["api_key"] == "ak-anthropic"
+    assert resolve_openai_client_config(env=env).as_kwargs()["api_key"] == "ak-anthropic"
 
 
 def test_codex_only_deployment_is_unchanged():
     """No Anthropic side present: resolution is exactly the explicit OpenAI config."""
-    assert openai_client_kwargs(env=dict(_CODEX_ONLY_ENV)) == {
+    assert resolve_openai_client_config(env=dict(_CODEX_ONLY_ENV)).as_kwargs() == {
         "api_key": "openai-token",
         "base_url": "https://llm-api.amd.com/Unified/v1",
     }
@@ -182,7 +182,7 @@ def test_codex_only_deployment_is_unchanged():
 
 def test_both_configured_prefers_the_explicit_openai_side():
     """With both shapes present the Anthropic fallback must never be consulted."""
-    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV})
+    kwargs = resolve_openai_client_config(env={**_ANTHROPIC_ONLY_ENV, **_CODEX_ONLY_ENV}).as_kwargs()
     assert kwargs == {
         "api_key": "openai-token",
         "base_url": "https://llm-api.amd.com/Unified/v1",
@@ -191,13 +191,15 @@ def test_both_configured_prefers_the_explicit_openai_side():
 
 def test_explicit_openai_side_wins_key_and_url_independently():
     """A half-configured OpenAI side takes what it has and derives only the rest."""
-    key_only = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"})
+    key_only = resolve_openai_client_config(
+        env={**_ANTHROPIC_ONLY_ENV, "_".join(("OPENAI", "API", "KEY")): "openai-token"}
+    ).as_kwargs()
     assert key_only["api_key"] == "openai-token"
     assert key_only["base_url"] == "https://llm-api.amd.com/Unified/v1"
 
-    url_only = openai_client_kwargs(
+    url_only = resolve_openai_client_config(
         env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://explicit.example.invalid/v1"}
-    )
+    ).as_kwargs()
     assert url_only["api_key"] == "gateway-token"
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
@@ -205,7 +207,7 @@ def test_explicit_openai_side_wins_key_and_url_independently():
 def test_retired_gateway_key_loses_to_the_anthropic_fallback():
     """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
+    assert resolve_openai_client_config(env=env).as_kwargs()["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -309,44 +311,46 @@ def test_preferred_agent_backend_ranks_credentials_then_sdk(
 
 def test_derived_base_url_carries_the_anthropic_gateway_headers():
     """An anthropic-only deployment must still send the gateway's subscription key."""
-    kwargs = openai_client_kwargs(env=dict(_ANTHROPIC_ONLY_ENV))
+    kwargs = resolve_openai_client_config(env=dict(_ANTHROPIC_ONLY_ENV)).as_kwargs()
     assert kwargs["base_url"] == "https://llm-api.amd.com/Unified/v1"
     assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "ak-anthropic"}
 
 
 def test_explicit_openai_base_url_does_not_borrow_anthropic_headers():
     """An explicit OpenAI URL may be a different host, whose headers we cannot guess."""
-    kwargs = openai_client_kwargs(env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"})
+    kwargs = resolve_openai_client_config(
+        env={**_ANTHROPIC_ONLY_ENV, "OPENAI_BASE_URL": "https://other-host.example/v1"}
+    ).as_kwargs()
     assert kwargs["base_url"] == "https://other-host.example/v1"
     assert "default_headers" not in kwargs
 
 
 def test_openai_custom_headers_win_over_the_derived_gateway_headers():
     """An operator who set the OpenAI side explicitly keeps that exact header set."""
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={**_ANTHROPIC_ONLY_ENV, "OPENAI_CUSTOM_HEADERS": f"{_SUBSCRIPTION_HEADER}: openai-sub"}
-    )
+    ).as_kwargs()
     assert kwargs["default_headers"] == {_SUBSCRIPTION_HEADER: "openai-sub"}
 
 
 def test_openai_kwargs_error_names_every_searched_key():
     """The message has to list what was actually searched, Anthropic side included."""
     with pytest.raises(LLMConfigError) as excinfo:
-        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+        resolve_openai_client_config(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"}).as_kwargs()
     message = str(excinfo.value)
     for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 
 def test_openai_kwargs_preserves_explicit_openai_config():
-    kwargs = openai_client_kwargs(
+    kwargs = resolve_openai_client_config(
         env={
             "_".join(("OPENAI", "API", "KEY")): "openai-token",
             "OPENAI_BASE_URL": "https://api.openai.com/v1",
             "_".join(("ANTHROPIC", "API", "KEY")): "ak-anthropic",
             "ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic",
         }
-    )
+    ).as_kwargs()
     assert kwargs == {
         "api_key": "openai-token",
         "base_url": "https://api.openai.com/v1",
@@ -355,7 +359,7 @@ def test_openai_kwargs_preserves_explicit_openai_config():
 
 def test_openai_kwargs_requires_a_key():
     with pytest.raises(LLMConfigError):
-        openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
+        resolve_openai_client_config(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"}).as_kwargs()
 
 
 def test_deepseek_compat_env_is_empty_without_legacy_vars():
@@ -541,6 +545,14 @@ def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
     assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
 
 
+def test_the_harness_model_comes_from_dsh_model_alone():
+    """One knob: the retired provider variable no longer names the harness's model."""
+    assert resolve_forge_llm_model("deepseek", env={"DSH_MODEL": "deepseek-v4-pro"}) == "deepseek-v4-pro"
+    assert resolve_forge_llm_model("deepseek", env={"DEEPSEEK_MODEL": "deepseek-v4-pro"}) == (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL
+    )
+
+
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
     assert resolve_forge_llm_model("codex", env={}) == DEFAULT_CODEX_MODEL
@@ -701,18 +713,6 @@ def test_get_openai_client_resolves_credentials_and_headers(monkeypatch):
         "base_url": "https://llm.example.invalid/Unified/v1",
         "default_headers": {"Ocp-Apim-Subscription-Key": "ak-header"},
     }
-
-
-def test_get_async_openai_client_honours_custom_env_var_names(monkeypatch):
-    _install_fake_openai_sdk(monkeypatch)
-    client = get_async_openai_client(
-        api_key_env="SCORER_KEY",
-        base_url_env="SCORER_URL",
-        env={"SCORER_KEY": "scorer-token", "SCORER_URL": "https://scorer.example.invalid/v1"},
-    )
-    assert client.kind == "AsyncOpenAI"
-    assert client.kwargs["api_key"] == "scorer-token"
-    assert client.kwargs["base_url"] == "https://scorer.example.invalid/v1"
 
 
 def test_get_client_omits_timeout_when_unset(monkeypatch):
@@ -1006,7 +1006,10 @@ def _record_anthropic_client_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[o
 
 def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
-    llm_config.anthropic_completion(model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0)
+    llm_config.anthropic_completion(
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
+    )
     assert seen == [60.0]
 
 
@@ -1014,7 +1017,8 @@ def test_a_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
 async def test_an_async_one_shot_http_completion_waits_the_callers_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
     await llm_config.aanthropic_completion(
-        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout_s=60.0
+        request=llm_config.AnthropicCompletionRequest(model="m", messages=[], max_tokens=16, timeout_s=60.0),
+        env={_ANTHROPIC_KEY: "k"},
     )
     assert seen == [60.0]
 
@@ -1023,7 +1027,10 @@ def test_an_explicit_http_timeout_outranks_timeout_s(monkeypatch):
     seen = _record_anthropic_client_timeouts(monkeypatch)
     sentinel = object()
     llm_config.anthropic_completion(
-        model="m", messages=[], max_tokens=16, env={_ANTHROPIC_KEY: "k"}, timeout=sentinel, timeout_s=60.0
+        request=llm_config.AnthropicCompletionRequest(
+            model="m", messages=[], max_tokens=16, timeout=sentinel, timeout_s=60.0
+        ),
+        env={_ANTHROPIC_KEY: "k"},
     )
     assert seen == [sentinel]
 
@@ -1150,119 +1157,6 @@ def test_chat_completion_does_not_request_a_stream():
     client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
     chat_completion(client, model="m", messages=[])
     assert "stream" not in client.completions.calls[0]
-
-
-# ---- aresponse ----
-class _StubResponses:
-    def __init__(self, outcome: Any) -> None:
-        self._outcome = outcome
-        self.calls: list[dict[str, Any]] = []
-
-    async def create(self, **params: Any) -> Any:
-        self.calls.append(params)
-        if isinstance(self._outcome, BaseException):
-            raise self._outcome
-        return self._outcome
-
-
-class _StubResponsesClient:
-    def __init__(self, outcome: Any) -> None:
-        self.responses = _StubResponses(outcome)
-
-
-def _message_item(text: str, *, citations: list[str] | None = None) -> dict[str, Any]:
-    annotations = [{"type": "url_citation", "url": u} for u in (citations or [])]
-    return {
-        "type": "message",
-        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
-    }
-
-
-@pytest.mark.asyncio
-async def test_aresponse_flattens_text_citations_status_and_tokens():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            _message_item("the answer", citations=["https://a.example", "https://b.example"]),
-        ],
-        "status": "completed",
-        "usage": {"input_tokens": 11, "output_tokens": 7},
-    }
-    client = _StubResponsesClient(resp)
-    result = await aresponse(client, model="m", input="prompt")
-    assert result.text == "the answer"
-    assert result.citations == ["https://a.example", "https://b.example"]
-    assert result.status == "completed"
-    assert (result.input_tokens, result.output_tokens) == (11, 7)
-    assert client.responses.calls == [{"model": "m", "input": "prompt"}]
-
-
-@pytest.mark.asyncio
-async def test_aresponse_joins_multiple_message_items_with_newlines():
-    resp = {"output": [_message_item("first"), _message_item("second")]}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "first\nsecond"
-
-
-@pytest.mark.asyncio
-async def test_aresponse_skips_non_output_text_content_blocks():
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.text, result.citations) == ("kept", [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resp", [{"output": []}, {}])
-async def test_aresponse_tolerates_empty_output_and_missing_usage(resp):
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == ""
-    assert result.citations == []
-    assert result.status is None
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_reads_attribute_carrying_sdk_objects():
-    """The real SDK returns pydantic models, not dicts."""
-    block = types.SimpleNamespace(
-        type="output_text",
-        text="from sdk",
-        annotations=[types.SimpleNamespace(type="url_citation", url="https://sdk.example")],
-    )
-    resp = types.SimpleNamespace(
-        output=[types.SimpleNamespace(type="message", content=[block])],
-        status="incomplete",
-        usage=types.SimpleNamespace(input_tokens=3, output_tokens=4),
-    )
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "from sdk"
-    assert result.citations == ["https://sdk.example"]
-    assert result.status == "incomplete"
-    assert (result.input_tokens, result.output_tokens) == (3, 4)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_treats_unusable_token_counts_as_zero():
-    resp = {"output": [], "usage": {"input_tokens": "abc", "output_tokens": None}}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_propagates_transport_errors():
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aresponse(_StubResponsesClient(RuntimeError("gateway down")), model="m")
 
 
 # ---- client-ownership guard ----
@@ -1495,10 +1389,9 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64, system="sys"
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1513,58 +1406,14 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     assert client.closed, "the HTTP client must be closed once the completion returns"
 
 
-def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
-    """The Messages API accepts it, and callers that ask for a low temperature to pin an output shape must keep getting one."""
-    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
-
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
-        env={_ANTHROPIC_KEY: "sk-ant-key"},
-    )
-
-    assert client.calls[0]["json"]["temperature"] == 0.2
-
-
-def test_anthropic_completion_omits_temperature_when_unset(monkeypatch):
-    """Absent means absent: sending an explicit default would change the sampling behaviour of every caller that never asked for one."""
-    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
-    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
-
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        env={_ANTHROPIC_KEY: "sk-ant-key"},
-    )
-
-    assert "temperature" not in client.calls[0]["json"]
-
-
-def test_anthropic_completion_drops_temperature_on_the_cli_path(fake_one_shot):
-    """The CLI has no temperature knob, so the argument is accepted and ignored rather than raising -- one entry point, two transports, same signature."""
-    llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
-        temperature=0.2,
-        env={_OAUTH_ENV: _OAUTH_VALUE},
-    )
-
-    assert "temperature" not in fake_one_shot.instances[0].calls[0]
-
-
 def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
     monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1578,12 +1427,14 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
     monkeypatch.setattr(llm_config, "get_anthropic_client", _refuse)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
-        system="sys",
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=64,
+            system="sys",
+            timeout_s=12.0,
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
-        timeout_s=12.0,
     )
 
     assert result.text == "cli reply"
@@ -1603,9 +1454,9 @@ def test_anthropic_completion_hands_the_cli_the_caller_env(fake_one_shot):
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE, "ANTHROPIC_BASE_URL": "https://gw.example"}
 
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1617,9 +1468,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
     caller_env = {_OAUTH_ENV: _OAUTH_VALUE}
 
     await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env=caller_env,
     )
 
@@ -1628,9 +1479,9 @@ async def test_aanthropic_completion_hands_the_cli_the_caller_env(fake_one_shot)
 
 def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_shot):
     llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
     assert fake_one_shot.instances[0].timeout_s == 60.0
@@ -1639,9 +1490,9 @@ def test_anthropic_completion_keeps_the_cli_default_budget_when_unset(fake_one_s
 def test_anthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError) as excinfo:
         llm_config.anthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
     message = str(excinfo.value)
@@ -1655,9 +1506,9 @@ async def test_aanthropic_completion_posts_to_the_messages_api_and_closes(monkey
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", lambda **_kw: client)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_ANTHROPIC_KEY: "sk-ant-key"},
     )
 
@@ -1674,9 +1525,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
     monkeypatch.setattr(llm_config, "get_async_anthropic_client", _refuse)
 
     result = await llm_config.aanthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=64,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=64
+        ),
         env={_OAUTH_ENV: _OAUTH_VALUE},
     )
 
@@ -1688,9 +1539,9 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
 async def test_aanthropic_completion_raises_when_no_credential_is_configured():
     with pytest.raises(LLMConfigError):
         await llm_config.aanthropic_completion(
-            model="claude-opus-5",
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=8,
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+            ),
             env={},
         )
 
@@ -1701,9 +1552,9 @@ def test_anthropic_completion_reads_the_ambient_environment_by_default(monkeypat
     monkeypatch.setenv(_OAUTH_ENV, _OAUTH_VALUE)
 
     result = llm_config.anthropic_completion(
-        model="claude-opus-5",
-        messages=[{"role": "user", "content": "hi"}],
-        max_tokens=8,
+        request=llm_config.AnthropicCompletionRequest(
+            model="claude-opus-5", messages=[{"role": "user", "content": "hi"}], max_tokens=8
+        )
     )
 
     assert result.text == "cli reply"

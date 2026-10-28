@@ -18,27 +18,26 @@ def test_create_workspace_layout(tmp_path):
     assert (ws / "system_profile").is_dir()
 
 
-def test_coerce_helpers_tolerate_bad_values():
-    # bool/None short-circuit to the default; bad strings fall through to default.
-    assert br._f(None) == 0.0
-    assert br._f(True) == 0.0
-    assert br._f("not-a-number") == 0.0
-    assert br._f("1.5") == 1.5
-    assert br._i(None) == 0
-    assert br._i(False) == 0
-    assert br._i("nope") == 0
-    assert br._i("7") == 7
+def test_build_report_reads_non_finite_client_values_as_zero():
+    """A client that reports inf/NaN still yields a report, written as strict JSON."""
+    report = br.build_report(
+        br.ReportSubject("vllm", "/models/x"),
+        br.RunOutcome(
+            False,
+            raw_result={"completed": float("inf"), "output_throughput": float("inf"), "mean_ttft_ms": float("nan")},
+        ),
+        workspace_dir="/ws",
+        execution_time=1.0,
+    )
+    assert report["throughput"]["completed_requests"] == 0
+    assert report["throughput"]["output_throughput"] == 0.0
+    assert report["latency"]["ttft"]["mean_ms"] == 0.0
+    json.dumps(report, allow_nan=False)
 
 
 def test_build_report_without_raw_leaves_metrics_none():
     report = br.build_report(
-        None,
-        framework="vllm",
-        model="/models/x",
-        success=False,
-        workspace_dir="/ws",
-        execution_time=1.0,
-        errors=["boom"],
+        br.ReportSubject("vllm", "/models/x"), br.RunOutcome(False, ["boom"]), workspace_dir="/ws", execution_time=1.0
     )
     assert report["success"] is False
     assert report["throughput"] is None
@@ -51,37 +50,34 @@ def test_build_report_without_raw_leaves_metrics_none():
 
 def test_build_report_model_falls_back_to_raw_model_id():
     report = br.build_report(
-        {"model_id": "raw-model", "output_throughput": 1.0},
-        framework="vllm",
-        model="",
-        success=True,
+        br.ReportSubject("vllm", ""),
+        br.RunOutcome(True, raw_result={"model_id": "raw-model", "output_throughput": 1.0}),
         workspace_dir="/ws",
         execution_time=1.0,
     )
     assert report["model"] == "raw-model"
 
 
-def test_build_report_carries_scriptable_extras_and_analysis():
+def test_build_report_carries_scriptable_extras():
     report = br.build_report(
-        {
-            "output_throughput": 1.5,
-            "workload_kind": "scriptable",
-            "throughput_unit": "img/s",
-            "quality_gate": {"passed": True},
-            "latency_s": 0.66,
-        },
-        framework="xdit",
-        model="/models/flux",
-        success=True,
+        br.ReportSubject("xdit", "/models/flux"),
+        br.RunOutcome(
+            True,
+            raw_result={
+                "output_throughput": 1.5,
+                "workload_kind": "scriptable",
+                "throughput_unit": "img/s",
+                "quality_gate": {"passed": True},
+                "latency_s": 0.66,
+            },
+        ),
         workspace_dir="/ws",
         execution_time=2.0,
-        analysis={"failure_root_cause": "oom"},
     )
     assert report["workload_kind"] == "scriptable"
     assert report["throughput_unit"] == "img/s"
     assert report["quality_gate"] == {"passed": True}
     assert report["latency_s"] == 0.66
-    assert report["bypass_analysis"] == {"failure_root_cause": "oom"}
 
 
 def test_format_summary_text_minimal_report():
@@ -141,13 +137,10 @@ def test_write_log_aliases_aggregates_phase_logs(tmp_path):
 
 def test_write_report_emits_all_artifacts(tmp_path):
     report = br.build_report(
-        {"output_throughput": 700.0, "completed": 40, "duration": 30.0},
-        framework="sglang",
-        model="/models/x",
-        success=True,
+        br.ReportSubject("sglang", "/models/x", profiling_enabled=True),
+        br.RunOutcome(True, raw_result={"output_throughput": 700.0, "completed": 40, "duration": 30.0}),
         workspace_dir=str(tmp_path),
         execution_time=30.0,
-        profiling_enabled=True,
     )
     path = br.write_report(tmp_path, report)
     assert path == tmp_path / "benchmark_report.json"

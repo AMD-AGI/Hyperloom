@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
-from ...source_snapshot import snapshot_source_layer
+from ...source_snapshot import SourceLayer, snapshot_source_layer
 from .projections import root_id_for, select_linked_build
 
 if TYPE_CHECKING:
@@ -187,13 +187,15 @@ def capture_root_snapshots(
         # target no longer in the accepted stack.
         shutil.rmtree(dest, ignore_errors=True)
         manifest = snapshot_source_layer(
-            framework_root=root,
-            base_sha=str(record.get("base_sha") or ""),
-            rel_paths=sorted(declared),
+            SourceLayer(
+                framework_root=root,
+                base_sha=str(record.get("base_sha") or ""),
+                rel_paths=sorted(declared),
+                declared_ops=declared,
+                import_root=import_root,
+            ),
             dest_dir=dest,
             provenance="enablement_keep",
-            declared_ops=declared,
-            import_root=import_root,
         )
         if not manifest:
             continue
@@ -318,6 +320,54 @@ def _build_output_trees(attempt_root: Path) -> list[Path]:
     return [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
 
 
+def _linked_build_attempt_root(enablement: EnablementRound, *, specialist_task_id: str) -> Path | None:
+    """Return the attempt directory of the build this KEEP's rounds link to.
+
+    The round being kept is not in ``kept_rounds`` until the KEEP completes, so
+    it is offered to the join alongside them; ``None`` when no build is linked.
+    """
+    rounds = list(enablement.kept_rounds)
+    current = str(specialist_task_id or "").strip()
+    if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
+        rounds.append({"task_id": current})
+    state = {
+        "build_manifest": list(enablement.build_manifest),
+        "last_specialist_task_id": enablement.last_specialist_task_id,
+        "kept_rounds": rounds,
+    }
+    _sentinel, row = select_linked_build(state)
+    # Validated as text first: ``Path("")`` is ``Path(".")``, whose ``is_dir()``
+    # is true, so an absent attempt root would otherwise scan the working
+    # directory and report whatever it found there.
+    attempt_root = str((row or {}).get("attempt_root") or "").strip()
+    return Path(attempt_root) if attempt_root else None
+
+
+def _built_package_extensions(attempt_root: Path, package_name: str) -> list[tuple[Path, Path]] | None:
+    """Return each shared object the build produced, with the package root it sits in.
+
+    Only the trees the build itself names as its output are walked. An attempt
+    root also holds the other repositories a build cloned and, where one was
+    provisioned, a virtual environment with its own installed copy of the same
+    package; comparing against those would refuse a recipe over files the
+    framework root was never meant to carry.
+
+    Returns:
+        ``None`` when the build named no output tree, named trees that are
+        gone, or could not be read -- none of which is the same as finding
+        nothing.
+    """
+    try:
+        package_roots = [
+            d for d in (prefix / package_name for prefix in _build_output_trees(attempt_root)) if d.is_dir()
+        ]
+        if not package_roots:
+            return None
+        return sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
+    except OSError:
+        return None
+
+
 def build_extensions_not_carried(
     enablement: EnablementRound, framework_root: Path | None, *, specialist_task_id: str = ""
 ) -> list[str] | None:
@@ -330,11 +380,7 @@ def build_extensions_not_carried(
     whichever code path first needs it.
 
     Only the extensions built *for this framework package* are judged, and
-    only inside the tree the build itself names as its output. An attempt
-    root also holds the other repositories a build cloned and, where one was
-    provisioned, a virtual environment with its own installed copy of this
-    same package -- comparing against those would refuse a recipe over files
-    the framework root was never meant to carry. Compared by
+    only inside the tree the build itself names as its output. Compared by
     content, so an extension the base image already shipped under the same
     name counts as not carried.
 
@@ -355,40 +401,15 @@ def build_extensions_not_carried(
         or no framework root to compare them against. None of those are
         evidence that anything was carried.
     """
-    rounds = list(enablement.kept_rounds)
-    current = str(specialist_task_id or "").strip()
-    if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
-        rounds.append({"task_id": current})
-    state = {
-        "build_manifest": list(enablement.build_manifest),
-        "last_specialist_task_id": enablement.last_specialist_task_id,
-        "kept_rounds": rounds,
-    }
-    _sentinel, row = select_linked_build(state)
-    # Validated as text first: ``Path("")`` is ``Path(".")``, whose
-    # ``is_dir()`` is true, so an absent attempt root would otherwise scan
-    # the working directory and report whatever it found there.
-    attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
-    if not attempt_root_text:
+    attempt_root = _linked_build_attempt_root(enablement, specialist_task_id=specialist_task_id)
+    if attempt_root is None:
         return []
-    if framework_root is None:
+    if framework_root is None or not attempt_root.is_dir():
         return None
-    attempt_root = Path(attempt_root_text)
-    if not attempt_root.is_dir():
+    built_files = _built_package_extensions(attempt_root, framework_root.name)
+    if built_files is None:
         return None
     missing: list[str] = []
-    try:
-        package_roots = [
-            d for d in (prefix / framework_root.name for prefix in _build_output_trees(attempt_root)) if d.is_dir()
-        ]
-        if not package_roots:
-            # The build named no output tree, or named trees that are gone.
-            # Either way this scanned nothing, which is not the same as
-            # finding nothing.
-            return None
-        built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
-    except OSError:
-        return None
     for package, built in built_files:
         relative = built.relative_to(package)
         installed = framework_root / relative

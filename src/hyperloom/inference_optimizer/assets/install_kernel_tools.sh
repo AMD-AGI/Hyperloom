@@ -93,14 +93,13 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="6489fbc288d3664857aa3204835a1297d6422c22"
-# Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
-# The persistent kernel-agent env re-exports the resolved default path, so a
-# presence-only check (${VAR:+1}) would misclassify it as an override and skip
-# the managed clone/realign, leaving a missing/stale default un-self-healed
-# across reruns (#722). Compare against the default path, not env presence.
+TRACELENS_REF="b80472133406b3d62a4bd0dfd55dfab39e872cf7"
+# Operator override iff TRACELENS_ROOT is not a TraceLens@<sha> checkout in the
+# cache root. Installs re-export that path (kernel-agent env, .env), so a
+# presence-only check would freeze a rerun on the old checkout instead of
+# cloning/realigning to the current TRACELENS_REF (#722).
 # Canonicalize a path (resolve symlinks/.. , strip trailing slash) so the
-# default-vs-override comparison matches the Python side's Path.resolve();
+# override comparison matches the Python side's Path.resolve();
 # unresolvable paths fall back to the trimmed literal so a not-yet-cloned
 # default still compares correctly (#722 / PR#789).
 # Keep in lockstep with Python-side path canonicalization helpers.
@@ -129,11 +128,15 @@ _home_dir() {
   printf '%s' "${h:-/}"
 }
 _TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
-_tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
-if [ -n "${TRACELENS_ROOT:-}" ] \
-   && [ "$(_canonicalize_path "${TRACELENS_ROOT}")" != "${_tracelens_default_root}" ]; then
-  _tracelens_root_was_set=1
+if [ -n "${TRACELENS_ROOT:-}" ]; then
+  _tracelens_root_canonical="$(_canonicalize_path "${TRACELENS_ROOT}")"
+  if [ "$(dirname "${_tracelens_root_canonical}")" = "$(_canonicalize_path "${_open_source_root}")" ] \
+     && [[ "$(basename "${_tracelens_root_canonical}")" == TraceLens@* ]]; then
+    TRACELENS_ROOT=""
+  else
+    _tracelens_root_was_set=1
+  fi
 fi
 TRACELENS_ROOT="${TRACELENS_ROOT:-${_open_source_root}/TraceLens@${_TRACELENS_SHA}}"
 TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
@@ -179,7 +182,7 @@ if [ -z "${GEAK_ROOT:-}" ]; then
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5-5}}"
 # Run mode for the GEAKv4 Claude Code workflow. ``full`` (default) selects the
 # 2 h / 5-round preset; ``quick`` selects the 1 h / 2-round smoke-test preset.
 # GEAK still honours later CLI ``--mode`` or LLM-parsed task-hint overrides.
@@ -847,15 +850,12 @@ ensure_tracelens() {
   _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal"
   export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: only the inference variant is accepted (the correct
-    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
-    # v0.4; the legacy training-mode CLI was removed to keep install /
-    # runtime in lockstep.
-    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
-      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    # The analysis agent's report step runs through this config-driven CLI.
+    if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_from_config --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_from_config"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
+      verify_die "TraceLens_generate_perf_report_from_config not found after install (reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }
@@ -969,10 +969,11 @@ write_env_file() {
   [ -n "${USER_DATA_PATH:-}" ] && upsert_dotenv_var USER_DATA_PATH "$USER_DATA_PATH"
   [ -n "${HYPERLOOM_RUNTIME_DIR:-}" ] && upsert_dotenv_var HYPERLOOM_RUNTIME_DIR "$HYPERLOOM_RUNTIME_DIR"
   [ -n "${KERNEL_AGENT_ENV:-}" ] && upsert_dotenv_var KERNEL_AGENT_ENV "$KERNEL_AGENT_ENV"
-  [ -n "${MAGPIE_PATH:-}" ] && upsert_dotenv_var MAGPIE_PATH "$MAGPIE_PATH"
+  # Derived from the MAGPIE_REF / INFERENCEX_REF pins; a .env copy would read back as an override that skips them.
+  remove_dotenv_var MAGPIE_PATH
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
-  [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  remove_dotenv_var INFERENCEX_PATH
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.
@@ -1155,14 +1156,11 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: only the inference variant is accepted
-  # (#124). Hyperloom is inference-only since v0.4; the legacy
-  # training-mode CLI was removed because its output shape silently
-  # breaks downstream fusion / roofline analysis.
-  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  # The analysis agent's report step runs through this config-driven CLI.
+  if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_from_config: $(command -v TraceLens_generate_perf_report_from_config)"
   else
-    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
+    warn "TraceLens_generate_perf_report_from_config not found"
   fi
   for tool in git patch; do
     if command -v "$tool" >/dev/null 2>&1; then

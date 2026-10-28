@@ -15,9 +15,11 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_outcome
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import OutcomeSources, collect_v6_outcome
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -34,12 +36,14 @@ def _bound_session(tmp_path):
 
 def _ext() -> dict[str, Any]:
     """The ledger's assembled ``ext``, whether or not it has closed."""
-    ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+    ext, _status = stack_event.assemble_stack_ext(event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id())
     return ext
 
 
 def _status() -> str:
-    _ext_, status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+    _ext_, status = stack_event.assemble_stack_ext(
+        event_parts(STACK_EVENT_SECTIONS), event=stack_event.stack_event_id()
+    )
     return status
 
 
@@ -62,10 +66,13 @@ def _adopt(
     stack_event.record_adoption(
         stack_index=index,
         entry={"action": action, "backend": backend, **entry},
-        throughput_before=before,
-        throughput_after=after,
         baseline_tput=baseline,
-        objective="output_throughput",
+        graded=GradedComparison(
+            objective="output_throughput",
+            candidate=after,
+            reference=before,
+            verdict=VERDICT_KEEP,
+        ),
     )
 
 
@@ -211,7 +218,8 @@ def test_a_zero_baseline_makes_every_contribution_unmeasurable():
     _adopt(0, "explore", 100.0, 120.0, baseline=0.0)
 
     ext = _ext()
-    assert ext["attributed_gain_pct"] == 0.0
+    assert ext["attributed_gain_pct"] is None
+    assert ext["attributed_gain_pct_excluding_fixes"] is None
     assert ext["guards"][stack_event.GUARD_UNMEASURED] == 1
     assert ext["unattributed_gain_pct"] is None
 
@@ -220,12 +228,18 @@ def test_reconciliation_gap_compares_the_ledger_to_the_measured_whole():
     _adopt(0, "explore", 100.0, 110.0)
     _adopt(1, "explore", 110.0, 120.0)
     stack_event.record_validation(
-        stack_len=2,
-        baseline_tput=100.0,
-        validated_tput=118.0,
-        validated_gain_pct=18.0,
-        source="writeback",
-        measurement_basis="e2e_rebench",
+        stack_event.StackValidation(
+            stack_len=2,
+            graded=GradedComparison(
+                objective="",
+                candidate=118.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=18.0,
+            source="writeback",
+            measurement_basis="e2e_rebench",
+        ),
     )
 
     ext = _ext()
@@ -239,12 +253,18 @@ def test_a_re_validation_at_one_stack_length_supersedes_the_earlier_figure():
     _adopt(0, "explore", 100.0, 120.0)
     for gain, tput in ((20.0, 120.0), (17.5, 117.5)):
         stack_event.record_validation(
-            stack_len=1,
-            baseline_tput=100.0,
-            validated_tput=tput,
-            validated_gain_pct=gain,
-            source="writeback",
-            measurement_basis="e2e_rebench",
+            stack_event.StackValidation(
+                stack_len=1,
+                graded=GradedComparison(
+                    objective="",
+                    candidate=tput,
+                    reference=100.0,
+                    verdict=VERDICT_KEEP,
+                ),
+                validated_gain_pct=gain,
+                source="writeback",
+                measurement_basis="e2e_rebench",
+            ),
         )
 
     ext = _ext()
@@ -255,10 +275,16 @@ def test_a_re_validation_at_one_stack_length_supersedes_the_earlier_figure():
 def test_a_validation_behind_the_stack_head_is_reported_as_such():
     _adopt(0, "explore", 100.0, 110.0)
     stack_event.record_validation(
-        stack_len=1,
-        baseline_tput=100.0,
-        validated_tput=110.0,
-        validated_gain_pct=10.0,
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(
+                objective="",
+                candidate=110.0,
+                reference=100.0,
+                verdict=VERDICT_KEEP,
+            ),
+            validated_gain_pct=10.0,
+        ),
     )
     _adopt(1, "explore", 110.0, 130.0)
 
@@ -326,7 +352,13 @@ def test_recording_without_a_bound_session_is_a_no_op(tmp_path, monkeypatch):
 
     monkeypatch.setattr(session_binding, "bound_session_or_none", lambda: None)
     _adopt(0, "explore", 100.0, 120.0)
-    stack_event.record_validation(stack_len=1, baseline_tput=100.0, validated_tput=120.0, validated_gain_pct=20.0)
+    stack_event.record_validation(
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(objective="", candidate=120.0, reference=100.0, verdict=VERDICT_KEEP),
+            validated_gain_pct=20.0,
+        )
+    )
     stack_event.finish()
 
 
@@ -334,17 +366,22 @@ def _outcome(session_dir) -> dict[str, Any]:
     """``outcome.validation`` over the recorded timeline."""
     stack_event.finish()
     return collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close={},
-        state={},
-        timeline=read_timeline_events(session_dir),
+        OutcomeSources(
+            session={"stop_reason": "target_reached"}, close={}, state={}, timeline=read_timeline_events(session_dir)
+        )
     )["validation"]
 
 
 def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp_path):
     _adopt(0, "replay_warm_recipe", 100.0, 110.0)
     _adopt(1, "integrate", 110.0, 130.0, backend="geak")
-    stack_event.record_validation(stack_len=2, baseline_tput=100.0, validated_tput=130.0, validated_gain_pct=30.0)
+    stack_event.record_validation(
+        stack_event.StackValidation(
+            stack_len=2,
+            graded=GradedComparison(objective="", candidate=130.0, reference=100.0, verdict=VERDICT_KEEP),
+            validated_gain_pct=30.0,
+        )
+    )
 
     validation = _outcome(tmp_path)
     assert validation["attributed_gain_pct"] == 30.0
@@ -381,7 +418,13 @@ def test_outcome_folds_explore_into_framework_agent(tmp_path):
 
 def test_outcome_notes_are_findings_and_empty_when_the_ledger_reconciles(tmp_path):
     _adopt(0, "explore", 100.0, 110.0)
-    stack_event.record_validation(stack_len=1, baseline_tput=100.0, validated_tput=110.0, validated_gain_pct=10.0)
+    stack_event.record_validation(
+        stack_event.StackValidation(
+            stack_len=1,
+            graded=GradedComparison(objective="", candidate=110.0, reference=100.0, verdict=VERDICT_KEEP),
+            validated_gain_pct=10.0,
+        )
+    )
 
     assert _outcome(tmp_path)["notes"] == []
 
@@ -400,14 +443,38 @@ def test_outcome_notes_name_the_anchor_movement_and_the_missing_measurement(tmp_
 
 
 def test_outcome_marks_attribution_unavailable_without_a_ledger_event():
-    validation = collect_v6_outcome(
-        session={"stop_reason": "signal"},
-        close={},
-        state={},
-        timeline=[],
-    )["validation"]
+    validation = collect_v6_outcome(OutcomeSources(session={"stop_reason": "signal"}, close={}, state={}, timeline=[]))[
+        "validation"
+    ]
 
     assert validation["attribution"]["available"] is False
     assert validation["attribution"]["by_source"]["warm_replay"]["total_gain_pct"] is None
     assert validation["reconciliation_gap_pct"] is None
     assert validation["notes"] == []
+
+
+def test_outcome_gain_figures_are_null_when_nothing_was_measured(tmp_path):
+    _adopt(0, "explore", 100.0, 120.0, baseline=0.0)
+
+    validation = _outcome(tmp_path)
+    assert validation["attributed_gain_pct"] is None
+    assert validation["unattributed_gain_pct"] is None
+
+
+def test_outcome_gain_figures_are_null_without_a_ledger():
+    validation = collect_v6_outcome(OutcomeSources(session={"stop_reason": "signal"}, close={}, state={}, timeline=[]))[
+        "validation"
+    ]
+
+    assert validation["attributed_gain_pct"] is None
+    assert validation["unattributed_gain_pct"] is None
+
+
+def test_a_session_that_kept_nothing_renders_no_contribution_sum(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers import optimizations
+
+    validation = _outcome(tmp_path)
+
+    assert optimizations.render({"outcome": {"validation": validation}}).key_facts == [
+        "0 adoption(s) recorded in the stack ledger."
+    ]

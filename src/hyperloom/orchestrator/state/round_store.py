@@ -68,6 +68,7 @@ __all__ = [
     "STALE_FENCE",
     "Round",
     "RoundEvent",
+    "RoundRequest",
     "RoundResult",
     "RoundStore",
 ]
@@ -122,17 +123,6 @@ class Round:
             expires_unix=float(row["expires_unix"]),
             settled_unix=None if settled is None else float(settled),
         )
-
-    def excludes_at(self, now_unix: float) -> bool:
-        """Report whether this round denies an acquire at ``now_unix``.
-
-        Args:
-            now_unix: The instant to test.
-
-        Returns:
-            bool: ``True`` when an acquire must be denied.
-        """
-        return self.state == OPEN
 
 
 @dataclass(frozen=True)
@@ -191,6 +181,21 @@ class RoundEvent:
 
 
 @dataclass(frozen=True)
+class RoundRequest:
+    """The caller's stamp on one attempt against a round.
+
+    Attributes:
+        request_id: The caller's id for this attempt.
+        now_unix: Current wall time.
+        evidence: Recorded on the outbox row.
+    """
+
+    request_id: str
+    now_unix: float
+    evidence: Mapping[str, Any] = field(default_factory=lambda: _NO_EVIDENCE)
+
+
+@dataclass(frozen=True)
 class RoundResult:
     """What an operation did.
 
@@ -233,25 +238,21 @@ class RoundStore:
     async def open(
         self,
         round_id: str,
+        request: RoundRequest,
         *,
         holder_task_id: str,
         lease_sec: float,
-        now_unix: float,
-        request_id: str,
         join: Callable[[sqlite3.Cursor], None] | None = None,
-        evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """Acquire the round, if and only if no live exclusion denies it.
 
         Args:
             round_id: Identity of the round to acquire.
+            request: The caller's id, wall time and evidence for this attempt.
             holder_task_id: The task that will hold it.
             lease_sec: How long the acquire is good for without a renewal.
-            now_unix: Current wall time.
-            request_id: The caller's id for this attempt.
             join: Ran with the acquiring cursor once the insert succeeds; its
                 writes commit with the acquire or not at all.
-            evidence: Recorded on the outbox row.
 
         Returns:
             RoundResult: ``ok`` when the round was acquired; otherwise
@@ -259,14 +260,15 @@ class RoundStore:
         """
         attempt = _Attempt(
             round_id=round_id,
-            request_id=request_id,
+            request_id=request.request_id,
             op="open",
             actor_task_id=holder_task_id,
             fence=0,
             outcome="",
-            evidence=evidence,
-            now_unix=now_unix,
+            evidence=request.evidence,
+            now_unix=request.now_unix,
         )
+        now_unix = request.now_unix
         opened = Round(
             round_id=round_id,
             state=OPEN,
@@ -310,20 +312,16 @@ class RoundStore:
     async def renew(
         self,
         held: Round,
+        request: RoundRequest,
         *,
         lease_sec: float,
-        now_unix: float,
-        request_id: str,
-        evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """Extend an open round's lease without changing who holds it.
 
         Args:
             held: The round as its holder last read it.
-            lease_sec: How much longer the lease is good for, from ``now_unix``.
-            now_unix: Current wall time.
-            request_id: The caller's id for this attempt.
-            evidence: Recorded on the outbox row.
+            request: The caller's id, wall time and evidence for this attempt.
+            lease_sec: How much longer the lease is good for, from ``request.now_unix``.
 
         Returns:
             RoundResult: ``ok`` when the lease moved; otherwise ``reason``.
@@ -331,31 +329,25 @@ class RoundStore:
         return await self._swap(
             held,
             "renew",
-            lambda current: replace(current, renewed_unix=now_unix, expires_unix=now_unix + lease_sec),
-            request_id=request_id,
-            now_unix=now_unix,
-            evidence=evidence,
+            lambda current: replace(current, renewed_unix=request.now_unix, expires_unix=request.now_unix + lease_sec),
+            request,
         )
 
     async def handoff(
         self,
         held: Round,
+        request: RoundRequest,
         *,
         new_holder_task_id: str,
         lease_sec: float,
-        now_unix: float,
-        request_id: str,
-        evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """Move an open round to a new holder, advancing the fence.
 
         Args:
             held: The round as its current holder last read it.
+            request: The caller's id, wall time and evidence for this attempt.
             new_holder_task_id: The task taking it over.
-            lease_sec: The new holder's lease, from ``now_unix``.
-            now_unix: Current wall time.
-            request_id: The caller's id for this attempt.
-            evidence: Recorded on the outbox row.
+            lease_sec: The new holder's lease, from ``request.now_unix``.
 
         Returns:
             RoundResult: ``ok`` with the advanced ``fence``; otherwise
@@ -368,31 +360,25 @@ class RoundStore:
                 current,
                 holder_task_id=new_holder_task_id,
                 fence=current.fence + 1,
-                renewed_unix=now_unix,
-                expires_unix=now_unix + lease_sec,
+                renewed_unix=request.now_unix,
+                expires_unix=request.now_unix + lease_sec,
             ),
-            request_id=request_id,
-            now_unix=now_unix,
-            evidence=evidence,
+            request,
         )
 
     async def settle(
         self,
         held: Round,
+        request: RoundRequest,
         *,
         outcome: str,
-        now_unix: float,
-        request_id: str,
-        evidence: Mapping[str, Any] = _NO_EVIDENCE,
     ) -> RoundResult:
         """End the round, releasing the machine.
 
         Args:
             held: The round as its holder last read it.
+            request: The caller's id, wall time and evidence for this attempt.
             outcome: One of :data:`OUTCOMES`.
-            now_unix: Current wall time.
-            request_id: The caller's id for this attempt.
-            evidence: Recorded on the outbox row.
 
         Returns:
             RoundResult: ``ok`` when the round settled, ``duplicate`` when this
@@ -406,10 +392,8 @@ class RoundStore:
         return await self._swap(
             held,
             "settle",
-            lambda current: replace(current, state=SETTLED, outcome=outcome, settled_unix=now_unix),
-            request_id=request_id,
-            now_unix=now_unix,
-            evidence=evidence,
+            lambda current: replace(current, state=SETTLED, outcome=outcome, settled_unix=request.now_unix),
+            request,
             outcome=outcome,
         )
 
@@ -418,10 +402,8 @@ class RoundStore:
         held: Round,
         op: str,
         advance: Callable[[Round], Round],
+        request: RoundRequest,
         *,
-        request_id: str,
-        now_unix: float,
-        evidence: Mapping[str, Any],
         outcome: str = "",
     ) -> RoundResult:
         """Replace the round with ``advance(current)`` while ``held`` still names its holder and fence.
@@ -430,13 +412,13 @@ class RoundStore:
         """
         attempt = _Attempt(
             round_id=held.round_id,
-            request_id=request_id,
+            request_id=request.request_id,
             op=op,
             actor_task_id=held.holder_task_id,
             fence=held.fence,
             outcome=outcome,
-            evidence=evidence,
-            now_unix=now_unix,
+            evidence=request.evidence,
+            now_unix=request.now_unix,
         )
         async with self.db.transaction() as cur:
             current = _load(cur, held.round_id)

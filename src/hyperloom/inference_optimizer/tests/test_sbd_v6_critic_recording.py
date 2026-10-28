@@ -14,14 +14,12 @@ from pathlib import Path
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6_critic import collect_v6_critic
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
-from hyperloom.inference_optimizer.breakdown.recorder.critic_out import record_critic_iteration
+from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIteration, record_critic_iteration
 
 
 def _emit(topic: str, body: str) -> dict:
     """An emitted envelope shaped as the agent writes ``emit.json``."""
     return {
-        "kind": "coordinator_inbox",
-        "kb_writes": [{"kind": "point"}],
         "intent_envelope": {"intents": [{"intent_type": "send_message", "payload": {"topic": topic, "body_md": body}}]},
     }
 
@@ -49,7 +47,7 @@ def _record(session_dir: Path, *, iter_n: int, **overrides) -> None:
         workdir=session_dir / "critic-workdir" / f"{iter_n:06d}",
     )
     kwargs.update(overrides)
-    record_critic_iteration(session_dir, **kwargs)
+    record_critic_iteration(session_dir, CriticIteration(**kwargs))
 
 
 def test_an_iteration_carries_its_verdict_and_its_artifacts(tmp_path: Path) -> None:
@@ -63,8 +61,7 @@ def test_an_iteration_carries_its_verdict_and_its_artifacts(tmp_path: Path) -> N
     assert row["summary"] == "the flag pays for itself"
     assert row["phase"] == "FRAMEWORK"
     assert row["macro_cycle"] == 3
-    assert row["review_path"].endswith("review.json")
-    assert row["kb_writes"] == [{"kind": "point"}]
+    assert row["review_path"] == "critic-workdir/000001/review.json"
     assert row["ts"]
 
 
@@ -108,12 +105,12 @@ def test_re_recording_the_same_iteration_stays_one_row(tmp_path: Path) -> None:
     assert len(_iterations(tmp_path)) == 1
 
 
-def test_iterations_are_ordered_as_the_agent_ran_them(tmp_path: Path) -> None:
+def test_iterations_are_ordered_by_when_they_were_recorded(tmp_path: Path) -> None:
     _record(tmp_path, iter_n=3)
     _record(tmp_path, iter_n=1)
     _record(tmp_path, iter_n=2)
 
-    assert [r["iter"] for r in _iterations(tmp_path)] == [1, 2, 3]
+    assert [r["iter"] for r in _iterations(tmp_path)] == [3, 1, 2]
 
 
 def test_a_session_the_critic_never_reviewed_reports_no_iterations(tmp_path: Path) -> None:

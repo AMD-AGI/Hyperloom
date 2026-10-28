@@ -15,6 +15,9 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     _section_reference_index,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mcp_context_tools import (
@@ -46,7 +49,14 @@ def file_reader(refs_dir):
             return f"(not found: {name!r}; available: {available})"
         return candidate.read_text(encoding="utf-8")
 
-    return ContextProvider(shared_state=None, reference_reader=_read)
+    return ContextProvider(
+        shared_state=None,
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
+        recent_outcomes_reader=lambda top_k: "",
+        running_tasks_reader=lambda: "",
+        reference_reader=_read,
+    )
 
 
 # Reference directory contract
@@ -118,14 +128,16 @@ def test_reference_index_present_in_prompt(registry, refs_dir):
         text = build_orchestration_prompt(
             action_registry=registry,
             enabled_actions=default_enabled_actions(no_kernel=False),
-            framework="sglang",
-            kernel_enabled=True,
-            framework_agent_phase_enabled=True,
-            objective_kind="gain_pct",
-            objective_value=15.0,
-            max_minutes=480,
-            phase=phase,
-            references_dir=refs_dir,
+            session=SessionContext(
+                framework="sglang",
+                kernel_enabled=True,
+                framework_agent_phase_enabled=True,
+                objective_kind="gain_pct",
+                objective_value=15.0,
+                max_minutes=480,
+            ),
+            cycle=PromptCycle(phase=phase),
+            assets=PromptAssets(references_dir=refs_dir),
         )
         assert "## 8. ON-DEMAND REFERENCE INDEX" in text, f"reference index missing from {phase} prompt"
 
@@ -168,9 +180,3 @@ def test_read_reference_unknown_name_returns_available_list(file_reader):
     result = file_reader.read_reference("nonexistent_reference_xyz")
     assert "not found" in result
     assert "available" in result
-
-
-def test_read_reference_not_wired_returns_marker():
-    """A ContextProvider with no reference_reader returns a clear marker string."""
-    provider = ContextProvider(shared_state=None)
-    assert "not wired" in provider.read_reference("anything")

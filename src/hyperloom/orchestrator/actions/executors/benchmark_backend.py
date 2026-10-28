@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 # Backend selection env var.
@@ -19,6 +22,9 @@ class BenchmarkBackend(Protocol):
     """Builds the benchmark subprocess command for one benchmark run."""
 
     name: str
+    #: What a round that only boots the persistent server (and leaves it up for the rounds that measure) must carry in
+    #: its config's ``benchmark.envs`` to stop after the server phase; empty when the backend needs nothing said.
+    boot_phase_envs: Mapping[str, str]
 
     def build_command(
         self,
@@ -35,6 +41,10 @@ class MagpieBackend:
     """Default backend: launches Magpie's local benchmark subprocess."""
 
     name = "magpie"
+    #: Nothing. Magpie sets ``MAGPIE_RUN_PHASE`` itself on the processes it starts, and it keeps every config env that is
+    #: not one of its client-only keys as the persistent server's reuse identity: a boot round that carried the key
+    #: would make every round that measures on that server fail its reuse check ("Reuse metadata mismatch").
+    boot_phase_envs: Mapping[str, str] = MappingProxyType({})
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
@@ -73,6 +83,8 @@ class BypassBackend:
     """Bypass backend: launches Hyperloom's own benchmark runner."""
 
     name = "bypass"
+    #: The runner reads the phase from ``benchmark.envs`` (it has no reuse check on envs, and nothing else says it).
+    boot_phase_envs: Mapping[str, str] = MappingProxyType({"MAGPIE_RUN_PHASE": "server"})
 
     def resolve_interpreter(self) -> str:
         """Return a plain python3 for bypass (no Magpie import needed)."""

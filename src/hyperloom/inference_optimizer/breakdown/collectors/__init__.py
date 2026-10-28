@@ -16,27 +16,15 @@ events into the shape the report reads.
 
 from __future__ import annotations
 
-from ._common import (
-    _load_json_safe as _load_json_safe,
-    _load_jsonl_safe as _load_jsonl_safe,
-    _to_float as _to_float,
-    _to_int as _to_int,
-    _safe_get as _safe_get,
-    _parse_iso_unix as _parse_iso_unix,
-)
 from .sessions import (
-    log as log,
-    _detect_image_for_session as _detect_image_for_session,
-    _close_phase_stop_reason as _close_phase_stop_reason,
-    _should_use_close_stop_reason as _should_use_close_stop_reason,
-    _collect_recovery as _collect_recovery,
     collect_session as collect_session,
-    session_elapsed_minutes as session_elapsed_minutes,
     collect_workload as collect_workload,
     collect_model_info as collect_model_info,
 )
 from .langfuse import collect_langfuse as collect_langfuse
 from .v6 import (
+    MetadataSources as MetadataSources,
+    OutcomeSources as OutcomeSources,
     collect_v6_metadata as collect_v6_metadata,
     langfuse_block as langfuse_block,
     collect_v6_outcome as collect_v6_outcome,
@@ -44,9 +32,10 @@ from .v6 import (
 )
 from .v6_close import collect_v6_close as collect_v6_close
 from .v6_critic import collect_v6_critic as collect_v6_critic
-from .v6_robustness import collect_v6_robustness as collect_v6_robustness
 
 __all__ = [
+    "MetadataSources",
+    "OutcomeSources",
     "collect_langfuse",
     "collect_model_info",
     "collect_session",
@@ -54,9 +43,7 @@ __all__ = [
     "collect_v6_critic",
     "collect_v6_metadata",
     "collect_v6_outcome",
-    "collect_v6_robustness",
     "collect_v6_timeline",
     "collect_workload",
     "langfuse_block",
-    "session_elapsed_minutes",
 ]

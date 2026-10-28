@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collecto
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
     record_close_opened,
     record_close_settled,
     record_close_step,
@@ -47,9 +48,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def _record_steps(session_dir: Path, steps: tuple[str, ...]) -> None:
     for step in steps:
         record_close_step(
-            session_dir,
-            step=step,
-            status="running" if step == "sequencer_started" else "done",
+            session_dir, CloseStep(step=step, status="running" if step == "sequencer_started" else "done")
         )
 
 
@@ -62,7 +61,7 @@ def _session_with_step_two_breakdown(tmp_path: Path) -> Path:
     exporter.write_breakdown_json(tmp_path)
     # The sequencer then finishes, recording the remaining steps and its verdict.
     _record_steps(tmp_path, _CLOSE_STEPS[4:])
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
     return tmp_path / exporter.BREAKDOWN_FILENAME
 
 
@@ -105,7 +104,7 @@ def test_close_patch_is_idempotent(tmp_path):
 def test_close_patch_is_a_no_op_without_a_breakdown(tmp_path):
     record_close_opened(tmp_path)
     _record_steps(tmp_path, _CLOSE_STEPS)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     assert exporter.patch_breakdown_close(tmp_path) is False
 
@@ -115,21 +114,20 @@ def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
     _write_json(target, {"schema_version": "hyperloom.session_breakdown.v5.0", "outcome": {}})
     record_close_opened(tmp_path)
     _record_steps(tmp_path, _CLOSE_STEPS)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     assert exporter.patch_breakdown_close(tmp_path) is False
     assert "close" not in json.loads(target.read_text(encoding="utf-8"))
 
 
-def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
-    target = tmp_path / exporter.BREAKDOWN_FILENAME
-    target.write_text("{not json", encoding="utf-8")
-
-    assert exporter.patch_breakdown_close(tmp_path) is False
-    assert target.read_text(encoding="utf-8") == "{not json"
-
-
 # what the consumer actually receives
+def _package_dest(tmp_path: Path, monkeypatch) -> Path:
+    """Point session packaging at a scratch root and return it."""
+    dest_root = tmp_path / "dest"
+    monkeypatch.setenv(session_package.ENV_PACKAGE_DEST_ROOT, str(dest_root))
+    return dest_root
+
+
 def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
     """Return the ``close`` key as delivered, from inside the zip and loose."""
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
@@ -139,14 +137,14 @@ def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
     return zipped["close"], loose["close"]
 
 
-def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
+def test_the_delivered_package_carries_the_finished_close_section(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     assert exporter.patch_breakdown_close(session_dir) is True
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
 
     zipped, loose = _packaged_close(session_dir, dest_root)
     for delivered in (zipped, loose):
@@ -155,12 +153,12 @@ def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
         assert [step["step"] for step in delivered["steps"]] == list(_CLOSE_STEPS)
 
 
-def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
+def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     target = _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     exporter.patch_breakdown_close(session_dir)
 
     assert json.loads(target.read_text(encoding="utf-8"))["close"]["status"] == "succeeded"
@@ -170,14 +168,14 @@ def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
         assert [step["step"] for step in stale["steps"]] == list(_STEPS_AT_BREAKDOWN)
 
 
-def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
+def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path, monkeypatch):
     session_dir = tmp_path / "session"
-    dest_root = tmp_path / "dest"
+    dest_root = _package_dest(tmp_path, monkeypatch)
     _session_with_step_two_breakdown(session_dir)
 
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
     exporter.patch_breakdown_close(session_dir)
-    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1")
 
     zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
     with zipfile.ZipFile(zip_path) as bundle:
@@ -191,10 +189,9 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
 # ---------------------------------------------------------------------------
 def _v6_outcome(timeline: list | None = None) -> dict:
     return v6_collectors.collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close={},
-        state={"phase": "CLOSE"},
-        timeline=timeline or [],
+        v6_collectors.OutcomeSources(
+            session={"stop_reason": "target_reached"}, close={}, state={"phase": "CLOSE"}, timeline=timeline or []
+        )
     )
 
 
@@ -213,7 +210,7 @@ def _baseline_action(
         "end_time": end_time,
         "request": {"task_id": task_id, "establishes_quality_ref": establishes_quality_ref},
         "measurement": {
-            "throughput_tok_s_per_gpu": throughput,
+            "output_throughput": throughput,
             "accuracy": 0.81,
             "ttft_mean_ms": 120.0,
             "e2el_mean_ms": 900.0,
@@ -247,7 +244,7 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
     outcome = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=800.0))])
 
     assert outcome["baseline"] == {
-        "throughput_tok_s_per_gpu": 800.0,
+        "output_throughput": 800.0,
         "accuracy": 0.81,
         "ttft_mean_ms": 120.0,
         "e2el_mean_ms": 900.0,
@@ -287,7 +284,7 @@ def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():
         ],
     )
 
-    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 800.0
+    assert outcome["baseline"]["output_throughput"] == 800.0
 
 
 def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
@@ -298,16 +295,50 @@ def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
         ],
     )
 
-    assert outcome["baseline"]["throughput_tok_s_per_gpu"] == 845.0
+    assert outcome["baseline"]["output_throughput"] == 845.0
+
+
+def test_outcome_final_names_the_recipe_throughput_as_the_whole_server_output_axis():
+    outcome = v6_collectors.collect_v6_outcome(
+        v6_collectors.OutcomeSources(
+            session={"stop_reason": "target_reached"},
+            close={"final_recipe": {"throughput": 910.0}},
+            state={"phase": "CLOSE"},
+            timeline=[],
+        )
+    )
+
+    assert outcome["final"]["output_throughput"] == 910.0
+    assert sorted(outcome["final"]) == [
+        "action_path",
+        "e2el_mean_ms",
+        "extra_envs",
+        "extra_server_args",
+        "gain_pct",
+        "graded_on",
+        "invocation",
+        "output_throughput",
+        "perf",
+        "ttft_mean_ms",
+    ]
+    assert sorted(outcome["baseline"]) == [
+        "accuracy",
+        "e2el_mean_ms",
+        "output_throughput",
+        "perf",
+        "submission_invalid_reasons",
+        "submission_valid",
+        "ttft_mean_ms",
+    ]
 
 
 def test_outcome_baseline_keeps_a_degraded_anchor_and_drops_a_failed_one():
     degraded = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="degraded"))])
     failed = _v6_outcome([_baseline_event(_baseline_action(task_id="b-1", throughput=770.0, status="failed"))])
 
-    assert degraded["baseline"]["throughput_tok_s_per_gpu"] == 770.0
+    assert degraded["baseline"]["output_throughput"] == 770.0
     assert failed["baseline"] == {
-        "throughput_tok_s_per_gpu": None,
+        "output_throughput": None,
         "accuracy": None,
         "ttft_mean_ms": None,
         "e2el_mean_ms": None,

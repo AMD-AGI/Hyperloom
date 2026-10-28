@@ -7,7 +7,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,11 +23,10 @@ from kernelforge.orchestrator.agent_response import (
     validated_agent_text,
 )
 from kernelforge.orchestrator.contracts import (
-    DispatchPlan,
     LaneDrop,
     OrchestrationContext,
     PlanCriticOutcome,
-    SpecialistOutcome,
+    SpecialistRound,
     SynthesizedPlan,
 )
 from kernelforge.orchestrator.structured_output import (
@@ -334,9 +333,7 @@ def build_plan_critic_prompts(
     *,
     context: OrchestrationContext,
     drafts: Sequence[SynthesizedPlan],
-    dispatch_plan: DispatchPlan,
-    specialist_outcomes: Sequence[SpecialistOutcome],
-    coverage: Mapping[str, object],
+    specialists: SpecialistRound,
 ) -> tuple[str, str]:
     """Build one bounded critic request from persisted planning evidence."""
     if not drafts:
@@ -347,9 +344,9 @@ def build_plan_critic_prompts(
             "accept it, revise it, or replace its implementation route."
         ),
         "context": context.to_prompt_dict(),
-        "dispatch_plan": dispatch_plan.to_dict(),
-        "specialist_coverage": dict(coverage),
-        "specialist_outcomes": [outcome.to_dict() for outcome in specialist_outcomes],
+        "dispatch_plan": specialists.dispatch_plan.to_dict(),
+        "specialist_coverage": dict(specialists.coverage),
+        "specialist_outcomes": [outcome.to_dict() for outcome in specialists.outcomes],
     }
     if len(drafts) == 1:
         payload["draft_plan"] = drafts[0].text
@@ -408,19 +405,11 @@ class PlanCriticAgent:
         *,
         context: OrchestrationContext,
         drafts: Sequence[SynthesizedPlan],
-        dispatch_plan: DispatchPlan,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        coverage: Mapping[str, object],
+        specialists: SpecialistRound,
         usage=None,
     ) -> PlanCriticOutcome:
         """Review one round; every backend/output failure accepts fail-open."""
-        system_prompt, user_prompt = build_plan_critic_prompts(
-            context=context,
-            drafts=drafts,
-            dispatch_plan=dispatch_plan,
-            specialist_outcomes=specialist_outcomes,
-            coverage=coverage,
-        )
+        system_prompt, user_prompt = build_plan_critic_prompts(context=context, drafts=drafts, specialists=specialists)
         budget_sec = self._budget_for(len(drafts))
         started_at = time.monotonic()
         try:
@@ -446,7 +435,7 @@ class PlanCriticAgent:
                 ),
                 timeout=watchdog_timeout_sec(budget_sec),
             )
-        except Exception as error:  # noqa: BLE001 - provider boundary
+        except Exception as error:  # noqa: BLE001 - isolation boundary: one round's plan-critic review
             return self._fail_open(error, started_at=started_at)
 
         try:
@@ -555,7 +544,8 @@ class PlanCriticAgent:
                 role=_WIDTH_BLOCK_LABEL,
                 allow_incomplete=True,
             )
-        except Exception as error:  # noqa: BLE001 - provider boundary
+        except Exception as error:  # isolation boundary: one width-block repair call
+            log.warning("plan critic width repair pass failed: %s", error, exc_info=True)
             return self._unrepaired(
                 ruling,
                 f"one repair pass for the width block failed: {_bounded_error_detail(error)}",
@@ -636,6 +626,7 @@ class PlanCriticAgent:
             "plan critic failed open to the draft after %.3fs: %s",
             duration_sec,
             detail,
+            exc_info=error,
         )
         return PlanCriticOutcome(
             verdict="NOT_REVIEWED",

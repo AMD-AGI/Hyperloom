@@ -85,6 +85,12 @@ def test_all_saturated_directions_stop_reloop():
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
+    st.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
+    assert evidence["terminal"] is True
+    assert evidence["saturated_directions"] == ["comm_specialist", "kernel_switch_specialist"]
+
 
 def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
@@ -92,59 +98,6 @@ def test_saturation_convergence_is_always_enabled():
     reloop, ev = ps._reloop_decision(ps.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
-
-
-# Absolute per-phase cap + 14-day ceiling for unbounded runs
-def test_phase_cap_binds_on_session_term_for_short_runs():
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
-    st = SharedState(
-        phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=120, phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    )
-    cap = ps.phase_cap_seconds(st)
-    assert cap == pytest.approx(120 * 60 * pct)
-
-
-def test_phase_cap_binds_on_24h_reference_for_unbounded_runs():
-    import math
-
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
-    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0, phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT))
-    cap = ps.phase_cap_seconds(st)
-    assert cap == pytest.approx(math.ceil(24 * 60 * pct) * 60)
-
-
-def test_effective_max_minutes_unbounded_is_14_days():
-    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0)
-    assert ps.effective_max_minutes(st) == ps.DEFAULT_LONGRUN_MAX_MINUTES
-    assert ps.DEFAULT_LONGRUN_MAX_MINUTES == 14 * 24 * 60
-
-
-def test_unbounded_explore_exits_when_cap_exceeded():
-    now = 1_000_000.0
-    cap = ps.phase_cap_seconds(
-        SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0, phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT))
-    )
-    st = SharedState(
-        phase=ps.PHASE_FRAMEWORK_AGENT,
-        max_minutes=0,
-        phase_started_unix=now - (cap + 10),
-        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
-    )
-    out_full = ps.compute_next_phase(st, now_unix=now)
-    out = None if out_full is None else (out_full[1], out_full[2])
-    assert out is not None
-    assert out[0] == "optimize_budget_cap"
-
-
-def test_bounded_explore_does_not_hit_absolute_cap():
-    now = 1_000_000.0
-    st = SharedState(
-        phase=ps.PHASE_FRAMEWORK_AGENT,
-        max_minutes=600,
-        phase_started_unix=now - 60,
-        phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
-    )
-    assert ps.compute_next_phase(st, now_unix=now) is None
 
 
 # Vocab: the leverage reasons close a phase, they never stop the run

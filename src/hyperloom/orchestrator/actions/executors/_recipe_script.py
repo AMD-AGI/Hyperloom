@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script
+from hyperloom.common.coerce import first_text
 
 log = logging.getLogger(__name__)
 
@@ -25,40 +26,36 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
     ``benchmark_script`` names a server launcher on every non-AgentX run. The
-    AgentX switch pins the aiperf client there instead, so for that one recipe
+    MLPerf switch pins its client there instead, so for that one recipe
     shape the launcher is the builtin the client delegates to. Resolution
-    mirrors ``aiperf_client.sh``: the same ``AGENTX_SERVER_SCRIPT`` override,
+    mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT`` override,
     the same ``{framework}_{gpu}.sh`` fallback, the same ``<checkout>/benchmarks/``
     directory and no recursive search. Recipe-recorded values beat the ambient
     env because the recipe is the record of what actually ran.
     """
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
-    script = Path(str(bench.get("benchmark_script") or "").strip()).name
+    script = Path(first_text(bench.get("benchmark_script"))).name
     if not script:
         return ""
 
     if is_agentx_client_script(script):
-        script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+        script = first_text(envs.get("AGENTX_SERVER_SCRIPT"), os.environ.get("AGENTX_SERVER_SCRIPT"))
         if not script:
-            framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
+            framework = first_text(bench.get("framework"), envs.get("FRAMEWORK")).lower()
             if not framework:
                 return ""
-            gpu = (
-                str(
-                    envs.get("GPU_TYPE")
-                    or envs.get("RUNNER_TYPE")
-                    or bench.get("runner_type")
-                    or os.environ.get("GPU_TYPE")
-                    or os.environ.get("RUNNER_TYPE")
-                    or "mi300x"
-                )
-                .strip()
-                .lower()
-            )
+            gpu = first_text(
+                envs.get("GPU_TYPE"),
+                envs.get("RUNNER_TYPE"),
+                bench.get("runner_type"),
+                os.environ.get("GPU_TYPE"),
+                os.environ.get("RUNNER_TYPE"),
+                "mi300x",
+            ).lower()
             script = f"{framework}_{gpu}.sh"
 
     for root in (
-        str(bench.get("inferencex_path") or "").strip(),
+        first_text(bench.get("inferencex_path")),
         os.environ.get("INFERENCEX_PATH", "").strip(),
     ):
         if not root:

@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import csv
+import errno
 import gzip
 import io
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -81,7 +83,7 @@ def _assert_artifacts(result):
 
 
 def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
-    rc, result, _ = _run(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]), capsys)
+    rc, result, _ = _run(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]), capsys)
     assert rc == 0
     assert result["status"] == "ok" and result["route"] == "bypass"
     _assert_artifacts(result)
@@ -90,7 +92,7 @@ def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
 def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
     # bypass must accept --num-denoise-steps and surface it in the result.
     rc, result, _ = _run(
-        _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
+        _base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run", "--num-denoise-steps", "20"]),
         capsys,
     )
     assert rc == 0
@@ -237,7 +239,7 @@ def test_diffusion_report_totals_param_marks_full_scope():
         "no_perf_model_us": 0.0,
     }
     # kernels_aggregated reflects the all-kernel count, not len(hot_kernels).
-    r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, totals=totals, kernels_aggregated=137)
+    r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, workload=dr.WorkloadTotals(totals, kernel_count=137))
     assert r["kernel_scope"] == "all_device_kernels"
     assert r["kernels_aggregated"] == 137
     assert r["totals"]["sigma_actual_kernel_us"] == 100.0
@@ -696,7 +698,7 @@ def test_maybe_build_shape_manifest_enabled_caps_and_writes(tmp_path, monkeypatc
     monkeypatch.setattr(bta, "_sha256_file", lambda p: "hash")
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: {"status": "ok"})
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {"src": "stub"})
-    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [{"m": 1}], "warnings": []})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda *a, **k: {"rows": [{"m": 1}], "warnings": []})
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": "main.json"}, tmp_path, generated_at="2026-01-01")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # 2 shards capped to 1
@@ -714,24 +716,23 @@ def test_maybe_build_shape_manifest_bad_max_caps_and_skips_bad_shard(tmp_path, m
     _seq = iter([{"status": "ok"}, {"status": "error"}])
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: next(_seq))
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {})
-    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [], "warnings": ["w"]})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda *a, **k: {"rows": [], "warnings": ["w"]})
     res = bta._maybe_build_shape_manifest(_mk_args(analysis_mode=None), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # second (non-ok) shard skipped
     assert res["warnings"] == ["w"]
 
 
-def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
-    # any failure -> {"status": "error: ..."}; never raises.
+def test_a_manifest_that_cannot_be_built_fails_the_analysis(tmp_path, monkeypatch):
+    # Without this run's manifest, forge would resolve an older trace's manifest instead.
     monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", "1")
 
-    def _boom(*a, **k):
-        raise RuntimeError("disk gone")
+    def _disk_full(*_args, **_kwargs):
+        raise OSError("No space left on device")
 
-    monkeypatch.setattr(bta, "_discover_capture_shards", _boom)
-    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
-    assert res["status"].startswith("error:")
-    assert "RuntimeError" in res["status"]
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", _disk_full)
+    with pytest.raises(OSError, match="No space left on device"):
+        bta.main(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]))
 
 
 def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
@@ -769,7 +770,9 @@ def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypat
         monkeypatch.setattr(
             bta._tsm,
             "build_shape_manifest",
-            lambda **k: (seen.extend(label for label, _an in k["capture_variants"]), {"rows": [], "warnings": []})[1],
+            lambda main, captures, origin, **k: (seen.extend(c.label for c in captures), {"rows": [], "warnings": []})[
+                1
+            ],
         )
         bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
         return seen
@@ -796,7 +799,7 @@ def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):
     )
     analyzed: list[object] = []
 
-    def _analyze(path, **kw):
+    def _analyze(path, options):
         analyzed.append(path)
         return {"status": "empty"}
 
@@ -896,7 +899,7 @@ def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
     # graph_under_recorded.
     trace = tmp_path / "g.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
-    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    out = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))
     attr = out["attribution"]
     cov = out["graph_coverage"]
     assert attr["graph_mode"] is True
@@ -912,7 +915,7 @@ def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
 def test_reader_no_graph_mode_when_no_graph_launches(tmp_path):
     trace = tmp_path / "ng.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
-    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    out = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))
     assert out["attribution"]["graph_mode"] is False
     assert out["graph_coverage"]["graph_under_recorded"] is False
 
@@ -954,7 +957,7 @@ def _graph_partial_replay_events():
 def test_graph_under_recorded_partial_replay_moderate_busy(tmp_path):
     trace = tmp_path / "partial.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_partial_replay_events()}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 3
     assert 0.5 < cov["busy_fraction"] < 0.9
     assert cov["graph_under_recorded"] is True
@@ -968,7 +971,7 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
     ]
     trace = tmp_path / "single.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 1
     assert cov["graph_under_recorded"] is False
 
@@ -997,7 +1000,7 @@ def _graph_fully_recorded_idle_events():
 def test_graph_fully_recorded_low_busy_not_under_recorded(tmp_path):
     trace = tmp_path / "idle.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_fully_recorded_idle_events()}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 4
     assert cov["graph_launches_with_kernels"] == 4
     assert cov["busy_fraction"] < 0.5
@@ -1031,16 +1034,11 @@ def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
         ("graph_k2", 100.0, 7, 6_000_000.0, 6_000_100.0),
         ("graph_k3", 100.0, 8, 9_000_000.0, 9_000_100.0),
     ]
+    buffers = bta._reader._TraceBuffers(k_events=k_events, graph_launch_corrs={5, 6, 7, 8})
     out = bta._reader._finalize(
-        k_events,
-        [],
-        {},
-        {},
-        {},
+        buffers,
         window=(0.0, 2_000_000.0),  # clips to only the corr-5 replay
         top_k=0,
-        graph_launch_corrs=frozenset({5, 6, 7, 8}),
-        graph_launch_count=4,
     )
     cov = out["graph_coverage"]
     assert cov["graph_launch_count"] == 4
@@ -1069,13 +1067,13 @@ def test_graph_launch_events_required_for_detection(tmp_path):
     # Raw trace (with hipGraphLaunch events) -> detected as graph, under-recorded.
     raw = tmp_path / "raw.trace.json"
     raw.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
-    raw_cov = bta._reader.analyze_trace(str(raw), top_k=0)["graph_coverage"]
+    raw_cov = bta._reader.analyze_trace(str(raw), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert raw_cov["graph_mode"] is True
     assert raw_cov["graph_under_recorded"] is True
     # Chunk with the launch runtime events stripped -> looks non-graph, so the artifact would be missed.
     chunk = tmp_path / "chunk.trace.json"
     chunk.write_bytes(json.dumps({"traceEvents": _graph_launch_stripped_events()}).encode("utf-8"))
-    chunk_cov = bta._reader.analyze_trace(str(chunk), top_k=0)["graph_coverage"]
+    chunk_cov = bta._reader.analyze_trace(str(chunk), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert chunk_cov["graph_mode"] is False
     assert chunk_cov["graph_under_recorded"] is False
 
@@ -1172,3 +1170,43 @@ def test_duration_warning_severity_is_graded(tmp_path, capsys):
     assert warn is not None and warn["severity"] == "warning"
     assert "unreliable" in warn["message"]
     assert "% of the" in warn["message"], "share of summed device time should be reported"
+
+
+def test_a_trace_the_reader_cannot_open_is_carried_as_a_degraded_analysis(tmp_path, capsys, monkeypatch, caplog):
+    trace = tmp_path / "t.trace.json"
+    denied = PermissionError(13, "Permission denied", str(trace))
+
+    def _unreadable(*_args, **_kwargs):
+        raise denied
+
+    monkeypatch.setattr(bta._reader, "analyze_trace", _unreadable)
+    with caplog.at_level(logging.WARNING, logger=bta.log.name):
+        rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+
+    assert (rc, result["status"], result["analysis_degraded"]) == (0, "ok", True)
+    assert [w for w in result["trace_health_warnings"] if w["code"] == "bypass_trace_parse_failed"] == [
+        {
+            "code": "bypass_trace_parse_failed",
+            "severity": "warning",
+            "message": f"bypass reader could not analyze trace: PermissionError: [Errno 13] Permission denied: '{trace}'",
+        }
+    ]
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("bypass trace analysis failed: ")]
+    assert record.exc_info[1] is denied
+
+
+def test_a_diffusion_sidecar_that_cannot_be_written_leaves_no_path(tmp_path, monkeypatch, caplog):
+    full = OSError(errno.ENOSPC, "No space left on device")
+
+    def _disk_full(*_args, **_kwargs):
+        raise full
+
+    monkeypatch.setattr(bta, "atomic_write_json", _disk_full)
+    args = _mk_args(framework="xdit", num_denoise_steps=20, target_platform="MI300X")
+    analyze = {"status": "ok", "timeline": {}, "kernels": []}
+    with caplog.at_level(logging.WARNING, logger=bta.log.name):
+        path = bta._write_diffusion_roofline(args, analyze, {"hot_kernels": []}, tmp_path, 0)
+
+    assert path is None
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("diffusion roofline sidecar failed: ")]
+    assert record.exc_info[1] is full

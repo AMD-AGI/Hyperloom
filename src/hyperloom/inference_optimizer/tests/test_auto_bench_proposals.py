@@ -20,9 +20,9 @@ class _Tasks:
     async def running(self):
         return self._running
 
-    async def create_or_return_existing(self, **kwargs):
-        existing = any(c["idempotency_key"] == kwargs["idempotency_key"] for c in self.created)
-        self.created.append(kwargs)
+    async def create_or_return_existing(self, spec):
+        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
 
@@ -44,7 +44,7 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
     state.phase = phase
     state.baseline_tput = 100.0
     state.baseline_config_path = "/cfg.yaml"
-    state.last_baseline = {"benchmark_script": "bench.sh"}
+    state.baseline_benchmark_script = "bench.sh"
     state.specialist_rounds = list(rounds)
     dispatcher = SimpleNamespace(
         admission_frozen=frozen,

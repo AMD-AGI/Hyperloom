@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 from . import __version__
 from .models import CompilePassOutcome, Diagnosis, FusionArtifacts, Recipe, ValidationResult
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 # v2 widens the ``verdict`` enum and adds the ``error`` block.
 FUSION_MANIFEST_SCHEMA_VERSION = 2
@@ -27,42 +28,67 @@ ANCHOR_RESOLVED_VERDICT = "anchor_resolved"
 ANCHOR_REPORT_NAME = "fusion_anchor.json"
 
 
+@dataclass(frozen=True)
+class ManifestSubject:
+    """What a fusion run analyzed: the framework, the model and the trace diagnosis."""
+
+    framework: str
+    model_path: str
+    model_type: str
+    diagnosis: Diagnosis
+
+
+@dataclass(frozen=True)
+class LocatedFusions:
+    """What discovery located: the top recipe, every candidate, and the kernel the operator named."""
+
+    recipe: Optional[Recipe]
+    candidates: Optional[list[Recipe]] = None
+    anchor: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """What the run has produced so far; ``verdict_override`` names an outcome that is not a kernel judgement."""
+
+    validation: Optional[ValidationResult] = None
+    artifacts: Optional[FusionArtifacts] = None
+    loop: Optional[dict[str, Any]] = None
+    compile_pass: Optional[CompilePassOutcome] = None
+    verdict_override: str = ""
+    error: Optional[dict[str, Any]] = None
+    patches: Optional[list[dict[str, Any]]] = None
+    nomination: Optional[dict[str, Any]] = None
+
+
 def build_manifest(
-    *,
-    framework: str,
-    model_path: str,
-    model_type: str,
-    diagnosis: Diagnosis,
-    recipe: Optional[Recipe],
-    candidates: Optional[list[Recipe]] = None,
-    validation: Optional[ValidationResult] = None,
-    artifacts: Optional[FusionArtifacts] = None,
-    loop: Optional[dict[str, Any]] = None,
-    verdict_override: str = "",
-    compile_pass: Optional[CompilePassOutcome] = None,
-    error: Optional[dict[str, Any]] = None,
-    patches: Optional[list[dict[str, Any]]] = None,
-    nomination: Optional[dict[str, Any]] = None,
-    anchor: Optional[dict[str, Any]] = None,
+    subject: ManifestSubject,
+    located: LocatedFusions,
+    outcome: RunOutcome = RunOutcome(),
 ) -> dict[str, Any]:
     """Assemble the JSON manifest dict."""
-    verdict = verdict_override or ("candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity")
+    diagnosis, recipe = subject.diagnosis, located.recipe
+    validation, artifacts, compile_pass = outcome.validation, outcome.artifacts, outcome.compile_pass
+    error, patches, nomination, anchor = outcome.error, outcome.patches, outcome.nomination, located.anchor
+    verdict = outcome.verdict_override or (
+        "candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity"
+    )
     return {
         "schema_version": FUSION_MANIFEST_SCHEMA_VERSION,
         # Manifest consumers key off this name; it stays even though the command is now `kernelforge forge-fuse`.
         "tool": "forge-fusion",
         "version": __version__,
         "verdict": verdict,
-        "framework": framework,
-        "model": {"path": model_path, "model_type": model_type},
+        "framework": subject.framework,
+        "model": {"path": subject.model_path, "model_type": subject.model_type},
         "diagnosis": diagnosis.to_dict(),
         "fusion": recipe.to_dict() if recipe is not None else None,
-        "fusion_candidates": [c.to_dict() for c in (candidates or [])],
+        "fusion_candidates": [c.to_dict() for c in (located.candidates or [])],
         "validation": validation.to_dict() if validation is not None else None,
         # A compile_pass claim is validated by a config + serving A/B, not by the kernel-level gates, so it carries
         # its own verdict.
         "compile_pass": compile_pass.to_dict() if compile_pass is not None else None,
-        "fusion_loop": loop,
+        "fusion_loop": outcome.loop,
         "artifacts": artifacts.to_dict() if artifacts is not None else None,
         "error": dict(error) if error else None,
         # The nomination contract: N independent sibling patches.

@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-import logging
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, NamedTuple
 
+from hyperloom.common.coerce import to_str_list
 from hyperloom.common.timeutil import now_iso
-
-log = logging.getLogger(__name__)
 
 # Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
 _INTERVENTION_MIX_CAP = 500
@@ -29,40 +28,11 @@ def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
     return {k: tested[k] for k in keys}
 
 
-def _stamp_cycle_on_tested(
-    tested: dict[str, Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> dict[str, Any]:
-    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(tested, dict):
-        return {}
-    bn = (bottleneck or "").strip()
-    for v in tested.values():
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return tested
-
-
-def _stamp_cycle_on_rejected(
-    rejected: list[Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> list[Any]:
-    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(rejected, list):
-        return []
-    bn = (bottleneck or "").strip()
-    for v in rejected:
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return rejected
+def _stamp_cycle(rows: Iterable[Any], cycle: int) -> None:
+    """Attribute each ledger row that carries no cycle to the macro-cycle it landed in."""
+    for row in rows:
+        if isinstance(row, dict):
+            row.setdefault("cycle", int(cycle))
 
 
 def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
@@ -77,6 +47,111 @@ def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+class _WinnerKey(NamedTuple):
+    """What makes a ``winners_history`` row distinct: the round, the variant, and when it landed."""
+
+    round_id: str
+    variant: str
+    ts: str
+
+
+def _winner_key(row: dict[str, Any]) -> _WinnerKey:
+    """The dedup identity of one winners_history row."""
+    return _WinnerKey(
+        round_id=str(row.get("round_id") or ""),
+        variant=str(row.get("fingerprint") or row.get("variant_name") or ""),
+        ts=str(row.get("ts") or ""),
+    )
+
+
+def _merge_winners_history(prior: Any, update: Any, cycle: int) -> list[dict[str, Any]]:
+    """Append a round's winners to the durable history, keeping the rows it already holds."""
+    merged = list(prior or [])
+    known = {_winner_key(row) for row in merged if isinstance(row, dict)}
+    for entry in update or []:
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        key = _winner_key(row)
+        if key in known:
+            continue
+        row.setdefault("cycle", cycle)
+        known.add(key)
+        merged.append(row)
+    return merged[-_WINNERS_HISTORY_CAP:]
+
+
+class _AcceptedConfig(NamedTuple):
+    """The configuration a promoted variant is replayed by, and the fingerprint it is keyed on."""
+
+    args: str
+    envs: dict[str, Any]
+    control_fields: dict[str, Any]
+    fingerprint: str
+
+
+def _control_fields(variant: dict[str, Any]) -> dict[str, Any]:
+    """The arg/env removal and replacement controls a variant carries, omitting the ones left at their default."""
+    fields: dict[str, Any] = {}
+    remove_args = to_str_list(variant.get("remove_args"))
+    if remove_args:
+        fields["remove_args"] = remove_args
+    unset_envs = to_str_list(variant.get("unset_envs"))
+    if unset_envs:
+        fields["unset_envs"] = unset_envs
+    if str(variant.get("args_mode") or "append").strip().lower() == "replace":
+        fields["args_mode"] = "replace"
+    return fields
+
+
+def _accepted_config(variant: dict[str, Any]) -> _AcceptedConfig:
+    """Read the config a promoted variant replays and the fingerprint it carries."""
+    return _AcceptedConfig(
+        args=str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or ""),
+        envs=dict(variant.get("extra_envs") or {}),
+        control_fields=_control_fields(variant),
+        fingerprint=str(variant["fingerprint"]),
+    )
+
+
+def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int) -> dict[str, Any]:
+    """The ``explore_search.accepted`` row recording one promoted variant."""
+    return {
+        "fingerprint": config.fingerprint,
+        "name": str(variant.get("name") or ""),
+        "extra_server_args": config.args,
+        "extra_envs": config.envs,
+        **config.control_fields,
+        "note": str(variant.get("note") or ""),
+        "tput": variant.get("output_throughput") or variant.get("tput"),
+        "gain_pct": variant.get("gain_pct"),
+        # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
+        # gated, not that it scored 0.
+        "accuracy": variant.get("accuracy"),
+        "stack_index": variant.get("stack_index"),
+        "accepted_at_round": str(variant.get("accepted_at_round") or ""),
+        "ts": str(variant.get("ts") or now_iso()),
+        "provenance": str(variant.get("provenance") or "llm_direct"),
+        # Attribute the win to the macro-cycle it landed in.
+        "cycle": cycle,
+    }
+
+
+def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
+    """The ``authored_framework_levers`` row for one accepted framework-rewrite switch."""
+    return {
+        "switch": str(entry.get("switch") or "").strip().upper(),
+        "value": str(entry.get("value") or "1"),
+        "category": str(entry.get("category") or ""),
+        "depends_on": list(entry.get("depends_on") or []),
+        "enables": list(entry.get("enables") or []),
+        "default_on": default_on,
+        # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
+        # "registered, not yet attributed".
+        "attributed_gain_pct": None,
+    }
+
+
 # Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
 GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
 
@@ -88,12 +163,17 @@ def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
 
 
 class _PhaseStateMixin:
-    def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
+    def record_specialist_round(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
+
+        A producer that stamps no ``completed_at`` is stamped now, since the
+        phase counts a round as its work by that time. Returns the stored row.
+        """
         if not isinstance(entry, dict) or not entry:
-            return
+            return None
         entry = dict(entry)
         entry.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
+        entry.setdefault("completed_at", now_iso())
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
             self.specialist_rounds.append(entry)
@@ -108,6 +188,7 @@ class _PhaseStateMixin:
             if not matched:
                 existing.append(entry)
         self._trim_specialist_rounds()
+        return entry
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
@@ -116,7 +197,7 @@ class _PhaseStateMixin:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
     def record_attempt(self, attempt: dict[str, Any]) -> None:
-        """Append one measured attempt; stamps the cycle the dryness judgment filters on."""
+        """Append one resolved attempt; stamps the cycle the dryness judgment filters on."""
         row = dict(attempt)
         row.setdefault("cycle", int(self.macro_cycle or 0))
         self.attempts.append(row)
@@ -197,36 +278,11 @@ class _PhaseStateMixin:
         matches.sort(key=lambda m: m[0])
         return matches[0][1]
 
-    def record_intervention(
-        self,
-        *,
-        change_type: str,
-        action: str,
-        task_id: str = "",
-        delta_pct: float | None = None,
-    ) -> None:
-        """Append one intervention entry and update config-only counters; the consecutive-config counter advances on ``\"config\"`` and resets on ``\"code_patch\"``."""
-        ct = str(change_type or "").strip().lower()
-        entry = {
-            "change_type": ct,
-            "action": str(action or ""),
-            "task_id": str(task_id or ""),
-            "delta_pct": delta_pct,
-            "ts": now_iso(),
-        }
-        self.intervention_mix.append(entry)
-        cap = _INTERVENTION_MIX_CAP
-        if len(self.intervention_mix) > cap:
-            self.intervention_mix = self.intervention_mix[-cap:]
-        if ct == "config":
-            self.consecutive_config_only_rounds = int(self.consecutive_config_only_rounds or 0) + 1
-        elif ct == "code_patch":
-            self.consecutive_config_only_rounds = 0
-
-    def bump_research_scout_runs(self, n: int = 1) -> int:
-        """Increment the research-scout dispatch counter; return new total."""
-        self.research_scout_runs = int(self.research_scout_runs or 0) + int(n)
-        return self.research_scout_runs
+    def record_intervention(self, *, change_type: str) -> None:
+        """Append one intervention entry (capped to the most recent rows)."""
+        self.intervention_mix.append({"change_type": str(change_type or "").strip().lower()})
+        if len(self.intervention_mix) > _INTERVENTION_MIX_CAP:
+            self.intervention_mix = self.intervention_mix[-_INTERVENTION_MIX_CAP:]
 
     def register_seen_pr_ids(self, pr_ids: Any) -> int:
         """Add PR ids to the shared seen-set (scout + FRAMEWORK dedup); returns count newly added."""
@@ -245,10 +301,6 @@ class _PhaseStateMixin:
             self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
         return added
 
-    def reset_explore_plateau_proxy(self) -> None:
-        """Reset the explore plateau proxy counter."""
-        self.params_no_promote_streak = 0
-
     def reset_per_cycle_plateau_state(self) -> None:
         """Reset transient plateau and dispatch state for a macro-cycle."""
         self.params_no_promote_streak = 0
@@ -260,12 +312,8 @@ class _PhaseStateMixin:
         self.last_conc_sweep = {}
         self.conc_sweep_granted_until_unix = 0.0
 
-    def open_macro_cycle(self, *, no_gain_cycle_streak: int | None = None) -> int:
-        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state.
-
-        Returns:
-            int: The new ``macro_cycle``.
-        """
+    def open_macro_cycle(self, *, no_gain_cycle_streak: int) -> None:
+        """Finish the current macro-cycle's strategy row, start the next cycle, and reset its per-cycle state."""
         finished = self.macro_cycle
         gain_delta = round(self.cumulative_gain_validated - self.gain_at_cycle_start, 6)
         rows = [r for r in self.cycle_strategy_log if isinstance(r, dict)]
@@ -274,16 +322,14 @@ class _PhaseStateMixin:
                 row["gain_delta"] = gain_delta
         self.cycle_strategy_log = rows[-50:]
         self.macro_cycle = finished + 1
-        if no_gain_cycle_streak is not None:
-            self.no_gain_cycle_streak = no_gain_cycle_streak
+        self.no_gain_cycle_streak = no_gain_cycle_streak
         self.gain_at_cycle_start = self.cumulative_gain_validated
         self.reset_per_cycle_plateau_state()
-        return self.macro_cycle
 
     def note_explore_outcome(self, *, promoted: bool) -> None:
         """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
         if promoted:
-            self.reset_explore_plateau_proxy()
+            self.params_no_promote_streak = 0
         else:
             self.params_no_promote_streak += 1
 
@@ -292,15 +338,11 @@ class _PhaseStateMixin:
         subject: str,
         verdict: str,
     ) -> None:
-        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review."""
+        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites)."""
         sid = str(subject or "").strip()
         if not sid:
             return
-        v = str(verdict or "").strip().lower()
-        if not v:
-            self.specialist_patch_verdicts.pop(sid, None)
-            return
-        self.specialist_patch_verdicts[sid] = v
+        self.specialist_patch_verdicts[sid] = str(verdict or "").strip().lower()
 
     def get_specialist_patch_verdict(
         self,
@@ -318,120 +360,38 @@ class _PhaseStateMixin:
             return
         prior = self.explore_search if isinstance(self.explore_search, dict) else {}
         merged = dict(prior)
-        merged["schema_version"] = int(update.get("schema_version") or 1)
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
-        cur_bottleneck = self.current_top_bottleneck()
         # The executor reports the round it just benched; accumulating it over the
         # durable ledger is this layer's job, and a re-measured fingerprint replaces
         # its earlier row because that is what a fresh measurement means.
-        merged["tested"] = _cap_tested_ledger(
-            _stamp_cycle_on_tested(
-                {**(prior.get("tested") or {}), **(update.get("tested") or {})},
-                cur_cycle,
-                cur_bottleneck,
-            )
-        )
-        merged["rejected"] = _stamp_cycle_on_rejected(
-            _merge_rejected(prior.get("rejected"), update.get("rejected")),
-            cur_cycle,
-            cur_bottleneck,
-        )
-        merged["name_index"] = {**(prior.get("name_index") or {}), **(update.get("name_index") or {})}
+        tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
+        _stamp_cycle(tested.values(), cur_cycle)
+        merged["tested"] = _cap_tested_ledger(tested)
+        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
+        _stamp_cycle(rejected, cur_cycle)
+        merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
         # round ids on it, so it has to advance once per benched round.
         merged["cursor"] = int(prior.get("cursor") or 0) + 1
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
-        wh = list(prior.get("winners_history") or [])
-        known = {
-            (
-                str(row.get("round_id") or ""),
-                str(row.get("fingerprint") or row.get("variant_name") or ""),
-                str(row.get("ts") or ""),
-            )
-            for row in wh
-            if isinstance(row, dict)
-        }
-        for entry in update.get("winners_history") or []:
-            if not isinstance(entry, dict):
-                continue
-            row = dict(entry)
-            key = (
-                str(row.get("round_id") or ""),
-                str(row.get("fingerprint") or row.get("variant_name") or ""),
-                str(row.get("ts") or ""),
-            )
-            if key in known:
-                continue
-            row.setdefault("cycle", cur_cycle)
-            known.add(key)
-            wh.append(row)
-        merged["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
-        merged["domains_round_summary"] = list(
-            update.get("domains_round_summary") or prior.get("domains_round_summary") or []
+        merged["winners_history"] = _merge_winners_history(
+            prior.get("winners_history"),
+            update.get("winners_history"),
+            cur_cycle,
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop so a later load re-runs the legacy union.
-        merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:
         """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
         if not isinstance(variant, dict) or not variant:
             return
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-
-        args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
-        envs = dict(variant.get("extra_envs") or {})
-
-        def _list_field(key: str) -> list[str]:
-            raw = variant.get(key)
-            if isinstance(raw, str):
-                return [raw.strip()] if raw.strip() else []
-            if isinstance(raw, (list, tuple, set)):
-                return [str(v).strip() for v in raw if str(v).strip()]
-            return []
-
-        remove_args = _list_field("remove_args")
-        unset_envs = _list_field("unset_envs")
-        args_mode = str(variant.get("args_mode") or "append").strip().lower()
-        control_fields: dict[str, Any] = {}
-        if remove_args:
-            control_fields["remove_args"] = remove_args
-        if unset_envs:
-            control_fields["unset_envs"] = unset_envs
-        if args_mode == "replace":
-            control_fields["args_mode"] = "replace"
-        fp = str(
-            variant.get("fingerprint")
-            or canonical_fingerprint(
-                args,
-                envs,
-                **control_fields,
-            )
-        )
-        entry = {
-            "fingerprint": fp,
-            "name": str(variant.get("name") or ""),
-            "extra_server_args": args,
-            "extra_envs": envs,
-            **control_fields,
-            "note": str(variant.get("note") or ""),
-            "tput": variant.get("output_throughput") or variant.get("tput"),
-            "gain_pct": variant.get("gain_pct"),
-            # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
-            # gated, not that it scored 0.
-            "accuracy": variant.get("accuracy"),
-            "stack_index": variant.get("stack_index"),
-            "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or now_iso()),
-            "provenance": str(variant.get("provenance") or "llm_direct"),
-            # Attribute the win to the macro-cycle it landed in.
-            "cycle": int(getattr(self, "macro_cycle", 0) or 0),
-        }
+        config = _accepted_config(variant)
+        fp = config.fingerprint
+        entry = _accepted_entry(variant, config, int(getattr(self, "macro_cycle", 0) or 0))
         search = dict(self.explore_search or {})
-        search.setdefault("schema_version", 1)
         accepted = [
             v for v in (search.get("accepted") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
@@ -440,27 +400,6 @@ class _PhaseStateMixin:
         search["rejected"] = [
             v for v in (search.get("rejected") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
         ]
-        name_index = dict(search.get("name_index") or {})
-        if entry["name"]:
-            name_index[entry["name"]] = fp
-        search["name_index"] = name_index
-        # Append a winners_history row so plateau judges needn't crawl optimization_stack.
-        wh = list(search.get("winners_history") or [])
-        wh.append(
-            {
-                "round_id": entry["accepted_at_round"],
-                "variant_name": entry["name"],
-                "fingerprint": fp,
-                "gain_pct": entry["gain_pct"],
-                "extra_args": args,
-                "extra_envs": envs,
-                **control_fields,
-                "provenance": entry["provenance"],
-                "ts": entry["ts"],
-                "cycle": entry["cycle"],
-            }
-        )
-        search["winners_history"] = wh[-_WINNERS_HISTORY_CAP:]
         self.explore_search = search
 
     def record_authored_framework_levers(
@@ -468,41 +407,20 @@ class _PhaseStateMixin:
         switches: list[dict[str, Any]],
         *,
         default_on: bool,
-        specialist_task_id: str = "",
-        stack_delta_pct: float | None = None,
     ) -> bool:
         """Register accepted framework-rewrite switches as search levers."""
         if not isinstance(switches, list) or not switches:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
-        now = now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):
                 continue
-            name = str(entry.get("switch") or "").strip().upper()
+            row = _lever_row(entry, bool(default_on))
+            name = row["switch"]
             if not name:
                 continue
-            row = {
-                "switch": name,
-                "value": str(entry.get("value") or "1"),
-                "category": str(entry.get("category") or ""),
-                "target": str(entry.get("target") or ""),
-                "evidence": str(entry.get("evidence") or ""),
-                "depends_on": list(entry.get("depends_on") or []),
-                "enables": list(entry.get("enables") or []),
-                "enabler": bool(entry.get("enabler")),
-                "default_on": bool(default_on),
-                "specialist_task_id": str(specialist_task_id or ""),
-                "stack_delta_pct": (float(stack_delta_pct) if isinstance(stack_delta_pct, (int, float)) else None),
-                # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
-                # "registered, not yet attributed".
-                "attributed_gain_pct": None,
-                "attribution_source": "",
-                "ts": now,
-                "cycle": int(getattr(self, "macro_cycle", 0) or 0),
-            }
             index = by_switch.get(name)
             if index is None:
                 rows.append(row)
@@ -513,7 +431,6 @@ class _PhaseStateMixin:
             # Preserve an attribution already measured for this lever; the measurement is more informative than this
             # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
-            row["attribution_source"] = str(prior.get("attribution_source") or "")
             if prior != row:
                 rows[index] = row
                 changed = True
@@ -526,7 +443,6 @@ class _PhaseStateMixin:
         switch: str,
         *,
         gain_pct: float | None,
-        source: str,
     ) -> bool:
         """Record a lever's individually measured contribution."""
         name = str(switch or "").strip().upper()
@@ -538,7 +454,6 @@ class _PhaseStateMixin:
                 continue
             updated = dict(row)
             updated["attributed_gain_pct"] = float(gain_pct) if isinstance(gain_pct, (int, float)) else None
-            updated["attribution_source"] = str(source or "")
             if updated != row:
                 rows[index] = updated
                 self.authored_framework_levers = rows

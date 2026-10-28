@@ -10,9 +10,12 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 from hyperloom.orchestrator.actions.executors import explore as ex
 
 
@@ -43,9 +46,14 @@ class TestFrameworkRegistry:
 
 
 class TestFormatPrimaryMetric:
-    def test_serving_shows_tok_s_per_gpu(self):
-        assert fr.format_primary_metric("sglang", 123.4) == "123.4 tok/s/GPU"
-        assert fr.format_primary_metric("vllm", 0.0) == "0.0 tok/s/GPU"
+    def test_serving_shows_aggregate_tok_s(self):
+        assert fr.format_primary_metric("sglang", 123.4) == "123.4 tok/s"
+        assert fr.format_primary_metric("vllm", 0.0) == "0.0 tok/s"
+
+    def test_serving_value_is_the_server_aggregate_not_divided_per_gpu(self):
+        # 768 requests x 1024 output tokens in 395.75 s on TP=4: the stored value is the server total.
+        aggregate = 768 * 1024 / 395.75
+        assert fr.format_primary_metric("sglang", aggregate) == "1987.2 tok/s"
 
     def test_xdit_shows_e2el_mean_ms_not_tok_s(self):
         # xDiT throughput is img/s; display equivalent per-image latency ms.
@@ -58,16 +66,16 @@ class TestFormatPrimaryMetric:
         assert fr.format_primary_metric("xdit", None) == "n/a ms"
 
     def test_unknown_framework_defaults_to_serving_label(self):
-        assert fr.format_primary_metric("rust-burn", 10.0) == "10.0 tok/s/GPU"
+        assert fr.format_primary_metric("rust-burn", 10.0) == "10.0 tok/s"
 
     def test_none_or_empty_framework_falls_back_to_serving(self):
         # A None/empty framework must not crash and defaults to serving unit.
-        assert fr.primary_metric_unit(None) == "tok/s/GPU"
-        assert fr.primary_metric_unit("") == "tok/s/GPU"
+        assert fr.primary_metric_unit(None) == "tok/s"
+        assert fr.primary_metric_unit("") == "tok/s"
         assert fr.primary_metric_value(None, 12.0) == 12.0
-        assert fr.format_primary_metric(None, 12.0) == "12.0 tok/s/GPU"
-        assert fr.format_primary_metric("", 12.0) == "12.0 tok/s/GPU"
-        assert fr.format_primary_metric(None, None) == "0.0 tok/s/GPU"
+        assert fr.format_primary_metric(None, 12.0) == "12.0 tok/s"
+        assert fr.format_primary_metric("", 12.0) == "12.0 tok/s"
+        assert fr.format_primary_metric(None, None) == "0.0 tok/s"
 
 
 class TestServerArgsEnvName:
@@ -84,25 +92,25 @@ class TestServerArgsEnvName:
 
 class TestXditBlacklist:
     def test_precision_lock_and_quantized_attn(self):
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
-        assert gr.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
+        assert vf.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
 
     def test_combo_crash(self):
-        reason = gr.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
+        reason = vf.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
         assert reason is not None
 
     def test_safe_envs_pass(self):
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
-        assert gr.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
-        assert gr.xdit_blacklist_reason({}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
+        assert vf.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
+        assert vf.xdit_blacklist_reason({}) is None
 
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
         bad = gr.GridVariant(name="xdit_fp4", extra_server_args="", extra_envs={"XDIT_USE_FP4_GEMMS": "1"})
-        kept, dropped = gr.apply_compatibility_filter([good, bad], framework="xdit", model_path="")
+        kept, dropped = gr.apply_compatibility_filter([good, bad], serving=ServingStack("xdit", ""))
         kept_names = {v.name for v in kept}
         dropped_names = {d["name"] for d in dropped}
         assert "xdit_ok" in kept_names
@@ -257,9 +265,7 @@ class TestExploreGrid:
             ("xdit", "dit", {}),
             ("xdit", "moe_mla", {}),
             ("xdit", "dit", {"conc": 32}),
-            ("xdit", "dit", {"isl": 2048}),
-            ("xdit", "dit", {"osl": 256}),
-            (" XDiT ", "", {"conc": 1, "isl": 2048, "osl": 256}),
+            (" XDiT ", "", {"conc": 1}),
         ],
     )
     def test_xdit_grid_content_order_and_safety(self, framework, model_class, hints):
@@ -276,11 +282,11 @@ class TestExploreGrid:
             assert v.note == v.provenance == "default_grid"
             assert v.remove_args == v.unset_envs == []
             assert v.args_mode == "append"
-            assert gr.xdit_blacklist_reason(v.extra_envs) is None
+            assert vf.xdit_blacklist_reason(v.extra_envs) is None
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
-        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32) == []
 
     @pytest.mark.parametrize(
         "model_class,conc,model_variants",
@@ -303,7 +309,7 @@ class TestExploreGrid:
         expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
         if conc:
             expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
-        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc)
         assert [(v.name, v.extra_server_args) for v in grid] == expected
         for v in grid:
             assert v.extra_envs == {}
@@ -430,7 +436,11 @@ class TestRooflineSnapshotUnits:
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
-            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.155),
+            framework="xdit",
         )
         assert snap["framework"] == "xdit"
 
@@ -438,7 +448,11 @@ class TestRooflineSnapshotUnits:
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
-            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528),
+            framework="xdit",
         )
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
@@ -453,10 +467,8 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            achieved_tok_per_sec=0.15528,  # img/s
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
             framework="xdit",
-            e2e_mean_ms=6440.0,
-            roofline_ideal_ms=644.0,
         )
         assert snap["e2e_mean_ms"] == 6440.0
         assert snap["roofline_ideal_ms"] == 644.0
@@ -473,10 +485,8 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            achieved_tok_per_sec=0.15528,
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
             framework="xdit",
-            e2e_mean_ms=6440.0,
-            roofline_ideal_ms=644.0,
         )
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
@@ -493,8 +503,12 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=200.0,
-            achieved_tok_per_sec=150.0,
+            reading=rs.RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=200.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=150.0,
+            ),
             framework="vllm",
         )
         assert snap["e2e_mean_ms"] is None
@@ -510,12 +524,10 @@ class TestScriptableLatencyRooflineSidecar:
 
         return SharedState.load_or_init(tmp_path)
 
-    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0, analytic_us=None):
+    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0):
         run_dir = session_dir / "kernel-agent" / "runs" / "20260705T193725Z" / "20260705T200313Z_tl-abc"
         run_dir.mkdir(parents=True, exist_ok=True)
         payload = {"totals": {"sigma_ideal_roofline_us": sigma_ideal_us}}
-        if analytic_us is not None:
-            payload["analytic_dit_ceiling"] = {"ideal_compute_us": analytic_us}
         sidecar = run_dir / "diffusion_roofline.json"
         sidecar.write_text(json.dumps(payload), encoding="utf-8")
         return sidecar
@@ -528,11 +540,15 @@ class TestScriptableLatencyRooflineSidecar:
         assert e2e_ms == pytest.approx(1350.0, abs=1.0)
         assert ideal_ms == pytest.approx(611.192, abs=0.01)
 
-    def test_analytic_ceiling_preferred_over_totals(self, tmp_path):
+    def test_analytic_ceiling_takes_priority_over_summed_kernels(self, tmp_path):
         state = self._make_state(tmp_path)
-        self._write_sidecar(tmp_path, sigma_ideal_us=611192.0, analytic_us=644000.0)
+        sidecar = self._write_sidecar(tmp_path)
+        sidecar.write_text(
+            json.dumps({"analytic_ceiling": {"ideal_ms": 400.0}, "totals": {"sigma_ideal_roofline_us": 611192.0}}),
+            encoding="utf-8",
+        )
         _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert ideal_ms == pytest.approx(644.0, abs=0.01)
+        assert ideal_ms == 400.0
 
     def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
         state = self._make_state(tmp_path)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Idempotent run-time patcher for vLLM and SGLang server installs."""
+"""Idempotent run-time patcher for vLLM, SGLang, and xDiT installs."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from hyperloom.common.unified_diff import parse_unified_diff
 
 from ._file_lock import best_effort_file_lock
+from ._git import _git_head_sha
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,28 @@ _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
 _VLLM_GRAPH_CAPTURE_MIN_VERSION: tuple[int, ...] = (0, 26)
 _VLLM_GRAPH_CAPTURE_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "graph_capture.py")
 _VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "capture_traces")
+
+# xDiT: SHA-based version gating.  ``pip show xfuser`` always reports
+# ``0.4.5`` regardless of the actual commit, so version detection reads
+# ``git rev-parse HEAD`` from the editable install and matches against
+# known image SHAs.
+_XDIT_PATCH_RE = re.compile(r"^config_xdit_v(\d+(?:\.\d+)*)\.patch$")
+_XDIT_PATCHES_LEAF = "xdit_patches"
+
+
+def _xdit_default_source_root() -> Path:
+    from hyperloom.inference_optimizer import framework_registry
+
+    return Path(framework_registry.source_root("xdit") or "/app/xDiT")
+
+
+_XDIT_SENTINEL_REL: tuple[str, ...] = ("xfuser", "config", "args.py")
+_XDIT_SENTINEL_MARKERS: tuple[str, ...] = ("profile_capture_phase",)
+# Known image tag → head commit SHA (full 40-char).
+_XDIT_SHA_TO_VERSION: dict[str, str] = {
+    "c30266378c815c2f31f95b9d21d2818276050547": "26.7",
+    "2f74acb12830163d1fe0dd1abb5422f0bff7acf0": "26.8",
+}
 
 # Vendor-shipped manifest filename(s).
 _SUPPORTED_VERSIONS_MANIFEST_NAMES: tuple[str, ...] = (
@@ -182,6 +205,18 @@ def _subdir_is_release_branch(name: str) -> bool:
     return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
 
 
+def _nearest_not_newer(available: dict[tuple[int, ...], Path], running: tuple[int, ...]) -> Path | None:
+    """The newest entry not newer than ``running``, preferring its own minor series."""
+    if len(running) >= 2:
+        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
+        if same_minor:
+            return available[max(same_minor)]
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
@@ -217,16 +252,7 @@ def _resolve_versioned_patches_dir(
         if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
             continue
         available[vt] = d
-    if not available:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running)
 
 
 # Public API
@@ -298,7 +324,7 @@ def _detect_installed_sglang_version() -> str | None:
     """Return the locally-installed SGLang version, or ``None`` if unimportable."""
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception:  # noqa: BLE001
+    except (ImportError, OSError):
         return None
     return (getattr(sglang, "__version__", "") or "").strip() or None
 
@@ -326,14 +352,9 @@ def resolve_sglang_patch_set() -> str:
 
 def _gc_patch_deferred_to_pods() -> bool:
     """True on a multi-node controller, where the pod fan-out applies the patch."""
-    try:
-        from ._multi_node_env import is_multi_node
-    except Exception:  # noqa: BLE001
-        return False
-    try:
-        return bool(is_multi_node())
-    except Exception:  # noqa: BLE001
-        return False
+    from ._multi_node_env import is_multi_node
+
+    return is_multi_node()
 
 
 def _ensure_sglang_gc_patched(
@@ -356,6 +377,107 @@ def _ensure_sglang_gc_patched(
     if plan is None:
         return False
     return _ensure_patched(plan)
+
+
+def ensure_xdit_patched_for_tracelens(
+    tracelens_root: Path | str | None = None,
+) -> bool:
+    """Apply TraceLens profiling patches to the xDiT installation.
+
+    xDiT is an editable install at ``/app/xDiT`` (no pip version);
+    version detection matches ``git rev-parse HEAD`` against known
+    image SHAs.  Unknown SHAs are skipped (no patch attempted).
+    The nearest-lower fallback applies only when a known version
+    has no exact patch file.
+    """
+    plan = _discover_xdit_plan(tracelens_root)
+    if plan is None:
+        return False
+    return _ensure_patched(plan)
+
+
+def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
+    """Pick the TraceLens xDiT patch for ``version`` with nearest-lower fallback."""
+    exact = patches_dir / f"config_xdit_v{version}.patch"
+    if exact.is_file():
+        return exact
+    if not patches_dir.is_dir():
+        return None
+    available: dict[tuple[int, ...], Path] = {}
+    for p in patches_dir.glob("config_xdit_v*.patch"):
+        m = _XDIT_PATCH_RE.match(p.name)
+        if not m:
+            continue
+        vt = _version_tuple(m.group(1))
+        if vt:
+            available[vt] = p
+    if not available:
+        return None
+    running = _version_tuple(version)
+    if running is None:
+        return None
+    not_higher = [vt for vt in available if vt <= running]
+    if not_higher:
+        return available[max(not_higher)]
+    return None
+
+
+def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
+    """Build the xDiT patch plan for the installed xDiT version.
+
+    Only attempts patching when the HEAD SHA matches a known image.
+    Unknown SHAs are skipped — no patch is attempted.
+    """
+    source_root = Path(os.environ.get("XDIT_PATH", "").strip() or str(_xdit_default_source_root()))
+    if not source_root.is_dir():
+        log.info("_server_patcher: xDiT source root %s not found; skip patch", source_root)
+        return None
+
+    sha = _git_head_sha(source_root)
+    if not sha:
+        log.info("_server_patcher: cannot read xDiT HEAD SHA at %s; skip patch", source_root)
+        return None
+
+    version = _XDIT_SHA_TO_VERSION.get(sha)
+    if version is None:
+        log.warning(
+            "_server_patcher: xDiT SHA %s not in known image table; capture-phase profiling will be unavailable",
+            sha[:12],
+        )
+        return None
+
+    tracelens_root = _resolve_tracelens_root(arg)
+    if tracelens_root is None:
+        log.info("_server_patcher: TRACELENS_ROOT unset/missing — skip xDiT patch")
+        return None
+
+    patches_dir = _patch_tree(tracelens_root, _XDIT_PATCHES_LEAF)
+    patch_file = _resolve_xdit_patch_file(patches_dir, version)
+    if patch_file is None:
+        log.warning(
+            "_server_patcher: no TraceLens patch for xDiT %s "
+            "(searched %s); capture-phase profiling will be unavailable",
+            version,
+            patches_dir,
+        )
+        return None
+
+    sentinel = source_root.joinpath(*_XDIT_SENTINEL_REL)
+    if not sentinel.is_file():
+        log.info(
+            "_server_patcher: xDiT layout unexpected (no %s); skip patch",
+            sentinel,
+        )
+        return None
+
+    return _PatchPlan(
+        framework="xdit",
+        version=version,
+        apply_root=source_root,
+        patches=(patch_file,),
+        sentinel_file=sentinel,
+        sentinel_text=_XDIT_SENTINEL_MARKERS,
+    )
 
 
 # Plan discovery
@@ -468,16 +590,7 @@ def _resolve_vllm_patch_file(patches_dir: Path, version: str) -> Path | None:
             if vt and vt in available:
                 return available[vt]
     running = _version_tuple(version)
-    if running is None:
-        return None
-    if len(running) >= 2:
-        same_minor = [vt for vt in available if vt[:2] == running[:2] and vt <= running]
-        if same_minor:
-            return available[max(same_minor)]
-    not_higher = [vt for vt in available if vt <= running]
-    if not_higher:
-        return available[max(not_higher)]
-    return None
+    return _nearest_not_newer(available, running) if running else None
 
 
 def _probe_isolated_vllm() -> tuple[str, Path] | None:
@@ -550,7 +663,7 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
 
         version = (getattr(vllm, "__version__", "") or "").strip()
         install_root = Path(vllm.__file__).resolve().parent.parent
-    except Exception as e:  # noqa: BLE001 - any import failure → isolated-venv fallback
+    except (ImportError, OSError, RuntimeError, TypeError) as e:
         probed = _probe_isolated_vllm()
         if probed is None:
             log.info(
@@ -648,7 +761,7 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception as e:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip patch", e)
         return None
 
@@ -771,7 +884,7 @@ def _discover_sglang_gc_plan(
 
     try:
         import sglang  # type: ignore[import-not-found]
-    except Exception as e:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError) as e:
         log.warning("_server_patcher: sglang not importable (%s); skip graph-capture patch", e)
         return None
     if not getattr(sglang, "__file__", None):
@@ -1047,17 +1160,32 @@ def _rollback_applied(
 _FUZZ = 2
 
 
+@dataclass(frozen=True)
+class _PatchMode:
+    """One ``patch`` invocation variant: its extra flags, the label its log lines carry, and how failures are logged.
+
+    ``spawn_log`` reports a failure to spawn; ``log_stderr`` also logs a non-zero exit's stderr.
+    """
+
+    flags: tuple[str, ...]
+    label: str
+    spawn_log: Callable[..., None]
+    log_stderr: bool = False
+
+
 def _run_patch(
     patch_bin: str,
     patch_file: Path,
     cwd: Path,
-    *extra_flags: str,
+    mode: _PatchMode,
+    *,
     strip: int = 1,
-    spawn_log: Callable[..., None],
-    log_stderr: bool = False,
-    reverse_label: str = "",
 ) -> bool:
-    """Run ``patch -p<strip> --fuzz=2 <extra_flags>`` with ``patch_file`` on stdin."""
+    """Run ``patch -p<strip> --fuzz=2 <mode.flags>`` with ``patch_file`` on stdin."""
+    extra_flags = mode.flags
+    spawn_log = mode.spawn_log
+    log_stderr = mode.log_stderr
+    reverse_label = mode.label
     try:
         with patch_file.open("rb") as fh:
             result = subprocess.run(
@@ -1099,11 +1227,8 @@ def _patch_dry_run(
         patch_bin,
         patch_file,
         cwd,
-        "--dry-run",
-        "--silent",
+        _PatchMode(("--dry-run", "--silent"), " --dry-run", log.warning),
         strip=strip,
-        spawn_log=log.warning,
-        reverse_label=" --dry-run",
     )
 
 
@@ -1118,12 +1243,8 @@ def _patch_reverse_dry_run(
         patch_bin,
         patch_file,
         cwd,
-        "-R",
-        "--dry-run",
-        "--silent",
+        _PatchMode(("-R", "--dry-run", "--silent"), " -R --dry-run", log.debug),
         strip=strip,
-        spawn_log=log.debug,
-        reverse_label=" -R --dry-run",
     )
 
 
@@ -1141,11 +1262,8 @@ def _patch_apply(
         patch_bin,
         patch_file,
         cwd,
-        *flags,
+        _PatchMode(flags, " --reverse" if reverse else "", log.warning, log_stderr=True),
         strip=strip,
-        spawn_log=log.warning,
-        log_stderr=True,
-        reverse_label=" --reverse" if reverse else "",
     )
 
 
@@ -1181,4 +1299,5 @@ def _git(git: str, args: Sequence[str], cwd: Path) -> bool:
 __all__ = [
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
+    "ensure_xdit_patched_for_tracelens",
 ]

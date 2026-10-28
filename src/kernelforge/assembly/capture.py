@@ -36,44 +36,53 @@ def _capture_environment(directory: Path):
                 os.environ[key] = value
 
 
+_FLYDSL_ASSEMBLY = "kernelforge.assembly.capture import FlyDSLAssembly"
+_HIP_ASSEMBLY = "kernelforge.assembly.hip_source import HIPAssembly"
+# (module of a from-import, None for a plain import; imported name) -> (suffix the call adds to the bound name, adapter)
+_COMPILE_IMPORTS = {
+    (None, "flydsl.compiler"): (".compile", _FLYDSL_ASSEMBLY),
+    ("flydsl", "compiler"): (".compile", _FLYDSL_ASSEMBLY),
+    ("flydsl.compiler", "compile"): ("", _FLYDSL_ASSEMBLY),
+    (None, "kernelforge.assembly.hip_source"): (".compile_hip", _HIP_ASSEMBLY),
+    ("kernelforge.assembly.hip_source", "compile_hip"): ("", _HIP_ASSEMBLY),
+}
+
+
+def _header_end(tree: ast.Module) -> int:
+    insertion = 0
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+            insertion = node.end_lineno
+        else:
+            break
+    return insertion
+
+
 def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> str:
     """Mechanically wrap one direct compile call, preserving its arguments and launcher."""
     tree = ast.parse(source)
-    aliases = set()
-    hip_aliases = set()
-    for node in tree.body:
-        if isinstance(node, ast.Import):
-            aliases.update(
-                (alias.asname or alias.name) + ".compile" for alias in node.names if alias.name == "flydsl.compiler"
-            )
-            hip_aliases.update(
-                (alias.asname or alias.name) + ".compile_hip"
-                for alias in node.names
-                if alias.name == "kernelforge.assembly.hip_source"
-            )
-        elif isinstance(node, ast.ImportFrom):
-            if node.module == "kernelforge.assembly.hip_source":
-                hip_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "compile_hip")
-            if node.module == "flydsl.compiler":
-                aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "compile")
-            elif node.module == "flydsl":
-                aliases.update(
-                    (alias.asname or alias.name) + ".compile" for alias in node.names if alias.name == "compiler"
-                )
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ast.unparse(node.func) in aliases]
-    hip_calls = [
-        node for node in ast.walk(tree) if isinstance(node, ast.Call) and ast.unparse(node.func) in hip_aliases
+    compilers = {
+        ((alias.asname or alias.name) + suffix, adapter)
+        for node in tree.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+        for form, (suffix, adapter) in _COMPILE_IMPORTS.items()
+        if form == (getattr(node, "module", None), alias.name)
+    }
+    calls = [
+        (node.func, adapter)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for name, adapter in compilers
+        if ast.unparse(node.func) == name
     ]
     launches = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)]
-    if len(calls) == 1 and not hip_calls:
-        function = calls[0].func
-        adapter = "kernelforge.assembly.capture import FlyDSLAssembly"
+    if len(calls) == 1:
+        function, adapter = calls[0]
         replacement = "_forge_assembly"
-    elif len(hip_calls) == 1 and not calls:
-        function = hip_calls[0].func
-        adapter = "kernelforge.assembly.hip_source import HIPAssembly"
-        replacement = "_forge_assembly"
-    elif not aliases and not hip_aliases and len(launches) == 1:
+    elif not compilers and len(launches) == 1:
         function = launches[0].func.value
         adapter = "kernelforge.assembly.triton import TritonAssembly"
         replacement = f"_forge_assembly({ast.unparse(function)})"
@@ -90,14 +99,7 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
     data = source.encode("utf-8")
     data = data[:start] + replacement.encode("utf-8") + data[end:]
     # Preserve the module docstring and future imports, including their line positions.
-    insertion = 0
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        ) or (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
-            insertion = node.end_lineno
-        else:
-            break
+    insertion = _header_end(tree)
     lines = data.decode("utf-8").splitlines(keepends=True)
     binding = (
         f"\nfrom {adapter} as _forge_assembly_type\n"

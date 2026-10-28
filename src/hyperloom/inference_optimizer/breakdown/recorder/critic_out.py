@@ -28,10 +28,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from hyperloom.common.coerce import dict_rows, to_mapping as _dict
+from hyperloom.common.fs_utils import relative_posix
 from hyperloom.common.jsonio import read_json
 
 from ..critic_reviews import normalize_framework_reviews
@@ -47,14 +50,6 @@ PRODUCER = "critic"
 #: the summary is context for it, and an unbounded one would let one iteration
 #: dominate the section.
 _SUMMARY_LIMIT = 500
-
-
-def _rel(path: Path, session_dir: Path | str) -> str:
-    """Express ``path`` relative to the session, or as-is when outside it."""
-    try:
-        return Path(path).relative_to(Path(session_dir)).as_posix()
-    except (ValueError, TypeError):
-        return str(path)
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:
@@ -73,17 +68,6 @@ def _stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}:{readable}:{digest}"
 
 
-def _dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _rows(value: Any) -> list[dict[str, Any]]:
-    """The mapping rows of ``value``, ignoring anything else in the list."""
-    if not isinstance(value, list):
-        return []
-    return [dict(row) for row in value if isinstance(row, Mapping)]
-
-
 def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
     """The ``(topic, body)`` of the first message the iteration spoke.
 
@@ -91,7 +75,7 @@ def _spoken_message(emit: Mapping[str, Any]) -> tuple[str, str]:
     ``send_message`` intent inside the envelope, which is also the only thing a
     turn with nothing to rule on produces.
     """
-    intents = _rows(_dict(emit.get("intent_envelope")).get("intents"))
+    intents = dict_rows(_dict(emit.get("intent_envelope")).get("intents"))
     for intent in intents:
         if str(intent.get("intent_type") or "") != "send_message":
             continue
@@ -108,7 +92,7 @@ def _verdict_counts(review: Mapping[str, Any]) -> dict[str, int]:
     not just the framework ones, because this row describes the whole turn.
     """
     counts: dict[str, int] = {}
-    for verdict_row in _rows(review.get("review_verdicts")):
+    for verdict_row in dict_rows(review.get("review_verdicts")):
         verdict = str(verdict_row.get("verdict") or "").strip().lower()
         if verdict:
             counts[verdict] = counts.get(verdict, 0) + 1
@@ -120,39 +104,43 @@ def _verdict_rollup(counts: Mapping[str, int]) -> str:
     return ", ".join(f"{count} {verdict}" for verdict, count in counts.items())
 
 
-def record_critic_iteration(
-    session_dir: Path | str | None,
-    *,
-    iter_n: int,
-    review: dict[str, Any] | None,
-    emit: dict[str, Any] | None,
-    workdir: Path | str | None,
-    request: dict[str, Any] | None = None,
-    judge_bundle: dict[str, Any] | None = None,
-    kb_priors: dict[str, Any] | None = None,
-    producer: str = PRODUCER,
-) -> None:
-    """Record one critic iteration under a session-unique identity.
+@dataclass(frozen=True)
+class CriticIteration:
+    """One critic iteration: the review, the emitted envelope and the workdir holding its artifacts.
 
     ``request`` and ``judge_bundle`` are read back from ``workdir`` when the
-    caller does not hold them, since the agent has just written both there. A
-    falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
+    caller does not hold them, since the agent has just written both there.
+    """
+
+    iter_n: int
+    review: dict[str, Any] | None
+    emit: dict[str, Any] | None
+    workdir: Path | str | None
+    request: dict[str, Any] | None = None
+    judge_bundle: dict[str, Any] | None = None
+    kb_priors: dict[str, Any] | None = None
+
+
+def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIteration) -> None:
+    """Record one critic iteration under a session-unique identity.
+
+    A falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
     omitted from the row rather than recorded blank.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=ITERATION_SECTION)
         return
     try:
-        review = _dict(review)
-        emit = _dict(emit)
-        wd = Path(workdir) if workdir else None
-        request = _dict(request) or (read_json(wd / "request.json", default={}) if wd else {})
-        judge_bundle = _dict(judge_bundle) or (read_json(wd / "judge_bundle.json", default={}) if wd else {})
+        review = _dict(iteration.review)
+        emit = _dict(iteration.emit)
+        wd = Path(iteration.workdir) if iteration.workdir else None
+        request = _dict(iteration.request) or (read_json(wd / "request.json", default={}) if wd else {})
+        judge_bundle = _dict(iteration.judge_bundle) or (read_json(wd / "judge_bundle.json", default={}) if wd else {})
 
         topic, body = _spoken_message(emit)
         counts = _verdict_counts(review)
         row: dict[str, Any] = {
-            "iter": int(iter_n),
+            "iter": int(iteration.iter_n),
             # Author time: neither the review nor the emit carries a timestamp,
             # and this runs the moment the review comes back.
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -160,11 +148,10 @@ def record_critic_iteration(
             "verdict": _verdict_rollup(counts),
             "verdict_counts": counts,
             "summary": body[:_SUMMARY_LIMIT],
-            "request_path": _rel(wd / "request.json", session_dir) if wd else None,
-            "judge_bundle_path": _rel(wd / "judge_bundle.json", session_dir) if wd else None,
-            "emit_path": _rel(wd / "emit.json", session_dir) if wd else None,
-            "review_path": _rel(wd / "review.json", session_dir) if wd else None,
-            "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
+            "request_path": relative_posix(wd / "request.json", Path(session_dir)) if wd else None,
+            "judge_bundle_path": relative_posix(wd / "judge_bundle.json", Path(session_dir)) if wd else None,
+            "emit_path": relative_posix(wd / "emit.json", Path(session_dir)) if wd else None,
+            "review_path": relative_posix(wd / "review.json", Path(session_dir)) if wd else None,
         }
 
         context = _dict(request.get("context"))
@@ -185,22 +172,22 @@ def record_critic_iteration(
         )
         if framework_reviews:
             row["framework_reviews"] = framework_reviews
-        if _dict(kb_priors):
-            row["kb_priors"] = dict(kb_priors or {})
+        if _dict(iteration.kb_priors):
+            row["kb_priors"] = dict(iteration.kb_priors or {})
 
         # Content only: ``ts`` is author time and ``topic`` is read off the
         # emit, so neither may seed the identity -- a wall clock in the key
         # would make every re-record a new fragment instead of an overwrite.
         row["iteration_id"] = _stable_id(
             "critic-iteration",
-            iter_n,
+            iteration.iter_n,
             [r.get("proposal_msg_id") for r in framework_reviews],
             request,
             judge_bundle,
             review,
             emit,
         )
-        recorder_for(session_dir, producer=producer).record_upsert_item(
+        recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
             ITERATION_SECTION,
             row,
             key=row["iteration_id"],
@@ -209,4 +196,4 @@ def record_critic_iteration(
         note_failure(section=ITERATION_SECTION, error=exc, detail="record_critic_iteration failed")
 
 
-__all__ = ["ITERATION_SECTION", "SECTION", "record_critic_iteration"]
+__all__ = ["ITERATION_SECTION", "SECTION", "CriticIteration", "record_critic_iteration"]

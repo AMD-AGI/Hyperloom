@@ -91,6 +91,7 @@ def test_the_experience_kb_runtime_ships_inside_this_distribution() -> None:
     assert project["dependencies"] == []
     for name, requirements in project["optional-dependencies"].items():
         assert not any(requirement.startswith("hyperloom-kb") for requirement in requirements), name
+    assert project["scripts"]["hyperloom-kb"] == "hyperloom_kb.cli:main"
     assert project["scripts"]["hyperloom-kb-serve"] == "hyperloom_kb.http_service:main"
     assert project["scripts"]["hyperloom-kb-collect"] == "hyperloom_kb.collect.cli:main"
     shipped = pyproject["tool"]["setuptools"]["package-data"]["hyperloom_kb"]

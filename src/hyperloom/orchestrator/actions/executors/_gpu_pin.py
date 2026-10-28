@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+
 import os
-import shlex
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,6 +19,8 @@ from hyperloom.common.visible_devices import (
     mask_tokens,
     parse_device_list,
 )
+from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
+from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
@@ -342,6 +344,11 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
     return is_rocr_level(str((pin or {}).get("var") or ""))
 
 
+def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:
+    """The handoff's ``gpu_type``, plus GEAK's explicit product/ISA pin for a board that carries one."""
+    return {"gpu_type": str(gpu_type or ""), **geak_identity_pin(gpu_type or "")}
+
+
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     """Which coordinate system the handoff's ``gpu_ids`` are expressed in.
 
@@ -374,6 +381,35 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     if pin and int(pin.get("count") or 0) <= 0:
         return "none"
     return "logical" if _pin_renumbers_devices(pin) else "absolute"
+
+
+def _resolve_handoff_physical_gpus(
+    *, gpu_ids: str, gpu_ids_space: str, gpu_pin: Mapping[str, Any] | None
+) -> list[int] | None:
+    """The physical cards, numbered as rocm-smi numbers them, that ``gpu_ids`` puts GEAK's servers on.
+
+    Absolute ids are the cards themselves; logical ids index into the ROCr pin's own numeric ids.
+
+    Args:
+        gpu_ids: The handoff's :func:`_resolve_handoff_gpu_ids` result.
+        gpu_ids_space: Its :func:`_resolve_handoff_gpu_ids_space` result.
+        gpu_pin: The :func:`resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+
+    Returns:
+        The card indices, or ``None`` when they cannot be named: an empty mask, a UUID mask in either space, or a
+        logical id the ROCr pin does not expose.
+    """
+    tokens = effective_mask_tokens(gpu_ids)
+    if gpu_ids_space == "none" or not tokens or not all(tok.isdigit() for tok in tokens):
+        return None
+    ids = [int(tok) for tok in tokens]
+    if gpu_ids_space != "logical":
+        return ids
+    pin = gpu_pin or {}
+    cards = [int(card) for card in pin.get("ids") or []]
+    if len(cards) != int(pin.get("count", len(cards))) or any(i >= len(cards) for i in ids):
+        return None
+    return [cards[i] for i in ids]
 
 
 def coerce_tp(*args: Any, default: int = 1) -> int:
@@ -426,23 +462,6 @@ def _resolve_handoff_tp(*, gpu_ids: str, tp: int) -> int:
     return max(min(int(tp or 1), advertised), 1)
 
 
-def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
-    """Extract a CLI flag's value from a server-args string."""
-    if not server_args or not flag:
-        return None
-    try:
-        toks = shlex.split(server_args)
-    except ValueError:
-        toks = server_args.split()
-    prefix = flag + "="
-    for i, tok in enumerate(toks):
-        if tok == flag:
-            return toks[i + 1] if i + 1 < len(toks) else None
-        if tok.startswith(prefix):
-            return tok[len(prefix) :]
-    return None
-
-
 def _resolve_serving_fidelity(
     *,
     baseline_server_args: str,
@@ -453,7 +472,7 @@ def _resolve_serving_fidelity(
 
     mml = int(state_max_model_len or 0)
     if mml <= 0:
-        v = _parse_server_arg_value(baseline_server_args, "--max-model-len")
+        v = server_arg_value(baseline_server_args, "--max-model-len")
         try:
             mml = int(v) if v else 0
         except (TypeError, ValueError):
@@ -463,7 +482,7 @@ def _resolve_serving_fidelity(
     if mml > 0:
         out["max_model_len"] = mml
 
-    v = _parse_server_arg_value(baseline_server_args, "--gpu-memory-utilization")
+    v = server_arg_value(baseline_server_args, "--gpu-memory-utilization")
     try:
         mem = float(v) if v else 0.0
     except (TypeError, ValueError):

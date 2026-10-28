@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_float
-from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom.common.jsonio import read_jsonl
 
 
 _FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
@@ -24,16 +23,6 @@ _AUTHORING_TASK_KINDS = frozenset(
 
 
 # Shared helpers
-def _mapping(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, otherwise an empty mapping."""
-    return value if isinstance(value, dict) else {}
-
-
-def _dict_rows(value: Any) -> list[dict[str, Any]]:
-    """Keep only dictionary rows from a list-shaped value."""
-    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
-
-
 def _first(*values: Any) -> Any:
     """Return the first value that is neither ``None`` nor an empty string."""
     return next((value for value in values if value is not None and value != ""), None)
@@ -61,25 +50,6 @@ def _string_list(value: Any) -> list[str]:
     return [str(item) for item in value if item not in (None, "")]
 
 
-def _load_json_safe(
-    path: Path | None,
-    warnings: list[str],
-    *,
-    require_dict: bool = False,
-) -> Any | None:
-    """Parse a JSON file, recording any failure instead of raising."""
-    if path is None:
-        return None
-    if not path.exists():
-        return None
-    return read_json(
-        path,
-        default=None,
-        require_dict=require_dict,
-        on_error=lambda exc: warnings.append(f"failed to parse {path}: {exc!r}"),
-    )
-
-
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:
     """Parse a JSON-Lines file into a list of dict rows, never raising."""
     if path is None or not path.exists():
@@ -89,7 +59,7 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
         prefix = "failed to read" if isinstance(exc, OSError) else "malformed jsonl line in"
         warnings.append(f"{prefix} {path}: {exc!r}")
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, on_error=_warn)
+    return read_jsonl(path, on_error=_warn)
 
 
 def _to_float(value: Any) -> float | None:
@@ -120,23 +90,6 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
     return cur if cur is not None else default
 
 
-def _parse_iso_unix(ts: Any) -> float | None:
-    """Best-effort ISO-8601 -> unix seconds. ``None`` on any failure."""
-    if ts is None:
-        return None
-    if isinstance(ts, (int, float)):
-        return float(ts)
-    s = str(ts).strip()
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        return datetime.fromisoformat(s).timestamp()
-    except ValueError:
-        return None
-
-
 def phase_at(
     ts_unix: float,
     phase_boundaries: list[tuple[float, str]],
@@ -151,20 +104,3 @@ def phase_at(
         else:
             break
     return current
-
-
-def _load_optimization_journal(
-    session_dir: Path | None,
-    warnings: list[str],
-) -> list[dict[str, Any]]:
-    """Read ``reports/optimization_journal.json`` entries (the canonical action ledger); ``[]`` on legacy sessions."""
-    if session_dir is None:
-        return []
-    data = _load_json_safe(
-        session_dir / "reports" / "optimization_journal.json",
-        warnings,
-    )
-    if not isinstance(data, dict):
-        return []
-    entries = data.get("entries")
-    return entries if isinstance(entries, list) else []

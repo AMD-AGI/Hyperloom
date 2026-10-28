@@ -13,7 +13,7 @@ import time
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, NamedTuple
 
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
@@ -259,7 +259,7 @@ def harvest_leaked_artifacts(
     # benchmark_report.json (no-op single-node).
     try:
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
-    except Exception as exc:  # noqa: BLE001 - telemetry harvest must not fail the run
+    except (OSError, ValueError, csv.Error) as exc:
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
     # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
     # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
@@ -359,53 +359,50 @@ def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, A
     return out
 
 
-def harvest_mn_gpu_metrics(
-    destination: Path,
-    *,
-    subprocess_started_unix: float | None = None,
-) -> dict[str, Any]:
-    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
-    out: dict[str, Any] = {}
-    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
-    # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
-    from ._multi_node_env import is_multi_node
-
-    if not is_multi_node():
-        return out
-    # Resolve the shared server-log dir exactly as cli.py forwards it to the pods (explicit env, else the
-    # $USER_DATA_PATH/server_logs default) so the client reads where the pod sampler wrote, without changing
-    # forwarding logic.
+def _pod_gpu_metric_csvs() -> list[Path]:
+    """The per-pod GPU sampler CSVs sitting in the shared server-log dir the pods were told to write to."""
+    # Resolved exactly as cli.py forwards it to the pods (explicit env, else the $USER_DATA_PATH/server_logs
+    # default) so the client reads where the pod sampler wrote, without changing forwarding logic.
     shared = os.path.expandvars(
         os.environ.get("HYPERLOOM_MN_SERVER_LOG_DIR", "").strip() or "$USER_DATA_PATH/server_logs"
     )
     if not shared.startswith("/") or "$" in shared:
-        return out
+        return []
     src_dir = Path(shared)
     try:
         if not src_dir.is_dir():
-            return out
-        pod_csvs = sorted(src_dir.glob("gpu_metrics_*.csv"))
+            return []
+        return sorted(src_dir.glob("gpu_metrics_*.csv"))
     except OSError:
-        return out
-    if not pod_csvs:
-        return out
+        return []
 
-    # PD-disaggregation: map each pod IP -> prefill/decode role so metrics can be tagged and aggregated per role
-    # (empty unless disaggregated).
-    from ._multi_node_env import pd_topology_from_state
 
-    pd = pd_topology_from_state()
+def _pod_role_by_ip(pd: dict[str, Any]) -> dict[str, str]:
+    """Pod IP to prefill/decode role, so metrics can be tagged and aggregated per role.
+
+    Empty unless the deployment is PD-disaggregated.
+    """
     role_of: dict[str, str] = {}
-    for _ip in pd.get("prefill_pod_ips", []):
-        role_of[str(_ip)] = "prefill"
-    for _ip in pd.get("decode_pod_ips", []):
-        role_of[str(_ip)] = "decode"
+    for ip in pd.get("prefill_pod_ips", []):
+        role_of[str(ip)] = "prefill"
+    for ip in pd.get("decode_pod_ips", []):
+        role_of[str(ip)] = "decode"
+    return role_of
 
-    lo = None
-    if subprocess_started_unix is not None:
-        lo = float(subprocess_started_unix) - _MN_GPU_WINDOW_SLACK_SEC
+
+class _HarvestedGpuRows(NamedTuple):
+    """What the pod CSVs yielded: the gpu_metrics.csv the harvest wrote, and the rows that parsed into samples."""
+
+    written: dict[str, Any]
+    samples: list[dict[str, Any]]
+
+
+def _write_pod_gpu_csv(
+    destination: Path, pod_csvs: list[Path], role_of: dict[str, str], started_unix: float | None
+) -> _HarvestedGpuRows:
+    """Tag every in-window pod row with its host and role and write them under one header as ``gpu_metrics.csv``."""
+    lo = None if started_unix is None else float(started_unix) - _MN_GPU_WINDOW_SLACK_SEC
     hi = time.time() + _MN_GPU_WINDOW_SLACK_SEC
-
     header: list[str] | None = None
     merged: list[list[str]] = []
     samples: list[dict[str, Any]] = []
@@ -423,12 +420,8 @@ def harvest_mn_gpu_metrics(
         if header is None:
             header = (["host", "role"] if role_of else ["host"]) + rocm_header
         for row in rows[1:]:
-            if not row:
-                continue
-            ts = _num_from_cell(row[0])
-            if ts is None:
-                continue
-            if lo is not None and (ts < lo or ts > hi):
+            ts = _num_from_cell(row[0]) if row else None
+            if ts is None or (lo is not None and (ts < lo or ts > hi)):
                 continue
             merged.append(([host, role] if role_of else [host]) + row)
             s = _row_to_gpu_sample(rocm_header, row)
@@ -436,51 +429,103 @@ def harvest_mn_gpu_metrics(
                 if role:
                     s["role"] = role
                 samples.append(s)
+    if not header or not merged:
+        return _HarvestedGpuRows({}, samples)
+    csv_path = destination / "gpu_metrics.csv"
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(header)
+            w.writerows(merged)
+    except OSError as exc:
+        log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
+        return _HarvestedGpuRows({}, samples)
+    return _HarvestedGpuRows({"gpu_metrics_csv": str(csv_path), "rows": len(merged)}, samples)
 
-    if header and merged:
-        try:
-            destination.mkdir(parents=True, exist_ok=True)
-            csv_path = destination / "gpu_metrics.csv"
-            with csv_path.open("w", encoding="utf-8", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(header)
-                w.writerows(merged)
-            out["gpu_metrics_csv"] = str(csv_path)
-            out["rows"] = len(merged)
-        except OSError as exc:
-            log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
 
-    if samples:
-        report_path = destination / "benchmark_report.json"
-        if report_path.is_file():
-            try:
-                with report_path.open(encoding="utf-8") as f:
-                    report = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                report = None
-            if isinstance(report, dict):
-                if len(samples) > _MN_GPU_SAMPLE_CAP:
-                    stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
-                    report["gpu_monitor"] = samples[::stride]
-                else:
-                    report["gpu_monitor"] = samples
-                # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
-                # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
-                if pd:
-                    report["pd"] = pd
-                    by_role = _aggregate_gpu_samples_by_role(samples)
-                    if by_role:
-                        report["gpu_monitor_by_role"] = by_role
-                        out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
-                try:
-                    with report_path.open("w", encoding="utf-8") as f:
-                        json.dump(report, f, indent=2)
-                    out["gpu_monitor_samples"] = len(report["gpu_monitor"])
-                except (OSError, TypeError) as exc:
-                    log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+def _inject_gpu_monitor(report_path: Path, samples: list[dict[str, Any]], pd: dict[str, Any]) -> dict[str, Any]:
+    """Fold the pod GPU samples, and the per-role aggregate when disaggregated, into an existing report."""
+    if not samples or not report_path.is_file():
+        return {}
+    try:
+        with report_path.open(encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(report, dict):
+        return {}
+    if len(samples) > _MN_GPU_SAMPLE_CAP:
+        stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
+        report["gpu_monitor"] = samples[::stride]
+    else:
+        report["gpu_monitor"] = samples
+    out: dict[str, Any] = {}
+    # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
+    # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
+    if pd:
+        report["pd"] = pd
+        by_role = _aggregate_gpu_samples_by_role(samples)
+        if by_role:
+            report["gpu_monitor_by_role"] = by_role
+            out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
+    try:
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        out["gpu_monitor_samples"] = len(report["gpu_monitor"])
+    except (OSError, TypeError) as exc:
+        log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+    return out
+
+
+def harvest_mn_gpu_metrics(
+    destination: Path,
+    *,
+    subprocess_started_unix: float | None = None,
+) -> dict[str, Any]:
+    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
+    # Multi-node only: single-node uses Magpie's own client-side GPUMonitor, so never touch its result path.
+    # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
+    from ._multi_node_env import is_multi_node, pd_topology_from_state
+
+    if not is_multi_node():
+        return {}
+    pod_csvs = _pod_gpu_metric_csvs()
+    if not pod_csvs:
+        return {}
+
+    pd = pd_topology_from_state()
+    harvested = _write_pod_gpu_csv(destination, pod_csvs, _pod_role_by_ip(pd), subprocess_started_unix)
+    out = harvested.written
+    out.update(_inject_gpu_monitor(destination / "benchmark_report.json", harvested.samples, pd))
     if out:
         log.info("benchmark_result: harvested MN GPU metrics %s", out)
     return out
+
+
+#: ``(measurement field, raw keys in preference order, coercion)`` for every field a raw InferenceX result can fill.
+#: Row order is the order these fields are created in, which is the key order of a measurement written unsorted.
+_RAW_RESULT_FIELDS: tuple[tuple[str, tuple[str, ...], Callable[..., Any]], ...] = (
+    ("output_throughput", ("output_throughput",), first_float),
+    ("request_throughput", ("request_throughput",), first_float),
+    ("total_token_throughput", ("total_token_throughput",), first_float),
+    ("completed_requests", ("completed_requests", "completed"), first_int),
+    ("duration_seconds", ("duration_seconds", "duration"), first_float),
+    ("ttft_mean_ms", ("mean_ttft_ms",), first_float),
+    ("ttft_p99_ms", ("p99_ttft_ms",), first_float),
+    ("tpot_mean_ms", ("mean_tpot_ms",), first_float),
+    ("input_throughput", ("input_throughput",), first_float),
+    ("tpot_p90_ms", ("p90_tpot_ms",), first_float),
+    ("ttft_p50_ms", ("median_ttft_ms",), first_float),
+    ("ttft_p90_ms", ("p90_ttft_ms",), first_float),
+    ("tpot_p50_ms", ("median_tpot_ms",), first_float),
+    ("e2e_norm_intvty_p90", ("e2e_norm_intvty_p90",), first_float),
+    ("e2e_norm_intvty_p50", ("e2e_norm_intvty_p50",), first_float),
+    ("request_error_rate", ("request_error_rate",), first_float),
+    ("e2el_mean_ms", ("mean_e2el_ms", "mean_latency_ms"), first_float),
+    ("e2el_p99_ms", ("p99_e2el_ms", "p99_latency_ms"), first_float),
+    ("requested_requests", ("num_prompts",), first_int),
+)
 
 
 def _merge_raw_result(
@@ -490,56 +535,9 @@ def _merge_raw_result(
     source_path: Path,
 ) -> None:
     """Fill missing measurement fields from a raw InferenceX result."""
-    if measurement.get("output_throughput") is None:
-        measurement["output_throughput"] = to_float(raw.get("output_throughput"))
-    if measurement.get("request_throughput") is None:
-        measurement["request_throughput"] = to_float(raw.get("request_throughput"))
-    if measurement.get("total_token_throughput") is None:
-        measurement["total_token_throughput"] = to_float(raw.get("total_token_throughput"))
-    if measurement.get("completed_requests") is None:
-        measurement["completed_requests"] = first_int(
-            raw.get("completed_requests"),
-            raw.get("completed"),
-        )
-    if measurement.get("duration_seconds") is None:
-        measurement["duration_seconds"] = first_float(
-            raw.get("duration_seconds"),
-            raw.get("duration"),
-        )
-    if measurement.get("ttft_mean_ms") is None:
-        measurement["ttft_mean_ms"] = to_float(raw.get("mean_ttft_ms"))
-    if measurement.get("ttft_p99_ms") is None:
-        measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
-    if measurement.get("tpot_mean_ms") is None:
-        measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
-    if measurement.get("input_throughput") is None:
-        measurement["input_throughput"] = to_float(raw.get("input_throughput"))
-    if measurement.get("tpot_p90_ms") is None:
-        measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
-    if measurement.get("ttft_p50_ms") is None:
-        measurement["ttft_p50_ms"] = to_float(raw.get("median_ttft_ms"))
-    if measurement.get("ttft_p90_ms") is None:
-        measurement["ttft_p90_ms"] = to_float(raw.get("p90_ttft_ms"))
-    if measurement.get("tpot_p50_ms") is None:
-        measurement["tpot_p50_ms"] = to_float(raw.get("median_tpot_ms"))
-    if measurement.get("e2e_norm_intvty_p90") is None:
-        measurement["e2e_norm_intvty_p90"] = to_float(raw.get("e2e_norm_intvty_p90"))
-    if measurement.get("e2e_norm_intvty_p50") is None:
-        measurement["e2e_norm_intvty_p50"] = to_float(raw.get("e2e_norm_intvty_p50"))
-    if measurement.get("request_error_rate") is None:
-        measurement["request_error_rate"] = to_float(raw.get("request_error_rate"))
-    if measurement.get("e2el_mean_ms") is None:
-        measurement["e2el_mean_ms"] = first_float(
-            raw.get("mean_e2el_ms"),
-            raw.get("mean_latency_ms"),
-        )
-    if measurement.get("e2el_p99_ms") is None:
-        measurement["e2el_p99_ms"] = first_float(
-            raw.get("p99_e2el_ms"),
-            raw.get("p99_latency_ms"),
-        )
-    if measurement.get("requested_requests") is None:
-        measurement["requested_requests"] = first_int(raw.get("num_prompts"))
+    for field, raw_keys, parse in _RAW_RESULT_FIELDS:
+        if measurement.get(field) is None:
+            measurement[field] = parse(*(raw.get(key) for key in raw_keys))
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
@@ -603,20 +601,26 @@ def _tag_latency_origins(
             origins[field] = label
 
 
-def _round_gpu_power_w(
+def _round_gpu_power(
     report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
-) -> float | None:
-    """Per-GPU mean power over the round's measured phase.
+) -> dict[str, Any]:
+    """The round's measured-phase power: ``gpu_power_avg_w`` (mean per serving card) and ``gpu_power_by_gpu_w``.
 
     Hyperloom's own ``gpu_power.json`` wins whenever this round wrote one, including one with no reading: that round
     was sampled and measured nothing, and substituting the report's figure would replace "unmeasured" with a number
     from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single node --
-    is the fallback for rounds no recorder ran on.
+    is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no per-card
+    figure and any per-card or total budget treats it as unmeasured.
     """
-    from ._gpu_power import read_measured_gpu_power
+    from ._gpu_power import read_measured_gpu_power, read_measured_gpu_power_by_gpu
 
     found, watts = read_measured_gpu_power(workspace, subprocess_started_unix=subprocess_started_unix)
-    return watts if found else gpu_metrics_from_report(report).get("avg_power_w")
+    return {
+        "gpu_power_avg_w": watts if found else gpu_metrics_from_report(report).get("avg_power_w"),
+        "gpu_power_by_gpu_w": read_measured_gpu_power_by_gpu(
+            workspace, subprocess_started_unix=subprocess_started_unix
+        )[1],
+    }
 
 
 def extract_benchmark_measurement(
@@ -624,6 +628,7 @@ def extract_benchmark_measurement(
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
+    config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Extract a normalized measurement from Magpie and InferenceX outputs.
 
@@ -644,13 +649,59 @@ def extract_benchmark_measurement(
         provenance labels).
     """
     report = report or {}
+    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
+
+    from .magpie_agentx import native_config
+
+    if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
+        measurement = agentx_measurement(report)
+        measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
+        return measurement
+    measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
+
+    origins: dict[str, str] = {}
+    _tag_latency_origins(
+        measurement,
+        origins,
+        label=LATENCY_FROM_REPORT,
+        before=dict.fromkeys(_LATENCY_FIELDS),
+    )
+
+    _merge_workspace_measurements(measurement, origins, workspace)
+
+    warnings = measurement["nonfatal_warnings"]
+    if report and report.get("success") is not True:
+        warnings.append("benchmark_report_success_false")
+    if workspace is not None and measurement.get("raw_result_path"):
+        warnings.append("raw_inferencex_result_used")
+
+    _settle_derived_latency(measurement, origins, report)
+
+    if not measurement["valid_measurement"] and workspace is not None:
+        _salvage_from_leaked_results(measurement, origins, report, workspace, subprocess_started_unix)
+
+    # One label for the pair, keyed on TTFT and falling back to E2EL, because
+    # that is the question a reader asks of it: the two are read from the same
+    # place in every path that supplies either, and TTFT is the one a latency
+    # reference is anchored on.
+    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
+    # Separate from the pair: TPOT is the one latency figure that can be
+    # computed rather than measured, and a derived value must not be read as
+    # one the benchmark reported.
+    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
+    return measurement
+
+
+def _measurement_from_report(
+    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
+) -> dict[str, Any]:
+    """The normalized fields a Magpie ``benchmark_report.json`` supplies on its own."""
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
     tpot = latency.get("tpot") or {}
     e2el = latency.get("e2el") or {}
-
-    measurement: dict[str, Any] = {
+    return {
         "reported_success": report.get("success") if report else None,
         "framework": report.get("framework"),
         "model": report.get("model"),
@@ -680,80 +731,48 @@ def extract_benchmark_measurement(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
-        "gpu_power_avg_w": _round_gpu_power_w(report, workspace, subprocess_started_unix),
+        **_round_gpu_power(report, workspace, subprocess_started_unix),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
 
-    origins: dict[str, str] = {}
-    _tag_latency_origins(
-        measurement,
-        origins,
-        label=LATENCY_FROM_REPORT,
-        before=dict.fromkeys(_LATENCY_FIELDS),
-    )
 
-    if workspace is not None:
-        for raw_path in _candidate_raw_jsons(workspace):
-            raw = read_json(raw_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
-                continue
-            before = _latency_snapshot(measurement)
-            _merge_raw_result(measurement, raw, source_path=raw_path)
-            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
-            if is_valid_measurement(measurement):
-                break
-
+def _salvage_from_leaked_results(
+    measurement: dict[str, Any],
+    origins: dict[str, str],
+    report: dict[str, Any],
+    workspace: Path,
+    subprocess_started_unix: float | None,
+) -> None:
+    """Adopt a Magpie leak written after launch as the measurement, when the in-workspace search found none."""
     warnings = measurement["nonfatal_warnings"]
-    if report and report.get("success") is not True:
-        warnings.append("benchmark_report_success_false")
-    if workspace is not None and measurement.get("raw_result_path"):
-        warnings.append("raw_inferencex_result_used")
+    for rescue_path in _rescue_candidate_paths(workspace, subprocess_started_unix=subprocess_started_unix):
+        raw = read_json(rescue_path, default=None, require_dict=True)
+        if not raw or to_float(raw.get("output_throughput")) is None:
+            continue
+        # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
+        materialized = _materialize_rescue_into_workspace(
+            rescue_path,
+            workspace,
+        )
+        recorded_path = materialized if materialized is not None else rescue_path
+        before = _latency_snapshot(measurement)
+        _merge_raw_result(measurement, raw, source_path=recorded_path)
+        _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
+        if is_valid_measurement(measurement):
+            warnings.append(f"rescued_from_leaked_path:{rescue_path}")
+            if materialized is None:
+                warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
+            break
+    _settle_derived_latency(measurement, origins, report)
 
+
+def _settle_derived_latency(measurement: dict[str, Any], origins: dict[str, str], report: dict[str, Any]) -> None:
+    """Fill TPOT from what the report allows deriving, label the fields that came from there, and settle validity."""
     before = _latency_snapshot(measurement)
     _derive_tpot_if_missing(measurement, report)
     _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
-
-    # Second-chance salvage from Magpie leak destinations when the in-workspace search found no usable measurement
-    # (mtime-gated).
-    if not measurement["valid_measurement"] and workspace is not None:
-        for rescue_path in _rescue_candidate_paths(
-            workspace,
-            subprocess_started_unix=subprocess_started_unix,
-        ):
-            raw = read_json(rescue_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
-                continue
-            # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
-            materialized = _materialize_rescue_into_workspace(
-                rescue_path,
-                workspace,
-            )
-            recorded_path = materialized if materialized is not None else rescue_path
-            before = _latency_snapshot(measurement)
-            _merge_raw_result(measurement, raw, source_path=recorded_path)
-            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
-            if is_valid_measurement(measurement):
-                warnings.append(f"rescued_from_leaked_path:{rescue_path}")
-                if materialized is None:
-                    warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
-                break
-        before = _latency_snapshot(measurement)
-        _derive_tpot_if_missing(measurement, report)
-        _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
-        measurement["valid_measurement"] = is_valid_measurement(measurement)
-
-    # One label for the pair, keyed on TTFT and falling back to E2EL, because
-    # that is the question a reader asks of it: the two are read from the same
-    # place in every path that supplies either, and TTFT is the one a latency
-    # reference is anchored on.
-    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
-    # Separate from the pair: TPOT is the one latency figure that can be
-    # computed rather than measured, and a derived value must not be read as
-    # one the benchmark reported.
-    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
-    return measurement
 
 
 def _derive_tpot_if_missing(
@@ -807,20 +826,10 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
-    # Gated on BOTH the mode and the key's presence, and each half earns its keep.
-    from ._workload_envs import agentx_enabled
-
-    if agentx_enabled() and "submission_valid" in result:
-        verdict = result.get("submission_valid")
-        if verdict is False:
-            return False
-        if verdict is None:
-            # The verdict is unknown: no --scenario was requested or the aiperf build predates the field. map_aiperf
-            # writes the key unconditionally, so None arrives as a present key.
-            from hyperloom.common.env import env_bool
-
-            if not env_bool("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION"):
-                return False
+    if result.get("submission_valid") is False:
+        return False
+    if result.get("benchmark_backend") == "magpie_agentx":
+        return result.get("benchmark_valid") is True and result.get("diagnostic_only") is False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
         from ._accuracy_gate import quality_gate_passed
@@ -831,6 +840,15 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return True
     completed = to_int(result.get("completed_requests"))
     return completed is not None and completed > 0
+
+
+def round_succeeded(measurement: dict[str, Any]) -> bool:
+    """Whether a round ran to the verdict its kind accepts.
+
+    A native AgentX round that Magpie marks diagnostic (a profile) is never a valid measurement: the trace it leaves is
+    what it is run for, so Magpie's own ``round_succeeded`` decides it. Any other round succeeds when it is valid.
+    """
+    return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
 
 
 def served_complete_protocol(result: dict[str, Any]) -> bool:
@@ -857,52 +875,6 @@ def served_complete_protocol(result: dict[str, Any]) -> bool:
     return completed is not None and completed >= requested
 
 
-# ── Approximate throughput for killed-overtime variants ──
-_SGLANG_GEN_TPUT_RE = re.compile(
-    r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
-    re.IGNORECASE,
-)
-_VLLM_GEN_TPUT_RE = re.compile(
-    r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)\s*tokens?/s",
-    re.IGNORECASE,
-)
-
-# Fraction of the leading warmup samples dropped before averaging so the estimate reflects sustained decode rather
-# than the cold-start climb.
-_DEFAULT_WARMUP_SKIP_FRAC: float = 0.25
-
-
-def _parse_server_log_gen_throughput(log_path: Path) -> list[float]:
-    """Return every positive decode-throughput sample logged in ``server.log``."""
-    samples: list[float] = []
-    try:
-        with log_path.open(encoding="utf-8", errors="replace") as f:
-            for line in f:
-                match = _SGLANG_GEN_TPUT_RE.search(line) or _VLLM_GEN_TPUT_RE.search(line)
-                if match is None:
-                    continue
-                value = to_float(match.group(1))
-                if value is not None:
-                    samples.append(value)
-    except OSError:
-        return []
-    return samples
-
-
-def _steady_state_mean(
-    samples: list[float],
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> float | None:
-    """Average the steady-state portion of throughput ``samples``."""
-    positive = [s for s in samples if s > 0]
-    if not positive:
-        return None
-    skip = int(len(positive) * max(0.0, min(1.0, warmup_skip_frac)))
-    steady = positive[skip:] or positive
-    return sum(steady) / len(steady)
-
-
 def _find_server_logs(slot: Path) -> list[Path]:
     """Return ``server.log`` files under ``slot``, largest first."""
     try:
@@ -918,39 +890,6 @@ def _find_server_logs(slot: Path) -> list[Path]:
             return 0
 
     return sorted(logs, key=_size, reverse=True)
-
-
-def estimate_output_throughput_from_server_log(
-    log_path: Path,
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> dict[str, Any] | None:
-    """Estimate sustained output throughput from one engine ``server.log``."""
-    samples = _parse_server_log_gen_throughput(log_path)
-    mean = _steady_state_mean(samples, warmup_skip_frac=warmup_skip_frac)
-    if mean is None:
-        return None
-    return {
-        "output_throughput": mean,
-        "num_samples": sum(1 for s in samples if s > 0),
-        "source_path": str(log_path),
-    }
-
-
-def estimate_killed_variant_throughput(
-    slot: Path,
-    *,
-    warmup_skip_frac: float = _DEFAULT_WARMUP_SKIP_FRAC,
-) -> dict[str, Any] | None:
-    """Estimate output throughput for a killed-overtime variant from its logs."""
-    for log_path in _find_server_logs(slot):
-        estimate = estimate_output_throughput_from_server_log(
-            log_path,
-            warmup_skip_frac=warmup_skip_frac,
-        )
-        if estimate is not None:
-            return estimate
-    return None
 
 
 def double_run_requested(params: dict | None) -> bool:
@@ -969,12 +908,25 @@ __all__ = [
     "LATENCY_FROM_RESCUED_RAW",
     "LATENCY_UNAVAILABLE",
     "harvest_mn_gpu_metrics",
-    "estimate_killed_variant_throughput",
-    "estimate_output_throughput_from_server_log",
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "double_run_requested",
     "is_valid_measurement",
+    "round_succeeded",
     "served_complete_protocol",
     "_materialize_rescue_into_workspace",
 ]
+
+
+def _merge_workspace_measurements(measurement: dict[str, Any], origins: dict[str, str], workspace: Path | None) -> None:
+    """Fill synthetic report gaps from the current workspace's raw measurements."""
+    if workspace is not None:
+        for raw_path in _candidate_raw_jsons(workspace):
+            raw = read_json(raw_path, default=None, require_dict=True)
+            if not raw or to_float(raw.get("output_throughput")) is None:
+                continue
+            before = _latency_snapshot(measurement)
+            _merge_raw_result(measurement, raw, source_path=raw_path)
+            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
+            if is_valid_measurement(measurement):
+                break

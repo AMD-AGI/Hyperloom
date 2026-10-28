@@ -15,6 +15,17 @@ DEFAULT_EVENTS_KEEP_RECENT: int = 5000
 # Keep at least this many most-recent done tasks (succeeded/cancelled).
 DEFAULT_TASKS_KEEP_DONE: int = 2000
 
+# Ids of proposals that already carry a verdict. It must exclude NULL and empty targets: ``msg_id NOT IN (.., NULL)``
+# is NULL for every row, so one malformed verdict would make every proposal look decided. ``replay_for_resume`` applies
+# the same rule in Python.
+DECIDED_PROPOSAL_IDS_SQL = """
+    SELECT json_extract(payload, '$.target_proposal_msg_id')
+    FROM events
+    WHERE topic = 'review_verdict'
+      AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
+      AND json_extract(payload, '$.target_proposal_msg_id') != ''
+"""
+
 # Only these task states are safe to prune: truly done, never retried, and not pending manual attention.
 _PRUNABLE_TASK_STATES: tuple[str, ...] = ("succeeded", "cancelled")
 
@@ -23,26 +34,6 @@ _PRUNABLE_TASK_STATES: tuple[str, ...] = ("succeeded", "cancelled")
 class RetentionResult:
     events_deleted: int = 0
     tasks_deleted: int = 0
-
-    @property
-    def total(self) -> int:
-        """Total rows deleted across the events and tasks retention passes."""
-        return self.events_deleted + self.tasks_deleted
-
-
-# A ``proposal`` event is semantically pending until a ``review_verdict`` targets its ``msg_id``; pruning a pending
-# proposal's row would lose the only durable record a post-resume late verdict can attach to.
-_PENDING_PROPOSAL_SEQS_SQL = """
-    SELECT seq FROM events
-    WHERE topic = 'proposal'
-      AND msg_id NOT IN (
-        SELECT json_extract(payload, '$.target_proposal_msg_id')
-        FROM events
-        WHERE topic = 'review_verdict'
-          AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
-          AND json_extract(payload, '$.target_proposal_msg_id') != ''
-      )
-"""
 
 
 async def prune_events(
@@ -58,24 +49,18 @@ async def prune_events(
     delete_below = max_seq - max(0, int(keep_recent))
     if delete_below <= 0:
         return 0
-    # Never prune a ``proposal`` row still semantically pending; the anti-join mirrors ``replay_for_resume``.
+    # Never prune a ``proposal`` row that has no verdict yet.
     async with db.transaction() as cur:
         cur.execute(
-            """
+            f"""
             DELETE FROM events
             WHERE seq <= ?
               AND seq NOT IN (
                 SELECT seq FROM events
                 WHERE topic = 'proposal'
-                  AND msg_id NOT IN (
-                    SELECT json_extract(payload, '$.target_proposal_msg_id')
-                    FROM events
-                    WHERE topic = 'review_verdict'
-                      AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
-                      AND json_extract(payload, '$.target_proposal_msg_id') != ''
-                  )
+                  AND msg_id NOT IN ({DECIDED_PROPOSAL_IDS_SQL})
               )
-            """,
+            """,  # nosec B608 - interpolates a constant SQL fragment only.
             (delete_below,),
         )
         return int(cur.rowcount or 0)
@@ -101,25 +86,13 @@ async def prune_tasks(
         return int(cur.rowcount or 0)
 
 
-async def run_db_retention(
-    db: SqliteConnection,
-    *,
-    events_keep_recent: int = DEFAULT_EVENTS_KEEP_RECENT,
-    tasks_keep_done: int = DEFAULT_TASKS_KEEP_DONE,
-) -> RetentionResult:
+async def run_db_retention(db: SqliteConnection) -> RetentionResult:
     """Run all DB retention passes; safe to call periodically from the reaper."""
-    events_deleted = await prune_events(
-        db,
-        keep_recent=events_keep_recent,
-    )
-    tasks_deleted = await prune_tasks(db, keep_done=tasks_keep_done)
-    return RetentionResult(
-        events_deleted=events_deleted,
-        tasks_deleted=tasks_deleted,
-    )
+    return RetentionResult(events_deleted=await prune_events(db), tasks_deleted=await prune_tasks(db))
 
 
 __all__ = [
+    "DECIDED_PROPOSAL_IDS_SQL",
     "DEFAULT_EVENTS_KEEP_RECENT",
     "DEFAULT_TASKS_KEEP_DONE",
     "RetentionResult",

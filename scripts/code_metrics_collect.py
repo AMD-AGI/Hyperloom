@@ -28,19 +28,24 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import io
 import json
 import os
 import re
 import shlex
 import subprocess
 import tempfile
+import tokenize
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import NamedTuple
 
 MODULE = "<module>"
 #: Metric names used by more than one collector.
-COGNITIVE, FUNCTION_LINES, MODULE_LINES = "cognitive-complexity", "function-lines", "module-lines"
+CYCLOMATIC, COGNITIVE = "cyclomatic-complexity", "cognitive-complexity"
+FUNCTION_LINES, MODULE_LINES = "function-lines", "module-lines"
+FUNCTION_ARGS = "function-args"
+DIRECTORY_ENTRIES = "directory-entries"
 _JSON, _CONFIG = "json", "--config"
 
 
@@ -55,20 +60,29 @@ class Metric:
 METRICS = {
     m.name: m
     for m in (
-        Metric("cyclomatic-complexity", "Cyclomatic complexity"),
+        Metric(CYCLOMATIC, "Cyclomatic complexity"),
         Metric(COGNITIVE, "Cognitive complexity"),
         Metric(FUNCTION_LINES, "Function length (lines)"),
         Metric("nested-blocks", "Nested block depth"),
+        Metric(FUNCTION_ARGS, "Parameter count"),
         Metric(MODULE_LINES, "Module length (lines)"),
         Metric("duplicated-lines", "Duplicated lines per file"),
         Metric("dead-code", "Dead code (vulture)"),
+        Metric(DIRECTORY_ENTRIES, "Directory size (entries)"),
     )
 }
 
+#: Metrics this copy of the gate can measure but whose threshold may still be absent
+#: from ``pyproject.toml``: a new dimension lands in two steps (style guide § *Size and
+#: complexity*), because the base branch's copy judges the commit that adds the key.
+#: A pending metric is measured only once its threshold is there, and the name leaves
+#: this tuple in the same commit as the key.
+PENDING: tuple[str, ...] = ()
+
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
-    "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),
     "PLR1702": ("nested-blocks", "lint.pylint.max-nested-blocks"),
+    "PLR0913": (FUNCTION_ARGS, "lint.pylint.max-args"),
 }
 
 _RUFF_VALUE = re.compile(r"\((\d+) > \d+\)")
@@ -76,6 +90,17 @@ _VULTURE_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+): (?P<message>.+) \(\d+
 _QUOTED = re.compile(r"'([^']+)'")
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _DEFS = (*_FUNCTIONS, ast.ClassDef)
+_NOT_CODE = frozenset(
+    {
+        tokenize.COMMENT,
+        tokenize.NL,
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.ENCODING,
+        tokenize.ENDMARKER,
+    }
+)
 _THREADS = "4"
 #: Suppression markers each tool honours, and what they are rewritten to (same line count).
 _JSCPD_MARKER = (re.compile(rb"jscpd:ignore", re.IGNORECASE), b"jscpd-defused")
@@ -115,12 +140,13 @@ def worse(metric: str, value: float, reference: float) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Def:
-    """One class or function: its ``def``/``class`` line, last line and qualified name."""
+    """One class or function: its ``def``/``class`` line, last line, qualified name and first body line."""
 
     start: int
     end: int
     name: str
     is_function: bool
+    body: int
 
 
 class Units:
@@ -130,6 +156,7 @@ class Units:
         self._root = root
         self._trees: dict[str, ast.Module] = {}
         self._defs: dict[str, list[Def]] = {}
+        self._code: dict[str, set[int]] = {}
 
     def tree(self, path: str) -> ast.Module:
         if path not in self._trees:
@@ -143,6 +170,12 @@ class Units:
         if path not in self._defs:
             self._defs[path] = list(_walk_defs(self.tree(path), ""))
         return self._defs[path]
+
+    def code_lines(self, path: str) -> set[int]:
+        """Lines holding code: not blank, not only a comment, not part of a docstring."""
+        if path not in self._code:
+            self._code[path] = _code_lines((self._root / path).read_bytes(), self.tree(path))
+        return self._code[path]
 
     def owner(self, path: str, line: int) -> str:
         """The def starting on ``line``, else the innermost def enclosing it."""
@@ -165,10 +198,29 @@ def _walk_defs(node: ast.AST, prefix: str) -> Iterator[Def]:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, _DEFS):
             name = prefix + child.name
-            yield Def(child.lineno, child.end_lineno or child.lineno, name, isinstance(child, _FUNCTIONS))
+            end = child.end_lineno or child.lineno
+            yield Def(child.lineno, end, name, isinstance(child, _FUNCTIONS), child.body[0].lineno)
             yield from _walk_defs(child, name + ".")
         else:
             yield from _walk_defs(child, prefix)
+
+
+def _code_lines(source: bytes, tree: ast.Module) -> set[int]:
+    rows: set[int] = set()
+    for token in tokenize.tokenize(io.BytesIO(source).readline):
+        if token.type not in _NOT_CODE:
+            rows.update(range(token.start[0], token.end[0] + 1))
+    blank = {row for row, text in enumerate(source.splitlines(), 1) if not text.strip()}
+    return rows - blank - _docstring_lines(tree)
+
+
+def _docstring_lines(tree: ast.Module) -> set[int]:
+    rows: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, *_DEFS)) and ast.get_docstring(node, clean=False) is not None:
+            doc = node.body[0]
+            rows.update(range(doc.lineno, (doc.end_lineno or doc.lineno) + 1))
+    return rows
 
 
 def list_files(root: Path, roots: Iterable[str], exclude: Iterable[str]) -> tuple[list[str], list[str]]:
@@ -251,9 +303,10 @@ def tool_version(argv: list[str]) -> str:
 
 
 def ruff_findings(root: Path, files: list[str], thresholds: dict[str, int], units: Units) -> list[Finding]:
+    rules = {code: pair for code, pair in RUFF_RULES.items() if pair[0] in thresholds}
     argv = ["ruff", "check", "--isolated", "--no-cache", "--ignore-noqa", "--exit-zero", "--output-format", _JSON]
-    argv += ["--preview", _CONFIG, "lint.explicit-preview-rules=true", "--select", ",".join(RUFF_RULES)]
-    for metric, setting in RUFF_RULES.values():
+    argv += ["--preview", _CONFIG, "lint.explicit-preview-rules=true", "--select", ",".join(rules)]
+    for metric, setting in rules.values():
         argv += [_CONFIG, f"{setting}={thresholds[metric]}"]
     with tempfile.TemporaryDirectory() as work:
         rows = json.loads(_run([*argv, *(str(root / f) for f in files)], work))
@@ -271,6 +324,33 @@ def parse_ruff(rows: list[dict], root: Path, units: Units) -> list[Finding]:
         metric = RUFF_RULES[row["code"]][0]
         findings.append(Finding(metric, path, units.owner(path, line), int(match.group(1)), line))
     return findings
+
+
+def radon_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:
+    """Cyclomatic complexity as radon counts it: every ``and`` / ``or``, ternary, comprehension and assert too."""
+    with tempfile.TemporaryDirectory() as work:
+        rows = json.loads(_run(["radon", "cc", "--json", *(str(root / f) for f in files)], work))
+    return parse_radon(rows, root, threshold, units)
+
+
+def parse_radon(rows: dict[str, object], root: Path, threshold: int, units: Units) -> list[Finding]:
+    """Functions and methods over ``threshold``; a closure is a unit of its own, a class is none."""
+    findings = []
+    for name, blocks in rows.items():
+        if not isinstance(blocks, list):
+            raise ToolError(f"radon could not measure {name}: {blocks}")
+        path = _relative(root, name)
+        pending, seen = list(blocks), set()
+        while pending:
+            block = pending.pop()
+            pending += block.get("methods", []) + block.get("closures", [])
+            if block["type"] == "class" or block["lineno"] in seen:
+                continue
+            seen.add(block["lineno"])
+            if worse(CYCLOMATIC, block["complexity"], threshold):
+                line = block["lineno"]
+                findings.append(Finding(CYCLOMATIC, path, units.owner(path, line), block["complexity"], line))
+    return sorted(findings, key=lambda f: (f.path, f.line))
 
 
 def complexipy_findings(root: Path, files: list[str], threshold: int, units: Units) -> list[Finding]:
@@ -311,33 +391,51 @@ def module_line_findings(root: Path, files: list[str], threshold: int) -> list[F
 
 
 def function_line_findings(files: list[str], threshold: int, units: Units) -> list[Finding]:
-    """Functions longer than ``threshold`` physical lines.
+    """Functions with more than ``threshold`` lines of code in their body.
 
-    A function counts from its ``def`` line through its last line: decorators are not
-    counted, blank, comment and docstring lines are. A nested function is measured on its
-    own, not folded into its parent: the parent's count leaves out the lines of every
-    function nested in it.
+    The body starts at the first statement, so the ``def`` lines and decorators are not
+    counted, and neither are blank, comment and docstring lines. A nested function is
+    measured on its own, not folded into its parent: the parent's count leaves out the
+    lines of every function nested in it.
     """
     findings = []
     for path in files:
-        defs = units.defs(path)
+        defs, code = units.defs(path), units.code_lines(path)
         for d in defs:
             if not d.is_function:
                 continue
-            length = d.end - d.start + 1 - _nested_function_lines(d, defs)
+            body = set(range(d.body, d.end + 1)) - _nested_function_lines(d, defs)
+            length = len(body & code)
             if worse(FUNCTION_LINES, length, threshold):
                 findings.append(Finding(FUNCTION_LINES, path, d.name, length, d.start))
     return findings
 
 
-def _nested_function_lines(parent: Def, defs: list[Def]) -> int:
-    """Lines of the outermost functions nested anywhere inside ``parent``."""
-    inside = [d for d in defs if d.name.startswith(parent.name + ".") and parent.start < d.start <= parent.end]
-    functions = [d for d in inside if d.is_function]
-    outermost = [
-        d for d in functions if not any(o is not d and o.start <= d.start and d.end <= o.end for o in functions)
+def _nested_function_lines(parent: Def, defs: list[Def]) -> set[int]:
+    """Lines of the functions nested anywhere inside ``parent``."""
+    inside = [
+        d
+        for d in defs
+        if d.is_function and d.name.startswith(parent.name + ".") and parent.start < d.start <= parent.end
     ]
-    return sum(d.end - d.start + 1 for d in outermost)
+    return {row for d in inside for row in range(d.start, d.end + 1)}
+
+
+def directory_findings(files: list[str], threshold: int) -> list[Finding]:
+    """Directories with more than ``threshold`` entries.
+
+    The entries of a directory are the ``files`` directly in it and its subdirectories that hold any.
+    """
+    entries: dict[str, set[str]] = {}
+    for path in files:
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            entries.setdefault("/".join(parts[:depth]), set()).add(parts[depth])
+    return [
+        Finding(DIRECTORY_ENTRIES, directory, MODULE, len(names), 1)
+        for directory, names in sorted(entries.items())
+        if worse(DIRECTORY_ENTRIES, len(names), threshold)
+    ]
 
 
 def vulture_findings(root: Path, files: list[str], min_confidence: int, units: Units) -> list[Finding]:

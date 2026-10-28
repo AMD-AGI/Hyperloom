@@ -158,19 +158,15 @@ The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting this hint is the **correct, expected** move
 when the current phase has no remaining actionable lever — it is strictly
 better than idling until the budget cap is reached, because it returns the
-unspent budget to later phases / macro-cycles. `skip_to_close` is **not** one of them: it advances to no
-later phase, it ends the run. Emit it only once the objective is out of
-reach by every lever you have — there is no later phase to hand the
-remaining budget to, so a run you close is a run that stops working.
-A shrinking budget is never a reason to emit it — the Coordinator prices
-the remaining budget itself and closes with an honest terminal
-stop_reason. Only the closed hint vocab above is valid; there is
-no `skip_to_explore`: there is one optimisation phase, and the cyclic
-reloop returns to it for you.
+unspent budget to later phases / macro-cycles. No hint ends the run: the
+Coordinator prices the remaining budget itself and closes with an honest
+terminal stop_reason. A hint outside the closed vocab is denied
+(`escalate_hint_not_in_vocab`); there is no `skip_to_explore`: there is
+one optimisation phase, and the cyclic reloop returns to it for you.
 
 OPTIMIZE and KERNEL_AGENT keep strict per-phase action contracts. Record
 cross-phase ideas as gaps or request a phase advance — see PHASE CONTRACT
-for the allowed-action sets, the `skip_to_close` caveat, and the per-tick
+for the allowed-action sets and the per-tick
 `=== Phase ===` block format.
 
 The goal of the phase you are in is stated in its own block below; the other
@@ -181,18 +177,21 @@ phases' goals are omitted because you cannot act on them from here.
 winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
 ordering (baseline first; `explore` revalidates the stack inline — no
 separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
-budget line as the urgency signal.
+budget line as the urgency signal — except under a `hold` line, where the
+Coordinator is waiting and that share running out is not urgency.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
 
-Drive `baseline_tput > 0` so the Coordinator advances.
+Drive `baseline_tput > 0` so the Coordinator advances, after any `hold` the
+`=== Phase ===` block shows.
 
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
 The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+accuracy-passing baseline so `baseline_tput > 0` and the run can proceed,
+after any `hold` the `=== Phase ===` block shows.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP
@@ -234,10 +233,15 @@ provide KB/PR/source evidence for `explore` grids and may produce patches for
 has covered the gap yet.
 
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
-carries the executable specialist proposals this cycle that no explore round
-has benched, ranked by gap severity. The Coordinator benches its head
-automatically (4 variants at a time) whenever no explore is queued or running,
-so dispatch an `explore` only for variants **not already in this queue**.
+carries the executable proposals this cycle that no explore round has benched:
+predictor rows (`provenance: primatune`) first when a predictor is configured,
+then specialist proposals ranked by gap severity. The Coordinator benches its
+head automatically (4 variants at a time) whenever no explore is queued or
+running, so dispatch an `explore` only for variants **not already in this
+queue** — except predictor rows, which that block asks you to copy into your
+own grid verbatim, keeping each row's name, fields and `provenance: primatune`.
+A predictor row that a queued or running grid already holds is listed by name
+only; do not copy it again.
 Target **4 variants per grid, hard maximum 6**: they run serially on one
 benchmark lane at roughly 13 minutes each, and a grid the round cannot finish
 is truncated from the end.
@@ -314,7 +318,8 @@ gives OPTIMIZE another round.
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
 that arrives while it is running will be returned as `deferred`; re-send it on
-the next turn.
+your next turn. In KERNEL_AGENT you get a turn when kernel progress changes,
+or after 15 minutes without one.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
@@ -322,8 +327,8 @@ and observed in a `delegated_result` event or in SharedState.
 <!-- phase: SWEEP -->
 ### SWEEP — phase goal
 
-Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
-`sweep_done` automatically.
+Validate `current_best` over the workload grid. The Coordinator decides the
+exit automatically: another macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
@@ -366,6 +371,17 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   Re-proposing with the SAME `idempotency_key` (or omitting it while
   the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
+* **`explore` does not re-measure a launch this session already judged.**
+  A `delegate{action_name='explore'}` whose every variant already has a KEEP
+  or REVERT in `explore_search` on the current stack (same base launch and
+  anchor throughput, same workload), or is already in a queued or running
+  explore grid on that stack, is denied as `explore_grid_already_covered`,
+  naming the variants. Add a variant that changes the launch, or wait until a
+  KEEP has moved the stack. A grid with one new variant is admitted and the
+  executor skips the rest as `already_measured`. A REVERT on throughput
+  stands only while its gain is below the current KEEP bar, so a variant
+  that missed an earlier cycle's higher bar may be proposed again; an
+  accuracy or tail-latency REVERT stands regardless.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no
@@ -383,18 +399,28 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   journal. Many of them before concluding the search is exhausted means the
   SLA is the binding limit, and the answer is a lever that buys throughput
   without spending per-request latency, not more of the same.
+  `=== Power budget (constraint) ===` works the same way for GPU power: a total
+  across the serving cards and any per-card limits (`power_budget_exceeded` /
+  `gpu_power_budget_exceeded` / `power_unmeasured`); the power cap it names is
+  fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
-  `consecutive_config_only_rounds`. Config tuning tends to plateau; when
-  the ledger shows many consecutive config-only rounds with no code_patch
-  keeps, a `serving_specialist`-authored framework SOURCE patch
-  (scheduler / kv_cache / chunked-prefill), promoted via
-  `integrate_patch`, is one route worth weighing against another config
-  round. A `code_patch` KEEP resets the consecutive counter.
+  `consecutive_config_only_rounds`. The arms differ in ceiling, not in
+  order: a flag is cheap to validate and bounded by whatever upstream
+  already wired up, while a source change moves the ceiling and keeps
+  paying in later rounds and cycles. A KEEP-less config round is
+  therefore not an argument for another config round. On consecutive
+  config-only rounds, dispatch a `mode='patch'` specialist at a
+  high-ceiling move: bridge a predicate that takes this model / GPU /
+  precision off a faster path (the `[static_recon/...]` rows in
+  `=== Current gaps ===`),
+  restore a path the runtime findings report disabled or falling back,
+  fix the framework bug behind the symptom, or re-sequence how
+  this architecture drives its components. Promote via
+  `integrate_patch`. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
-  `escalate_strategy_change` with a phase-advance / budget hint (`skip_to_kernel`
-  / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
+  `escalate_strategy_change` with a `skip_to_kernel` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
@@ -486,6 +512,8 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /
   host-pacing GPU idle** → `system_specialist`
+* **memory-bound decode with idle compute — small batch or long context** →
+  `speculative_decoding_specialist` (serving frameworks only)
 * **uncertain / cross-cutting** → `candidate_discovery_specialist`
 
 Landing upstream work is a lever in its own right, ranked with the others
@@ -526,6 +554,12 @@ admitted against. A `bench` / enablement specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or
 use `bench` when the work genuinely needs to measure.
+
+A domain holds at most one queued or running `scope=domain` specialist,
+whatever gap each names: a second `scope=domain` delegate for it is refused
+(`specialist_domain_in_flight`) until the first finishes. Fold new evidence into
+that domain's next dispatch; the in-flight block lists the domains queued
+specialists hold. `domains` and `freeform` dispatches hold no domain.
 
 **Domain-anchored example:**
 ```

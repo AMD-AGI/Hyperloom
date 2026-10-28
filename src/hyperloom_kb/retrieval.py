@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Protocol, TypeAlias, runtime_checkable
 
 from hyperloom_kb.query_view import (
@@ -19,7 +19,15 @@ from hyperloom_kb.query_view import (
     RepeatAnnotations,
     RetrievalCapability,
 )
-from hyperloom_kb.schema import Experience, JsonScalar, JsonValue, RenderedRef
+from hyperloom_kb.schema import (
+    CATEGORIES,
+    Experience,
+    FieldValue,
+    FileRef,
+    JsonScalar,
+    JsonValue,
+    RenderedRef,
+)
 from hyperloom_kb.storage import ExperienceStore
 
 
@@ -91,17 +99,6 @@ class ReadLeaseManager:
             self._leases[lease.lease_id] = lease
         return lease
 
-    def renew(self, lease_id: str, ttl_seconds: float | None = None) -> ReadLease:
-        with self._lock:
-            current = self.require(lease_id)
-            lease = ReadLease(
-                lease_id=current.lease_id,
-                view=current.view,
-                expires_at_monotonic=time.monotonic() + self._ttl(ttl_seconds),
-            )
-            self._leases[lease_id] = lease
-            return lease
-
     def release(self, lease_id: str) -> None:
         with self._lock:
             self._leases.pop(lease_id, None)
@@ -145,7 +142,7 @@ class RetrievalResult:
     groups: tuple[GroupCandidate, ...]
     rendered: RenderedResult
     executed_capabilities: tuple[RetrievalCapability, ...]
-    unavailable_capabilities: tuple[RetrievalCapability, ...]
+    unavailable_capabilities: tuple[RetrievalCapability, ...] = ()
 
 
 ExperienceRenderer: TypeAlias = Callable[[Experience, QueryView], str]
@@ -165,7 +162,7 @@ class LocalRetrievalService:
     ) -> None:
         self._experiences = experiences
         self._views = views
-        self._renderer = renderer or _render_experience
+        self._renderer = renderer or render_complete_experience
         self._providers = {provider.capability: provider for provider in providers}
         if any(
             capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC}
@@ -308,8 +305,9 @@ class LocalRetrievalService:
     ) -> RenderedResult:
         """Render representatives whole, in order, while they fit ``budget_chars``; ``None`` renders every one.
 
-        A record is never cut: the first one that does not fit and every one after it are left out, and only the
-        records rendered are named in ``rendered_refs``, so nothing reads as shown that the prompt did not carry.
+        A record is never cut: one that does not fit is left out and the ones after it that fit are still rendered,
+        and only the records rendered are named in ``rendered_refs``, so nothing reads as shown that the prompt did
+        not carry.
         """
 
         snapshot = self._leased_view(view, lease_id)
@@ -333,7 +331,7 @@ class LocalRetrievalService:
             block = self._renderer(experience, snapshot)
             size = len(block) + (len("\n\n") if blocks else 0)
             if budget_chars is not None and used + size > budget_chars:
-                break
+                continue
             blocks.append(block)
             shown.append(experience)
             used += size
@@ -343,24 +341,12 @@ class LocalRetrievalService:
             truncated=len(shown) < len(experiences),
         )
 
-    def result(
-        self,
-        groups: tuple[GroupCandidate, ...],
-        rendered: RenderedResult,
-        *,
-        view: QueryViewRef,
-        lease_id: str,
-        executed_capabilities: tuple[RetrievalCapability, ...],
-        unavailable_capabilities: tuple[RetrievalCapability, ...] = (),
-    ) -> RetrievalResult:
-        self._leased_view(view, lease_id)
-        return RetrievalResult(
-            view=view,
-            lease_id=lease_id,
-            groups=groups,
-            rendered=rendered,
-            executed_capabilities=tuple(dict.fromkeys(executed_capabilities)),
-            unavailable_capabilities=tuple(dict.fromkeys(unavailable_capabilities)),
+    def result(self, outcome: RetrievalResult) -> RetrievalResult:
+        self._leased_view(outcome.view, outcome.lease_id)
+        return replace(
+            outcome,
+            executed_capabilities=tuple(dict.fromkeys(outcome.executed_capabilities)),
+            unavailable_capabilities=tuple(dict.fromkeys(outcome.unavailable_capabilities)),
         )
 
     def _resolve_view(
@@ -398,75 +384,41 @@ def _value_key(value: JsonScalar) -> str:
     )
 
 
-def _render_experience(experience: Experience, view: QueryView) -> str:
-    group_key = view.experience_groups[experience.id]
-    annotations = view.groups[group_key].annotations
-    outcome = experience.outcome
-    return "\n".join(
-        (
-            f"Experience {experience.id}",
-            f"Repeat Group: {group_key}",
-            f"Conditions: {dict(sorted(experience.identity.items()))}",
-            f"Objective: {experience.objective}",
-            (
-                "Baseline: "
-                f"identity={dict(sorted(experience.baseline_identity.items()))}, "
-                f"value={experience.baseline_value}"
-            ),
-            (
-                "Annotations: "
-                f"members={annotations.member_count}, "
-                f"runs={annotations.distinct_run_count}, "
-                f"decisions={dict(sorted(annotations.decision_counts.items()))}"
-            ),
-            f"Reasoning: {experience.reasoning}",
-            f"Change: {experience.change.summary if experience.change else ''}",
-            (f"Outcome: decision={outcome.decision if outcome else ''}, value={outcome.value if outcome else None}"),
-            f"Reflection: {experience.reflection}",
-        )
-    )
+#: Where a file's content can be read on this host.
+FilePath: TypeAlias = Callable[[FileRef], Path]
 
 
-def content_ref(content: str) -> str:
-    return "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-
-
-def _free_text_slots(record: dict[str, JsonValue]) -> list[tuple[dict[str, JsonValue], str]]:
-    change = record.get("change")
-    alternatives = record.get("alternatives")
-    slots: list[tuple[dict[str, JsonValue], str]] = [(record, "reasoning"), (record, "reflection")]
-    if isinstance(change, dict):
-        slots += [(change, "summary"), (change, "content")]
-    for alternative in alternatives if isinstance(alternatives, list) else []:
-        if isinstance(alternative, dict):
-            slots += [(alternative, "option"), (alternative, "why_not")]
-    return [(container, key) for container, key in slots if key in container]
+def _rendered(value: FieldValue, file_path: FilePath | None) -> JsonValue:
+    if isinstance(value, tuple):
+        return [_rendered(item, file_path) for item in value]
+    if not isinstance(value, FileRef):
+        return value
+    if file_path is None:
+        return {"file": value.name, "bytes": value.bytes, "sha256": value.sha256}
+    return {"file": value.name, "bytes": value.bytes, "path": str(file_path(value))}
 
 
 def render_complete_experience(
     experience: Experience,
     view: QueryView,
     *,
-    inline_limit: int | None = None,
-    external: dict[str, str] | None = None,
+    file_path: FilePath | None = None,
 ) -> str:
-    """Render every canonical field plus full Repeat Group annotations.
+    """Render every knowledge field of the record, never condensed, plus full Repeat Group annotations.
 
-    A free-text field (``reasoning``, ``reflection``, ``change.summary``, ``change.content``, or an alternative)
-    longer than ``inline_limit`` bytes renders as a reference to its text, which is put in ``external`` under that
-    reference: the record stays complete while the prompt carries only its size.
+    The record's metadata, such as its provenance and the reads that shaped it, stays in the record and out of the
+    prompt; the heading names the Experience so an agent can cite it. A text field renders whole. A file field renders
+    as its name, size, and the ``file_path`` an agent reads its content from, never as the content itself.
     """
 
     group_key = view.experience_groups[experience.id]
     annotations = view.groups[group_key].annotations
-    record = experience.to_dict()
-    if inline_limit is not None and external is not None:
-        for container, key in _free_text_slots(record):
-            text = container[key]
-            if isinstance(text, str) and len(text.encode()) > inline_limit:
-                ref = content_ref(text)
-                external[ref] = text
-                container[key] = f"<external content {ref}, {len(text.encode())} bytes>"
+    record: dict[str, JsonValue] = {"objective": experience.objective}
+    for category in CATEGORIES:
+        record[category] = {name: _rendered(value, file_path) for name, value in getattr(experience, category).items()}
+    if experience.raw_logs:
+        record["raw_logs"] = [_rendered(ref, file_path) for ref in experience.raw_logs]
+    record["notes"] = dict(experience.notes)
     return "\n".join(
         (
             f"Experience {experience.id}",
@@ -484,6 +436,7 @@ __all__ = [
     "CandidateProvider",
     "CapabilityUnavailable",
     "ExperienceRenderer",
+    "FilePath",
     "GroupCandidate",
     "LeaseExpired",
     "LocalRetrievalService",
@@ -494,6 +447,5 @@ __all__ = [
     "RetrievalError",
     "RetrievalResult",
     "ViewUnavailable",
-    "content_ref",
     "render_complete_experience",
 ]

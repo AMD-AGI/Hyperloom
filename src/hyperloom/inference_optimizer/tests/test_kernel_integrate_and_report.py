@@ -31,13 +31,17 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
+
+from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
+from hyperloom.orchestrator.kernel import _integrate_outcomes as integrate_outcomes
 
 
 # fixtures
@@ -134,10 +138,10 @@ def _write_patch_pair(
 
 
 @pytest.fixture
-def graded_integrate_case(session_dir, tmp_path, monkeypatch):
+def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_REQUIRE_KERNEL_ACCURACY", "1")
@@ -150,6 +154,7 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
     state.baseline_tput = 100.0
     state.baseline_accuracy = 0.80
     state.baseline_perf = {
+        "workload_identity": "fixed-workload",
         "output_throughput": 100.0,
         "input_throughput": 900.0,
         "total_throughput": 1000.0,
@@ -181,7 +186,10 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
         "request_error_rate": 0.0,
         "tpot_p90_ms": 10.0,
         "completed_requests": 80,
-        "submission_valid": True,
+        "benchmark_valid": True,
+        "benchmark_backend": "magpie_agentx",
+        "diagnostic_only": False,
+        "workload_identity": "fixed-workload",
         "accuracy": 0.80,
         "accuracy_task": "gsm8k",
         "accuracy_metric": "exact_match,strict-match",
@@ -215,13 +223,16 @@ def graded_integrate_case(session_dir, tmp_path, monkeypatch):
 
 # integrate_handler
 @pytest.mark.asyncio
-async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir, tmp_path, monkeypatch):
+async def test_integrate_handler_materializes_persisted_agentx_mode(
+    session_dir, tmp_path, monkeypatch, native_benchmark
+):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     base_yaml = tmp_path / "base.yaml"
-    _write_baseline_yaml(base_yaml)
+    base_yaml.write_text(native_benchmark.read_text())
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(base_yaml))
     target, patch_file = _write_patch_pair(tmp_path)
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
@@ -251,13 +262,13 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 80,
-        "submission_valid": True,
+        "benchmark_valid": True,
         "accuracy": 0.80,
         "accuracy_task": "gsm8k",
         "accuracy_metric": "exact_match,strict-match",
     }
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         seen["shared_state"] = executor.shared_state
         seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         workspace = output_dir / "benchmark_sglang_e2e"
@@ -282,10 +293,11 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
         session_dir=session_dir,
     )
 
-    assert seen["benchmark"]["benchmark_script"] == "aiperf_client.sh"
+    assert seen["benchmark"]["agentx"]["enabled"] is True
+    assert "benchmark_script" not in seen["benchmark"]
     assert seen["shared_state"] is not None
     assert seen["shared_state"].benchmark_mode == "agentx"
-    assert yaml.safe_load(base_yaml.read_text(encoding="utf-8"))["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
+    assert "launch_overrides" not in yaml.safe_load(base_yaml.read_text())["benchmark"]["agentx"]
     assert result["status"] == "ok"
     assert result["decision"] == "KEEP"
     assert result["graded_objective"] == "e2e_norm_intvty_p50"
@@ -297,7 +309,8 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(session_dir,
 def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.double_run_requested", lambda params: False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("FRAMEWORK", "sglang")
@@ -317,7 +330,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     base_yaml.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
-    state.benchmark_mode = "agentx"
+    state.benchmark_mode = "synthetic"
     state.baseline_tput = 100.0
     state.baseline_config_path = str(base_yaml)
     state.baseline_perf = {
@@ -344,7 +357,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
@@ -359,7 +372,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
             "duration_seconds": 900.0,
             "request_error_rate": 0.0,
             "completed_requests": 80,
-            "submission_valid": True,
+            "benchmark_valid": True,
         }
 
     monkeypatch.setattr(BaselineExecutor, "_run_single_benchmark", _measure)
@@ -413,7 +426,7 @@ async def test_integrate_handler_materializes_recipe_controls(
         assert "REENABLE" not in envs
     else:
         assert envs["REENABLE"] == "candidate"
-    assert benchmarks[0]["benchmark_script"] == "aiperf_client.sh"
+    assert benchmarks[0]["benchmark_script"] == "sglang_mi300x.sh"
     assert base_yaml.read_bytes() == original_yaml
 
 
@@ -556,7 +569,6 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
         reference,
         candidate,
         config_path=str(base_yaml),
-        budget_minutes=1,
     )
 
     assert verdict is not None
@@ -607,7 +619,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
@@ -652,7 +664,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     rounds = []
     measured = {}
 
-    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+    async def _benchmark(executor, _attempt, *, config_path, output_dir, **_kwargs):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))
@@ -680,7 +692,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
             "request_error_rate": 0.0,
             "tpot_p90_ms": round_tpot,
             "completed_requests": 80,
-            "submission_valid": True,
+            "benchmark_valid": True,
             "workspace": str(workspace),
             "report_path": str(workspace / "benchmark_report.json"),
         }
@@ -765,7 +777,7 @@ async def test_integrate_handler_grades_full_e2e_measurement(
 ):
     _, payload, measurement, target = graded_integrate_case
     if not agentx_env:
-        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     measurement.update(
         output_throughput=output,
         total_token_throughput=total,
@@ -848,7 +860,7 @@ async def test_integrate_handler_preserves_output_grading_and_threshold(
     if explicit_output:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     else:
-        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+        monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
         state.benchmark_mode = ""
         state.save(session_dir)
     measurement.update(output_throughput=output, total_token_throughput=900.0, e2e_norm_intvty_p90=90.0)
@@ -915,7 +927,7 @@ async def test_integrate_handler_grades_stack_increment_on_live_intvty_anchor(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate", ["accuracy", "submission_valid"])
+@pytest.mark.parametrize("gate", ["accuracy", "benchmark_valid"])
 async def test_integrate_handler_intvty_win_still_requires_valid_e2e_evidence(session_dir, graded_integrate_case, gate):
     _, payload, measurement, target = graded_integrate_case
     measurement[gate] = 0.60 if gate == "accuracy" else False
@@ -948,11 +960,12 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             {"scanned": 1, "deleted": 1, "errors": 0},
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(
+            _module,
+            "_sweep_integrate_aiter_locks",
+            lambda **_kwargs: next(sweeps),
+        )
     calls = 0
 
     async def _executor(_ctx):
@@ -962,7 +975,7 @@ async def test_integrate_retries_once_after_stale_aiter_baton(tmp_path, monkeypa
             return {"status": "failed", "error_class": "timeout"}
         return {"status": "succeeded", "output_throughput": 100.0}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -991,11 +1004,12 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
             },
         ]
     )
-    monkeypatch.setattr(
-        krh,
-        "_sweep_integrate_aiter_locks",
-        lambda **_kwargs: next(sweeps),
-    )
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(
+            _module,
+            "_sweep_integrate_aiter_locks",
+            lambda **_kwargs: next(sweeps),
+        )
     calls = 0
 
     async def _executor(_ctx):
@@ -1003,7 +1017,7 @@ async def test_integrate_does_not_delete_or_retry_live_baton_owner(tmp_path, mon
         calls += 1
         return {"status": "failed", "error_class": "timeout"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         object(),
         workspace=tmp_path,
@@ -1024,7 +1038,8 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         _drop,
@@ -1046,7 +1061,7 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
         extra={},
         task=types.SimpleNamespace(params={"extra_envs": extra_envs}),
     )
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         ctx,
         workspace=tmp_path,
@@ -1067,7 +1082,8 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
+    for _module in (krh, integrate_rebaseline):
+        monkeypatch.setattr(_module, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._aiter_jit.drop_serving_so_for_envs",
         lambda *args, **kwargs: {"action": "invalidate"},
@@ -1089,7 +1105,7 @@ async def test_integrate_registry_retry_does_not_restamp_unrelated_retry_failure
         )
         return {"status": "failed", "error_class": "oom", "error": "HIP out of memory"}
 
-    result = await krh._run_integrate_rebaseline_with_lock_retry(
+    result = await integrate_rebaseline._run_integrate_rebaseline_with_lock_retry(
         _executor,
         types.SimpleNamespace(
             extra={},
@@ -1109,30 +1125,19 @@ def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     session_dir,
     tmp_path,
 ):
-    """Queued KEEPs may pass patch_path while relying on kernel_opt_attempts for source_file."""
+    """A queued KEEP integrated by kernel_id and patch_path takes its source_file from the queued record."""
     state = SharedState.load_or_init(session_dir)
     patch_path = tmp_path / "k001_opt.cu"
     source_path = tmp_path / "gemm_moe_ck2stages.cu"
     patch_path.write_text("// optimized\n", encoding="utf-8")
     source_path.write_text("// original\n", encoding="utf-8")
-    state.last_kernel_opt = {
-        "kernel_id": "k004",
-        "best_artifact_path": "/tmp/k004_opt.cu",
-        "source_file": "/tmp/rmsnorm.cu",
-    }
-    state.kernel_opt_attempts = {
-        "k001": {
-            "last_decision": "KEEP",
-            "last_artifact_path": str(patch_path),
-            "last_source_file": str(source_path),
-        },
-    }
+    seed_kernel_keep(state, "k001", source_file=str(source_path), artifact=str(patch_path))
     state.save(session_dir)
 
-    resolved, err = krh._resolve_integrate_payload(
-        {"kernel_id": "k001", "patch_path": str(patch_path)},
-        session_dir=session_dir,
+    payload = integrate_payload._fill_integrate_defaults_from_state(
+        {"kernel_id": "k001", "patch_path": str(patch_path)}, session_dir=session_dir
     )
+    resolved, err = integrate_payload._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert err is None
     assert resolved["patch_path"] == str(patch_path)
@@ -1990,10 +1995,6 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
     target, patch_file = _write_patch_pair(tmp_path)
     state = SharedState(
         session_id=session_dir.name,
-        last_kernel_opt={
-            "kernel_id": "k006",
-            "best_artifact_path": str(patch_file),
-        },
         last_trace_analyze={
             "hot_kernels_top15": [
                 {
@@ -2004,6 +2005,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
             ],
         },
     )
+    seed_kernel_keep(state, "k006", artifact=str(patch_file))
     state.save(session_dir)
 
     def _fake_run(cmd, *args, **kwargs):
@@ -2075,7 +2077,7 @@ async def test_integrate_handler_accepts_runtime_jit_deferred_apply(
     }
     with (
         patch.object(
-            krh,
+            integrate_outcomes,
             "_maybe_apply_kernel_patch",
             return_value=apply_result,
         ),
@@ -2263,8 +2265,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.has_handler("integrate")
-    assert krh.has_handler("apply_patch")
+    assert krh.get_handler("integrate") is not None
     assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
 
 
@@ -2450,9 +2451,10 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
-        # (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion, and PRELUDE would have handed over to
+        # FRAMEWORK_AGENT, where explore is proposable.
         c.shared_state.baseline_tput = 800.0
+        c.shared_state.phase = "FRAMEWORK_AGENT"
         await c.router.handle_intent(
             "orchestration",
             Intent(
@@ -2474,15 +2476,17 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.stop()
 
     db = SqliteConnection(tmp_path_helper(session_dir))
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
-        kind="report",
-        params={"session_dir": str(session_dir)},
-        idempotency_key="rep-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={"session_dir": str(session_dir)},
+            idempotency_key="rep-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -2521,14 +2525,16 @@ async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, mo
     """An unresolvable session_dir yields a structured failure, not a crash."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
     sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
-        kind="report",
-        params={},
-        idempotency_key="rep-fail-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="rep-fail-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()

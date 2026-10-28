@@ -91,17 +91,23 @@ class TestCallSiteBinding:
 
     def test_tracelens_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
-        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
+        from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
+        from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 
         seen: dict = {}
+        resolve = ds.resolve_perstep_divisor
 
         def _recorder(*, requested_steps=None, inferred_steps=None):
             seen.update(requested_steps=requested_steps, inferred_steps=inferred_steps)
-            return ds.resolve_perstep_divisor(requested_steps=requested_steps, inferred_steps=inferred_steps)
+            return resolve(requested_steps=requested_steps, inferred_steps=inferred_steps)
 
         # The call site imports from the module at call time, so patch the source.
         monkeypatch.setattr(ds, "resolve_perstep_divisor", _recorder)
-        monkeypatch.setattr(dr, "build_report", lambda *a, **k: {"totals": {}})
+        monkeypatch.setattr(
+            dr,
+            "build_report",
+            lambda *a, **k: {"totals": {"kernel_roofline_efficiency": 0.0, "sigma_actual_kernel_us": 0.0}},
+        )
 
         trace = self._trace(tmp_path)
         run_dir = tmp_path / "run"
@@ -113,17 +119,15 @@ class TestCallSiteBinding:
             model_name="m",
             framework="xdit",
             target_platform="MI300X",
-            analysis_mode="inference",
             dry_run=False,
             num_denoise_steps=9,
         )
-        tl.write_reports(
+        analysis_reports.write_reports(
             run_dir,
-            trace_input_type="file",
-            trace_files=[trace],
+            trace_inputs.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            existing_report_path=md,
+            outcome=analysis_reports.OrchestratorOutcome(report_path=md),
         )
         assert seen, "the TraceLens route never reached resolve_perstep_divisor"
         assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"

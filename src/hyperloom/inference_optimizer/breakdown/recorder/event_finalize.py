@@ -22,7 +22,9 @@ from . import (
     warm_replay_event,
     warm_start_event,
 )
-from .assembler import (
+from .assembler import event_parts
+from .event_timeline import EVENT_STATUS_INTERRUPTED, EventHeader, finish_event, residual_events
+from .sections import (
     BASELINE_EVENT_SECTIONS,
     CONC_SWEEP_EVENT_SECTIONS,
     ENABLEMENT_EVENT_SECTIONS,
@@ -33,9 +35,7 @@ from .assembler import (
     STACK_EVENT_SECTIONS,
     WARM_REPLAY_EVENT_SECTIONS,
     WARM_START_EVENT_SECTIONS,
-    event_parts,
 )
-from .event_timeline import EVENT_STATUS_INTERRUPTED, finish_event, residual_events
 
 __all__ = ["finalize_events"]
 
@@ -173,13 +173,15 @@ def _finalize_type(spec: _EventType) -> list[str]:
             )
             continue
         finish_event(
-            event_type=spec.event_type,
-            event=residual.event_id,
+            EventHeader(
+                spec.event_type,
+                residual.event_id,
+                spec.kind,
+                _start_time(parts.get(spec.event_section) or [], residual.event_id),
+            ),
             sequence=residual.sequence,
             status=EVENT_STATUS_INTERRUPTED,
             ext=ext,
-            kind=spec.kind,
-            start_time=_start_time(parts.get(spec.event_section) or [], residual.event_id),
         )
         closed.append(residual.event_id)
         log.warning(

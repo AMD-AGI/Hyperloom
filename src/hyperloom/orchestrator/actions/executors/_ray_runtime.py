@@ -438,6 +438,7 @@ def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_pat
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
 SAFE_ENV_KEYS = (
+    "HYPERLOOM_BENCHMARK_CONFIG",
     "PATH",
     "HOME",
     "LD_LIBRARY_PATH",
@@ -560,7 +561,8 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             try:
                 _connect(address)
                 landed = True
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            except BaseException as exc:  # re-raised on the caller's thread
+                log.debug("ray.init(address=%r) raised on the connect thread", address, exc_info=True)
                 outcome["error"] = exc
                 landed = False
             with verdict_lock:
@@ -611,7 +613,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         # Foreign cluster: replace with a local head, then retry exactly once.
         try:
             ray.shutdown()
-        except Exception:  # noqa: BLE001
+        except (RuntimeError, OSError):
             pass
         force_restart_local_cluster(num_gpus=num_gpus, log_path=log_path)
         _init(_RAY_ADDRESS_AUTO)

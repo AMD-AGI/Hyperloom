@@ -28,7 +28,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 def _delegate(
     *,
-    action: str = "long_running",
+    action: str = "target_analysis",  # proposable in the default PRELUDE phase
     params: dict | None = None,
     key: str | None = "dup-key-1",
 ) -> Intent:
@@ -49,10 +49,12 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         first, _ = await c.tasks.create_or_return_existing(
-            kind="long_running",
-            params={"x": 1},
-            idempotency_key="dup-key-1",
-            dispatch_class="llm",
+            TaskSpec(
+                kind="target_analysis",
+                params={"x": 1},
+                idempotency_key="dup-key-1",
+                dispatch_class="llm",
+            ),
         )
         await c.tasks.transition(first.task_id, "running", evidence={})
         await c.tasks.transition(first.task_id, "succeeded", evidence={})
@@ -70,10 +72,12 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         await c.tasks.create_or_return_existing(
-            kind="long_running",
-            params={"x": 1},
-            idempotency_key="dup-key-run",
-            dispatch_class="llm",
+            TaskSpec(
+                kind="target_analysis",
+                params={"x": 1},
+                idempotency_key="dup-key-run",
+                dispatch_class="llm",
+            ),
         )
         before = len(await c.tasks.by_state("queued"))
         await c.router.handle_delegate("orchestration", _delegate(key="dup-key-run"))
@@ -91,22 +95,19 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_delegate_source_patch_without_git_root_prunes_without_retry(session_dir):
+async def test_delegate_source_patch_without_git_root_is_refused_and_recorded_once(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
-        await c.router.handle_delegate(
-            "orchestration",
-            _delegate(
-                action="specialist",
-                key="patch-no-root",
-                params={"domain": "serving_specialist"},
-            ),
-        )
+        c.shared_state.phase = "FRAMEWORK_AGENT"
+        for key in ("patch-no-root", "patch-no-root-again"):
+            await c.router.handle_delegate(
+                "orchestration",
+                _delegate(action="specialist", key=key, params={"domain": "serving_specialist"}),
+            )
 
         assert await c.tasks.by_state("queued") == []
-        assert c.shared_state.pruned_families == ["source_patch"]
         failures = [(row["action"], row["task_id"], row["error_class"]) for row in c.shared_state.last_action_failures]
         assert failures == [("specialist", "patch-no-root", "no_git_framework_source_root")]
     finally:
@@ -126,7 +127,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
         assert len(queued) == 1
         key = queued[0].idempotency_key
         assert re.match(
-            r"^orchestration:long_running:t42:[0-9a-f]{10}$",
+            r"^orchestration:target_analysis:t42:[0-9a-f]{10}$",
             key,
         )
     finally:
@@ -137,6 +138,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
     from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
     from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -146,7 +148,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     coordinator.shared_state.macro_cycle = 0
     try:
         with session_scope(session_dir):
-            phase_event.record_entry(phase="PRELUDE", macro_cycle=0, sequence=1)
+            phase_event.record_entry(PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1))
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
@@ -157,11 +159,12 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
                 PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
             )
             phase_event.record_exit(
-                phase="PRELUDE",
-                macro_cycle=0,
-                to_phase="CLOSE",
-                reason="prelude_baseline_failed",
-                evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                PhaseExit(
+                    at=PhaseCycle("PRELUDE", 0),
+                    to_phase="CLOSE",
+                    reason="prelude_baseline_failed",
+                    evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                )
             )
         breakdown = build(session_dir)
     finally:
@@ -271,11 +274,11 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
             "orchestration",
             intent,
             pd,
-            action_name="long_running",
+            action_name="target_analysis",
         )
-        assert c.shared_state.policy_denial_streak.get("long_running:duplicate_idempotency_key") == 1
+        assert c.shared_state.policy_denial_streak.get("target_analysis:duplicate_idempotency_key") == 1
         await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(k.startswith("long_running:") for k in c.shared_state.policy_denial_streak)
+        assert not any(k.startswith("target_analysis:") for k in c.shared_state.policy_denial_streak)
     finally:
         await c.stop()
 
@@ -299,6 +302,7 @@ from hyperloom.orchestrator.policy.gate import (
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
 )
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @pytest.fixture
@@ -373,3 +377,208 @@ def test_mission_summary_flags_a_stack_that_outgrew_its_validation():
 
 # The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by
 # the backend.
+
+
+def _explore(key: str, *variants: tuple[str, str]) -> Intent:
+    grid = [{"name": name, "extra_args": args} for name, args in variants]
+    return _delegate(action="explore", key=key, params={"grid": grid})
+
+
+async def _explore_denials(c) -> list[dict]:
+    obs = await c.bus.tail(topic="observation")
+    return [
+        m.payload
+        for m in obs
+        if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "explore_grid_already_covered"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_grid_already_queued_under_another_key_is_denied(session_dir):
+    """A second grid with the same launches under a different key is not queued again."""
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2"), ("k", "--k 0")))
+        await c.router.handle_delegate(
+            "orchestration", _explore("round-b", ("folded_again", "--folded 2"), ("k2", "--k 0"))
+        )
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["round-a"]
+        assert len(await _explore_denials(c)) == 1
+
+        # One genuinely new variant admits the grid.
+        await c.router.handle_delegate(
+            "orchestration", _explore("round-c", ("folded", "--folded 2"), ("new", "--new 1"))
+        )
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["round-a", "round-c"]
+
+        # A grid queued on an older stack does not cover the same launches on the current one.
+        c.shared_state.baseline_tput = 820.0
+        await c.router.handle_delegate("orchestration", _explore("round-d", ("folded", "--folded 2"), ("k", "--k 0")))
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["round-a", "round-c", "round-d"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_kernel_overlay_grid_is_never_counted_as_queued(session_dir):
+    """Two overlay variants share args and envs but not the kernel they load, so neither covers the other."""
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        for key, overlay in (("overlay-a", "/overlays/a"), ("overlay-b", "/overlays/b")):
+            grid = [{"name": "patched", "extra_args": "--k 0", "overlay_pythonpath": overlay}]
+            await c.router.handle_delegate("orchestration", _delegate(action="explore", key=key, params={"grid": grid}))
+        queued = [t for t in await c.tasks.by_state("queued") if t.kind == "explore"]
+        assert [t.idempotency_key for t in queued] == ["overlay-a", "overlay-b"]
+        assert await _explore_denials(c) == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_grid_already_measured_on_this_stack_is_denied(session_dir):
+    """A grid whose every launch already has a verdict on the current stack is not queued; on a moved stack it is."""
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint, workload_signature
+
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        fp = canonical_fingerprint("--max-running-requests 48", {})
+        c.shared_state.explore_search = {
+            "tested": {
+                fp: {
+                    "fingerprint": fp,
+                    "name": "max_running_48",
+                    "extra_server_args": "--max-running-requests 48",
+                    "extra_envs": {},
+                    "outcome": "REVERT",
+                    "workload_signature": workload_signature(),
+                    "measured_against": {
+                        "throughput": 800.0,
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                        "remove_args": [],
+                        "unset_envs": [],
+                        "args_mode": "append",
+                    },
+                }
+            }
+        }
+        await c.router.handle_delegate("orchestration", _explore("again", ("mrr_48", "--max-running-requests 48")))
+        assert [t for t in await c.tasks.by_state("queued") if t.kind == "explore"] == []
+        assert len(await _explore_denials(c)) == 1
+
+        c.shared_state.baseline_tput = 820.0  # the anchor moved: the old verdict no longer speaks for this stack
+        await c.router.handle_delegate("orchestration", _explore("moved", ("mrr_48", "--max-running-requests 48")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["moved"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_grid_refused_on_throughput_is_admitted_once_the_bar_decays(session_dir):
+    """A +0.7% REVERT answers a grid under cycle 0's 1.0% bar but not under cycle 1's lower one."""
+    from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint, workload_signature
+
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        fp = canonical_fingerprint("--max-running-requests 48", {})
+        c.shared_state.explore_search = {
+            "tested": {
+                fp: {
+                    "fingerprint": fp,
+                    "name": "max_running_48",
+                    "extra_server_args": "--max-running-requests 48",
+                    "extra_envs": {},
+                    "outcome": "REVERT",
+                    "reason": "gain_below_threshold",
+                    "graded_gain_pct": 0.7,
+                    "workload_signature": workload_signature(),
+                    "measured_against": {
+                        "throughput": 800.0,
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                        "remove_args": [],
+                        "unset_envs": [],
+                        "args_mode": "append",
+                    },
+                }
+            }
+        }
+        c.shared_state.macro_cycle = 0
+        await c.router.handle_delegate("orchestration", _explore("cycle-0", ("mrr_48", "--max-running-requests 48")))
+        assert [t for t in await c.tasks.by_state("queued") if t.kind == "explore"] == []
+        assert len(await _explore_denials(c)) == 1
+
+        c.shared_state.macro_cycle = 1
+        await c.router.handle_delegate("orchestration", _explore("cycle-1", ("mrr_48", "--max-running-requests 48")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["cycle-1"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_same_key_resend_is_a_duplicate_not_a_covered_grid(session_dir):
+    """Re-sending a key whose grid is still queued is answered by the key rule, which tells the model to wait."""
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == ["round-a"]
+        assert await _explore_denials(c) == []
+        obs = await c.bus.tail(topic="observation")
+        rules = [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"]
+        assert rules == ["duplicate_idempotency_key_running"]
+
+        # A different key for the same launches is still refused as covered.
+        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
+        assert len(await _explore_denials(c)) == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attribution(session_dir, monkeypatch):
+    """The executor adds pending rewrite levers to a grid, so a grid of measured variants still has work to run."""
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
+        monkeypatch.setattr(
+            "hyperloom.orchestrator.actions.executors.explore.framework_lever_grid",
+            lambda _state: [{"name": "lever_off", "extra_envs": {"HL_X": "0"}}],
+        )
+        await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
+        assert [t.idempotency_key for t in await c.tasks.by_state("queued") if t.kind == "explore"] == [
+            "round-a",
+            "round-b",
+        ]
+        assert await _explore_denials(c) == []
+    finally:
+        await c.stop()
+
+
+def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
+    """On a replacing base the runner applies only the variant's removal, so a removal the base also names is new."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors.measured_variants import explore_grid_already_covered
+
+    base = {"base_tput": 800.0, "base_extra_args": "--x 1", "base_remove_args": ["--foo"], "base_args_mode": "replace"}
+    kept = {"name": "keeps_foo", "extra_args": "--foo 1 --b 1", "args_mode": "replace"}
+    removes = {**kept, "name": "removes_foo", "remove_args": ["--foo"]}
+    queued = [SimpleNamespace(kind="explore", params={**base, "grid": [kept]})]
+    assert explore_grid_already_covered({**base, "grid": [removes]}, queued, {}) is None
+    assert explore_grid_already_covered({**base, "grid": [dict(kept, name="again")]}, queued, {}) is not None

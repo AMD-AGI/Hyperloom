@@ -14,6 +14,9 @@ from kernelforge.loop.lessons import (
     UNDISPROVEN_CLAIM,
     LessonScope,
     LessonStore,
+    OutcomeMeasurement,
+    SessionEnd,
+    SessionObservations,
     build_fallback_document,
     build_summary_prompt,
     cases_named_in,
@@ -26,7 +29,6 @@ from kernelforge.loop.lessons import (
     parse_negatives_marker,
     parse_scope_line,
     scan_constant_values,
-    scan_sources_for_constants,
     scan_sources_with_coverage,
     scope_conflicts,
     summarize_iteration,
@@ -91,10 +93,8 @@ def test_append_outcome_ignores_empty_line(tmp_path):
 def test_format_outcome_line_includes_available_measurements():
     line = format_outcome_line(
         decision="REVERT_PERF",
-        wall_ms=1.2340,
-        best_wall_ms=1.1980,
-        snr_db=42.25,
-        end_reason="turn_cap",
+        measurement=OutcomeMeasurement(wall_ms=1.2340, best_wall_ms=1.1980, snr_db=42.25),
+        session=SessionEnd("turn_cap"),
     )
     assert line == ("OUTCOME: REVERT_PERF | wall 1.2340 ms vs best 1.1980 ms | snr 42.2 dB | session ended: turn_cap")
 
@@ -102,10 +102,8 @@ def test_format_outcome_line_includes_available_measurements():
 def test_format_outcome_line_tolerates_missing_measurements():
     line = format_outcome_line(
         decision="BUILD_FAILED",
-        wall_ms=None,
-        best_wall_ms=None,
-        snr_db=None,
-        end_reason="",
+        measurement=OutcomeMeasurement(wall_ms=None, best_wall_ms=None, snr_db=None),
+        session=SessionEnd(""),
     )
     assert line == "OUTCOME: BUILD_FAILED"
 
@@ -225,7 +223,8 @@ def test_cutoff_classification(end_reason, expected):
 # ── summarize_iteration ───────────────────────────────────────────────────────
 
 
-def test_summarize_writes_the_returned_text(tmp_path):
+def test_summarize_returns_the_text_and_leaves_the_store_alone(tmp_path):
+    """The caller writes the text: a lane's record is persisted with the iteration that measures it."""
     store = _store(tmp_path)
     seen: list[str] = []
 
@@ -235,7 +234,6 @@ def test_summarize_writes_the_returned_text(tmp_path):
 
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="turn_cap",
             summarizer=fake_summarizer,
@@ -244,15 +242,14 @@ def test_summarize_writes_the_returned_text(tmp_path):
 
     assert outcome
     assert "bigger tile" in outcome.text
-    assert "bigger tile" in store.read(2)
     assert "turn_cap" in seen[0]
+    assert store.existing_iterations() == []
 
 
 def test_summarize_without_a_resumable_provider(tmp_path):
     store = _store(tmp_path)
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="",
             summarizer=None,
@@ -263,24 +260,21 @@ def test_summarize_without_a_resumable_provider(tmp_path):
     assert store.existing_iterations() == []
 
 
-def test_summarize_reports_why_a_failing_session_produced_nothing(tmp_path):
-    """The reason reaches the caller: a live run needs it to diagnose."""
+def test_summarize_propagates_a_failing_session_to_the_recording_caller(tmp_path):
+    """The loop's lesson step records the failure with its traceback, so it must reach it."""
     store = _store(tmp_path)
 
     async def broken(prompt: str) -> str:
         raise RuntimeError("backend exploded")
 
-    outcome = asyncio.run(
-        summarize_iteration(
-            store=store,
-            iteration=2,
-            end_reason="",
-            summarizer=broken,
+    with pytest.raises(RuntimeError, match="^backend exploded$"):
+        asyncio.run(
+            summarize_iteration(
+                iteration=2,
+                end_reason="",
+                summarizer=broken,
+            )
         )
-    )
-    assert not outcome
-    assert "RuntimeError" in outcome.reason
-    assert "backend exploded" in outcome.reason
     assert store.existing_iterations() == []
 
 
@@ -292,7 +286,6 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
 
     outcome = asyncio.run(
         summarize_iteration(
-            store=store,
             iteration=2,
             end_reason="",
             summarizer=empty,
@@ -303,39 +296,20 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
     assert store.existing_iterations() == []
 
 
-def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
-    store = _store(tmp_path)
-
-    async def summary(_prompt: str) -> str:
-        return "use wider vector loads\n- [better] vectorized loads | 1.04x"
-
-    monkeypatch.setattr(store, "write", lambda _iteration, _text: None)
-    outcome = asyncio.run(
-        summarize_iteration(
-            store=store,
-            iteration=2,
-            end_reason="",
-            summarizer=summary,
-        )
-    )
-
-    assert not outcome
-    assert outcome.reason == "failed to persist lesson document"
-    assert store.existing_iterations() == []
-
-
 # ── machine-written fallback ──────────────────────────────────────────────────
 
 
 def test_fallback_document_carries_the_gate_rejections():
     doc = build_fallback_document(
-        diff_summary="softmax_kernel.py | 12 +++---",
-        findings=(
-            "Your change is NOT finished: the kernel fails correctness.\ndetail\n"
-            "---\n"
-            "The kernel is CORRECT but NOT faster than the current best.\nmore"
+        SessionObservations(
+            diff_summary="softmax_kernel.py | 12 +++---",
+            findings=(
+                "Your change is NOT finished: the kernel fails correctness.\ndetail\n"
+                "---\n"
+                "The kernel is CORRECT but NOT faster than the current best.\nmore"
+            ),
         ),
-        end_reason="block_budget_exhausted",
+        SessionEnd("block_budget_exhausted"),
     )
 
     assert doc.splitlines()[0].startswith("(no agent summary)")
@@ -350,9 +324,8 @@ def test_fallback_document_carries_the_gate_rejections():
 
 def test_fallback_document_without_findings_still_records_the_diff():
     doc = build_fallback_document(
-        diff_summary="a.py | 1 +",
-        findings="",
-        end_reason="",
+        SessionObservations(diff_summary="a.py | 1 +", findings=""),
+        SessionEnd(""),
     )
     assert doc.splitlines()[0].startswith("(no agent summary)")
     assert "a.py | 1 +" in doc
@@ -361,9 +334,8 @@ def test_fallback_document_without_findings_still_records_the_diff():
 def test_fallback_document_is_empty_when_nothing_was_observed():
     assert (
         build_fallback_document(
-            diff_summary="",
-            findings="",
-            end_reason="turn_cap",
+            SessionObservations(diff_summary="", findings=""),
+            SessionEnd("turn_cap"),
         )
         == ""
     )
@@ -372,9 +344,8 @@ def test_fallback_document_is_empty_when_nothing_was_observed():
 def test_fallback_document_caps_the_rejection_list():
     findings = "\n---\n".join(f"rejection {i}" for i in range(20))
     doc = build_fallback_document(
-        diff_summary="",
-        findings=findings,
-        end_reason="",
+        SessionObservations(diff_summary="", findings=findings),
+        SessionEnd(""),
         max_findings=3,
     )
     listed = [line for line in doc.splitlines() if line.startswith("- rejection")]
@@ -639,18 +610,18 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_it():
 
 def test_a_constant_is_looked_for_in_every_declared_source_file():
     """Tile and dispatch constants move to a sibling file; that is not gone."""
-    found = scan_sources_for_constants(["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"])
+    found = scan_sources_with_coverage(["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"])[0]
     assert found == {"BLOCK_N": ("16",)}
 
 
 def test_a_constant_absent_from_every_parsed_file_is_absent():
-    found = scan_sources_for_constants(["import config\n", "num_warps = 8\n"], ["BLOCK_N"])
+    found = scan_sources_with_coverage(["import config\n", "num_warps = 8\n"], ["BLOCK_N"])[0]
     assert found == {}
 
 
 def test_nothing_is_known_when_no_source_file_could_be_parsed():
-    assert scan_sources_for_constants(["def broken(:\n"], ["BLOCK_N"]) is None
-    assert scan_sources_for_constants([], ["BLOCK_N"]) is None
+    assert scan_sources_with_coverage(["def broken(:\n"], ["BLOCK_N"])[0] is None
+    assert scan_sources_with_coverage([], ["BLOCK_N"])[0] is None
 
 
 def test_an_unparsable_source_is_reported_as_unchecked_not_as_moved():

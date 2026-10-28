@@ -81,9 +81,7 @@ async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves
     st.conc_sweep_enabled = False
 
     await coord.phase_sweep.on_enter_sweep(
-        Transition(
-            from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={}, loopback=False
-        )
+        Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={})
     )
 
     assert st.last_conc_sweep["status"] == "skipped"
@@ -146,7 +144,7 @@ async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(s
 @pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
     coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
-    coord.shared_state.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1
+    coord.shared_state.saturated_directions = {"kv_cache": {"saturated": True}}
 
     await coord.phase_sweep.pump()
 

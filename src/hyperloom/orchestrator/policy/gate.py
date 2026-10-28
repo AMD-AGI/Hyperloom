@@ -24,10 +24,11 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
+from hyperloom.common.coerce import first_text
 from hyperloom.common.env import env_bool
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
@@ -45,9 +46,11 @@ from ..specialists.domains import (
     SPECIALIST_MAX_TURNS_HARD_CAP,
     domain_for_tag,
     get_domain,
-    is_custom_specialist_dispatch,
     normalize_dispatch_tags,
 )
+from .custom_specialist import deny_coordinator_dispatched_delegate, deny_search_under_custom_only
+from .denial import PolicyDenied
+from .send_message import deny_malformed_send_message
 from ..specialists.profile import (
     SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
@@ -62,33 +65,6 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 
 log = logging.getLogger(__name__)
-
-
-class PolicyDenied(RuntimeError):
-    """Intent rejected by PolicyGate.
-
-    Attributes:
-        rule: short identifier of the rule that fired.
-        hint: optional one-line agent-actionable suggestion.
-    """
-
-    def __init__(self, reason: str, *, rule: str | None = None, hint: str | None = None):
-        """Initialise the denial with a human-readable reason and metadata.
-
-        Args:
-            reason (str): human-readable explanation passed to the base
-                ``RuntimeError``; surfaced in logs and the policy_denied
-                observation event.
-            rule (str | None): short identifier of the rule that fired,
-                used by the Coordinator to classify the denial. Defaults
-                to ``None``.
-            hint (str | None): optional one-line, agent-actionable
-                suggestion describing the canonical fix. Defaults to
-                ``None``.
-        """
-        super().__init__(reason)
-        self.rule = rule
-        self.hint = hint
 
 
 # Specialist dispatch action name.
@@ -194,17 +170,6 @@ REQUEST_ROUTING: dict[str, frozenset[str]] = {
 # Critic-only: REVIEW_VERDICT
 REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
 
-# Verdict vocabulary for review_verdict
-REVIEW_VERDICTS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "reject",
-        "redirect",
-        "advise",
-        "needs_review",
-    }
-)
-
 
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
 # ``queued`` only drains the backlog and leaves the family usable.
@@ -216,9 +181,6 @@ PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
         PRUNE_BRANCH_SCOPE_QUEUED,
     }
 )
-
-# Ceiling on a single extend_lease step; repeated extensions are allowed.
-EXTEND_LEASE_MAX_SEC: int = 3600
 
 # SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
 # (checked recursively). SOURCE_LIKE_FIELDS are exempt -- they name framework
@@ -240,7 +202,6 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "json_path",
         "md_path",
         "session_dir",
-        "backup_root",
         "manifest_path",
     }
 )
@@ -324,6 +285,7 @@ class PolicyGate:
             raise PolicyDenied(
                 f"role={role.name!r} cannot emit intent_type={intent.type.value!r}",
                 rule="role",
+                hint=f"role {role.name!r} may emit: {', '.join(t.value for t in IntentType if t in role.allowed_intents)}.",
             )
 
         payload = intent.payload or {}
@@ -334,7 +296,7 @@ class PolicyGate:
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(role, payload)
         elif intent.type == IntentType.SEND_MESSAGE:
-            self._validate_send_message_topic(payload)
+            deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
@@ -472,8 +434,14 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
+        if check_source:
+            deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
+            params = payload.get("params")
+            # Ingress only: the Coordinator's own rows for these specialists are replayed here at dispatch.
+            if check_source and isinstance(params, dict):
+                deny_coordinator_dispatched_delegate(params)
             self._validate_specialist_dispatch(role, payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
@@ -516,6 +484,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
+        deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")
@@ -578,27 +547,6 @@ class PolicyGate:
             rule=RULE_ROUND_IN_FLIGHT,
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
-
-    def _validate_send_message_topic(self, payload: dict[str, Any]) -> None:
-        """Require a non-empty ``topic`` on a ``SEND_MESSAGE`` intent.
-
-        Unknown topics are intentionally not rejected here — the
-        Coordinator soft-degrades them to ``"observation"`` — so agents can still surface unstructured observations.
-
-        Args:
-            payload (dict[str, Any]): the send_message payload, expected to
-                carry a ``topic`` string.
-
-        Returns:
-            None: returns silently when a topic is present.
-
-        Raises:
-            PolicyDenied: with ``rule='payload'`` when ``topic`` is missing
-                or blank.
-        """
-        topic = str(payload.get("topic", "")).strip()
-        if not topic:
-            raise PolicyDenied("send_message missing topic", rule="payload")
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent against the routing matrix.
@@ -666,7 +614,7 @@ class PolicyGate:
         ``target_proposal_msg_id`` is present, and that exactly one of the
         single ``verdict`` field or the per-variant ``verdict_map`` is
         supplied. Every verdict string (single or per-variant) must belong
-        to the closed :data:`REVIEW_VERDICTS` vocabulary.
+        to the closed :data:`ALLOWED_VERDICTS` vocabulary.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -680,7 +628,7 @@ class PolicyGate:
         Raises:
             PolicyDenied: if the role is not a Critic, the target id is
                 missing, neither/both verdict forms are present, or a
-                verdict string is outside ``REVIEW_VERDICTS``.
+                verdict string is outside ``ALLOWED_VERDICTS``.
         """
         if role.name not in REVIEW_VERDICT_SOURCE_ALLOWLIST:
             raise PolicyDenied(
@@ -711,23 +659,23 @@ class PolicyGate:
             )
         if has_single:
             verdict = str(payload.get("verdict", "")).strip()
-            if verdict not in REVIEW_VERDICTS:
+            if verdict not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
-                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(REVIEW_VERDICTS)!r}",
+                    f"review_verdict.verdict={verdict!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint="use one of approve/reject/redirect/advise/needs_review",
+                    hint=f"use one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
             return
         # verdict_map path — every entry's verdict must be in the closed vocab.
         for vname, entry in verdict_map.items():
             v = str((entry or {}).get("verdict") or "").strip()
-            if v not in REVIEW_VERDICTS:
+            if v not in ALLOWED_VERDICTS:
                 raise PolicyDenied(
                     f"review_verdict.verdict_map[{vname!r}].verdict="
                     f"{v!r} not in allowed set "
-                    f"{sorted(REVIEW_VERDICTS)!r}",
+                    f"{sorted(ALLOWED_VERDICTS)!r}",
                     rule="payload",
-                    hint=("every per-variant verdict must be one of approve/reject/redirect/advise/needs_review"),
+                    hint=f"every per-variant verdict must be one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
                 )
 
     # GEMM tuning ownership
@@ -918,26 +866,41 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
         _validate_specialist_framework(params)
-        # Before the scope branches: a freeform dispatch naming the custom domain still runs as it.
-        self._validate_custom_specialist_configured(params)
 
-        # scope='freeform' has no domain anchor: it skips the tag / gap
-        # vocabulary checks and runs a lightweight mechanical sanity gate instead.
         scope_raw = str(params.get("scope") or "").strip().lower()
-        if scope_raw == SPECIALIST_SCOPE_FREEFORM:
-            self._validate_freeform_specialist_dispatch(params)
-            return
-
         # ``params.tags`` is canonical; ``params.domain`` is accepted as a single-tag alias.
         tags = normalize_dispatch_tags(params)
-        # A bare dispatch (no scope, no anchor) defaults to the cheap freeform
-        # lane; its gate still requires a non-empty task_description.
-        if not scope_raw and not tags:
+        # scope='freeform' has no domain anchor, and a bare dispatch (no scope, no
+        # anchor) defaults to that cheap lane: both skip the tag / gap vocabulary
+        # checks for a mechanical sanity gate that still requires a task_description.
+        if scope_raw == SPECIALIST_SCOPE_FREEFORM or not (scope_raw or tags):
             self._validate_freeform_specialist_dispatch(params)
             return
 
         # Observed, not enforced: resolve_specialist_profile re-infers the scope
         # and the runner synthesizes an empty result for an unresolvable anchor.
+        self._log_specialist_dispatch_coherence(scope_raw, tags)
+
+        gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
+        # Backfill the gap id from the gaps[] ledger by matching the dispatch
+        # anchor against each gap's ``domain_hint``; only mutates on a match.
+        if not gap and not self._autofill_gap_from_ledger(params, tags):
+            raise PolicyDenied(
+                "delegate{action='specialist'}: params.gap_canonical_id required",
+                rule="specialist_dispatch_source",
+                hint=(
+                    "Provide a canonical gap id (e.g. "
+                    "'gap.attention.fp8_kv_cache.session-<sid>') so the "
+                    "specialist can anchor its KB traversal."
+                ),
+            )
+        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
+
+        self._validate_specialist_gpu_request(params)
+
+    @staticmethod
+    def _log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
+        """Log a tag / scope combination the specialist profile will re-infer."""
         if not tags:
             log.info("specialist dispatch declares a scope but no tags; profile will re-infer")
         unknown_tags = [t for t in tags if t not in KNOWLEDGE_DOMAIN_TAG_SET]
@@ -955,47 +918,9 @@ class PolicyGate:
                 sorted(SPECIALIST_SCOPE_VALUES),
             )
         elif scope_raw == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
-            log.info("specialist dispatch scope='domains' with %d tag(s)=%r", len(tags), tags)
+            log.info("specialist dispatch scope='domains' with %d tag(s)=%r; profile will re-infer", len(tags), tags)
         elif scope_raw == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
             log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
-
-        gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
-        if not gap:
-            # Backfill the gap id from the gaps[] ledger by matching the dispatch
-            # anchor against each gap's ``domain_hint``; only mutates on a match.
-            gap = self._autofill_gap_from_ledger(params, tags)
-        if not gap:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: params.gap_canonical_id required",
-                rule="specialist_dispatch_source",
-                hint=(
-                    "Provide a canonical gap id (e.g. "
-                    "'gap.attention.fp8_kv_cache.session-<sid>') so the "
-                    "specialist can anchor its KB traversal."
-                ),
-            )
-        max_turns_raw = params.get("max_turns")
-        validate_specialist_max_turns_raw(max_turns_raw, where="params.max_turns")
-
-        self._validate_specialist_gpu_request(params)
-
-    def _validate_custom_specialist_configured(self, params: dict[str, Any]) -> None:
-        """Deny a ``custom_specialist`` dispatch when the session defines none.
-
-        Raises:
-            PolicyDenied: When the dispatch names the custom domain or tag and
-                the session has no operator-defined prompt.
-        """
-        if not is_custom_specialist_dispatch(params):
-            return
-        ss = getattr(self, "shared_state", None)
-        if str(getattr(ss, "custom_specialist_prompt", "") or "").strip():
-            return
-        raise PolicyDenied(
-            "delegate{action='specialist'}: custom_specialist is not configured for this session",
-            rule="specialist_custom_not_configured",
-            hint="Pick a built-in domain; custom_specialist exists only when the operator defines it.",
-        )
 
     def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
         """Validate a specialist's optional GPU request.
@@ -1110,7 +1035,7 @@ class PolicyGate:
 
         # Build the anchor candidate set the gap's domain_hint may name.
         candidates: set[str] = set()
-        domain_key = str(params.get("domain") or "").strip()
+        domain_key = first_text(params.get("domain"))
         if domain_key:
             candidates.add(domain_key.lower())
             d = get_domain(domain_key)
@@ -1132,15 +1057,15 @@ class PolicyGate:
             g
             for g in gaps
             if isinstance(g, dict)
-            and str(g.get("canonical_id") or "").strip()
-            and str(g.get("domain_hint") or "").strip().lower() in candidates
+            and first_text(g.get("canonical_id"))
+            and first_text(g.get("domain_hint")).lower() in candidates
         ]
         if not matches:
             return ""
         matches.sort(key=gap_actionability_key)
-        chosen = str(matches[0].get("canonical_id") or "").strip()
-        if chosen:
-            params["gap_canonical_id"] = chosen
+        # Every match carries a non-empty canonical id.
+        chosen = first_text(matches[0].get("canonical_id"))
+        params["gap_canonical_id"] = chosen
         return chosen
 
     def _validate_freeform_specialist_dispatch(
@@ -1245,8 +1170,8 @@ class PolicyGate:
                 f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
                 rule="extend_lease_bounds",
                 hint=(
-                    "Extend in bounded steps and re-check get_running_tasks; "
-                    "a lease must not outlive the session budget."
+                    f"Extend at most {EXTEND_LEASE_MAX_SEC}s per call; call again while the task runs to extend "
+                    "further. Re-check get_running_tasks between steps."
                 ),
             )
         live = self.resources.live_task_ids
@@ -1330,6 +1255,27 @@ class PolicyGate:
         relative_posix = relative.as_posix()
         return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
 
+    def _warm_replay_patch_key(self, raw_patch: Any, raw_targets: list[str]) -> str:
+        """Return the realpath of a warm-replay patch, which must lie inside the session KB download root."""
+        if not isinstance(raw_patch, str) or not raw_patch.strip():
+            raise PolicyDenied(
+                f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
+                rule="warm_replay_patch_missing",
+            )
+        kb_root = self._remote_recipe_files_root()
+        if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
+            raise PolicyDenied(
+                f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
+                rule="warm_replay_patch_outside_kb_download",
+            )
+        try:
+            return str(Path(raw_patch).resolve())
+        except (OSError, RuntimeError) as exc:
+            raise PolicyDenied(
+                f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
+                rule="warm_replay_patch_outside_kb_download",
+            ) from exc
+
     def _validate_warm_replay_targets(
         self,
         params: dict[str, Any],
@@ -1351,7 +1297,6 @@ class PolicyGate:
                 rule="warm_replay_plan_invalid",
             )
 
-        kb_root = self._remote_recipe_files_root()
         admitted: set[str] = set()
         patch_coverage: dict[str, tuple[frozenset[str], set[str]]] = {}
         for index, entry in enumerate(plan):
@@ -1360,7 +1305,7 @@ class PolicyGate:
                     f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
                     rule="warm_replay_plan_invalid",
                 )
-            raw_targets = entry.get("resolved_patch_targets") or []
+            raw_targets = entry.get("resolved_patch_targets")
             if not raw_targets:
                 continue
             if not isinstance(raw_targets, list) or not all(
@@ -1372,35 +1317,10 @@ class PolicyGate:
                     rule="warm_replay_plan_invalid",
                 )
 
-            raw_patch = entry.get("patch_path")
-            if not isinstance(raw_patch, str) or not raw_patch.strip():
-                raise PolicyDenied(
-                    f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
-                    rule="warm_replay_patch_missing",
-                )
-            if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
-                    rule="warm_replay_patch_outside_kb_download",
-                )
-
-            declared_targets = self._patch_declared_targets(Path(raw_patch))
-            try:
-                patch_key = str(Path(raw_patch).resolve())
-            except (OSError, RuntimeError) as exc:
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
-                    rule="warm_replay_patch_outside_kb_download",
-                ) from exc
-            known_targets, covered_targets = patch_coverage.setdefault(
-                patch_key,
-                (declared_targets, set()),
-            )
-            if known_targets != declared_targets:
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={raw_patch!r} changed during validation",
-                    rule="warm_replay_patch_target_mismatch",
-                )
+            patch_key = self._warm_replay_patch_key(entry.get("patch_path"), raw_targets)
+            if patch_key not in patch_coverage:
+                patch_coverage[patch_key] = (self._patch_declared_targets(Path(patch_key)), set())
+            declared_targets, covered_targets = patch_coverage[patch_key]
             for raw_target in raw_targets:
                 active_root = resolve_session_framework_root()
                 if not active_root or not resolved_within(raw_target, active_root):
@@ -1409,7 +1329,7 @@ class PolicyGate:
                         rule="warm_replay_target_outside_framework_roots",
                     )
                 target_candidates = self._framework_relative_candidates(raw_target)
-                if not declared_targets or declared_targets.isdisjoint(target_candidates):
+                if declared_targets.isdisjoint(target_candidates):
                     raise PolicyDenied(
                         f"replay_warm_recipe target_file={raw_target!r} does not "
                         f"match patch targets={sorted(declared_targets)!r}",
@@ -1628,7 +1548,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 
 __all__ = [
-    "EXTEND_LEASE_MAX_SEC",
     "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
@@ -1640,7 +1559,6 @@ __all__ = [
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",
-    "REVIEW_VERDICTS",
     "REVIEW_VERDICT_SOURCE_ALLOWLIST",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",

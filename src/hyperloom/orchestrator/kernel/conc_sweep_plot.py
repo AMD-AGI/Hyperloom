@@ -70,30 +70,36 @@ def _axes_for_metric(metric: str, tp_eff: float) -> _Axes:
     )
 
 
+@dataclass(frozen=True)
+class ConcCurveOptions:
+    """Labels and workload shape a sweep curve is drawn for.
+
+    Attributes:
+        model_label: Model name in the chart title.
+        gpu_label: GPU name in the chart title.
+        tp: Tensor-parallel size the per-chip axes divide by.
+        isl: Input sequence length the roofline ceiling is computed for.
+        osl: Output sequence length the roofline ceiling is computed for.
+        draw_ceiling: Whether to draw the roofline ceiling.
+    """
+
+    model_label: str = ""
+    gpu_label: str = ""
+    tp: int = 1
+    isl: int = 0
+    osl: int = 0
+    draw_ceiling: bool = False
+
+
 def render_conc_sweep_curve(
     payload: dict[str, Any] | str | Path,
     out_path: str | Path,
-    *,
-    model_label: str = "",
-    gpu_label: str = "",
-    tp: int = 1,
-    isl: int = 0,
-    osl: int = 0,
-    draw_ceiling: bool = False,
+    options: ConcCurveOptions = ConcCurveOptions(),
 ) -> Path | None:
     """Render a throughput-vs-interactivity PNG from a ``conc_sweep_summary.json``."""
     try:
-        return _render(
-            payload=payload,
-            out_path=Path(out_path),
-            model_label=model_label,
-            gpu_label=gpu_label,
-            tp=tp,
-            isl=isl,
-            osl=osl,
-            draw_ceiling=draw_ceiling,
-        )
-    except Exception:
+        return _render(payload, Path(out_path), options)
+    except (ImportError, OSError):
         log.debug("conc_sweep_plot: render failed", exc_info=True)
         return None
 
@@ -109,17 +115,75 @@ def _arm_series(
     points: list[dict[str, Any]],
     tp_eff: float,
     axes: _Axes,
-) -> tuple[list[float], list[float]]:
-    """Extract one arm's (x, y) series on *axes*, sorted ascending by x."""
-    pairs: list[tuple[float, float]] = []
+) -> tuple[list[float], list[float], list[float | None]]:
+    """Extract one arm's (x, y, conc) series on *axes*, in concurrency order.
+
+    A ladder is walked by concurrency, and interactivity need not fall as it rises, so sorting by x would join the
+    points in an order nobody ran them in. A point with no recorded concurrency sorts last, by x.
+    """
+    rows: list[tuple[float | None, float, float]] = []
     for pt in points:
         xy = axes.point_xy(pt, tp_eff)
         if xy is not None:
-            pairs.append(xy)
-    pairs.sort(key=lambda p: p[0])
-    if not pairs:
-        return [], []
-    return [p[0] for p in pairs], [p[1] for p in pairs]
+            rows.append((_positive(pt.get("conc")), xy[0], xy[1]))
+    rows.sort(key=lambda r: (r[0] is None, r[0] or 0.0, r[1]))
+    return [r[1] for r in rows], [r[2] for r in rows], [r[0] for r in rows]
+
+
+def _conc_text(conc: float | None) -> str:
+    return "" if conc is None else f"c={conc:g}"
+
+
+def _unpaired(concs: list[float | None], other: list[float | None]) -> list[bool]:
+    """Which of *concs* the other arm has no plotted point for; nothing is unpaired against an empty arm."""
+    if not other:
+        return [False] * len(concs)
+    return [c is not None and c not in other for c in concs]
+
+
+@dataclass(frozen=True)
+class _Arm:
+    """One arm's series and how it is drawn."""
+
+    name: str
+    xs: list[float]
+    ys: list[float]
+    concs: list[float | None]
+    color: str
+    marker: str
+    label_dy: int
+
+
+def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None], bg: str) -> bool:
+    """Draw one arm, labelled by concurrency; True when some rung is hollow because the other arm lacks it."""
+    xs, ys, concs, color, marker = arm.xs, arm.ys, arm.concs, arm.color, arm.marker
+    if not xs:
+        return False
+    ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=arm.name)
+    single = _unpaired(concs, other_concs)
+    if any(single):
+        # Hollow: the same concurrency has no point on the other arm, so there is nothing to compare it with.
+        ax.plot(
+            [x for x, s in zip(xs, single) if s],
+            [y for y, s in zip(ys, single) if s],
+            marker,
+            markersize=6,
+            markerfacecolor=bg,
+            markeredgecolor=color,
+            markeredgewidth=1.5,
+            linestyle="none",
+        )
+    for x, y, conc in zip(xs, ys, concs):
+        ax.annotate(
+            f"{_conc_text(conc)} {y:.0f}".strip(),
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, arm.label_dy),
+            ha="center",
+            fontsize=7,
+            color=color,
+        )
+    return any(single)
 
 
 def _ceiling_series(
@@ -150,35 +214,35 @@ def _ceiling_series(
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
-def _render(
-    payload: dict[str, Any] | str | Path,
-    out_path: Path,
-    *,
-    model_label: str,
-    gpu_label: str,
-    tp: int,
-    isl: int,
-    osl: int,
-    draw_ceiling: bool,
-) -> Path | None:
+def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
+    parts = [options.model_label or "Model"]
+    if options.gpu_label:
+        parts.append(options.gpu_label)
+    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
+    # placeholders and naming them would misreport what was measured.
+    if agentic:
+        parts.append("Agentic")
+    elif options.isl or options.osl:
+        parts.append(f"ISL={options.isl} OSL={options.osl}")
+    return "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(parts)
+
+
+def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     data = _load_payload(payload)
-    tp_eff = float(max(tp, 1))
+    tp_eff = float(max(options.tp, 1))
     # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
     # pin against the workload's default, and whether the workload was an agentic replay at all.
     metric = _graded_metric_of(data)
     agentic = is_agentx_mode(data.get("benchmark_mode"))
     axes = _axes_for_metric(metric, tp_eff)
 
-    baseline_pts = (data.get("baseline") or {}).get("points") or []
-    optimized_pts = (data.get("optimized") or {}).get("points") or []
-
-    bx, by = _arm_series(baseline_pts, tp_eff, axes)
-    ox, oy = _arm_series(optimized_pts, tp_eff, axes)
+    bx, by, bc = _arm_series((data.get("baseline") or {}).get("points") or [], tp_eff, axes)
+    ox, oy, oc = _arm_series((data.get("optimized") or {}).get("points") or [], tp_eff, axes)
 
     # Need at least the baseline to draw something useful.
     if not bx and not ox:
@@ -199,55 +263,33 @@ def _render(
 
     # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
     # ``_ceiling_series`` returns it in that axis pair's units.
-    if draw_ceiling and not agentic and metric == GRADED_OUTPUT:
-        ceiling_data = data.get("roofline_ceiling") or {}
-        cx, cy = _ceiling_series(ceiling_data, tp_eff)
+    if options.draw_ceiling and not agentic and metric == GRADED_OUTPUT:
+        cx, cy = _ceiling_series(data.get("roofline_ceiling") or {}, tp_eff)
         if cx:
             ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
-    if bx:
-        ax.plot(bx, by, "o-", color=baseline_c, linewidth=2, markersize=6, label="baseline")
-        for x, y in zip(bx, by):
-            ax.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, 8),
-                ha="center",
-                fontsize=7,
-                color=baseline_c,
-            )
-
-    if ox:
-        ax.plot(ox, oy, "s-", color=optimized_c, linewidth=2, markersize=6, label="optimized")
-        for x, y in zip(ox, oy):
-            ax.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, -14),
-                ha="center",
-                fontsize=7,
-                color=optimized_c,
-            )
+    single_arm_note = False
+    for arm, other_concs in (
+        (_Arm("baseline", bx, by, bc, baseline_c, "o", 8), oc),
+        (_Arm("optimized", ox, oy, oc, optimized_c, "s", -14), bc),
+    ):
+        single_arm_note = _draw_arm(ax, arm, other_concs, bg) or single_arm_note
+    if single_arm_note:
+        ax.plot(
+            [],
+            [],
+            "o",
+            markerfacecolor=bg,
+            markeredgecolor=fg,
+            markeredgewidth=1.5,
+            linestyle="none",
+            label="hollow: concurrency measured by one arm only",
+        )
 
     ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
     ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
 
-    title_parts = [model_label or "Model"]
-    if gpu_label:
-        title_parts.append(gpu_label)
-    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
-    # placeholders and naming them would misreport what was measured.
-    if agentic:
-        title_parts.append("Agentic")
-    elif isl or osl:
-        title_parts.append(f"ISL={isl} OSL={osl}")
-    ax.set_title(
-        "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),
-        fontsize=11,
-        color=fg,
-    )
+    ax.set_title(_chart_title(options, agentic), fontsize=11, color=fg)
 
     ax.grid(True, alpha=0.3, color=grid_c)
     ax.tick_params(colors=fg)
@@ -265,4 +307,4 @@ def _render(
     return out_path
 
 
-__all__ = ["render_conc_sweep_curve"]
+__all__ = ["ConcCurveOptions", "render_conc_sweep_curve"]

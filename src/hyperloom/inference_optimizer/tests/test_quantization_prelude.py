@@ -26,13 +26,14 @@ def _enable_quant_by_default(monkeypatch):
 # fakes
 
 
-def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None):
+def _fake_result(status: str, qdir: str | None, *, final="x", eval_gap=None, run_dir: str | None = None):
     """Build a stand-in for quantization_agent.QuantSkillRunResult."""
     assessment = types.SimpleNamespace(final=final, eval_gap=eval_gap)
     return types.SimpleNamespace(
         status=status,
         quantized_model_dir=Path(qdir) if qdir else None,
         assessment=assessment,
+        run_dir=Path(run_dir) if run_dir else None,
     )
 
 
@@ -180,14 +181,7 @@ def test_build_prompt_full_renders_three_groups():
         seq_len=2048,
         acceptable_eval_gap=0.03,
     )
-    p = qs.build_quantization_prompt(
-        cfg,
-        model_path="/path/models/Qwen-Qwen3-32B",
-        gpu_type="mi355x",
-        skill_path="@/shared/quantization_agent/SKILL.md",
-    )
-    assert "Use the skill at @/shared/quantization_agent/SKILL.md" in p
-    assert "on an MI355X target" in p
+    p = qs.build_quantization_prompt(cfg)
     assert "Quantization strategy:" in p
     assert "Apply mxfp4 as the global quantization scheme." in p
     assert "Override the self_attn layers with fp8 and the moe/mlp layers with ptpc_fp8." in p
@@ -220,9 +214,10 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
-    # source model + export dir folded into the effective prompt.
+    # source model + export dir folded into the effective prompt; the export dir is inside the run's own directory.
     assert "/models/src" in calls[0]["prompt"]
-    assert str(tmp_path / "quantized") in calls[0]["prompt"]
+    assert "`quantized/` in your workspace" in calls[0]["prompt"]
+    assert str(tmp_path) not in calls[0]["prompt"]
     assert "fp8" in calls[0]["prompt"]
     assert calls[0]["interactive"] is False
     assert calls[0]["workspace"] == tmp_path
@@ -241,11 +236,14 @@ def test_adapter_partial_without_model_exits_4(tmp_path, monkeypatch):
     assert ei.value.code == 4
 
 
-def test_adapter_failed_exits_4(tmp_path, monkeypatch):
-    _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed"))
+def test_adapter_failed_exits_4(tmp_path, monkeypatch, capsys):
+    run_dir = str(tmp_path / "runs" / "r1")
+    _patch_quantize(monkeypatch, _fake_result("failed", None, final="exec_model_load_failed", run_dir=run_dir))
     with pytest.raises(SystemExit) as ei:
         asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/m", workspace=tmp_path))
     assert ei.value.code == 4
+    # The failure names the run directory that holds this run's diagnosis.
+    assert run_dir in capsys.readouterr().err
 
 
 # Group C — cli prelude hook

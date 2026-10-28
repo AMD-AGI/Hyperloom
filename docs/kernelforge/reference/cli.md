@@ -35,6 +35,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
 kernelforge roofline-ceiling --workspace <W> [options]
+kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -79,8 +80,6 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
-| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
-| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
@@ -133,13 +132,13 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--agent-backend <name>` | provider default | Registered local Agent provider for the Implementer. |
-| `--supervisor-backend <name>` | follows Implementer | Registered provider for the stalled-search (AVO) supervisor. Omit it so one `--agent-backend` controls every local agent. |
+| `--agent-backend <name>` | provider default | Registered local Agent provider; the model-relay primary of a new campaign. A resumed campaign refuses a different provider. |
+| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, run at a model-relay blockage when no other Agent profile is available. Omit it so one `--agent-backend` controls every local agent. |
 | `--agent-cli <path>` | provider default | Provider executable path or command. |
-| `--model <name>` | provider default | Selected provider model. |
+| `--model <name>` | provider default | Model of the primary Agent profile for this session, on resume as well. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |
 | `--agent-sandbox-mode <v>` | provider default | Provider sandbox mode. |
-| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a fallback. |
+| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none`. Under model relay it is the member a session prefers when the primary cannot run, and `none` refuses to start a session that has no profile to resume on any other member. |
 | `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
 | `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 | `--permission-mode <v>` | provider default | Provider permission mode, where the provider supports one. |
@@ -150,9 +149,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--experience-kb` / `--no-experience-kb` | on | Read and publish forge-loop experience KB entries. Internal callers with their own KB lifecycle, such as `forge-rewrite-by-flydsl`, disable this explicitly. |
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
-| `--return-after-read-kb` / `--return-after-read-KB` | off | Return before iteration 1 when a KB solution applies cleanly, passes current correctness and improves current performance. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
-| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
+| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. When the repository resolves and the Agent provider supports MCP, the Implementer also gets the `pr_monitor` tools: `pr_find_references`, `pr_get_reference` and `pr_get_file_patch` query the service, and `pr_check_inclusion` answers from local git alone whether a PR is already in a tree: `included` when a commit subject names it, otherwise `unknown`, because local history cannot show that a PR is absent. The check-prior-art contributor skill runs the same probe as `python -m kernelforge.knowledge.pr_knowledge.inclusion`, passing the PR's merge commit sha so that it also matches the PR's commits by sha or patch-id. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
 ### Output
@@ -218,7 +216,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`/`DSH_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |
@@ -268,9 +266,9 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
-| `--agent-backend <name>` | `auto` | `auto`, `claude` or `codex`, for discovery and authoring. |
+| `--agent-backend <name>` | `auto` | `auto`, `claude`, `codex` or `deepseek`, for discovery and authoring. `deepseek` is never chosen by `auto`: name it here or with `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`. |
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
-| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
+| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL` / `$DSH_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
 | `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |
@@ -339,6 +337,7 @@ Shape sources, in descending priority — `--demand` wins, then
 | `--kernel-signature-log <file>` | `''` | Server log for 1-stage ASM detection. |
 | `--tokens <a,b>` | auto | Comma-separated explicit token list, overriding the automatic coverage. |
 | `--conc <n>` | `64` | Target serving concurrency, used for token coverage. |
+| `--m-grid bucket\|exact` | `bucket` | M the aiter dense (fp8/fp4) tuners tune the decode band and `--demand` rows at: aiter's multiple of 16 up to 256 and a power of two above (`bucket`), or the exact batch sizes (`exact`). The decode band takes sglang's graph batch sizes up to 64 and the powers of two above, up to `--conc`. The sglang bf16 tuner buckets its decode band and `--demand` rows the same way and does not read this flag. |
 | `--tp <n>` | `1` | Tensor-parallel degree. |
 
 Search and execution:
@@ -509,3 +508,60 @@ profiler or a shell cannot outlive its budget and hold the device.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
+
+## export-runs
+
+Writes the runs found under one or more directories as one JSON document,
+`{"runs": [...], "raw_logs": ["raw-logs-not-collected.log"]}`, for
+`hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`), and an empty
+`raw-logs-not-collected.log` beside it. A run is a plain `forge-loop` run's
+`forge_experiments/` directory, which holds `campaign_config.json` and
+`run_state.json`. A directory that never wrote those two files is not a run
+this export reports. Each candidate the run archived
+(`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
+entry of its own. A record that exists but is not readable JSON, or a candidate
+whose `meta.json` is missing or malformed, is one entry saying why, which
+collection skips with that reason.
+
+An entry names the candidate's plan, the kernel KernelForge measured, and, when
+the candidate archived one, the diff of every file the commit touched
+(`candidates/iter_NNN/change.diff`). Its reasoning is the whole lesson
+`lessons/iter_NNN.md` or, for a single session that wrote none, the first three
+sentences of the rationale its `meta.json` records. A lane or a merge with
+neither has no reasoning. It holds the text of the `report.md` of the Analysis
+generation the candidate's planning round read, which its
+`orchestration/iter_NNN/context.json` names, and names that generation in its
+metadata. It carries the candidate's whole
+`meta.json` as its metadata, and the run's operator, the kernel name
+KernelForge files its KB records under, its framework, backend, GPU, and the
+benchmark driver's SHA-256 from `campaign_config.json`. The run's
+`forge-loop.log` gives the record KernelForge's own experience KB filed a kept
+candidate under; the log is only read, and no entry names it or records its path.
+
+A kept candidate's record is the one its own session printed. Each session
+prints `Experiment: <id>`, and the run's `events.jsonl` records that
+`experiment_id` on the `iteration_result` of every iteration the session
+measured. The id is new for each session, and `events.jsonl` moves with
+`forge_experiments`, so the record is found after the controller moves the
+archive out of the workspace and when two runs share one kernel file. No path
+is compared. A log whose experiment no exported run recorded, and two logs
+that disagree on one session's record, leave `kb_record` unset. The export
+stops with an error and writes nothing when it cannot list a directory under
+the log roots or read a file it needs, such as a JSON record, a plan, a
+lesson, or a log, naming that path.
+
+The document names the empty file, relative to itself, as the raw log of every
+Experience collected from it, and no run log goes with an Experience: the
+global KB refuses a complete Experience without raw logs, and KernelForge's run
+logs are not collected yet. Keep the file beside the document: collection reads
+that name from the document's directory and skips every candidate when the file
+is missing. The export empties any file of that name already there. A document
+without a top-level `raw_logs`, such as one an earlier `export-runs` wrote,
+gives Experiences the global KB refuses: export its runs again before
+collecting them.
+
+| Argument / option | Default | Meaning |
+|:--|:--|:--|
+| `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. The empty `raw-logs-not-collected.log` is written beside it. |

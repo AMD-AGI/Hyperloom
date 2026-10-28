@@ -86,14 +86,7 @@ class ConcSweepExecutor:
                 "error": "conc_sweep: ctx.extra['session_dir'] missing",
             }
         session_dir = Path(session_dir_str)
-        try:
-            state = SharedState.load_or_init(session_dir)
-        except Exception as exc:  # noqa: BLE001 — surface as failure
-            return {
-                "status": "failed",
-                "error_class": "shared_state_load_failed",
-                "error": f"conc_sweep: SharedState.load_or_init failed: {exc!r}",
-            }
+        state = SharedState.load_or_init(session_dir)
 
         params = ctx.task.params or {}
         # ``None`` falls back to the ladder run_conc_sweep resolves for this workload; an empty list short-circuits
@@ -146,7 +139,7 @@ class ConcSweepExecutor:
             conc_sweep_event_id,
             make_conc_sweep_recorder,
         )
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -161,7 +154,7 @@ class ConcSweepExecutor:
             phase=str(getattr(state, "phase", "") or "unphased"),
             macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
         )
-        sink = make_sink(event, producer=_RECORDER_PRODUCER)
+        sink = EventSink(event, producer=_RECORDER_PRODUCER)
         return make_conc_sweep_recorder(
             sink,
             task_id=str(getattr(ctx.task, "task_id", "") or ""),

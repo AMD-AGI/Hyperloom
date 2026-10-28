@@ -321,9 +321,12 @@ class _FusedMoeAdapter:
             AITER_CONFIGS.get_config_file.cache_clear()
             fm.cfg_2stages = None
             fm.get_2stage_cfgs.cache_clear()
-        except Exception:  # noqa: BLE001 - off-GPU, or aiter already torn down
+        except (ImportError, OSError, RuntimeError):
+            # aiter is absent, cannot load its libraries, or fails its import-time
+            # GPU arch probe, so there is no cache to drop.
             pass
-        shutil.rmtree(self._workdir, ignore_errors=True)
+        finally:
+            shutil.rmtree(self._workdir, ignore_errors=True)
 
     def __enter__(self) -> "_FusedMoeAdapter":
         return self
@@ -378,8 +381,8 @@ class _FusedMoeAdapter:
                 32,
                 1,
             )
-        except Exception as exc:  # noqa: BLE001 - "cannot build operands" is data
-            log.info("tier3: cannot build fused-MoE operands for %s: %r", shape, exc)
+        except Exception as exc:  # isolation boundary: one fused-MoE shape's operand bundle
+            log.info("tier3: cannot build fused-MoE operands for %s: %r", shape, exc, exc_info=True)
             self._operands[shape] = None
             return None
         self._operands[shape] = bundle
@@ -524,8 +527,8 @@ class _FusedMoeAdapter:
             return None
         try:
             resolved = self._resolved_kernels(run)
-        except Exception as exc:  # noqa: BLE001 - a candidate that raises is not dispatchable
-            log.info("tier3: fused-MoE candidate %s/%s raised: %r", kn1, kn2, exc)
+        except Exception as exc:  # isolation boundary: one fused-MoE candidate config
+            log.info("tier3: fused-MoE candidate %s/%s raised: %r", kn1, kn2, exc, exc_info=True)
             self._point_at(self._baseline_csv)
             return None
         if resolved != (kn1, kn2):
@@ -597,8 +600,8 @@ class _FusedMoeAdapter:
                 got = run()
                 torch.cuda.synchronize()
                 worst = max(worst, mean_error(got, ref))
-        except Exception as exc:  # noqa: BLE001 - a kernel that raises is wrong
-            log.warning("tier3: fused-MoE correctness check raised, rejecting: %r", exc)
+        except Exception as exc:  # isolation boundary: one fused-MoE candidate correctness check
+            log.warning("tier3: fused-MoE correctness check raised, rejecting: %r", exc, exc_info=True)
             return False
 
         if worst > MAX_MOE_MEAN_ERROR:
@@ -799,8 +802,8 @@ class _Bf16DenseAdapter:
                     b_preshuffle=False,
                     c_to_lds=False,
                 )
-        except Exception as exc:  # noqa: BLE001 - undispatchable is data
-            log.info("tier3: cannot dispatch %s: %r", backend, exc)
+        except Exception as exc:  # isolation boundary: one dense bf16 candidate callable
+            log.info("tier3: cannot dispatch %s: %r", backend, exc, exc_info=True)
             return None
 
         # Declared above but not built here: a gap in this module, not in the
@@ -829,8 +832,8 @@ class _Bf16DenseAdapter:
                     return False
                 ref = torch.matmul(a.float(), b.float().t())
                 worst = max(worst, relative_error(got, ref))
-        except Exception as exc:  # noqa: BLE001 - a kernel that raises is wrong
-            log.warning("tier3: correctness check raised, rejecting: %r", exc)
+        except Exception as exc:  # isolation boundary: one dense candidate correctness trial
+            log.warning("tier3: correctness check raised, rejecting: %r", exc, exc_info=True)
             return False
         finally:
             if saved is not None:

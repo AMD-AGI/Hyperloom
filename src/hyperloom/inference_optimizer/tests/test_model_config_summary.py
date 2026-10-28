@@ -28,6 +28,26 @@ def test_summary_missing_config_returns_empty(tmp_path: Path) -> None:
     assert summarize_model_config("") == {}
 
 
+@pytest.mark.parametrize(
+    "mtp_field",
+    [
+        {"num_nextn_predict_layers": 1},
+        {"mtp_num_hidden_layers": 1},
+        {"num_mtp_modules": 1},
+        {"text_config": {"model_type": "glm5_next_text", "num_nextn_predict_layers": 1}},
+    ],
+)
+def test_summary_reports_mtp_layers_under_every_family_field(tmp_path: Path, mtp_field: dict) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "x", **mtp_field})
+    assert summarize_model_config(str(m))["mtp_layers"] == 1
+
+
+@pytest.mark.parametrize("payload", [{}, {"num_nextn_predict_layers": 0}])
+def test_summary_reports_zero_mtp_layers_for_a_model_without_them(tmp_path: Path, payload: dict) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "llama", **payload})
+    assert summarize_model_config(str(m))["mtp_layers"] == 0
+
+
 def test_summary_mha(tmp_path: Path) -> None:
     m = _write_config(
         tmp_path / "m",
@@ -141,6 +161,34 @@ def test_summary_quantization(tmp_path: Path) -> None:
     )
     out = summarize_model_config(str(m))
     assert out["quantization"] == "fp8"
+
+
+@pytest.mark.parametrize(
+    ("quant_cfg", "expected"),
+    [
+        (
+            {
+                "quant_method": "quark",
+                "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
+                "layer_quant_config": {"*self_attn*": {"weight": {"dtype": "fp8_e4m3"}}},
+            },
+            "fp4",
+        ),
+        (
+            {
+                "quant_method": "compressed-tensors",
+                "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "float"}}},
+            },
+            "fp8",
+        ),
+    ],
+)
+def test_summary_quantization_is_the_format_a_toolkit_nests(tmp_path: Path, quant_cfg: dict, expected: str) -> None:
+    m = _write_config(
+        tmp_path / "m",
+        {"num_attention_heads": 32, "num_key_value_heads": 8, "quantization_config": quant_cfg},
+    )
+    assert summarize_model_config(str(m))["quantization"] == expected
 
 
 def test_summary_nested_text_config(tmp_path: Path) -> None:

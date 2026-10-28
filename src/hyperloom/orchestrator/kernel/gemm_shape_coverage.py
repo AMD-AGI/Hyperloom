@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
+from kernelforge.gemm_tune.evidence import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
@@ -117,7 +118,6 @@ def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
     max_shapes: int = 64,
-    max_m: int = 0,
 ) -> tuple[list[Shape], dict[str, Any]]:
     """Re-key observed shapes onto the M values aiter will actually look up."""
     observed = sorted({(int(m), int(n), int(k)) for m, n, k in shapes if min(m, n, k) > 0})
@@ -125,23 +125,22 @@ def align_shapes_to_aiter_keys(
         return [], {"observed": 0, "aligned": 0, "dropped": 0, "unchanged": True}
 
     nk_pairs = sorted({(n, k) for _m, n, k in observed})
-    ladder = _pow2_ladder(max(max(m for m, _, _ in observed), int(max_m or 0)))
+    ladder = _pow2_ladder(max(m for m, _, _ in observed))
 
     ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
     fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
 
     budget = max(len(nk_pairs), int(max_shapes))
     kept = set(ladder_rows)
-    if len(kept) > budget:
-        # Drop the smallest rungs first, but never leave an (N, K) with no row.
-        for m in ladder:
+    # The budget is at least one row per (N, K), so the break fires before the
+    # last rung and no (N, K) is left without a row.
+    for m in ladder:
+        if len(kept) <= budget:
+            break
+        for n, k in nk_pairs:
             if len(kept) <= budget:
                 break
-            for n, k in nk_pairs:
-                if len(kept) <= budget:
-                    break
-                if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
-                    kept.discard((m, n, k))
+            kept.discard((m, n, k))
     for shape in sorted(fine_rows, key=lambda s: s[0], reverse=True):
         if len(kept) >= budget:
             break
@@ -305,26 +304,6 @@ def parse_aiter_shape_lookups_for_tables(
     return missed, hit
 
 
-def _split_fmoe_tuple(raw: str) -> list[str]:
-    """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
-    parts: list[str] = []
-    current: list[str] = []
-    in_quote = False
-    for ch in raw:
-        if ch == "'":
-            in_quote = not in_quote
-            continue
-        if ch == "," and not in_quote:
-            parts.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-    tail = "".join(current).strip()
-    if tail:
-        parts.append(tail)
-    return parts
-
-
 def _normalize_fmoe_q_dtype(value: str) -> str:
     """Map known q-dtype aliases to the canonical string aiter logs."""
     text = str(value or "").strip().strip("'\"")
@@ -409,7 +388,7 @@ def _parse_fused_moe_dispatch_line(line: str) -> dict[str, str] | None:
         kernel_name1 = kn_match.group("kn1")
         kernel_name2 = kn_match.group("kn2")
 
-    record = _fmoe_dispatch_record(_split_fmoe_tuple(keys_raw))
+    record = _fmoe_dispatch_record(moe_tuple(keys_raw))
     if record is None:
         return None
     record["descriptor"] = descriptor
@@ -466,9 +445,6 @@ def resolve_fmoe_candidate_csv(path: str | Path) -> Path | None:
     return resolved
 
 
-FMOE_INTEGRATE_RUN = "integrate-gemm_tune_fmoe_ck"
-
-
 def log_has_fused_moe_activity(log_text: str) -> bool:
     """Return True when server.log shows fused-MoE activity we might parse."""
     text = log_text or ""
@@ -488,20 +464,14 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
-def integrate_server_logs(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> list[Path]:
+def integrate_server_logs(session_dir: Path, integrate_name: str) -> list[Path]:
     """Server logs for one integrate run, retries included, oldest first."""
     parent = session_dir / "runs" / "integrate"
     run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
     return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
 
 
-def read_latest_integrate_server_log(
-    session_dir: Path,
-    integrate_name: str = FMOE_INTEGRATE_RUN,
-) -> tuple[Path, str] | None:
+def read_latest_integrate_server_log(session_dir: Path, integrate_name: str) -> tuple[Path, str] | None:
     """Return the newest ``server.log`` under an integrate run, if readable."""
     logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
@@ -543,13 +513,6 @@ def tuned_fmoe_csv_rows(path: str | Path) -> list[dict[str, str]]:
     return out
 
 
-def _fmoe_candidate_row_for_dispatch(
-    record: dict[str, str],
-    candidate_rows: dict[FmoeDispatchKey, dict[str, str]],
-) -> dict[str, str] | None:
-    return candidate_rows.get(fmoe_dispatch_lookup_key(record))
-
-
 def fmoe_tuned_config_coverage(
     candidate_rows: Iterable[dict[str, str]],
     requested_dispatches: Iterable[dict[str, str]],
@@ -573,7 +536,7 @@ def fmoe_tuned_config_coverage(
             default_count += 1
             uncovered.append(record)
             continue
-        row = _fmoe_candidate_row_for_dispatch(record, by_key)
+        row = by_key.get(fmoe_dispatch_lookup_key(record))
         if row is None:
             uncovered.append(record)
             continue

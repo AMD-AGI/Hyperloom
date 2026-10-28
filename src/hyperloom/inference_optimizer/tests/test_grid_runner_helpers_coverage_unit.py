@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
@@ -39,7 +41,7 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="meta-llama-3-8b")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "meta-llama-3-8b"))
     assert [v.name for v in kept] == ["plain"]
     assert len(dropped) == 1
     assert dropped[0]["source"] == "compatibility_filter"
@@ -50,14 +52,82 @@ def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch)
     # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="deepseek-moe")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "deepseek-moe"))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
 def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
+    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", ""))
     assert [v.name for v in kept] == ["moe"] and dropped == []
+
+
+# -- ungrounded_env_file_reason (env-value file grounding) ----------------
+def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
+    # A proposal may point a config env at an artifact no stage authored; the server would read it
+    # unconditionally and die at config load, so the variant must be dropped with a reason.
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
+    assert str(tmp_path / "nope.csv") in reason
+
+
+def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
+    csv = tmp_path / "tuned.csv"
+    csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
+    # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
+    # Both files on disk is a valid variant and must not be dropped.
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    b = tmp_path / "t2.csv"
+    b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    missing = str(tmp_path / "never_authored.csv")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
+
+
+def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
+    # An unreadable parent or an overlong name makes Path.is_file() raise; the variant is dropped, the grid runs on.
+    def raise_eacces(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "/root/private/tuned.csv" in reason
+
+
+def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_path, monkeypatch) -> None:
+    # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
+    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
+
+
+def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
+    # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
+    v = _variant(
+        "plain",
+        envs={
+            "AITER_CONFIG": '{"path": "/tmp/never_scanned.json"}',
+            "SGLANG_USE_AITER": "1",
+            "AITER_CONFIG_GEMM_A8W8": "",
+        },
+    )
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------
@@ -279,8 +349,7 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--foo 1", envs={"USE_AITER": "1"})
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -310,8 +379,7 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     )
     variant = _variant("v1", "--attention-backend ROCM_AITER_FA")
     out = gr._build_variant_yaml(
-        base,
-        "",
+        gr.GridRecipe(base_yaml_path=base),
         variant,
         output_subdir=tmp_path / "v1",
     )
@@ -319,6 +387,20 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     args = cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert args.count("--attention-backend") == 1, f"duplicate flag: {args}"
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
+
+
+def test_build_variant_yaml_repeated_multi_value_flag_keeps_last(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--cuda-graph-bs 1 2 4"}}}),
+        encoding="utf-8",
+    )
+    out = gr._build_variant_yaml(
+        gr.GridRecipe(base_yaml_path=base), _variant("v1", "--cuda-graph-bs 8 16"), output_subdir=tmp_path / "v1"
+    )
+    assert yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] == (
+        "--cuda-graph-bs 8 16"
+    )
 
 
 def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
@@ -332,7 +414,7 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     overlay.mkdir()
     variant = _variant("v1")
     variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
 
@@ -354,7 +436,7 @@ def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, mo
     base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
     variant = _variant("v1")
     variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
-    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
     envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
 
@@ -372,37 +454,9 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
     for bad in (f"{overlay}:/etc", f"{overlay}/../evil", str(tmp_path / "missing")):
         variant = _variant("v1")
         variant.overlay_pythonpath = bad  # type: ignore[attr-defined]
-        out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+        out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
         envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
-
-
-def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
-    """JSON stays an opaque argv token while unrelated flags dedupe last-wins."""
-    args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
-    out = gr._shell_safe_dedupe(args)
-    assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
-    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
-
-
-def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
-    """Multi-token flags must not be reassembled as stray positional tokens."""
-    args = "--cuda-graph-bs 1 2 4 --cuda-graph-bs 8 16"
-    out = gr._shell_safe_dedupe(args)
-    assert out == args
-
-
-def test_shell_safe_dedupe_normalizes_equals_form() -> None:
-    """--flag=value and --flag value must dedupe to one (last wins)."""
-    out = gr._shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
-    assert out.count("--attention-backend") == 1, out
-    assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
-    assert "ROCM_ATTN" not in out
-
-
-def test_shell_safe_dedupe_simple_last_wins() -> None:
-    out = gr._shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
-    assert out == "--tp 8 --mem-fraction-static 0.9"
 
 
 def test_compose_server_args_replace_still_applies_remove_args() -> None:
@@ -416,29 +470,37 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
     out = gr.compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
         variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
     )
-    assert "--no-enable-prefix-caching" not in out
+    assert "--no-enable-prefix-caching" in out
     assert "--block-size 128" in out
     assert "--kv-cache-dtype fp8" in out
 
 
-def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = gr.compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
         args_mode="replace",
     )
-    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+    assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
+    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+
+    launched = gr.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
+    assert "--no-enable-prefix-caching" in launched
+    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:
-    out = gr.remove_server_args(
+    out = remove_server_args(
         "--flag-a --flag-b --flag-c 3 --keep 4",
         "--flag-a --flag-b --flag-c",
     )
@@ -452,7 +514,7 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
         '"exclude_layer":["*.mlp.gate","*expert*"]} '
         "--no-enable-prefix-caching --tp 8"
     )
-    out = gr.remove_server_args(args, ["--no-enable-prefix-caching"])
+    out = remove_server_args(args, ["--no-enable-prefix-caching"])
     tokens = out.split(" ")
     assert tokens[0] == "--online_quant_config"
     assert json.loads(tokens[1]) == {
@@ -464,5 +526,5 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
 
 def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
     """A stray ``}`` is not a JSON blob and must not take the tail with it."""
-    out = gr.remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
+    out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
     assert out == "--tp 8 --max-num-seqs 64"

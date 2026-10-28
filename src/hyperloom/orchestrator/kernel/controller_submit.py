@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from hyperloom.common.llm_attribution import inject_env
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+    RoundWatch,
     run_with_session_kill,
 )
 
@@ -150,7 +151,7 @@ def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) ->
                     cache_read_input_tokens=row.get("cache_read_input_tokens"),
                 ),
             )
-        except Exception:  # noqa: BLE001 - accounting must not fail the phase
+        except ValueError:  # a malformed usage row is skipped
             continue
         appended += 1
     return appended
@@ -175,8 +176,7 @@ def run_controller_subprocess(
         completed = run_with_session_kill(
             command,
             env=_controller_environment(),
-            timeout=max(1, int(hard_timeout_sec)),
-            text=True,
+            watch=RoundWatch(timeout=max(1, int(hard_timeout_sec))),
             on_output=on_output,
         )
         returncode = int(completed.returncode)

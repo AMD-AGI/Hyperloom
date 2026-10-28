@@ -12,16 +12,19 @@ import tempfile
 import unittest
 import unittest.mock as mock
 
-from hyperloom.orchestrator.trace_analysis.tracelens_analysis import (
+from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
+from hyperloom.orchestrator.trace_analysis._candidate_assembly import derive_kernel_category
+from hyperloom.orchestrator.trace_analysis._kernel_classification import (
     _defines_traced_triton_kernel,
-    _flydsl_kernel_params,
     _flydsl_reusable_roots,
     _looks_like_flydsl_source,
     _reusable_roots,
     classify_patchability,
-    derive_kernel_category,
-    enrich_candidates_with_runtime_metadata,
     source_type_for,
+)
+from hyperloom.orchestrator.trace_analysis._kernel_roofline import (
+    _flydsl_kernel_params,
+    enrich_candidates_with_runtime_metadata,
 )
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
@@ -340,7 +343,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         args = argparse.Namespace(
             framework="sglang",
             model_name="",
-            analysis_mode="inference",
             target_platform="mi355x",
         )
         flydsl_cand = {
@@ -393,13 +395,8 @@ class TestCandidateEnvForwarding(unittest.TestCase):
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     """Orchestrator-side allowlist must stay in sync with the classifier."""
 
-    def setUp(self) -> None:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        self.handlers = kernel_request_handlers
-
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
-        roots = self.handlers._reusable_source_roots()
+        roots = resolve_known_source_prefixes()
         self.assertIn("/sgl-workspace/flydsl/", roots)
 
     def test_orchestrator_honours_dsl2_root_env(self) -> None:
@@ -407,7 +404,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
             self.assertIn(
                 "/path/user-local/flydsl/",
-                self.handlers._reusable_source_roots(),
+                resolve_known_source_prefixes(),
             )
 
 
@@ -444,13 +441,13 @@ class TestFlyDSLTargetArch(unittest.TestCase):
     """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
 
     def test_every_supported_board_gets_the_table_arch(self) -> None:
-        from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+        from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 
-        for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        for product, board in AMD_GPU_BOARDS.items():
             self.assertEqual(
-                _flydsl_kernel_params("", board).get("FLYDSL_TARGET_ARCH"),
-                arch,
-                board,
+                _flydsl_kernel_params("", product).get("FLYDSL_TARGET_ARCH"),
+                board.gfx,
+                product,
             )
 
     def test_an_unsupported_board_gets_no_arch(self) -> None:

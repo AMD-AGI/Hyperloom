@@ -14,6 +14,7 @@ from hyperloom.orchestrator.state.task_registry import (
     _MAX_PROGRESS_NOTES,
     Task,
     TaskRegistry,
+    TaskSpec,
     create_in_cursor,
     task_dispatch_class,
     task_dispatch_evidence,
@@ -27,7 +28,7 @@ _ORIGIN = {"phase": "PRELUDE", "macro_cycle": 2, "tick": 7}
 async def _running_task(tmp_path, name: str) -> tuple[TaskRegistry, str]:
     """Create a registry holding one task already in ``running``."""
     registry = TaskRegistry(SqliteConnection(tmp_path / f"{name}.db"))
-    task = await registry.create(kind="roofline", params={}, idempotency_key=name)
+    task, _ = await registry.create_or_return_existing(TaskSpec(kind="roofline", params={}, idempotency_key=name))
     await registry.transition(task.task_id, "running")
     return registry, task.task_id
 
@@ -112,12 +113,14 @@ async def test_a_note_lands_whole_and_readable_under_the_bound(tmp_path):
 async def test_dispatch_class_is_persisted_without_a_schema_migration(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "dispatch-class.db"))
     try:
-        task = await registry.create(
-            kind="baseline",
-            params={},
-            idempotency_key="llm-baseline",
-            dispatch_class="llm",
-            dispatch_origin=_ORIGIN,
+        task, _ = await registry.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="llm-baseline",
+                dispatch_class="llm",
+                dispatch_origin=_ORIGIN,
+            ),
         )
         reloaded = await registry.get(task.task_id)
     finally:
@@ -133,32 +136,17 @@ async def test_dispatch_class_is_persisted_without_a_schema_migration(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_registry_does_not_publish_partial_dispatch_evidence(tmp_path):
-    registry = TaskRegistry(SqliteConnection(tmp_path / "legacy-registry.db"))
-    try:
-        task = await registry.create(
-            kind="baseline",
-            params={},
-            idempotency_key="legacy-registry",
-            dispatch_class="coordinator",
-        )
-    finally:
-        registry.db.close()
-
-    assert task_dispatch_evidence(task) is None
-    assert task_dispatch_record(task) is None
-
-
-@pytest.mark.asyncio
 async def test_unknown_dispatch_class_fails_before_insert(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "bad-dispatch-class.db"))
     try:
         with pytest.raises(ValueError, match="unknown dispatch_class"):
-            await registry.create(
-                kind="baseline",
-                params={},
-                idempotency_key="bad",
-                dispatch_class="agent",
+            await registry.create_or_return_existing(
+                TaskSpec(
+                    kind="baseline",
+                    params={},
+                    idempotency_key="bad",
+                    dispatch_class="agent",
+                ),
             )
         row = await registry.db.fetchone("SELECT COUNT(*) AS count FROM tasks")
     finally:
@@ -172,24 +160,30 @@ async def test_idempotent_reuse_requires_the_same_dispatch_class(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "dispatch-reuse.db"))
     try:
         created, existing = await registry.create_or_return_existing(
-            kind="baseline",
-            params={},
-            idempotency_key="same-key",
-            dispatch_class="llm",
-            dispatch_origin=_ORIGIN,
-        )
-        reused, was_existing = await registry.create_or_return_existing(
-            kind="baseline",
-            params={},
-            idempotency_key="same-key",
-            dispatch_class="llm",
-        )
-        with pytest.raises(ValueError, match="dispatch_class mismatch"):
-            await registry.create_or_return_existing(
+            TaskSpec(
                 kind="baseline",
                 params={},
                 idempotency_key="same-key",
-                dispatch_class="coordinator",
+                dispatch_class="llm",
+                dispatch_origin=_ORIGIN,
+            ),
+        )
+        reused, was_existing = await registry.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="same-key",
+                dispatch_class="llm",
+            ),
+        )
+        with pytest.raises(ValueError, match="dispatch_class mismatch"):
+            await registry.create_or_return_existing(
+                TaskSpec(
+                    kind="baseline",
+                    params={},
+                    idempotency_key="same-key",
+                    dispatch_class="coordinator",
+                ),
             )
     finally:
         registry.db.close()
@@ -206,28 +200,22 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
         async with db.transaction() as cur:
             created, existing = create_in_cursor(
                 cur,
-                kind="specialist",
-                params={},
-                idempotency_key="cursor-key",
-                dispatch_class="coordinator",
-                dispatch_origin=_ORIGIN,
+                TaskSpec(
+                    kind="specialist",
+                    params={},
+                    idempotency_key="cursor-key",
+                    dispatch_class="coordinator",
+                    dispatch_origin=_ORIGIN,
+                ),
             )
         async with db.transaction() as cur:
             reused, was_existing = create_in_cursor(
-                cur,
-                kind="specialist",
-                params={},
-                idempotency_key="cursor-key",
-                dispatch_class="coordinator",
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="coordinator")
             )
         with pytest.raises(ValueError, match="dispatch_class mismatch"):
             async with db.transaction() as cur:
                 create_in_cursor(
-                    cur,
-                    kind="specialist",
-                    params={},
-                    idempotency_key="cursor-key",
-                    dispatch_class="inline",
+                    cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
                 )
     finally:
         db.close()
@@ -241,7 +229,9 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
 async def test_exists_with_key_prefix_matches_the_prefix_literally(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "key-prefix.db"))
     try:
-        await registry.create(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
+        await registry.create_or_return_existing(
+            TaskSpec(kind="integrate_patch", params={}, idempotency_key="aab-reconcile1")
+        )
 
         assert await registry.exists_with_key_prefix("integrate_patch", "aab-reconcile", states=("queued",))
         # Real keys carry ``_``; it must match only itself, not any character.
@@ -266,30 +256,28 @@ async def test_legacy_task_reuse_stays_unknown_without_blocking_resume(tmp_path)
     registry = TaskRegistry(SqliteConnection(tmp_path / "legacy-reuse.db"))
     try:
         legacy, _ = await registry.create_or_return_existing(
-            kind="baseline",
-            params={},
-            idempotency_key="legacy-async",
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="legacy-async",
+            ),
         )
         reused, was_existing = await registry.create_or_return_existing(
-            kind="baseline",
-            params={},
-            idempotency_key="legacy-async",
-            dispatch_class="coordinator",
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="legacy-async",
+                dispatch_class="coordinator",
+            ),
         )
         async with registry.db.transaction() as cur:
             cursor_legacy, _ = create_in_cursor(
-                cur,
-                kind="specialist",
-                params={},
-                idempotency_key="legacy-cursor",
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="legacy-cursor")
             )
         async with registry.db.transaction() as cur:
             cursor_reused, cursor_existing = create_in_cursor(
                 cur,
-                kind="specialist",
-                params={},
-                idempotency_key="legacy-cursor",
-                dispatch_class="coordinator",
+                TaskSpec(kind="specialist", params={}, idempotency_key="legacy-cursor", dispatch_class="coordinator"),
             )
     finally:
         registry.db.close()

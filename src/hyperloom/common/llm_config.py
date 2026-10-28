@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
 from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
@@ -25,7 +24,7 @@ from hyperloom.common.llm_request_hooks import (
     observed_request,
 )
 from hyperloom.common.reasoning_effort import gateway_reasoning_effort
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import anthropic_usage_counts, openai_usage_counts, sdk_field
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +43,8 @@ class OpenAIClientConfig:
     api_key: str
     base_url: str | None
     default_headers: dict[str, str]
+    # The variable ``default_headers`` was parsed from.
+    headers_env: str
 
     def as_kwargs(self) -> dict[str, object]:
         """Return kwargs accepted by ``openai.AsyncOpenAI``."""
@@ -157,16 +158,28 @@ _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 # A managed gateway carries the credential itself, so it can drive the Claude CLI without naming a key.
 _ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
 
-# The two agent CLIs that can drive this repository's agentic roles.
+# The agent CLIs that can drive this repository's agentic roles.
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
+AGENT_BACKEND_DEEPSEEK = "deepseek"
+
+#: Names the agent CLI for the agentic roles, overriding the credential-ranked
+#: rule between Claude and Codex. The DeepSeek Harness is reachable only this
+#: way: it returns its intents in the reply body with no schema enforcing them,
+#: so it is a route an operator asks for rather than one a credential shape can
+#: select. The harness model comes from ``DSH_MODEL``. Quantization honours
+#: only ``deepseek``: any other value leaves it on Claude.
+AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
+
+AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK)
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-# The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
-# behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+DEFAULT_CODEX_MODEL = "gpt-6-astra"
+# The harness route mounts DeepSeek's own models only, so this names one of
+# those rather than a gateway deployment.
+DEFAULT_DEEPSEEK_HARNESS_MODEL = "deepseek-v4-flash"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
@@ -233,6 +246,13 @@ def codex_agent_sdk_installed() -> bool:
     return find_spec("openai_codex") is not None
 
 
+def deepseek_harness_sdk_installed() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("deepseek_harness") is not None
+
+
 def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int, int]:
     """Sort key for one agent backend candidate: credential first, then SDK.
 
@@ -251,6 +271,30 @@ def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int,
 
 # The rank of a candidate that can neither authenticate nor import: no reason to prefer it over any other.
 UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
+
+
+def explicit_agent_backend(env: Mapping[str, str] | None = None, *, env_name: str = AGENT_BACKEND_ENV) -> str:
+    """Return the agent backend ``env_name`` names, or ``""`` when unset.
+
+    Raises:
+        ValueError: When it names no known backend, or the DeepSeek Harness without its SDK.
+    """
+    requested = ((env if env is not None else os.environ).get(env_name) or "").strip().lower()
+    if requested and requested not in AGENT_BACKEND_CHOICES:
+        raise ValueError(f"{env_name}={requested!r} not in {set(AGENT_BACKEND_CHOICES)}")
+    if requested == AGENT_BACKEND_DEEPSEEK and not deepseek_harness_sdk_installed():
+        raise ValueError(f"{env_name}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra")
+    return requested
+
+
+def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the harness backend every non-critic agent role should run.
+
+    An explicit :data:`AGENT_BACKEND_ENV` wins over the credential-ranked rule
+    between Claude and Codex. DeepSeek is reachable only through that explicit
+    name: it is not a third candidate in :func:`preferred_agent_backend`.
+    """
+    return explicit_agent_backend(env) or preferred_agent_backend(env)
 
 
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
@@ -386,6 +430,8 @@ def resolve_forge_llm_model(
     backend = (agent_backend or "").strip().lower()
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    if backend == AGENT_BACKEND_DEEPSEEK:
+        return str(source.get("DSH_MODEL") or "").strip() or DEFAULT_DEEPSEEK_HARNESS_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
@@ -409,40 +455,28 @@ def derive_openai_base_url(anthropic_base_url: str | None) -> str | None:
     return base
 
 
-def resolve_openai_client_config(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> OpenAIClientConfig:
+def resolve_openai_client_config(*, env: dict[str, str] | None = None) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
-    api_key = _first_set_value(candidates, source)
+    api_key = _first_set_value(_OPENAI_CLIENT_KEY_ENV_ORDER, source)
     if not api_key:
-        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(
+            f"{' / '.join(_OPENAI_CLIENT_KEY_ENV_ORDER)} not set in env (OpenAI-compatible client cannot auth)"
+        )
 
-    explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
+    explicit_base_url = (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
     base_url = explicit_base_url or derived_base_url or None
 
     # Gateway headers are operator-supplied, and they belong to an endpoint rather than to a protocol: AMD's gateway
     # rejects a call without its subscription header, and that header is only ever written to
     # ANTHROPIC_CUSTOM_HEADERS.
-    headers = parse_custom_headers(source.get("OPENAI_CUSTOM_HEADERS"), env=source)
+    headers_env = "OPENAI_CUSTOM_HEADERS"
+    headers = parse_custom_headers(source.get(headers_env), env=source)
     if not headers and not explicit_base_url and derived_base_url:
-        headers = parse_custom_headers(source.get("ANTHROPIC_CUSTOM_HEADERS"), env=source)
-    return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers)
-
-
-def openai_client_kwargs(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> dict[str, object]:
-    """Return kwargs accepted by ``openai.AsyncOpenAI``."""
-    return resolve_openai_client_config(api_key_env=api_key_env, base_url_env=base_url_env, env=env).as_kwargs()
+        headers_env = "ANTHROPIC_CUSTOM_HEADERS"
+        headers = parse_custom_headers(source.get(headers_env), env=source)
+    return OpenAIClientConfig(api_key=api_key, base_url=base_url, default_headers=headers, headers_env=headers_env)
 
 
 def build_http_timeout(
@@ -475,15 +509,9 @@ def _openai_sdk_client_class(class_name: str) -> object:
     return getattr(openai, class_name)
 
 
-def _openai_sdk_kwargs(
-    *,
-    api_key_env: str,
-    base_url_env: str,
-    env: dict[str, str] | None,
-    timeout: object | None,
-) -> dict[str, object]:
+def _openai_sdk_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
     """Resolve credentials and fold in an optional per-caller ``timeout``."""
-    kwargs = openai_client_kwargs(api_key_env=api_key_env, base_url_env=base_url_env, env=env)
+    kwargs = resolve_openai_client_config(env=env).as_kwargs()
     if timeout is not None:
         kwargs["timeout"] = timeout
     return kwargs
@@ -491,8 +519,6 @@ def _openai_sdk_kwargs(
 
 def get_openai_client(
     *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -500,8 +526,6 @@ def get_openai_client(
     factory = _openai_sdk_client_class("OpenAI")
     return factory(  # type: ignore[operator]
         **_openai_sdk_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -510,8 +534,6 @@ def get_openai_client(
 
 def get_async_openai_client(
     *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -519,8 +541,6 @@ def get_async_openai_client(
     factory = _openai_sdk_client_class("AsyncOpenAI")
     return factory(  # type: ignore[operator]
         **_openai_sdk_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -536,29 +556,16 @@ def _httpx_module() -> object:
     return httpx
 
 
-def _anthropic_client_kwargs(
-    *,
-    api_key_env: str,
-    base_url_env: str,
-    env: dict[str, str] | None,
-    timeout: object | None,
-) -> dict[str, object]:
+def _anthropic_client_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
     """Resolve base URL, auth and gateway headers for an Anthropic HTTP client."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-    )
+    api_key = _first_set_value(ANTHROPIC_SYNTHESIZABLE_KEY_ENVS, source)
     if not api_key:
-        key_names = " / ".join(dict.fromkeys([api_key_env, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]))
-        raise LLMConfigError(f"{key_names} not set in env (Anthropic client cannot auth)")
+        raise LLMConfigError(
+            f"{' / '.join(ANTHROPIC_SYNTHESIZABLE_KEY_ENVS)} not set in env (Anthropic client cannot auth)"
+        )
 
-    base_url = (
-        (source.get(base_url_env) or "").strip()
-        or (source.get("ANTHROPIC_BASE_URL") or "").strip()
-        or DEFAULT_ANTHROPIC_BASE_URL
-    ).rstrip("/")
+    base_url = ((source.get("ANTHROPIC_BASE_URL") or "").strip() or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     headers = {
         "x-api-key": api_key,
         "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
@@ -574,8 +581,6 @@ def _anthropic_client_kwargs(
 
 def get_anthropic_client(
     *,
-    api_key_env: str = "ANTHROPIC_API_KEY",
-    base_url_env: str = "ANTHROPIC_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -583,8 +588,6 @@ def get_anthropic_client(
     httpx = _httpx_module()
     return httpx.Client(  # type: ignore[attr-defined]
         **_anthropic_client_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -593,8 +596,6 @@ def get_anthropic_client(
 
 def get_async_anthropic_client(
     *,
-    api_key_env: str = "ANTHROPIC_API_KEY",
-    base_url_env: str = "ANTHROPIC_BASE_URL",
     env: dict[str, str] | None = None,
     timeout: object | None = None,
 ) -> object:
@@ -602,8 +603,6 @@ def get_async_anthropic_client(
     httpx = _httpx_module()
     return httpx.AsyncClient(  # type: ignore[attr-defined]
         **_anthropic_client_kwargs(
-            api_key_env=api_key_env,
-            base_url_env=base_url_env,
             env=env,
             timeout=timeout,
         )
@@ -724,10 +723,10 @@ def _observe_chat(observation: RequestObservation, resp: object) -> ChatCompleti
     """Fold one chat-completions response onto ``observation``, then flatten it."""
     result = _chat_completion_result(resp)
     observation.update(
-        response_id=_sdk_field(resp, "id"),
-        model=_sdk_field(resp, "model"),
+        response_id=sdk_field(resp, "id"),
+        model=sdk_field(resp, "model"),
         stop_reason=result.finish_reason,
-        usage=_openai_usage_counts(result.usage),
+        usage=openai_usage_counts(result.usage),
     )
     return result
 
@@ -762,86 +761,6 @@ async def achat_completion(
         return _observe_chat(observation, resp)
 
 
-def _sdk_field(obj: object, key: str) -> object:
-    """Read ``key`` off a dict or an attribute-carrying object."""
-    if isinstance(obj, dict):
-        return obj.get(key)
-    return getattr(obj, key, None)
-
-
-def _sdk_token_count(usage: object, key: str) -> int:
-    """Read one ``usage`` counter as a non-negative int; ``0`` when absent, not numeric, or negative."""
-    raw = _sdk_field(usage, key)
-    parsed = _to_int(raw, default=0)
-    return max(0, parsed)  # type: ignore[type-var]
-
-
-def _openai_usage_counts(usage: object) -> dict[str, int]:
-    """An OpenAI ``usage`` as Hyperloom's four counters; ``prompt_tokens`` already includes both cache shares."""
-    if usage is None:
-        return {}
-    cached = _sdk_token_count(_sdk_field(usage, "prompt_tokens_details") or {}, "cached_tokens")
-    created = _sdk_token_count(usage, "cache_creation_input_tokens")
-    return {
-        "input_tokens": uncached_input_tokens(_sdk_token_count(usage, "prompt_tokens"), cached + created),
-        "output_tokens": _sdk_token_count(usage, "completion_tokens"),
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": created,
-    }
-
-
-def _anthropic_usage_counts(usage: object) -> dict[str, int]:
-    """An Anthropic ``usage``, whose ``input_tokens`` is already the uncached share."""
-    if usage is None:
-        return {}
-    return {
-        key: _sdk_token_count(usage, key)
-        for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-    }
-
-
-@dataclass(frozen=True)
-class ResponsesResult:
-    """One Responses-API result, flattened for Hyperloom callers."""
-
-    text: str
-    citations: list[str]
-    status: str | None
-    input_tokens: int
-    output_tokens: int
-
-
-async def aresponse(
-    client: object,
-    **params: object,
-) -> ResponsesResult:
-    """Async Responses-API call; returns text, citations, status and token counts."""
-    resp = await client.responses.create(**params)  # type: ignore[union-attr]
-    texts: list[str] = []
-    citations: list[str] = []
-    for item in _sdk_field(resp, "output") or []:  # type: ignore[union-attr]
-        if _sdk_field(item, "type") != "message":
-            continue
-        for block in _sdk_field(item, "content") or []:  # type: ignore[union-attr]
-            if _sdk_field(block, "type") != "output_text":
-                continue
-            chunk = _sdk_field(block, "text") or ""
-            if chunk:
-                texts.append(str(chunk))
-            for ann in _sdk_field(block, "annotations") or []:  # type: ignore[union-attr]
-                url = _sdk_field(ann, "url")
-                if isinstance(url, str) and url:
-                    citations.append(url)
-    usage = _sdk_field(resp, "usage")
-    return ResponsesResult(
-        text="\n".join(texts),
-        citations=citations,
-        status=_sdk_field(resp, "status"),  # type: ignore[arg-type]
-        input_tokens=_sdk_token_count(usage, "input_tokens"),
-        output_tokens=_sdk_token_count(usage, "output_tokens"),
-    )
-
-
 def _anthropic_text_from_content(content: object) -> str:
     """Concatenate the ``text`` blocks of an Anthropic Messages ``content`` array."""
     if not isinstance(content, list):
@@ -857,6 +776,32 @@ class AnthropicMessageResult:
     text: str
     stop_reason: str | None
     usage: object | None
+
+
+@dataclass(frozen=True)
+class AnthropicCompletionRequest:
+    """One single-shot Anthropic completion: the Messages body and the time budget it may take.
+
+    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    """
+
+    model: str
+    messages: Sequence[Mapping[str, object]]
+    max_tokens: int
+    system: str | None = None
+    timeout: object | None = None
+    timeout_s: float | None = None
+
+    def http_params(self) -> dict[str, object]:
+        """Assemble the Messages request body, omitting an absent system prompt."""
+        params: dict[str, object] = {
+            "model": self.model,
+            "messages": list(self.messages),
+            "max_tokens": int(self.max_tokens),
+        }
+        if self.system:
+            params["system"] = self.system
+        return params
 
 
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
@@ -888,11 +833,6 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
     )
 
 
-def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
-    """Check one Messages response for failure, then flatten it."""
-    return _anthropic_body_result(_anthropic_message_body(resp))
-
-
 def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
     """Fold one Messages response onto ``observation``, then flatten it."""
     body = _anthropic_message_body(resp)
@@ -901,7 +841,7 @@ def _observe_anthropic(observation: RequestObservation, resp: object) -> Anthrop
         response_id=body.get("id"),
         model=body.get("model"),
         stop_reason=result.stop_reason,
-        usage=_anthropic_usage_counts(result.usage),
+        usage=anthropic_usage_counts(result.usage),
     )
     return result
 
@@ -973,27 +913,6 @@ def anthropic_transport_ready(env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
-def _anthropic_http_params(
-    *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    system: str | None,
-    max_tokens: int,
-    temperature: float | None = None,
-) -> dict[str, object]:
-    """Assemble the Messages request body, omitting an absent system prompt."""
-    params: dict[str, object] = {
-        "model": model,
-        "messages": list(messages),
-        "max_tokens": int(max_tokens),
-    }
-    if system:
-        params["system"] = system
-    if temperature is not None:
-        params["temperature"] = float(temperature)
-    return params
-
-
 def _one_shot_client(
     timeout_s: float | None,
     env: Mapping[str, str] | None,
@@ -1015,116 +934,54 @@ def _one_shot_client(
 
 def anthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Issue one single-shot Anthropic completion over whichever transport works."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return client.messages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
+    http_client = get_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
+        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def aanthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_completion`; see it for the full contract."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return await client.amessages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
+    http_client = get_async_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
-
-
-def stream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-        for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
+        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def astream_chat_completion_text(
@@ -1155,31 +1012,35 @@ async def astream_chat_completion_text(
                 delta = chunk.choices[0].delta
                 if delta is not None and delta.content:
                     parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
+        observation.update(usage=openai_usage_counts(usage_obj))
     return "".join(parts), usage_obj
 
 
 def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
     """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
-    choices = _sdk_field(chunk, "choices") or []
+    choices = sdk_field(chunk, "choices") or []
     choice = choices[0] if isinstance(choices, list) and choices else None
-    delta = _sdk_field(choice, "delta") if choice is not None else None
-    if delta is not None and _sdk_field(delta, "content"):
+    delta = sdk_field(choice, "delta") if choice is not None else None
+    if delta is not None and sdk_field(delta, "content"):
         observation.mark_first_token()
     observation.update(
-        response_id=_sdk_field(chunk, "id"),
-        model=_sdk_field(chunk, "model"),
-        stop_reason=_sdk_field(choice, "finish_reason") if choice is not None else None,
+        response_id=sdk_field(chunk, "id"),
+        model=sdk_field(chunk, "model"),
+        stop_reason=sdk_field(choice, "finish_reason") if choice is not None else None,
     )
 
 
 __all__ = [
+    "AGENT_BACKEND_CHOICES",
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
+    "AGENT_BACKEND_DEEPSEEK",
+    "AGENT_BACKEND_ENV",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
+    "AnthropicCompletionRequest",
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",
@@ -1188,10 +1049,10 @@ __all__ = [
     "DEFAULT_ANTHROPIC_VERSION",
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_MODEL",
+    "DEFAULT_DEEPSEEK_HARNESS_MODEL",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
-    "ResponsesResult",
     "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
@@ -1204,7 +1065,6 @@ __all__ = [
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
-    "aresponse",
     "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
@@ -1212,6 +1072,7 @@ __all__ = [
     "claude_sdk_env_options",
     "codex_agent_sdk_installed",
     "deepseek_compat_env",
+    "deepseek_harness_sdk_installed",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
@@ -1225,11 +1086,11 @@ __all__ = [
     "is_anthropic_only",
     "is_openai_only",
     "openai_agent_credentialed",
-    "openai_client_kwargs",
     "preferred_agent_backend",
     "provider_model_defaults",
+    "explicit_agent_backend",
+    "resolve_agent_backend",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
-    "stream_chat_completion_text",
     "with_synthesized_anthropic_keys",
 ]

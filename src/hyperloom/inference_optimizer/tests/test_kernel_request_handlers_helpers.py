@@ -7,97 +7,98 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
 
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as kernel_agent_tool
-from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import _forge_lane_budget as forge_lane_budget
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
 
 
 # -- _normalize_precision / _normalize_kernel_id --------------------------
 def test_normalize_precision() -> None:
-    assert krh._normalize_precision("  FP8 ") == "fp8"
-    assert krh._normalize_precision(None) == ""
-    assert krh._normalize_precision(0) == ""
+    assert integrate_payload._normalize_precision("  FP8 ") == "fp8"
+    assert integrate_payload._normalize_precision(None) == ""
+    assert integrate_payload._normalize_precision(0) == ""
 
 
 # -- _gemm_tuning_timeout_sec ---------------------------------------------
 def test_gemm_tuning_timeout_payload_floor(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 30}) == 60  # floored
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 900}) == 900
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 30}) == 60  # floored
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 900}) == 900
 
 
 def test_gemm_tuning_timeout_env_and_invalid(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "300")
-    assert krh._gemm_tuning_timeout_sec({}) == 300
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}) == 300
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "bad")
-    assert krh._gemm_tuning_timeout_sec({}) == max(60, krh._DEFAULT_GEMM_TUNING_TIMEOUT_SEC)
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}) == max(60, forge_lane_budget._DEFAULT_GEMM_TUNING_TIMEOUT_SEC)
 
 
 def test_gemm_tuning_timeout_takes_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 7140
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 7140
 
 
 def test_gemm_tuning_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
     """An unbounded phase must not collapse the lane to a zero-second session."""
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=0) == 18000
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=0) == 18000
 
 
 def test_an_explicit_gemm_timeout_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", raising=False)
-    assert krh._gemm_tuning_timeout_sec({"timeout_sec": 900}, lane_budget_sec=7140) == 900
+    assert forge_lane_budget._gemm_tuning_timeout_sec({"timeout_sec": 900}, lane_budget_sec=7140) == 900
 
 
 def test_the_gemm_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.setenv("HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC", "300")
-    assert krh._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 300
+    assert forge_lane_budget._gemm_tuning_timeout_sec({}, lane_budget_sec=7140) == 300
 
 
 # -- _forge_fusion_timeout_sec --------------------------------------------
 def test_fusion_timeout_takes_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 10710
 
 
 def test_fusion_timeout_without_an_allocation_keeps_the_module_default(monkeypatch) -> None:
     """An unbounded phase must not collapse the lane to a one-second session."""
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=0) == 7200
 
 
 def test_an_explicit_fusion_timeout_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.delenv("FORGE_FUSION_TIMEOUT", raising=False)
-    assert krh._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
+    assert forge_lane_budget._forge_fusion_timeout_sec({"timeout": 900}, lane_budget_sec=10710) == 900
 
 
 def test_the_fusion_timeout_env_outranks_the_lane_share(monkeypatch) -> None:
     monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "300")
-    assert krh._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
+    assert forge_lane_budget._forge_fusion_timeout_sec({}, lane_budget_sec=10710) == 300
 
 
 # -- _gemm_router_targets / _gemm_capped_tuner ----------------------------
 _ROUTER_PROBE = {
     "model_path": "/nonexistent-model-dir",
-    "framework": "sglang",
-    "precision": "bf16",
-    "quant_type": "auto",
-    "gpu_type": "auto",
-    "kernel_signature_log": "",
-    "has_untuned_csv": False,
-    "has_shapes_json": False,
-    "has_tunableop_input": False,
+    "target": RoutingTarget(framework="sglang", precision="bf16", quant_type="auto", gpu_type="auto"),
+    "evidence": RoutingEvidence(
+        kernel_signature_log=None,
+        has_untuned_csv=False,
+        has_shapes_json=False,
+        has_tunableop_input=False,
+    ),
 }
 
 
 def test_an_unconsultable_router_yields_no_estimates() -> None:
-    assert krh._gemm_router_targets(**_ROUTER_PROBE) == ()
+    assert forge_lane_budget._gemm_router_targets(**_ROUTER_PROBE) == ()
 
 
 def test_without_estimates_the_gemm_ceiling_divides_by_its_default_cost() -> None:
     """7140s of lane share buys five 20-minute targets when nothing is estimated."""
-    costs = tuple(cost for _, cost in krh._gemm_router_targets(**_ROUTER_PROBE))
+    costs = tuple(cost for _, cost in forge_lane_budget._gemm_router_targets(**_ROUTER_PROBE))
     assert lane_budget.max_targets(lane_budget.LANE_GEMM, 7140, target_costs_sec=costs) == 5
     assert 7140 // lane_budget.GEMM_DEFAULT_TARGET_SEC == 5
 
@@ -128,86 +129,19 @@ def test_no_gemm_ceiling_leaves_the_routed_tuner_set_untouched() -> None:
 
 # -- _gemm_tuning_workspace -----------------------------------------------
 def test_gemm_tuning_workspace_explicit(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({"workspace_path": str(tmp_path / "ws")}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({"workspace_path": str(tmp_path / "ws")}, session_dir=tmp_path)
     assert out == tmp_path / "ws"
 
 
 def test_gemm_tuning_workspace_from_task_id(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({"task_id": "t-1"}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({"task_id": "t-1"}, session_dir=tmp_path)
     assert out == tmp_path / "runs" / "gemm_tuning" / "t-1"
 
 
 def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
-    out = krh._gemm_tuning_workspace({}, session_dir=tmp_path)
+    out = forge_lane_budget._gemm_tuning_workspace({}, session_dir=tmp_path)
     assert out.parent == tmp_path / "runs" / "gemm_tuning"
     assert out.name.startswith("request_")
-
-
-# -- _write_gemm_tuning_benchmark_script ----------------------------------
-def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
-    path = krh._write_gemm_tuning_benchmark_script(
-        workspace=tmp_path,
-        model_path="/models/Qwen-Qwen3-8B",
-        framework="sglang",
-        gpu_type="mi355x",
-        tp=1,
-        conc=8,
-        isl=256,
-        osl=256,
-    )
-    script = path.read_text(encoding="utf-8")
-    assert 'export RUN_EVAL="false"' in script
-    assert "RUN_EVAL:-" not in script
-
-
-# -- _optimization_budget_minutes / wrapper timeout ----------------------- -- backend selection
-# -----------------------------------------------------
-def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._raw_kernel_backend_order({"backend_order": "FORGE,foo,unknown"}) == ["geak"]
-
-
-def test_backend_order_exact_env_forge_opt_in(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh._raw_kernel_backend_order({}) == ["forge"]
-
-
-def test_backend_order_defaults_to_geak_phase_owner(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._raw_kernel_backend_order({}) == ["geak"]
-
-
-def test_removed_per_kernel_ladder_stays_removed(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert not hasattr(krh, "_backend_order")
-    assert not hasattr(krh, "_run_backend_ladder")
-
-
-# -- geak_selected ---------------------------------------------------------
-def test_geak_selected_from_env_order(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
-    # Mixed values are not the exact forge opt-in, so GEAK remains the owner.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,GEAK")
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_true_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_false_only_for_exact_env_forge(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected({"backend_order": "geak"}) is False
-
-
-def test_geak_selected_payload_cannot_override_exact_env_forge(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected({"backend_order": "geak"}) is False
 
 
 # -- _artifact_paths_from_payload -----------------------------------------
@@ -299,28 +233,6 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     # empty stdout -> _parse_tool_stdout returns {} -> synthesize branch
     out = kernel_agent_tool._shape_tool_result(2, "", "the stderr")
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
-
-
-# -- _in_flight_kernel_ids ------------------------------------------------- -- unattempted_skip_reason /
-# gate-rejected dispatch ----------------------
-def _state_owing_one_attempt():
-    """SharedState whose trace still owes ``k001`` a kernel_opt attempt."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState(session_id="skip-accounting")
-    state.last_trace_analyze = {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001",
-                "name": "gqa_decode_kernel",
-                "gpu_pct": 8.5,
-                "reusable_native_kernel": True,
-                "source_file": "/pkg/aiter/gqa.py",
-            }
-        ],
-        "task_groups": [],
-    }
-    return state
 
 
 _OP_FANOUT_ROWS = [

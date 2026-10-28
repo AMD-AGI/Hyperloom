@@ -467,7 +467,7 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     state.closing_phase = True
     state.closing_report_task_id = "r-1"
     state.elapsed_charged_sec = 120 * 60.0
-    state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
+    state.target_reached_at = "2026-08-01T02:00:00+00:00"
 
     cb._begin_resume_leg(state)
 
@@ -478,7 +478,7 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     assert state.closing_phase is False
     assert state.closing_report_task_id == ""
     assert state.crash_count == 0
-    assert state.teardown_timings_sec == {}
+    assert state.target_reached_at == ""
     # The budget survives the boundary; only an operator extend can move it.
     assert state.elapsed_charged_sec == 120 * 60.0
     assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
@@ -545,7 +545,6 @@ def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
     """A phase segment is only durable once banked, and stopping never banks it."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
     state.phase = "PRELUDE"
-    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
     state.phase_started_unix = 1785_542_400.0
     state.set_stop_reason("time_exhausted")
     # Pin where the leg ended so the banked segment is a checkable number.
@@ -560,7 +559,6 @@ def test_a_resume_banks_what_the_stopped_leg_spent_in_its_phase() -> None:
 def test_a_resume_banks_a_resumable_legs_own_boundary() -> None:
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
     state.phase = "PRELUDE"
-    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
     state.phase_started_unix = 1785_542_400.0
     state.leg_ended_ts = "2026-08-01T00:30:00+00:00"
 
@@ -575,7 +573,6 @@ def test_a_second_resume_banks_only_the_leg_that_just_stopped() -> None:
     """The first leg's segment is already durable; re-banking it would double-charge the phase."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
     state.phase = "PRELUDE"
-    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
     state.phase_started_unix = 1785_542_400.0
     state.set_stop_reason("time_exhausted")
     state.stop_ts = "2026-08-01T00:30:00+00:00"
@@ -595,7 +592,6 @@ def test_a_resume_does_not_bank_a_stop_stamped_after_the_present() -> None:
     started = time.time() - 60.0
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
     state.phase = "PRELUDE"
-    state.phase_started_ts = datetime.fromtimestamp(started, tz=timezone.utc).isoformat()
     state.phase_started_unix = started
     state.set_stop_reason("time_exhausted")
     state.stop_ts = datetime.fromtimestamp(started + 10 * 86400.0, tz=timezone.utc).isoformat()
@@ -609,7 +605,6 @@ def test_a_resume_with_no_recorded_stop_leaves_the_segment_unbanked() -> None:
     """A clean stop records no end time; under-charge the phase rather than guess one."""
     state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00")
     state.phase = "PRELUDE"
-    state.phase_started_ts = "2026-08-01T00:00:00+00:00"
     state.phase_started_unix = 1785_542_400.0
 
     cb._begin_resume_leg(state)

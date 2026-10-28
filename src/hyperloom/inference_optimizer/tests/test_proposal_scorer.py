@@ -18,7 +18,6 @@ import pytest
 from hyperloom.orchestrator.scoring.proposal_scorer import (
     DEFAULT_SCORER_MODELS,
     ProposalScorer,
-    _extract_scores_json,
     _prepare_scoring_proposals,
 )
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
@@ -306,19 +305,9 @@ async def test_empty_proposals_returns_empty_envelope():
     assert scorer._client.chat.completions.calls == []
 
 
-def test_extract_scores_json_bare_and_fenced():
-    fenced = _scores_json(("proposal_0", 1.0, "x"))
-    assert _extract_scores_json(fenced)["scores"]["proposal_0"]["score"] == 1.0
-    bare = '{"scores": {"proposal_0": {"score": 2, "reason": "y"}}}'
-    assert _extract_scores_json(bare)["scores"]["proposal_0"]["score"] == 2
-    assert _extract_scores_json("no json here") is None
-    meta = '```json\n{"meta": "draft", "scores": {"proposal_0": {"score": 9, "reason": "final"}}}\n```'
-    assert _extract_scores_json(meta)["scores"]["proposal_0"]["score"] == 9
-
-
 def test_default_models_constant():
     assert DEFAULT_SCORER_MODELS == (
-        "claude-opus-5",
+        "claude-opus-5-5",
         "gpt-5.6-sol",
         "dvue-aoai-005-Kimi-K2.6",
         "gemini/gemini-3.1-pro-preview",
@@ -505,7 +494,7 @@ def test_render_rater_labels_stable_across_rounds():
             },
         },
     ]
-    text = st.to_proposal_scores_summary(max_rounds=2)
+    text = st.to_proposal_scores_summary()
     for slug in ("claude-opus-4-8", "gpt-5.5", "claude", "gpt"):
         assert slug not in text, f"model slug {slug!r} leaked into prompt"
     # claude-opus-4-8 sorts first -> rater_1, stable across rounds.

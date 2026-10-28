@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
+import logging
 import os
 import re
 import shutil
@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.agent_backends import (
     AgentHook,
     AgentHooks,
@@ -30,15 +30,64 @@ from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.tracker import UsageAccumulator
+
+log = logging.getLogger(__name__)
 
 # Framework apply-back artifacts live beside, never inside, the artifact paths the nested standalone FlyDSL forge-loop
 # owns (``forge_experiments/best*``).
 APPLYBACK_NAMESPACE = "rewrite_applyback"
 _IMPORT_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_NO_TIME_FOR_APPLYBACK = "insufficient time remaining for the apply-back agent and host validation"
+_UNRETRYABLE_FAILURE_MARKERS = ("baseline apply-back import validation", "insufficient time remaining")
+
+
+@dataclass(frozen=True)
+class ApplybackRequest:
+    """One apply-back: the pristine base, the best and what it measured, diagnostics, deadline, imports, attempts."""
+
+    base_commit: str
+    experiments_dir: str
+    best_commit: str = ""
+    measurement: FlydslMeasurement = FlydslMeasurement(None, None, None)
+    deadline_unix: float | None = None
+    import_modules: list[str] | tuple[str, ...] = ()
+    max_attempts: int = 2
+
+
+@dataclass(frozen=True)
+class CollectedPatch:
+    """The integration commit, the patch from the pristine base to it, the files it changes and the ref keeping it."""
+
+    base_commit: str
+    applyback_commit: str
+    commit_ref: str
+    patch: str
+    changed_files: list[str]
+
+
+@dataclass(frozen=True)
+class _IntegrationBrief:
+    """What every attempt integrates: the rewrite, its framework, the source path and the read-only reference."""
+
+    spec: RewriteSpec
+    framework: str
+    source_relative: str
+    reference_path: Path
+
+
+@dataclass(frozen=True)
+class _ApplybackTurn:
+    """One clean-room session: its worktree, budget, progress log and the failure the previous attempt left."""
+
+    worktree: Path
+    timeout_sec: int
+    progress_log: list[str]
+    prior_failure: str = ""
 
 
 @dataclass
@@ -74,9 +123,9 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def _infer_framework(spec: RewriteSpec, explicit: str) -> str:
-    if explicit.strip():
-        return explicit.strip().lower()
+def _infer_framework(spec: RewriteSpec) -> str:
+    if spec.framework.strip():
+        return spec.framework.strip().lower()
     parts = {part.lower() for part in Path(spec.source_kernel).parts}
     for candidate in protocol.SUPPORTED_FRAMEWORKS:
         if candidate in parts:
@@ -173,15 +222,8 @@ def _validate_imports(
             raise RuntimeError(f"{stage} apply-back import validation failed for {module}: {output}")
 
 
-def _build_prompt(
-    *,
-    spec: RewriteSpec,
-    framework: str,
-    source_relative: str,
-    reference_path: str,
-    time_budget_seconds: int,
-    prior_failure: str = "",
-) -> str:
+def _build_prompt(brief: _IntegrationBrief, *, time_budget_seconds: int, prior_failure: str = "") -> str:
+    spec = brief.spec
     targets = ", ".join(spec.target_functions) or "(not specified)"
     retry_context = (
         "\n## Previous clean-room attempt\n"
@@ -192,17 +234,17 @@ def _build_prompt(
         else ""
     )
     return f"""\
-Integrate a verified FlyDSL rewrite into the original {framework} repository.
+Integrate a verified FlyDSL rewrite into the original {brief.framework} repository.
 
 Repository source operation:
-- Source file: `{source_relative}`
+- Source file: `{brief.source_relative}`
 - Source symbols: `{targets}`
 - Logical operator: `{spec.op_name}`
 - Required FlyDSL factory: `{spec.builder_symbol}`
 
 The latest correctness-verified and performance-selected standalone FlyDSL
 implementation is available read-only at:
-`{reference_path}`
+`{brief.reference_path}`
 
 Inspect the repository and implement the production integration now. Use the
 reference implementation as the computational source of truth, but place code
@@ -318,31 +360,20 @@ def _make_applyback_hooks(*, deadline_monotonic: float) -> AgentHooks:
 
 async def _run_agent(
     *,
-    spec: RewriteSpec,
     config: Config,
-    worktree: Path,
-    reference_path: Path,
-    framework: str,
-    source_relative: str,
-    timeout_sec: int,
-    progress_log: list[str],
-    prior_failure: str = "",
+    brief: _IntegrationBrief,
+    turn: _ApplybackTurn,
     usage: UsageAccumulator | None = None,
 ) -> tuple[str, str]:
+    worktree = turn.worktree
+    timeout_sec = turn.timeout_sec
     runtime = config.agent_runtime()
     backend = create_registered_backend(
         runtime,
         preflight=False,
         probe_cwd=str(worktree),
     )
-    prompt = _build_prompt(
-        spec=spec,
-        framework=framework,
-        source_relative=source_relative,
-        reference_path=str(reference_path),
-        time_budget_seconds=timeout_sec,
-        prior_failure=prior_failure,
-    )
+    prompt = _build_prompt(brief, time_budget_seconds=timeout_sec, prior_failure=turn.prior_failure)
     deadline_monotonic = time.monotonic() + timeout_sec
     run_spec = AgentRunSpec(
         system_prompt=(
@@ -355,10 +386,10 @@ async def _run_agent(
         cwd=str(worktree),
         writable=True,
         timeout_sec=timeout_sec,
-        additional_directories=[str(reference_path.parent)],
+        additional_directories=[str(brief.reference_path.parent)],
         allow_untracked=True,
         hooks=_make_applyback_hooks(deadline_monotonic=deadline_monotonic),
-        progress_log=progress_log,
+        progress_log=turn.progress_log,
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
@@ -379,21 +410,12 @@ async def _run_agent(
     return backend.name, backend.runtime.model
 
 
-def _staged_paths(worktree: Path) -> list[str]:
-    names_raw = _git(
-        worktree,
-        "diff",
-        "--cached",
-        "--name-only",
-        "-z",
-        "--",
-        ".",
-    ).stdout
-    return [path for path in names_raw.split("\0") if path]
-
-
-def _reject_unpublishable_paths(changed_files: list[str]) -> None:
-    """Refuse changes a framework patch must never carry."""
+def _publishable_staged_paths(worktree: Path, empty_error: str) -> list[str]:
+    """The staged change set, refused when it is empty or carries what a framework patch must never carry."""
+    names_raw = _git(worktree, "diff", "--cached", "--name-only", "-z", "--", ".").stdout
+    changed_files = [path for path in names_raw.split("\0") if path]
+    if not changed_files:
+        raise RuntimeError(empty_error)
     forbidden = [path for path in changed_files if path.startswith(("test/", "tests/", "benchmark/", "benchmarks/"))]
     if forbidden:
         raise RuntimeError("apply-back agent modified protected validation files: " + ", ".join(forbidden))
@@ -403,6 +425,7 @@ def _reject_unpublishable_paths(changed_files: list[str]) -> None:
             "apply-back agent would publish producer-owned forge state as a "
             "framework change: " + ", ".join(producer_owned)
         )
+    return changed_files
 
 
 def _validate_worktree_changes(
@@ -416,10 +439,7 @@ def _validate_worktree_changes(
     staged = _git(worktree, "add", "-A", "--", ".")
     if staged.returncode != 0:
         raise RuntimeError(f"could not stage integration changes: {staged.stderr.strip()}")
-    changed_files = _staged_paths(worktree)
-    if not changed_files:
-        raise RuntimeError("apply-back agent produced no repository changes")
-    _reject_unpublishable_paths(changed_files)
+    changed_files = _publishable_staged_paths(worktree, "apply-back agent produced no repository changes")
     checked = _git(worktree, "diff", "--cached", "--check")
     if checked.returncode != 0:
         raise RuntimeError(f"apply-back diff check failed: {checked.stdout.strip()}")
@@ -427,19 +447,14 @@ def _validate_worktree_changes(
     python_files = [worktree / path for path in changed_files if path.endswith(".py") and (worktree / path).is_file()]
     for python_file in python_files:
         try:
-            compile(
-                python_file.read_text(encoding="utf-8"),
-                str(python_file),
-                "exec",
-                dont_inherit=True,
-            )
+            compile(python_file.read_text(encoding="utf-8"), str(python_file), "exec", dont_inherit=True)
         except (OSError, SyntaxError) as error:
             raise RuntimeError(f"apply-back Python syntax validation failed for {python_file}: {error}") from error
 
     precommit_config = worktree / ".pre-commit-config.yaml"
     precommit = shutil.which("pre-commit")
     if precommit and precommit_config.is_file():
-        for attempt in range(2):
+        for _ in range(2):
             remaining = timeout_sec - (time.monotonic() - validation_started)
             if remaining <= 0:
                 raise RuntimeError("apply-back pre-commit validation timed out")
@@ -459,29 +474,21 @@ def _validate_worktree_changes(
                 raise RuntimeError(f"could not restage pre-commit changes: {staged.stderr.strip()}")
             if checked.returncode == 0:
                 break
-            if attempt == 1:
-                raise RuntimeError(
-                    f"apply-back pre-commit validation failed: {(checked.stdout or checked.stderr)[-2000:]}"
-                )
+        else:
+            raise RuntimeError(f"apply-back pre-commit validation failed: {(checked.stdout or checked.stderr)[-2000:]}")
         checked = _git(worktree, "diff", "--cached", "--check")
         if checked.returncode != 0:
             raise RuntimeError(f"post-format apply-back diff check failed: {checked.stdout.strip()}")
         # Hooks can add files of their own or normalize an edit back to its committed state, so the final staged set
         # is what the patch will carry.
-        changed_files = _staged_paths(worktree)
-        if not changed_files:
-            raise RuntimeError("apply-back pre-commit hooks reverted every repository change")
-        _reject_unpublishable_paths(changed_files)
+        changed_files = _publishable_staged_paths(
+            worktree, "apply-back pre-commit hooks reverted every repository change"
+        )
     if import_plan is not None:
         remaining = timeout_sec - (time.monotonic() - validation_started)
         if remaining <= 0:
             raise RuntimeError("patched apply-back import validation timed out")
-        _validate_imports(
-            worktree=worktree,
-            plan=import_plan,
-            timeout_sec=max(1, int(remaining)),
-            stage="patched",
-        )
+        _validate_imports(worktree=worktree, plan=import_plan, timeout_sec=max(1, int(remaining)), stage="patched")
     return changed_files
 
 
@@ -508,15 +515,7 @@ def _snapshot_failure(
     return str(root)
 
 
-def _collect_patch(
-    *,
-    workspace: Path,
-    worktree: Path,
-    patch_path: Path,
-    base_commit: str,
-    op_name: str,
-    operator_slug: str,
-) -> tuple[str, list[str], str, str]:
+def _collect_patch(spec: RewriteSpec, worktree: Path, patch_path: Path, base_commit: str) -> CollectedPatch:
     staged = _git(worktree, "add", "-A", "--", ".")
     if staged.returncode != 0:
         raise RuntimeError(f"could not stage integration changes: {staged.stderr.strip()}")
@@ -528,7 +527,7 @@ def _collect_patch(
         "user.email=forge-rewrite@local",
         "commit",
         "-m",
-        f"forge-rewrite: integrate {op_name} flydsl apply-back",
+        f"forge-rewrite: integrate {spec.op_name} flydsl apply-back",
     )
     if committed.returncode != 0:
         raise RuntimeError(
@@ -575,29 +574,23 @@ def _collect_patch(
     checked = _git(worktree, "apply", "--check", str(patch_path))
     if checked.returncode != 0:
         raise RuntimeError(f"generated framework patch does not apply to the pristine base: {checked.stderr.strip()}")
-    commit_ref = f"refs/forge-rewrite/applyback/{operator_slug}-{applyback_commit[:12]}"
-    published_ref = _git(workspace, "update-ref", commit_ref, applyback_commit)
+    commit_ref = f"refs/forge-rewrite/applyback/{spec.operator_slug}-{applyback_commit[:12]}"
+    published_ref = _git(Path(spec.workspace).resolve(), "update-ref", commit_ref, applyback_commit)
     if published_ref.returncode != 0:
         raise RuntimeError(f"could not preserve apply-back commit: {published_ref.stderr.strip()}")
-    return patch, changed_files, applyback_commit, commit_ref
+    return CollectedPatch(base_commit, applyback_commit, commit_ref, patch, changed_files)
 
 
 def _publish_patch(
-    *,
     spec: RewriteSpec,
     framework: str,
-    base_commit: str,
-    applyback_commit: str,
     flydsl_best_commit: str,
-    commit_ref: str,
-    source_ms: float | None,
-    flydsl_best_ms: float | None,
-    speedup: float | None,
-    reference_snr_db: float | None,
-    patch: str,
-    changed_files: list[str],
+    measurement: FlydslMeasurement,
+    collected: CollectedPatch,
 ) -> tuple[str, str, str, str]:
     """Publish the framework patch into the apply-back-owned artifact namespace."""
+    applyback_commit = collected.applyback_commit
+    changed_files = collected.changed_files
     workspace = Path(spec.workspace).resolve()
     root = workspace / "forge_experiments"
     namespace_root = root / APPLYBACK_NAMESPACE
@@ -632,14 +625,14 @@ def _publish_patch(
             "builder_symbol": spec.builder_symbol,
             "source_entry": spec.source_entry,
             "commit_hash": applyback_commit,
-            "base_commit": base_commit,
-            "commit_ref": commit_ref,
+            "base_commit": collected.base_commit,
+            "commit_ref": collected.commit_ref,
             "flydsl_best_commit": flydsl_best_commit,
-            "baseline_wall_ms": source_ms,
-            "best_wall_ms": flydsl_best_ms,
-            "speedup": speedup,
+            "baseline_wall_ms": measurement.source_ms,
+            "best_wall_ms": measurement.flydsl_ms,
+            "speedup": measurement.speedup,
             "reference_correctness_passed": True,
-            "reference_snr_db": reference_snr_db,
+            "reference_snr_db": measurement.snr_db,
             "integration_validation_required": True,
             "integration_validation_status": protocol.INTEGRATION_VALIDATION_PENDING,
             "target_language": "flydsl",
@@ -661,7 +654,7 @@ def _publish_patch(
         )
     )
     try:
-        atomic_write_text(temporary / "forge.patch", patch)
+        atomic_write_text(temporary / "forge.patch", collected.patch)
         atomic_write_text(
             temporary / "validation.txt",
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
@@ -670,8 +663,8 @@ def _publish_patch(
         _atomic_write_json(
             temporary / "benchmark.json",
             {
-                "source_ms": source_ms,
-                "flydsl_best_ms": flydsl_best_ms,
+                "source_ms": measurement.source_ms,
+                "flydsl_best_ms": measurement.flydsl_ms,
             },
         )
         _atomic_write_json(temporary / "publication.json", manifest)
@@ -681,14 +674,7 @@ def _publish_patch(
             target = Path(relative)
             if target.is_absolute() or ".." in target.parts:
                 raise RuntimeError(f"apply-back changed file escapes repository: {relative}")
-            content = git(
-                "-C",
-                str(workspace),
-                "show",
-                f"{applyback_commit}:{target.as_posix()}",
-                check=False,
-                text=False,
-            )
+            content = git_bytes("-C", str(workspace), "show", f"{applyback_commit}:{target.as_posix()}", check=False)
             # Deleted files belong in the patch but have no final snapshot.
             if content.returncode != 0:
                 continue
@@ -712,224 +698,74 @@ def _publish_patch(
     )
 
 
-def generate_applyback_patch(
-    spec: RewriteSpec,
-    config: Config,
-    *,
-    base_commit: str,
-    experiments_dir: str,
-    framework: str = "",
-    best_commit: str = "",
-    source_ms: float | None = None,
-    flydsl_best_ms: float | None = None,
-    speedup: float | None = None,
-    reference_snr_db: float | None = None,
-    deadline_unix: float | None = None,
-    import_modules: list[str] | tuple[str, ...] = (),
-    max_attempts: int = 2,
-    usage: UsageAccumulator | None = None,
-) -> ApplybackResult:
-    """Run bounded clean-room agent attempts and publish a validated patch."""
-    workspace = Path(spec.workspace).resolve()
-    if not base_commit:
-        return ApplybackResult(
-            ok=False,
-            error="apply-back requires an existing git base commit",
-        )
-    base_exists = _git(workspace, "cat-file", "-e", f"{base_commit}^{{commit}}")
-    if base_exists.returncode != 0:
-        return ApplybackResult(
-            ok=False,
-            error=f"apply-back base commit is unavailable: {base_commit}",
-        )
-    try:
-        source_relative = Path(spec.source_kernel).resolve().relative_to(workspace).as_posix()
-    except ValueError:
-        return ApplybackResult(
-            ok=False,
-            error="source kernel is outside the framework workspace",
-        )
-    flydsl_path = Path(spec.flydsl_kernel)
-    if not flydsl_path.is_file():
-        return ApplybackResult(
-            ok=False,
-            error="best FlyDSL kernel is unavailable for apply-back",
-        )
+@dataclass(frozen=True)
+class _CleanRoomAttempts:
+    """The bounded clean-room attempts of one apply-back: its inputs and the brief every attempt integrates."""
 
-    rewrite_budget = DEFAULT_REWRITE_BUDGET
-    if not rewrite_budget.can_start_applyback(deadline_unix):
-        return ApplybackResult(
-            ok=False,
-            error=("insufficient time remaining for the apply-back agent and host validation"),
-        )
-    resolved_framework = _infer_framework(spec, framework)
-    if resolved_framework not in protocol.SUPPORTED_FRAMEWORKS:
-        return ApplybackResult(
-            ok=False,
-            error=(f"apply-back framework could not be resolved to a supported value: {resolved_framework!r}"),
-        )
+    config: Config
+    request: ApplybackRequest
+    brief: _IntegrationBrief
+    usage: UsageAccumulator | None
 
-    reference_dir = Path(tempfile.mkdtemp(prefix="forge_rewrite_reference_"))
-    reference_path = reference_dir / spec.flydsl_kernel_name
-    reference_path.write_bytes(flydsl_path.read_bytes())
-    prior_failure = ""
-    last_result = ApplybackResult(
-        ok=False,
-        error="apply-back produced no attempt",
-        base_commit=base_commit,
-    )
-    try:
-        for attempt in range(1, max(1, int(max_attempts)) + 1):
-            if not rewrite_budget.can_start_applyback(deadline_unix):
-                if attempt == 1:
-                    return ApplybackResult(
-                        ok=False,
-                        error=("insufficient time remaining for the apply-back agent and host validation"),
-                    )
+    def run(self) -> ApplybackResult:
+        """Attempt until one publishes, one fails in a way a fresh attempt cannot fix, or time runs out."""
+        request, budget = self.request, DEFAULT_REWRITE_BUDGET
+        workspace = Path(self.brief.spec.workspace).resolve()
+        source_relative = self.brief.source_relative
+        prior_failure = ""
+        last_result = ApplybackResult(ok=False, error=_NO_TIME_FOR_APPLYBACK)
+        for attempt in range(1, request.max_attempts + 1):
+            if not budget.can_start_applyback(request.deadline_unix):
                 break
-
             worktree = Path(tempfile.mkdtemp(prefix="forge_rewrite_applyback_worktree_"))
             worktree_added = False
             progress_log: list[str] = []
             timeout_sec = 0
             diagnostic_path = ""
             error_text = ""
-            retryable = True
             try:
-                added = _git(
-                    workspace,
-                    "worktree",
-                    "add",
-                    "--detach",
-                    str(worktree),
-                    base_commit,
-                )
+                added = _git(workspace, "worktree", "add", "--detach", str(worktree), request.base_commit)
                 if added.returncode != 0:
                     return ApplybackResult(
                         ok=False,
-                        error=(f"could not create pristine apply-back worktree: {added.stderr.strip()}"),
+                        error=f"could not create pristine apply-back worktree: {added.stderr.strip()}",
                         attempts=attempt,
                     )
                 worktree_added = True
                 if not (worktree / source_relative).is_file():
                     return ApplybackResult(
                         ok=False,
-                        error=(f"source kernel is not tracked by the pristine framework commit: {source_relative}"),
+                        error=f"source kernel is not tracked by the pristine framework commit: {source_relative}",
                         attempts=attempt,
                     )
                 import_plan = _build_import_validation_plan(
-                    worktree=worktree,
-                    source_relative=source_relative,
-                    import_modules=import_modules,
+                    worktree=worktree, source_relative=source_relative, import_modules=request.import_modules
                 )
-                remaining_for_baseline = rewrite_budget.remaining_seconds(deadline_unix)
-                baseline_import_timeout = (
-                    rewrite_budget.import_validation_timeout_sec
-                    if not math.isfinite(remaining_for_baseline)
-                    else min(
-                        rewrite_budget.import_validation_timeout_sec,
-                        max(1, int(remaining_for_baseline)),
-                    )
-                )
-                _validate_imports(
-                    worktree=worktree,
-                    plan=import_plan,
-                    timeout_sec=baseline_import_timeout,
-                    stage="baseline",
-                )
-
-                if not rewrite_budget.can_start_applyback(deadline_unix):
+                remaining = budget.remaining_seconds(request.deadline_unix)
+                baseline_timeout = int(min(budget.import_validation_timeout_sec, max(1, remaining)))
+                _validate_imports(worktree=worktree, plan=import_plan, timeout_sec=baseline_timeout, stage="baseline")
+                if not budget.can_start_applyback(request.deadline_unix):
                     raise RuntimeError(
                         "insufficient time remaining after baseline import "
                         "validation for the apply-back agent and host validation"
                     )
-                attempts_left = max(1, max_attempts - attempt + 1)
-                timeout_sec = rewrite_budget.agent_timeout_sec(
-                    deadline_unix=deadline_unix,
-                    configured_timeout_sec=config.agent_timeout_sec,
-                    attempts_left=attempts_left,
+                timeout_sec = budget.agent_timeout_sec(
+                    deadline_unix=request.deadline_unix,
+                    configured_timeout_sec=self.config.agent_timeout_sec,
+                    attempts_left=request.max_attempts - attempt + 1,
                 )
-                backend_name, backend_model = asyncio.run(
-                    _run_agent(
-                        spec=spec,
-                        config=config,
-                        worktree=worktree,
-                        reference_path=reference_path,
-                        framework=resolved_framework,
-                        source_relative=source_relative,
-                        timeout_sec=timeout_sec,
-                        progress_log=progress_log,
-                        prior_failure=prior_failure,
-                        usage=usage,
-                    )
-                )
-
-                remaining_for_host = rewrite_budget.remaining_seconds(deadline_unix)
-                if remaining_for_host <= rewrite_budget.applyback_post_agent_reserve_sec:
-                    raise RuntimeError("apply-back agent returned without enough time for host validation")
-                host_timeout_sec = rewrite_budget.host_validation_timeout_sec(deadline_unix)
-                _validate_worktree_changes(
-                    worktree=worktree,
-                    timeout_sec=host_timeout_sec,
-                    import_plan=import_plan,
-                )
-                temporary_patch = reference_dir / f"forge_attempt_{attempt:02d}.patch"
-                patch, changed_files, applyback_commit, commit_ref = _collect_patch(
-                    workspace=workspace,
-                    worktree=worktree,
-                    patch_path=temporary_patch,
-                    base_commit=base_commit,
-                    op_name=spec.op_name,
-                    operator_slug=spec.operator_slug,
-                )
-                patch_path, manifest_path, files_root, result_path = _publish_patch(
-                    spec=spec,
-                    framework=resolved_framework,
-                    base_commit=base_commit,
-                    applyback_commit=applyback_commit,
-                    flydsl_best_commit=best_commit,
-                    commit_ref=commit_ref,
-                    source_ms=source_ms,
-                    flydsl_best_ms=flydsl_best_ms,
-                    speedup=speedup,
-                    reference_snr_db=reference_snr_db,
-                    patch=patch,
-                    changed_files=changed_files,
-                )
-                return ApplybackResult(
-                    ok=True,
-                    patch_path=patch_path,
-                    manifest_path=manifest_path,
-                    changed_files=changed_files,
-                    agent_backend=backend_name,
-                    agent_model=backend_model,
-                    base_commit=base_commit,
-                    best_commit=applyback_commit,
-                    commit_ref=commit_ref,
-                    canonical_patch_path=patch_path,
-                    canonical_files_root=files_root,
-                    canonical_result_path=result_path,
-                    forge_workspace=str(workspace),
-                    artifacts=[patch_path],
-                    import_validation_modules=list(import_plan.modules),
-                    attempts=attempt,
-                )
+                turn = _ApplybackTurn(worktree, timeout_sec, progress_log, prior_failure)
+                return self._integrate(turn, import_plan, attempt)
             except (asyncio.TimeoutError, TimeoutError):
                 error_text = f"apply-back agent timed out after {timeout_sec}s"
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:  # isolation boundary: one apply-back attempt
+                log.warning("apply-back attempt %d failed: %s", attempt, error, exc_info=True)
                 error_text = f"{type(error).__name__}: {error}"
-                retryable = not any(
-                    marker in error_text
-                    for marker in (
-                        "baseline apply-back import validation",
-                        "insufficient time remaining",
-                    )
-                )
             finally:
                 if error_text and worktree_added:
                     diagnostic_path = _snapshot_failure(
                         worktree=worktree,
-                        experiments_dir=experiments_dir,
+                        experiments_dir=request.experiments_dir,
                         error=error_text,
                         progress_log=progress_log,
                         attempt=attempt,
@@ -940,14 +776,85 @@ def generate_applyback_patch(
 
             last_result = ApplybackResult(
                 ok=False,
-                error=error_text or "apply-back attempt failed without diagnostics",
-                base_commit=base_commit,
+                error=error_text,
+                base_commit=request.base_commit,
                 diagnostic_path=diagnostic_path,
                 attempts=attempt,
             )
-            if not retryable:
+            if any(marker in error_text for marker in _UNRETRYABLE_FAILURE_MARKERS):
                 break
-            prior_failure = last_result.error
+            prior_failure = error_text
         return last_result
+
+    def _integrate(self, turn: _ApplybackTurn, import_plan: ImportValidationPlan, attempt: int) -> ApplybackResult:
+        """Let the agent integrate the reference in the turn's worktree, then validate and publish what it changed."""
+        spec, request, budget = self.brief.spec, self.request, DEFAULT_REWRITE_BUDGET
+        backend_name, backend_model = asyncio.run(
+            _run_agent(config=self.config, brief=self.brief, turn=turn, usage=self.usage)
+        )
+        if budget.remaining_seconds(request.deadline_unix) <= budget.applyback_post_agent_reserve_sec:
+            raise RuntimeError("apply-back agent returned without enough time for host validation")
+        host_timeout_sec = budget.host_validation_timeout_sec(request.deadline_unix)
+        _validate_worktree_changes(worktree=turn.worktree, timeout_sec=host_timeout_sec, import_plan=import_plan)
+        temporary_patch = self.brief.reference_path.parent / f"forge_attempt_{attempt:02d}.patch"
+        collected = _collect_patch(spec, turn.worktree, temporary_patch, request.base_commit)
+        patch_path, manifest_path, files_root, result_path = _publish_patch(
+            spec, self.brief.framework, request.best_commit, request.measurement, collected
+        )
+        return ApplybackResult(
+            ok=True,
+            patch_path=patch_path,
+            manifest_path=manifest_path,
+            changed_files=collected.changed_files,
+            agent_backend=backend_name,
+            agent_model=backend_model,
+            base_commit=request.base_commit,
+            best_commit=collected.applyback_commit,
+            commit_ref=collected.commit_ref,
+            canonical_patch_path=patch_path,
+            canonical_files_root=files_root,
+            canonical_result_path=result_path,
+            forge_workspace=str(Path(spec.workspace).resolve()),
+            artifacts=[patch_path],
+            import_validation_modules=list(import_plan.modules),
+            attempts=attempt,
+        )
+
+
+def generate_applyback_patch(
+    spec: RewriteSpec,
+    config: Config,
+    request: ApplybackRequest,
+    *,
+    usage: UsageAccumulator | None = None,
+) -> ApplybackResult:
+    """Run bounded clean-room agent attempts and publish a validated patch."""
+    base_commit = request.base_commit
+    workspace = Path(spec.workspace).resolve()
+    if not base_commit:
+        return ApplybackResult(ok=False, error="apply-back requires an existing git base commit")
+    if _git(workspace, "cat-file", "-e", f"{base_commit}^{{commit}}").returncode != 0:
+        return ApplybackResult(ok=False, error=f"apply-back base commit is unavailable: {base_commit}")
+    try:
+        source_relative = Path(spec.source_kernel).resolve().relative_to(workspace).as_posix()
+    except ValueError:
+        return ApplybackResult(ok=False, error="source kernel is outside the framework workspace")
+    flydsl_path = Path(spec.flydsl_kernel)
+    if not flydsl_path.is_file():
+        return ApplybackResult(ok=False, error="best FlyDSL kernel is unavailable for apply-back")
+    if not DEFAULT_REWRITE_BUDGET.can_start_applyback(request.deadline_unix):
+        return ApplybackResult(ok=False, error=_NO_TIME_FOR_APPLYBACK)
+    resolved_framework = _infer_framework(spec)
+    if resolved_framework not in protocol.SUPPORTED_FRAMEWORKS:
+        return ApplybackResult(
+            ok=False, error=f"apply-back framework could not be resolved to a supported value: {resolved_framework!r}"
+        )
+
+    reference_dir = Path(tempfile.mkdtemp(prefix="forge_rewrite_reference_"))
+    reference_path = reference_dir / spec.flydsl_kernel_name
+    reference_path.write_bytes(flydsl_path.read_bytes())
+    brief = _IntegrationBrief(spec, resolved_framework, source_relative, reference_path)
+    try:
+        return _CleanRoomAttempts(config, request, brief, usage).run()
     finally:
         shutil.rmtree(reference_dir, ignore_errors=True)

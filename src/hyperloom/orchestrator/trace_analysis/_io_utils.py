@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 
 def write_text(path: Path, text: str) -> None:
@@ -30,36 +29,8 @@ def read_last_lines(log_path: Path, limit: int = 20) -> list[str]:
     return lines[-limit:]
 
 
-def safe_float(
-    value: Any,
-    default: float | None = 0.0,
-    *,
-    strip_percent: bool = False,
-    strip_commas: bool = False,
-) -> float | None:
-    """Coerce int/float/numeric-str to float; None/empty/malformed -> default."""
-    if isinstance(value, bool):
-        return default
-    try:
-        if value is None or value == "":
-            return default
-        if isinstance(value, str):
-            text = value.strip()
-            if strip_percent:
-                text = text.rstrip("%")
-            if strip_commas:
-                text = text.replace(",", "")
-            if not text:
-                return default
-            return float(text)
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 __all__ = [
     "append_log",
     "read_last_lines",
-    "safe_float",
     "write_text",
 ]

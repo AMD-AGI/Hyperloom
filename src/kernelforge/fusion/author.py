@@ -13,9 +13,10 @@ import stat
 import subprocess
 import tempfile
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from kernelforge.agent_backends.base import (
     AgentHook,
@@ -39,7 +40,7 @@ from .llm_failure import (
 )
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git_bytes
 
 log = logging.getLogger("forge_fusion")
 
@@ -107,17 +108,22 @@ def _model_dir_block(model_path: str) -> str:
     )
 
 
-def build_author_prompt(
-    recipe: dict,
-    *,
-    framework: str,
-    ab_hint: str,
-    target_speedup: float = DEFAULT_TARGET_SPEEDUP,
-    harness_path: str = "",
-    gpu_arch: str = "",
-    model_path: str = "",
-) -> str:
+@dataclass(frozen=True)
+class AuthorBrief:
+    """What the author is told besides the recipe: framework, how it is validated, the bar, harness, GPU and model."""
+
+    framework: str
+    ab_hint: str
+    target_speedup: float = DEFAULT_TARGET_SPEEDUP
+    harness_path: str = ""
+    gpu_arch: str = ""
+    model_path: str = ""
+
+
+def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
     """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``)."""
+    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
+    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
     shapes = recipe.get("shapes", {})
     hints = recipe.get("source_hints", [])
     env_flag = recipe.get("env_flag", "FUSED")
@@ -203,27 +209,12 @@ Do not edit the A/B harness or hard-code any numbers.
 """
 
 
-def build_multi_author_prompt(
-    recipes: list[dict],
-    *,
-    framework: str,
-    ab_hint: str,
-    target_speedup: float = DEFAULT_TARGET_SPEEDUP,
-    harness_path: str = "",
-    gpu_arch: str = "",
-    model_path: str = "",
-) -> str:
+def build_multi_author_prompt(recipes: list[dict], brief: AuthorBrief) -> str:
     """Prompt to author SEVERAL confirmed fusions in one pass (each env-gated)."""
     if len(recipes) == 1:
-        return build_author_prompt(
-            recipes[0],
-            framework=framework,
-            ab_hint=ab_hint,
-            target_speedup=target_speedup,
-            harness_path=harness_path,
-            gpu_arch=gpu_arch,
-            model_path=model_path,
-        )
+        return build_author_prompt(recipes[0], brief)
+    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
+    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
     blocks = []
     all_flags = []
     for i, r in enumerate(recipes, 1):
@@ -330,15 +321,7 @@ def _git_bytes(
 ) -> subprocess.CompletedProcess:
     """Run one bounded Git plumbing command without decoding path bytes."""
     try:
-        result = git(
-            "-C",
-            str(root),
-            *args,
-            input=input_data,
-            check=False,
-            text=False,
-            timeout=60,
-        )
+        result = git_bytes("-C", str(root), *args, input=input_data, check=False, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         # Pure I/O, and ``SubprocessError`` covers ``TimeoutExpired``: a 60s ``git ls-files`` timeout against an NFS
         # worktree under a concurrent serving campaign is weather, not a verdict on what the author did.
@@ -414,12 +397,7 @@ def _is_fusion_scratch_relpath(rel: str) -> bool:
 class _AuthorWorkspaceGuard:
     """Restore every Git-visible mutation outside the author's writable scope."""
 
-    def __init__(
-        self,
-        workdir: str,
-        target_files: list[str],
-        new_module_dirs: Optional[list[str]] = None,
-    ) -> None:
+    def __init__(self, workdir: str, target_files: list[str], new_module_dirs: list[str]) -> None:
         cwd = Path(workdir).expanduser().resolve()
         root_result = _git_bytes(cwd, "rev-parse", "--show-toplevel")
         root_text = root_result.stdout.decode(errors="surrogateescape").strip()
@@ -427,80 +405,31 @@ class _AuthorWorkspaceGuard:
             raise AuthorSafetyError("registered authoring requires a Git worktree")
         self.root = Path(root_text).resolve()
         self.cwd = cwd
-        self.target_relpaths: set[str] = set()
-        self.target_files: list[str] = []
-        for value in target_files:
-            if not value:
-                continue
-            raw = Path(value).expanduser()
-            lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else cwd / raw)))
-            try:
-                lexical.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author target is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            resolved = lexical.resolve(strict=False)
-            try:
-                relative = resolved.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author target is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            if lexical.is_symlink() or resolved != lexical:
-                raise AuthorSafetyError(
-                    f"author target symlink/path escape is not allowed: {lexical}",
-                    paths=[str(lexical)],
-                )
-            rel = relative.as_posix()
-            self.target_relpaths.add(rel)
-            self.target_files.append(str(resolved))
+        self.target_files = [str(self._contained_path(value, "author target")) for value in target_files]
+        self.target_relpaths = {Path(path).relative_to(self.root).as_posix() for path in self.target_files}
 
-        self.new_module_dirs: list[str] = []
         # Name inventory per nominated directory.
         self.new_module_baselines: dict[str, frozenset[str]] = {}
-        for value in new_module_dirs or []:
-            if not value:
-                continue
-            raw = Path(value).expanduser()
-            lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else cwd / raw)))
-            resolved = lexical.resolve(strict=False)
+        for value in new_module_dirs:
+            directory = self._contained_path(value, "author module directory")
             try:
-                relative = resolved.relative_to(self.root)
-            except ValueError as exc:
-                raise AuthorSafetyError(
-                    f"author module directory is outside the Git worktree: {lexical}",
-                    paths=[str(lexical)],
-                ) from exc
-            if lexical.is_symlink() or resolved != lexical:
-                raise AuthorSafetyError(
-                    f"author module directory symlink/path escape is not allowed: {lexical}",
-                    paths=[str(lexical)],
-                )
-            try:
-                entries = frozenset(os.listdir(resolved))
+                entries = frozenset(os.listdir(directory))
             except FileNotFoundError as exc:
                 # An empty inventory is the most permissive scope there is -- every name in it counts as absent -- and
                 # the prompt would then advertise a directory the author cannot write into anyway.
                 raise AuthorSafetyError(
-                    f"author module directory does not exist: {lexical}",
-                    paths=[str(lexical)],
+                    f"author module directory does not exist: {directory}",
+                    paths=[str(directory)],
                 ) from exc
             except OSError as exc:
                 # A missing directory above is a verdict: it is absent on every attempt.
                 raise AuthorSafetyError(
-                    f"cannot inventory author module directory: {lexical}",
-                    paths=[str(lexical)],
+                    f"cannot inventory author module directory: {directory}",
+                    paths=[str(directory)],
                     transient=True,
                 ) from exc
-            self.new_module_baselines[relative.as_posix()] = entries
-            if str(resolved) not in self.new_module_dirs:
-                self.new_module_dirs.append(str(resolved))
-
-        # Paths the current transaction must not clobber while restoring others.
-        self.preserved_relpaths: set[str] = set(self.target_relpaths)
+            self.new_module_baselines[directory.relative_to(self.root).as_posix()] = entries
+        self.new_module_dirs = [str(self.root / rel) for rel in self.new_module_baselines]
 
         self.baseline_head = self._head()
         self.baseline_branch = self._branch()
@@ -522,9 +451,8 @@ class _AuthorWorkspaceGuard:
         except OSError as exc:
             raise AuthorSafetyError(f"cannot snapshot Git index: {self.index_path}") from exc
         hidden_index_paths = {rel for rel, flag in self.baseline_index_flags.items() if flag != "H"}
-        self.baseline_status_paths = self._status_paths() | hidden_index_paths
         self.baseline_states: dict[str, _WorkspacePathState] = {}
-        for rel in self.baseline_status_paths:
+        for rel in self._status_paths() | hidden_index_paths:
             state = _capture_path_state(self._path(rel))
             if state.kind in {"directory", "unsupported"}:
                 raise AuthorSafetyError(
@@ -532,6 +460,17 @@ class _AuthorWorkspaceGuard:
                     paths=[rel],
                 )
             self.baseline_states[rel] = state
+
+    def _contained_path(self, value: str, what: str) -> Path:
+        """Resolve one caller-named path, refusing one outside the worktree or reached through a symlink."""
+        raw = Path(value).expanduser()
+        lexical = Path(os.path.abspath(str(raw if raw.is_absolute() else self.cwd / raw)))
+        resolved = lexical.resolve(strict=False) if lexical.is_relative_to(self.root) else lexical
+        if not resolved.is_relative_to(self.root):
+            raise AuthorSafetyError(f"{what} is outside the Git worktree: {lexical}", paths=[str(lexical)])
+        if lexical.is_symlink() or resolved != lexical:
+            raise AuthorSafetyError(f"{what} symlink/path escape is not allowed: {lexical}", paths=[str(lexical)])
+        return resolved
 
     def _head(self) -> bytes:
         return _git_bytes(
@@ -868,6 +807,26 @@ class _AuthorWorkspaceGuard:
                     selected.discard(child)
         return selected
 
+    def _changed_paths(
+        self,
+        entries: dict[str, tuple[tuple[str, str, int], ...]],
+        flags: dict[str, str],
+        status: set[str],
+    ) -> set[str]:
+        """Git-visible paths whose index entry, index flag or worktree state differs from the baseline snapshot."""
+        baseline_entries, baseline_flags = self.baseline_index_entries, self.baseline_index_flags
+        changed = {
+            rel
+            for rel in baseline_entries.keys() | entries.keys()
+            if baseline_entries.get(rel, ()) != entries.get(rel, ())
+        }
+        changed.update(rel for rel in baseline_flags.keys() | flags.keys() if baseline_flags.get(rel) != flags.get(rel))
+        changed.update(status - self.baseline_states.keys())
+        changed.update(
+            rel for rel, state in self.baseline_states.items() if _capture_path_state(self._path(rel)) != state
+        )
+        return changed
+
     def enforce(self) -> _AuthorWorkspaceOutcome:
         """Restore out-of-scope deltas and report rejections plus new modules."""
         if self._head() != self.baseline_head or self._branch() != self.baseline_branch:
@@ -878,24 +837,7 @@ class _AuthorWorkspaceGuard:
 
         post_entries = self._index_entries()
         post_flags = self._index_flags()
-        post_status = self._status_paths()
-        index_paths = set(self.baseline_index_entries) | set(post_entries)
-        flag_paths = set(self.baseline_index_flags) | set(post_flags)
-        index_changed = {
-            rel for rel in index_paths if self.baseline_index_entries.get(rel, ()) != post_entries.get(rel, ())
-        }
-        flag_changed = {rel for rel in flag_paths if self.baseline_index_flags.get(rel) != post_flags.get(rel)}
-        candidates = self.baseline_status_paths | post_status | index_changed | flag_changed
-        worktree_changed: set[str] = set()
-        for rel in candidates:
-            baseline = self.baseline_states.get(rel)
-            if baseline is not None:
-                if _capture_path_state(self._path(rel)) != baseline:
-                    worktree_changed.add(rel)
-            elif rel in post_status:
-                worktree_changed.add(rel)
-
-        changed = worktree_changed | index_changed | flag_changed
+        changed = self._changed_paths(post_entries, post_flags, self._status_paths())
         # A new fused helper module inside the nominated scope is part of the authored fusion, so it is allowed to
         # survive.
         scratch = {rel for rel in changed if _is_fusion_scratch_relpath(rel)}
@@ -911,11 +853,11 @@ class _AuthorWorkspaceGuard:
             return _AuthorWorkspaceOutcome(created=tuple(sorted(created)))
 
         preserved = allowed - unsafe_allowed
-        if flag_changed & preserved:
-            unsafe_flags = sorted(flag_changed & preserved)
-            violations.update(unsafe_flags)
-            preserved.difference_update(unsafe_flags)
-        self.preserved_relpaths = set(preserved)
+        unsafe_flags = {rel for rel in preserved if self.baseline_index_flags.get(rel) != post_flags.get(rel)}
+        violations |= unsafe_flags
+        preserved -= unsafe_flags
+        # Paths the current transaction must not clobber while restoring others.
+        self.preserved_relpaths = preserved
 
         self._restore_index(post_entries, preserved)
         restore_paths = self._minimal_restore_paths(violations)
@@ -928,29 +870,7 @@ class _AuthorWorkspaceGuard:
             else:
                 self._remove_path(rel)
 
-        final_entries = self._index_entries()
-        final_flags = self._index_flags()
-        final_status = self._status_paths()
-        verify_paths = (
-            self.baseline_status_paths | final_status | set(self.baseline_index_entries) | set(final_entries)
-        ) - preserved
-        failed: set[str] = set()
-        for rel in verify_paths:
-            if self.baseline_index_entries.get(rel, ()) != final_entries.get(
-                rel,
-                (),
-            ):
-                failed.add(rel)
-                continue
-            if self.baseline_index_flags.get(rel) != final_flags.get(rel):
-                failed.add(rel)
-                continue
-            baseline = self.baseline_states.get(rel)
-            if baseline is not None:
-                if _capture_path_state(self._path(rel)) != baseline:
-                    failed.add(rel)
-            elif (rel in self.baseline_status_paths) != (rel in final_status):
-                failed.add(rel)
+        failed = self._changed_paths(self._index_entries(), self._index_flags(), self._status_paths()) - preserved
         if failed:
             raise AuthorSafetyError(
                 "could not prove exact restoration of non-target paths",
@@ -1069,20 +989,30 @@ def _write_registered_author_log(
     )
 
 
-def _run_registered_author(
-    backend: Any,
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str,
-    model: str,
-    max_turns: int,
-    timeout_s: int,
-    target_files: list[str],
-    new_module_dirs: list[str],
-) -> int:
+@dataclass(frozen=True)
+class AuthorAgent:
+    """The agent that authors: its backend (or a factory for one), model, device, turn cap and per-attempt timeout."""
+
+    backend: Any
+    gpu: str = "0"
+    model: Optional[str] = None
+    max_turns: int = 100
+    timeout_s: int = 7200
+
+
+@dataclass(frozen=True)
+class AuthorWorkspace:
+    """Where an authoring session runs and logs, the files it may edit, and where it may add new modules."""
+
+    workdir: str
+    log_path: str
+    target_files: Sequence[str] = ()
+    new_module_dirs: Sequence[str] = ()
+
+
+def _run_registered_author(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> int:
     """Run authoring, retrying only a transport that never delivered an answer."""
+    timeout_s = agent.timeout_s
     attempts = max(1, int(env_setting("FORGE_FUSION_AUTHOR_ATTEMPTS", DEFAULT_AUTHOR_ATTEMPTS, cast=int)))
     base_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float))
     max_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float))
@@ -1095,18 +1025,7 @@ def _run_registered_author(
     deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", default_deadline, cast=float))
     started_at = time.monotonic()
     for attempt in range(1, attempts + 1):
-        rc, retryable = _run_registered_author_once(
-            backend,
-            prompt,
-            workdir=workdir,
-            log_path=log_path,
-            gpu=gpu,
-            model=model,
-            max_turns=max_turns,
-            timeout_s=timeout_s,
-            target_files=target_files,
-            new_module_dirs=new_module_dirs,
-        )
+        rc, retryable = _run_registered_author_once(prompt, workspace, agent)
         if not retryable or attempt >= attempts:
             return rc
         delay = retry_delay(attempt, base_sec=base_delay, max_sec=max_delay)
@@ -1132,58 +1051,86 @@ def _run_registered_author(
     return rc
 
 
-def _run_registered_author_once(
-    backend: Any,
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str,
-    model: str,
-    max_turns: int,
-    timeout_s: int,
-    target_files: list[str],
-    new_module_dirs: list[str],
-) -> tuple[int, bool]:
-    """One authoring run, with whether its failure was the transport's rather than the task's."""
-    progress: list[str] = []
-    requested_targets = list(dict.fromkeys(str(path) for path in target_files if str(path)))
-    requested_module_dirs = list(dict.fromkeys(str(path) for path in new_module_dirs if str(path)))
+def _record_author_log(log_path: str, progress: list[str], **fields: Any) -> None:
+    """Write the author log, best-effort.
+
+    A log this run could not write is not a reason to lose the verdict it was
+    recording, so the failure is reported and the caller carries on.
+    """
     try:
-        guard = _AuthorWorkspaceGuard(workdir, requested_targets, requested_module_dirs)
-    except AuthorSafetyError as exc:
-        detail = str(exc)
-        if exc.paths:
-            detail = f"{detail}; paths={', '.join(exc.paths[:20])}"
-        heading = (
-            "author workspace could not be inspected before run"
-            if exc.transient
-            else "author workspace safety rejected before run"
+        _write_registered_author_log(log_path, progress, **fields)
+    except OSError:
+        log.warning("could not write registered author log %s", log_path)
+
+
+def _safety_detail(exc: AuthorSafetyError) -> str:
+    """The guard's complaint, with the paths it named."""
+    detail = str(exc)
+    return f"{detail}; paths={', '.join(exc.paths[:20])}" if exc.paths else detail
+
+
+def _author_run_error_verdict(run_error: Exception, *, backend: Any, timeout_s: int) -> tuple[int, bool]:
+    """The exit code for an agent run that raised, and whether another attempt is worth spending."""
+    # Checked ahead of the timeout markers: a provider safety stop is final even if its message happens to mention
+    # a clock, and retrying one is exactly the anti-pattern the session-resume allowlist already refuses.
+    if is_agent_safety_error(run_error):
+        log.error(
+            "%s author was stopped by a provider safety guard: %s: %s",
+            backend.name,
+            type(run_error).__name__,
+            run_error,
         )
-        try:
-            _write_registered_author_log(log_path, progress, error=f"{heading}: {detail}")
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
-        log.error("%s: %s", heading, detail)
-        # A workspace the guard could not read is the box's problem, not the transport's.
-        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
-    targets = guard.target_files
+        return AUTHOR_RC_SAFETY, False
+    if is_agent_timeout_error(run_error):
+        log.warning(
+            "%s author timed out after %ss: %s: %s",
+            backend.name,
+            timeout_s,
+            type(run_error).__name__,
+            run_error,
+        )
+        # The attempt just spent the whole per-attempt budget; another would spend it again.
+        return AUTHOR_RC_TIMEOUT, False
+    log.error("%s author failed: %s: %s", backend.name, type(run_error).__name__, run_error)
+    return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
+
+
+def _author_result_verdict(result: Any, *, backend: Any) -> tuple[int, bool]:
+    """The exit code for an agent run that returned, and whether another attempt is worth spending."""
+    if result.end_reason == "agent_stopped":
+        return AUTHOR_RC_OK, False
+    log.warning(
+        "%s author ended without success (end_reason=%s subtype=%s)",
+        backend.name,
+        result.end_reason,
+        result.subtype or "none",
+    )
+    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than an exception, so
+    # session_resume owns which of them is worth another attempt; a turn cap is the task's own answer.
+    return AUTHOR_RC_FAILED, is_api_failure(result)
+
+
+def _run_author_session(
+    prompt: str, workdir: str, agent: AuthorAgent, guard: _AuthorWorkspaceGuard, progress: list[str]
+) -> Any:
+    """Run one agent session on the author's GPU, allowed to write exactly what the guard will accept."""
+    session_timeout = max(1, int(agent.timeout_s))
     spec = AgentRunSpec(
         system_prompt=_author_system_prompt(guard.new_module_dirs),
         user_prompt=prompt,
         role="fusion author",
         cwd=workdir,
-        model=model,
+        model=agent.model,
         writable=True,
-        timeout_sec=max(1, int(timeout_s)),
+        timeout_sec=session_timeout,
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
             write=True,
             shell=True,
-            max_turns=max(1, int(max_turns)),
+            max_turns=max(1, int(agent.max_turns)),
         ),
-        target_files=targets,
+        target_files=guard.target_files,
         allow_dirty_targets=True,
         allow_untracked=True,
         # The author phase runs in a worktree a long campaign has already left dirty in ways it never touches, so the
@@ -1192,29 +1139,46 @@ def _run_registered_author_once(
         # Keep the backend's built-in measurement protections; the outer provider-neutral transaction enforces the
         # exact target allowlist.
         protected_globs=[],
-        hooks=_target_file_hooks(targets, workdir, allows_new_path=guard.permits_new_path),
+        hooks=_target_file_hooks(guard.target_files, workdir, allows_new_path=guard.permits_new_path),
         progress_log=progress,
     )
-
-    async def _run() -> Any:
-        return await asyncio.wait_for(
-            backend.run(spec),
-            timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
-        )
-
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")
-    os.environ["HIP_VISIBLE_DEVICES"] = gpu
-    result = None
-    run_error: BaseException | None = None
+    os.environ["HIP_VISIBLE_DEVICES"] = agent.gpu
     try:
-        result = asyncio.run(_run())
-    except BaseException as exc:  # noqa: BLE001 - safety restoration must always run
-        run_error = exc
+        return asyncio.run(asyncio.wait_for(agent.backend.run(spec), timeout=watchdog_timeout_sec(session_timeout)))
     finally:
         if previous_gpu is None:
             os.environ.pop("HIP_VISIBLE_DEVICES", None)
         else:
             os.environ["HIP_VISIBLE_DEVICES"] = previous_gpu
+
+
+def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> tuple[int, bool]:
+    """One authoring run, with whether its failure was the transport's rather than the task's."""
+    progress: list[str] = []
+    requested_targets = list(dict.fromkeys(str(path) for path in workspace.target_files if str(path)))
+    requested_module_dirs = list(dict.fromkeys(str(path) for path in workspace.new_module_dirs if str(path)))
+    try:
+        guard = _AuthorWorkspaceGuard(workspace.workdir, requested_targets, requested_module_dirs)
+    except AuthorSafetyError as exc:
+        detail = _safety_detail(exc)
+        heading = (
+            "author workspace could not be inspected before run"
+            if exc.transient
+            else "author workspace safety rejected before run"
+        )
+        _record_author_log(workspace.log_path, progress, error=f"{heading}: {detail}")
+        log.error("%s: %s", heading, detail)
+        # A workspace the guard could not read is the box's problem, not the transport's.
+        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
+    result = None
+    run_error: BaseException | None = None
+    try:
+        result = _run_author_session(prompt, workspace.workdir, agent, guard, progress)
+    except BaseException as exc:  # isolation boundary: one author attempt; restoration must always run
+        log.warning("author agent run failed for %s", workspace.workdir, exc_info=True)
+        run_error = exc
+    text = str(getattr(result, "text", "") or "")
 
     def _with_run_error(reason: str) -> str:
         """Keep the session's own failure beside a verdict about the workspace."""
@@ -1222,64 +1186,39 @@ def _run_registered_author_once(
             return reason
         return f"{reason}; the agent run also failed: {type(run_error).__name__}: {run_error}"
 
+    def _rejected(reason: str, rc: int) -> tuple[int, bool]:
+        """Record a workspace verdict and end the attempt; the retry loop never spends another one on it."""
+        reason = _with_run_error(reason)
+        _record_author_log(workspace.log_path, progress, text=text, error=reason)
+        log.error("%s", reason)
+        if run_error is not None and not isinstance(run_error, Exception):
+            raise run_error
+        return rc, False
+
     try:
         enforcement = guard.enforce()
     except AuthorSafetyError as exc:
-        detail = str(exc)
-        if exc.paths:
-            detail = f"{detail}; paths={', '.join(exc.paths[:20])}"
         heading = (
             "author workspace restoration could not complete"
             if exc.transient
             else "author workspace safety restoration failed"
         )
-        reason = _with_run_error(f"{heading}: {detail}")
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=reason,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
-        log.error("%s", reason)
-        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
-    except Exception as exc:
+        return _rejected(f"{heading}: {_safety_detail(exc)}", AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY)
+    except OSError as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=_with_run_error(f"author workspace safety rejection: {detail}"),
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
         # operator needs the traceback to fix it.
         log.exception("author workspace safety restoration failed: %s", _with_run_error(detail))
-        return AUTHOR_RC_SAFETY, False
+        return _rejected(f"author workspace safety rejection: {detail}", AUTHOR_RC_SAFETY)
 
     if enforcement.violations:
         violations = enforcement.violations
         detail = ", ".join(violations[:20])
         if len(violations) > 20:
             detail += f", ... ({len(violations)} paths)"
-        reason = _with_run_error(f"author workspace rejected and restored non-target paths: {detail}")
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=reason,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
-        log.error("%s", reason)
         # Deterministic: the same guard, worktree and prompt reject the next attempt the same way, and the loop is
         # told so rather than spending one on it.
-        return AUTHOR_RC_SAFETY, False
+        return _rejected(f"author workspace rejected and restored non-target paths: {detail}", AUTHOR_RC_SAFETY)
 
     if enforcement.created:
         log.info(
@@ -1290,101 +1229,32 @@ def _run_registered_author_once(
     if run_error is not None:
         if not isinstance(run_error, Exception):
             raise run_error
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                error=f"{type(run_error).__name__}: {run_error}",
-                created=enforcement.created,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
-        # Checked ahead of the timeout markers: a provider safety stop is final even if its message happens to mention
-        # a clock, and retrying one is exactly the anti-pattern the session-resume allowlist already refuses.
-        if is_agent_safety_error(run_error):
-            log.error(
-                "%s author was stopped by a provider safety guard: %s: %s",
-                backend.name,
-                type(run_error).__name__,
-                run_error,
-            )
-            return AUTHOR_RC_SAFETY, False
-        if is_agent_timeout_error(run_error):
-            log.warning(
-                "%s author timed out after %ss: %s: %s",
-                backend.name,
-                timeout_s,
-                type(run_error).__name__,
-                run_error,
-            )
-            # The attempt just spent the whole per-attempt budget; another would spend it again.
-            return AUTHOR_RC_TIMEOUT, False
-        log.error(
-            "%s author failed: %s: %s",
-            backend.name,
-            type(run_error).__name__,
-            run_error,
-        )
-        return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
-
-    assert result is not None
-    final_text = str(getattr(result, "text", "") or "")
-    try:
-        _write_registered_author_log(
-            log_path,
+        _record_author_log(
+            workspace.log_path,
             progress,
-            text=final_text,
+            error=f"{type(run_error).__name__}: {run_error}",
             created=enforcement.created,
         )
-    except OSError:
-        log.warning("could not write registered author log %s", log_path)
-    end_reason = result.end_reason
-    if end_reason == "agent_stopped":
-        return AUTHOR_RC_OK, False
-    log.warning(
-        "%s author ended without success (end_reason=%s subtype=%s)",
-        backend.name,
-        end_reason,
-        result.subtype or "none",
-    )
-    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than an exception, so
-    # session_resume owns which of them is worth another attempt; a turn cap is the task's own answer.
-    return AUTHOR_RC_FAILED, is_api_failure(result)
+        return _author_run_error_verdict(run_error, backend=agent.backend, timeout_s=agent.timeout_s)
+
+    assert result is not None
+    _record_author_log(workspace.log_path, progress, text=text, created=enforcement.created)
+    return _author_result_verdict(result, backend=agent.backend)
 
 
-def run_author(
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str = "0",
-    model: Optional[str] = None,
-    max_turns: int = 100,
-    timeout_s: int = 7200,
-    backend: Any,
-    target_files: Optional[list[str]] = None,
-    new_module_dirs: Optional[list[str]] = None,
-) -> int:
+def run_author(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> int:
     """Drive the selected Agent backend and return the legacy process-style code."""
+    backend = agent.backend
     if callable(backend) and not hasattr(backend, "run"):
         backend = backend()
-    selected_model = str(model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    selected_model = (
+        str(agent.model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    )
     log.info(
         "running %s Agent author (model=%s max_turns=%d workdir=%s)",
         backend.name,
         selected_model,
-        max_turns,
-        workdir,
+        agent.max_turns,
+        workspace.workdir,
     )
-    return _run_registered_author(
-        backend,
-        prompt,
-        workdir=workdir,
-        log_path=log_path,
-        gpu=gpu,
-        model=selected_model,
-        max_turns=max_turns,
-        timeout_s=timeout_s,
-        target_files=list(target_files or []),
-        new_module_dirs=list(new_module_dirs or []),
-    )
+    return _run_registered_author(prompt, workspace, dataclasses.replace(agent, backend=backend, model=selected_model))

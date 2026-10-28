@@ -15,50 +15,37 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
+from hyperloom.common.timeutil import elapsed_ms, epoch_iso
+from hyperloom.common.token_usage import TOKEN_KEYS
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
-from hyperloom.inference_optimizer.trace.tool_events import tool_attributes, tool_status
+from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_CONTEXT_COMPACTION,
     EVENT_LLM_REQUEST,
     EVENT_TOOL,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    EventWindow,
     new_span_id,
     record_event,
 )
-from .base import safe_int
+from hyperloom.common.coerce import to_int
 
 TIMING_STREAM = "stream_events"
 TIMING_ASSISTANT_MESSAGE = "assistant_message"
-
-_USAGE_KEYS: tuple[str, ...] = (
-    "input_tokens",
-    "output_tokens",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-)
 
 
 def _usage_counts(usage: Any) -> dict[str, int]:
     """The canonical counters a usage mapping reports (absent keys are left out, so a later delta cannot zero them)."""
     if not isinstance(usage, dict):
         return {}
-    return {key: safe_int(usage.get(key)) for key in _USAGE_KEYS if usage.get(key) is not None}
+    return {key: to_int(usage.get(key), 0) for key in TOKEN_KEYS if usage.get(key) is not None}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _iso(epoch_s: float) -> str:
-    return datetime.fromtimestamp(epoch_s, timezone.utc).isoformat(timespec="microseconds")
-
-
-def _elapsed_ms(start: float, end: float | None) -> int | None:
-    return None if end is None else max(0, int((end - start) * 1000))
 
 
 @dataclass
@@ -216,8 +203,8 @@ class ClaudeRequestTracker:
                     "complete": request.end is not None,
                     "start": request.start,
                     "end": request.end,
-                    "latency_ms": _elapsed_ms(request.start, request.end),
-                    "ttft_ms": _elapsed_ms(request.start, request.first_token),
+                    "latency_ms": elapsed_ms(request.start, request.end),
+                    "ttft_ms": elapsed_ms(request.start, request.first_token),
                     "stop_reason": request.stop_reason,
                     **request.usage,
                 }
@@ -237,8 +224,7 @@ class ClaudeRequestTracker:
                 EVENT_LLM_REQUEST,
                 status=STATUS_COMPLETED if record["complete"] else STATUS_FAILED,
                 span_id=request.span_id,
-                start_ts=_iso(start),
-                ts=_iso(end if end is not None else now),
+                window=EventWindow(start_ts=epoch_iso(start), ts=epoch_iso(end if end is not None else now)),
                 attributes={**record, "name": model, "model": model, "attempt": attempt},
             )
         for tool in self._tools.values():
@@ -246,17 +232,20 @@ class ClaudeRequestTracker:
             record_event(
                 EVENT_TOOL,
                 status=tool_status(result_seen=tool.end is not None, is_error=tool.is_error),
-                start_ts=_iso(tool.start),
-                ts=_iso(tool.end if tool.end is not None else now),
+                window=EventWindow(
+                    start_ts=epoch_iso(tool.start), ts=epoch_iso(tool.end if tool.end is not None else now)
+                ),
                 attributes=tool_attributes(
-                    name=tool.name,
-                    tool_use_id=tool.tool_use_id,
-                    tool_input=tool.tool_input,
-                    result_content=tool.result_content,
-                    result_seen=tool.end is not None,
-                    is_error=tool.is_error,
+                    ToolCall(
+                        name=tool.name,
+                        tool_use_id=tool.tool_use_id,
+                        tool_input=tool.tool_input,
+                        result_content=tool.result_content,
+                        result_seen=tool.end is not None,
+                        is_error=tool.is_error,
+                    ),
                     parent_tool_use_id=tool.parent_tool_use_id,
-                    latency_ms=_elapsed_ms(tool.start, tool.end),
+                    latency_ms=elapsed_ms(tool.start, tool.end),
                     attempt=attempt,
                 ),
                 **context,
@@ -264,7 +253,7 @@ class ClaudeRequestTracker:
         for at, data in self._compactions:
             record_event(
                 EVENT_CONTEXT_COMPACTION,
-                ts=_iso(at),
+                window=EventWindow(ts=epoch_iso(at)),
                 attributes={**compaction_attributes(data), "attempt": attempt},
             )
 

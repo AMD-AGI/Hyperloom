@@ -18,6 +18,11 @@ from hyperloom.common.env_safety import (
     is_allowed_external_env_key,
     is_allowed_variant_env_key,
 )
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,78 +105,48 @@ def _accepted_config_controls(cfg: Any, *, inherited_remove_args: Any = None) ->
     return controls
 
 
+# Minimum over-baseline gain a same-harness revalidation must show to count as "engaged"; detects a collapse back to
+# ~baseline.
+_MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
+
+
 def _geak_revalidation_decision(
     *,
     measured: Any,
     baseline: Any,
     got_hash: str,
     expected_hash: str,
-    min_engaged_gain_pct: float,
     current_best: Any = None,
 ) -> str:
     """Decide a geak same-harness (2b) rebench outcome."""
     measured_ok = isinstance(measured, (int, float)) and measured > 0
     baseline_ok = isinstance(baseline, (int, float)) and baseline > 0
     if not (measured_ok and baseline_ok):
-        return "fallback"
+        return REBENCH_FALLBACK
     cfg_ok = (not expected_hash) or (str(got_hash or "") == str(expected_hash))
-    engaged = float(measured) >= float(baseline) * (1.0 + float(min_engaged_gain_pct) / 100.0)
+    engaged = float(measured) >= float(baseline) * (1.0 + float(_MIN_KERNEL_ENGAGED_GAIN_PCT) / 100.0)
     if not (cfg_ok and engaged):
-        return "fallback"
+        return REBENCH_FALLBACK
     if isinstance(current_best, (int, float)) and current_best > 0 and float(measured) <= float(current_best):
-        return "no_promote"
-    return "validated"
+        return REBENCH_NO_PROMOTE
+    return REBENCH_VALIDATED
 
 
-def _geak_result_has_material(
-    result: Any,
-    *,
-    prev_best_flags: str = "",
-    prev_best_envs: Any = None,
-    prev_best_controls: Any = None,
-) -> bool:
-    """Decide whether a GEAK result carries a material optimization product."""
-    from hyperloom.inference_optimizer.canonical_fingerprint import (
-        canonical_fingerprint,
-    )
+def _geak_result_has_artifact(result: dict[str, Any]) -> bool:
+    """Whether a GEAK result carries an authored kernel, head, overlay or patch."""
 
     def _has_nonempty(entries: Any) -> bool:
-        # A list whose items are all empty/blank (e.g. ``[""]``) is not material.
+        # A list whose items are all empty/blank (e.g. ``[""]``) carries nothing.
         if not isinstance(entries, (list, tuple, set)):
             return bool(entries)
         return any(str(e).strip() for e in entries)
 
-    if not isinstance(result, dict) or not result:
-        return True
-    if _has_nonempty(result.get("accepted_kernels")):
-        return True
-    if _has_nonempty(result.get("accepted_heads")):
-        return True
-    if str(result.get("final_overlay") or "").strip():
-        return True
-    if str(result.get("final_patch") or "").strip():
-        return True
-    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
-    prior_controls = _accepted_config_controls(prev_best_controls)
-    controls = _accepted_config_controls(
-        result.get("accepted_config"), inherited_remove_args=prior_controls.get("remove_args")
+    return (
+        _has_nonempty(result.get("accepted_kernels"))
+        or _has_nonempty(result.get("accepted_heads"))
+        or bool(str(result.get("final_overlay") or "").strip())
+        or bool(str(result.get("final_patch") or "").strip())
     )
-    # A missing / all-empty accepted_config carries no config optimization; a
-    # bare fingerprint mismatch against a non-empty current_best is NOT material
-    # (promoting it would wipe the existing config to empty).
-    if not accepted_flags and not parsed_envs and not controls:
-        return False
-    # Both sides go through the same guard: a resume can hand current_best the raw accepted_config, and an untrusted
-    # key on one side only reads as a diff.
-    prev_envs, _dropped = filter_untrusted_env_mapping(
-        dict(prev_best_envs or {}),
-        allow_predicate=is_allowed_variant_env_key,
-    )
-    got_fp = canonical_fingerprint(accepted_flags, parsed_envs, **controls)
-    prev_fp = canonical_fingerprint(
-        str(prev_best_flags or ""), prev_envs, **(_accepted_config_controls(prev_best_controls) if controls else {})
-    )
-    return got_fp != prev_fp
 
 
 def _normalize_geak_overlay_dir(overlay: str) -> str:
@@ -224,51 +199,66 @@ def geak_spec_is_env(spec: Any) -> bool:
     return geak_spec_kind(spec) == "env"
 
 
-def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
-    """Return the authored kernels a GEAK result accepted, both lanes, deduped."""
+def geak_acceptance_specs(result: Any) -> list[dict[str, Any]]:
+    """Return every GEAK acceptance of both lanes, tagged with its ``lane`` and deduped.
+
+    GEAK's own ``e2e_delta_pct`` never decides whether a kernel counts: the rebench
+    measures it. The delta is read only as twin evidence -- a slot tag and the symbol
+    it produced report the same number, and the tag collapses onto the symbol, which
+    lists it in ``aliases``. An exact duplicate name drops; an absent or unreadable
+    delta never collapses; ``env`` selections are kept as they are.
+    """
     if not isinstance(result, dict):
         return []
+    lanes = [
+        *(("kernelQueue", row) for row in result.get("accepted_kernels") or []),
+        *(("headQueue", row) for row in result.get("accepted_heads") or []),
+    ]
     out: list[dict[str, Any]] = []
     index: dict[tuple[str, str], int] = {}
-    lanes = (result.get("accepted_kernels") or []) + (result.get("accepted_heads") or [])
-    for k in lanes:
-        if not isinstance(k, dict):
+    for lane, raw in lanes:
+        name = geak_spec_name(raw)
+        if not isinstance(raw, dict) or not name:
             continue
-        if geak_spec_is_env(k):
+        row = {**raw, "lane": lane, "alias_collapsed": False}
+        if geak_spec_is_env(raw):
+            out.append({**row, "kind": "env"})
             continue
         try:
-            delta = float(k.get("e2e_delta_pct") or 0.0)
+            twin = (str(raw.get("op_kind") or ""), f"{float(raw.get('e2e_delta_pct')):.4f}")
         except (TypeError, ValueError):
+            out.append(row)
             continue
-        if delta <= 0.0:
+        pos = index.setdefault(twin, len(out))
+        if pos == len(out):
+            out.append(row)
             continue
-        name = str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip()
-        if not name:
+        kept = out[pos]
+        kept_name = geak_spec_name(kept)
+        if name == kept_name:
             continue
-        twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
-        pos = index.get(twin)
-        if pos is None:
-            index[twin] = len(out)
-            out.append(k)
+        if geak_is_cand_tag(kept_name) == geak_is_cand_tag(name):
+            out.append(row)
             continue
-        existing_name = geak_spec_name(out[pos])
-        if _GEAK_CAND_TAG_RE.match(existing_name) and not _GEAK_CAND_TAG_RE.match(name):
-            out[pos] = k
-            continue
-        if _GEAK_CAND_TAG_RE.match(name) and not _GEAK_CAND_TAG_RE.match(existing_name):
-            continue
-        if name == existing_name:
-            continue
-        out.append(k)
+        survivor = row if geak_is_cand_tag(kept_name) else kept
+        out[pos] = survivor
+        survivor["alias_collapsed"] = True
+        aliases = {*(survivor.get("aliases") or []), kept_name, name} - {geak_spec_name(survivor)}
+        survivor["aliases"] = sorted(aliases)
     return out
 
 
+def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
+    """Return the authored kernels a GEAK result accepted: its acceptances without the ``env`` selections."""
+    return [spec for spec in geak_acceptance_specs(result) if not geak_spec_is_env(spec)]
+
+
 def _geak_has_accepted_kernel(result: Any) -> bool:
-    """Report whether a GEAK result carries an accepted kernel that gained."""
+    """Report whether a GEAK result names an authored kernel for the rebench to measure."""
     return bool(_geak_accepted_kernel_specs(result))
 
 
-def _geak_overlay_is_loadable(overlay: str) -> bool:
+def geak_overlay_is_loadable(overlay: str) -> bool:
     """Report whether an overlay dir can actually install an authored kernel."""
     from hyperloom.common.overlay import overlay_is_loadable
 
@@ -308,11 +298,18 @@ def _geak_overlay_digest(overlay: str) -> str:
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """The measured throughput a ``sweep_via_geak`` replay produced, or None."""
+    """The value a ``sweep_via_geak`` replay measured on its requested axis, or None.
+
+    ``measured_value`` is the axis-neutral field; the ``output_throughput`` fallback keeps results recorded before it
+    existed readable. Off the output axis only the neutral field is populated, because there the number is not a
+    throughput.
+    """
     if not isinstance(res, dict):
         return None
     best = res.get("promotion_measurement")
     if not isinstance(best, dict):
         return None
-    tput = best.get("output_throughput")
+    tput = best.get("measured_value")
+    if not isinstance(tput, (int, float)):
+        tput = best.get("output_throughput")
     return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None

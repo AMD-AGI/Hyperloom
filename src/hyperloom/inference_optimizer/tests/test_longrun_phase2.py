@@ -197,6 +197,18 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     assert "Historical results are evidence only" in block
 
 
+def test_a_row_answered_without_measuring_is_no_negative_ledger_pressure(cyclic_coordinator):
+    c = cyclic_coordinator
+    c.shared_state.explore_search = {
+        "tested": {
+            "fp1": {"name": "v_revert", "outcome": "REVERT", "domain": "serving_specialist", "cycle": 0},
+            "fp2": {"name": "v_restates", "outcome": "SKIPPED_DEDUP", "domain": "serving_specialist", "cycle": 0},
+        },
+        "rejected": [],
+    }
+    assert c.phase_macro_cycle._negative_ledger_domain_counts() == {"serving_specialist": 1}
+
+
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
@@ -230,7 +242,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st = SharedState(session_id="t", macro_cycle=0)
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
             "rejected": [{"name": "a", "fingerprint": "fp_a"}],
         }
@@ -242,7 +253,6 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     st.macro_cycle = 1
     st.apply_explore_search_update(
         {
-            "schema_version": 1,
             "tested": {
                 "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0},
                 "fp_b": {"name": "b", "fingerprint": "fp_b"},
@@ -258,36 +268,3 @@ def test_tested_and_rejected_stamped_with_macro_cycle():
     assert tested["fp_b"]["cycle"] == 1
     cycles = {r["fingerprint"]: r["cycle"] for r in st.explore_search["rejected"]}
     assert cycles == {"fp_a": 0, "fp_b": 1}
-
-
-def test_veto_fingerprints_bucketed_by_bottleneck():
-    st = SharedState(session_id="t", macro_cycle=0)
-    # cycle 0 worked the MoE bottleneck.
-    st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": "MoE_fused"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
-        }
-    )
-    assert st.explore_search["tested"]["fp_a"]["bottleneck"] == "MoE_fused"
-    assert st.explore_search["rejected"][0]["bottleneck"] == "MoE_fused"
-
-    # cycle 1 drifted to a comm bottleneck; new rejection carries the new bucket.
-    st.macro_cycle = 1
-    st.roofline_snapshots = [{"snapshot_id": 2, "top_bottleneck": "all_reduce"}]
-    st.apply_explore_search_update(
-        {
-            "schema_version": 1,
-            "tested": {
-                "fp_a": {"name": "a", "fingerprint": "fp_a", "cycle": 0, "bottleneck": "MoE_fused"},
-                "fp_b": {"name": "b", "fingerprint": "fp_b"},
-            },
-            "rejected": [],
-        }
-    )
-    tested = st.explore_search["tested"]
-    assert tested["fp_a"]["bottleneck"] == "MoE_fused"
-    assert tested["fp_b"]["bottleneck"] == "all_reduce"
-    assert tested["fp_b"]["cycle"] == 1

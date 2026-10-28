@@ -48,7 +48,6 @@ class MockBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn."""
@@ -105,7 +104,6 @@ class MockRowScanBackend:
         intent_builder: Callable[[re.Match[str]], Intent],
         idle_body: str,
         raw_text: str,
-        dedup_key: Callable[[re.Match[str]], str] = lambda m: m.group(2),
     ):
         """Initialise the row-scan mock backend."""
         self.name = name
@@ -113,7 +111,6 @@ class MockRowScanBackend:
         self._intent_builder = intent_builder
         self._idle_body = idle_body
         self._raw_text = raw_text
-        self._dedup_key = dedup_key
         self.calls: list[dict[str, Any]] = []
         # Track handled rows so reactor fan-out re-renders don't double-emit.
         self._answered_ids: set[str] = set()
@@ -124,14 +121,13 @@ class MockRowScanBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Emit one intent per not-yet-seen matched row, else an idle message."""
         self.calls.append({"prompt": prompt})
         intents: list[Intent] = []
         for match in self._row_regex.finditer(prompt):
-            key = self._dedup_key(match)
+            key = match.group(2)
             if key in self._answered_ids:
                 continue
             self._answered_ids.add(key)

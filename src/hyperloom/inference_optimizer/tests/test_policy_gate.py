@@ -20,7 +20,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-    LLM_REQUESTABLE_KERNEL_REQUEST_KINDS,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
@@ -71,7 +70,7 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-@pytest.mark.parametrize("kind", sorted(LLM_REQUESTABLE_KERNEL_REQUEST_KINDS))
+@pytest.mark.parametrize("kind", sorted(set(KERNEL_REQUEST_HANDLERS) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS))
 def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
     """The narrowing refuses the owned lanes and nothing beside them."""
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
@@ -80,14 +79,6 @@ def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
 def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
     """The handler lookup answers a typo with the valid-kind vocabulary."""
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": "no_such_kind"})
-
-
-def test_every_registered_kernel_lane_is_requestable_or_owned() -> None:
-    """A new handler is refused by default until it is declared LLM-requestable."""
-    unclassified = (
-        set(KERNEL_REQUEST_HANDLERS) - LLM_REQUESTABLE_KERNEL_REQUEST_KINDS - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-    )
-    assert not unclassified, f"kernel request kinds neither requestable nor Coordinator-owned: {sorted(unclassified)}"
 
 
 # -- Coordinator-managed actions ------------------------------------------
@@ -149,6 +140,34 @@ def test_the_round_holders_own_bring_up_is_dispatched_and_no_other_row_is() -> N
 def test_the_round_rule_refuses_nothing_without_a_snapshot() -> None:
     """No ledger means no resource facts, and the acquire remains the authority."""
     _emit(_llm_gate(), IntentType.DELEGATE, {"action_name": "baseline", "params": {}})
+
+
+# -- send_message recipient shape -----------------------------------------
+def test_send_message_to_a_single_recipient_is_admitted() -> None:
+    """``to`` names one recipient; the inbox filter and the events row agree."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": "critic", "topic": "observation", "body_md": "x"})
+
+
+def test_send_message_without_to_broadcasts() -> None:
+    """An absent ``to`` is the broadcast form and stays admitted."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"topic": "observation", "body_md": "x"})
+
+
+def test_send_message_to_a_list_of_recipients_is_admitted() -> None:
+    """A JSON array is how a model addresses several agents at once; each becomes its own events row."""
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": ["critic", "specialist:t1"], "topic": "observation"})
+
+
+@pytest.mark.parametrize("to", [[], ["critic", ""], ["critic", 3], 3, {"agent": "critic"}, ""])
+def test_send_message_with_a_to_naming_no_recipient_is_denied(to) -> None:
+    """A ``to`` that is not a name or a list of names is denied, not crashed on.
+
+    Before the check a raw list reached the events INSERT as ``to_agent`` and faulted the running phase event; a
+    list is fanned out now, but one holding an empty or non-string name still names nobody.
+    """
+    with pytest.raises(PolicyDenied) as excinfo:
+        _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": to, "topic": "observation", "body_md": "x"})
+    assert excinfo.value.rule == "payload"
 
 
 # -- The prompt and the gate agree ----------------------------------------

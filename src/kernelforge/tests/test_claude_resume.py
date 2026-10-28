@@ -17,7 +17,7 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
 
 
@@ -199,7 +199,7 @@ def test_run_does_not_pass_a_resume_option():
     assert "resume" not in captured["options"].kwargs
 
 
-def test_opus_5_uses_the_runtime_effort_and_adaptive_thinking():
+def test_default_model_uses_the_runtime_effort_and_adaptive_thinking():
     captured: dict = {}
     backend = _backend(
         [_result_message(session_id="s-opus-48")],
@@ -224,7 +224,7 @@ def test_opus_5_uses_the_runtime_effort_and_adaptive_thinking():
     )
 
     kwargs = captured["options"].kwargs
-    assert kwargs["model"] == "claude-opus-5"
+    assert kwargs["model"] == DEFAULT_CLAUDE_MODEL
     # The spec asked for ``max``; the runtime says ``high`` and the runtime wins.
     # An effort written at a call site is this repository's opinion, and the one
     # on the runtime is the operator's decision about the run in front of them.
@@ -241,6 +241,7 @@ def test_opus_5_uses_the_runtime_effort_and_adaptive_thinking():
         ("claude-sonnet-4-6", True),
         ("claude-haiku-4-8", True),
         ("claude-opus-5", True),
+        ("claude-opus-5-5", True),
         ("company-current-claude", True),
         ("claude-opus-4", False),
         ("claude-sonnet-4", False),

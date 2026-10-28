@@ -109,10 +109,9 @@ def record_metadata_identity(
     payload: dict[str, Any] = {"session": session, "task_config": task_config}
     workflow_flags = manifest.get("workflow_flags")
     if isinstance(workflow_flags, Mapping):
-        from ..workflow_contract import manifest_contract_version, workflow_metadata
+        from ..workflow_contract import workflow_metadata
 
-        version = manifest_contract_version(manifest)
-        workflow = workflow_metadata(workflow_flags, version=version)
+        workflow = workflow_metadata(workflow_flags)
         authored_digest = manifest.get("workflow_contract_digest")
         if manifest.get("workflow_contract_version") and authored_digest != workflow["contract_digest"]:
             raise ValueError("manifest workflow contract identity does not match the published contract")
@@ -181,7 +180,6 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
 
 def _launch_config(state: Any) -> dict[str, Any]:
     """Workload shape and operator-supplied launch overrides from live state."""
-    server_args = getattr(state, "operator_server_args", "") or getattr(state, "server_args", "")
     config: dict[str, Any] = {
         "model_name": _text(getattr(state, "model_name", "")),
         "model_path": _text(getattr(state, "model_path", "")),
@@ -196,7 +194,7 @@ def _launch_config(state: Any) -> dict[str, Any]:
         "precision": _text(getattr(state, "precision", "")),
         "max_model_len": getattr(state, "max_model_len", None),
         "launch_env": redact_secret_env_values(getattr(state, "operator_extra_env", None)),
-        "launch_server_args": _text(server_args),
+        "launch_server_args": _text(getattr(state, "operator_server_args", "")),
     }
     # The singleton merges leaf-by-leaf with no notion of an empty value, so
     # the version detected at launch has to be left alone rather than

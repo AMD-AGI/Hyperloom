@@ -5,10 +5,15 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import subprocess
 from pathlib import Path
 
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.insession_gate import InSessionGate
+
+_MEASUREMENT_FIELDS = [field.name for field in dataclasses.fields(GateMeasurement)]
+_SCOPE_FIELDS = [field.name for field in dataclasses.fields(GateScope)]
 
 
 def _run(coro):
@@ -60,7 +65,9 @@ def _gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
         target_files=[str(kernel)],
     )
     kwargs.update(overrides)
-    return InSessionGate(**kwargs), workspace
+    measurement = {name: kwargs.pop(name) for name in _MEASUREMENT_FIELDS if name in kwargs}
+    scope = {name: kwargs.pop(name) for name in _SCOPE_FIELDS if name in kwargs}
+    return InSessionGate(GateMeasurement(**measurement), GateScope(**scope), **kwargs), workspace
 
 
 # ── constructor bookkeeping ────────────────────────────────────────────────────
@@ -278,11 +285,11 @@ def test_stop_gate_invokes_driver_without_shape_selectors(tmp_path, monkeypatch)
         )
         return {"passed": True, "message": ""}
 
-    async def benchmark(**kwargs):
+    async def benchmark(run, **kwargs):
         calls.append(
             (
                 "benchmark",
-                kwargs["driver_args"],
+                run.driver_args,
                 kwargs["timeout_sec"],
                 kwargs["measurements"],
             )
@@ -322,7 +329,7 @@ def test_stop_hands_validation_timeout_to_outer_loop(tmp_path, monkeypatch):
             "message": "TIMEOUT after 1800s",
         }
 
-    async def benchmark(**_kwargs):
+    async def benchmark(_run, **_kwargs):
         bench_calls["count"] += 1
         return {"median_ms": 0.5}
 
@@ -354,6 +361,67 @@ def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
     assert out["decision"] == "block"
     assert "NOT faster" in out["reason"]
     assert gate.passed is False
+
+
+def test_performance_verdict_clears_stale_bench_state_on_coverage_failure(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+
+    async def benchmark(*_args, **_kwargs):
+        return {
+            "success": True,
+            "median_ms": 0.5,
+            "measurements": [
+                {
+                    "success": True,
+                    "case_times": {},
+                    "unscored_cases": [],
+                }
+                for _ in range(3)
+            ],
+        }
+
+    monkeypatch.setattr(gate_module, "measure_wallclock", benchmark)
+
+    out = _run(gate._stop_performance_verdict())
+
+    assert out["decision"] == "block"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
+
+
+def test_performance_verdict_keeps_current_wall_when_scoring_is_unavailable(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, best_mean_case_speedup=None)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+    _patch_canonical(monkeypatch, wall_ms=0.5)
+
+    out = _run(gate._stop_performance_verdict())
+
+    assert out["decision"] == "block"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, 0.5)
+
+
+def test_stop_clears_stale_bench_state_when_benchmark_raises(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+
+    async def correctness(**_kwargs):
+        return {"passed": True, "message": ""}
+
+    async def benchmark(*_args, **_kwargs):
+        raise RuntimeError("benchmark crashed")
+
+    monkeypatch.setattr(gate_module, "test_correctness", correctness)
+    monkeypatch.setattr(gate_module, "measure_wallclock", benchmark)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert gate.end_reason == "gate_error"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
 
 
 def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path, monkeypatch):

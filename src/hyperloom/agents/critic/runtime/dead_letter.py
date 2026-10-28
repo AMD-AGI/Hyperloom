@@ -6,17 +6,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
-from .metrics import CRITIC_KB_DEAD_LETTER_COUNT, get_registry
 
+
+log = logging.getLogger(__name__)
 
 DEFAULT_DEAD_LETTER_DIR = "/var/lib/critic-kb-dlq"
 
@@ -75,8 +77,7 @@ class DeadLetter:
             "last_error": last_error,
             "context": context or {},
         }
-        append_jsonl(path, record, ensure_ascii=False)
-        get_registry().counter(CRITIC_KB_DEAD_LETTER_COUNT).inc({"endpoint": endpoint})
+        append_jsonl(path, record, fmt=JsonLineFormat(ensure_ascii=False))
         return path
 
     def files(self) -> list[Path]:
@@ -119,7 +120,8 @@ class DeadLetter:
                 try:
                     dispatcher(endpoint, payload)
                     summary.succeeded += 1
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # isolation boundary: one dead-letter record
+                    log.warning("dead-letter replay failed for %s:%d: %s", path, lineno, exc, exc_info=True)
                     summary.failed += 1
                     summary.failed_details.append(
                         {

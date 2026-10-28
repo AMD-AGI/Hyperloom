@@ -15,12 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
+from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
+from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks import (
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
-    _reset_vendor_operator_playbooks_cache,
     _role_haystack,
 )
 
@@ -29,9 +30,9 @@ _MORI_SITE_PACKAGES_FILE = "/opt/venv/lib/python3.12/site-packages/mori/ops/disp
 
 @pytest.fixture(autouse=True)
 def _fresh_registry_cache():
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
     yield
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
 
 
 def _mori_dispatch_candidate(**overrides) -> dict:
@@ -156,8 +157,8 @@ def test_match_vendor_operator_playbook_matches_via_trace_launcher_file_when_gra
 
 
 def test_classify_patchability_routes_mori_dispatch_and_combine():
-    dispatch_ok, dispatch_reason = tla.classify_patchability(_mori_dispatch_candidate())
-    combine_ok, combine_reason = tla.classify_patchability(_mori_combine_candidate())
+    dispatch_ok, dispatch_reason = kernel_classification.classify_patchability(_mori_dispatch_candidate())
+    combine_ok, combine_reason = kernel_classification.classify_patchability(_mori_combine_candidate())
 
     assert (dispatch_ok, dispatch_reason) == (True, "")
     assert (combine_ok, combine_reason) == (True, "")
@@ -180,8 +181,8 @@ def test_classify_patchability_routes_graph_captured_mori_synthetic_ops():
         "trace_launcher_file": "/usr/local/lib/python3.12/dist-packages/mori/jit/hip_driver.py",
     }
 
-    dispatch_ok, dispatch_reason = tla.classify_patchability(dispatch_candidate)
-    combine_ok, combine_reason = tla.classify_patchability(combine_candidate)
+    dispatch_ok, dispatch_reason = kernel_classification.classify_patchability(dispatch_candidate)
+    combine_ok, combine_reason = kernel_classification.classify_patchability(combine_candidate)
 
     assert (dispatch_ok, dispatch_reason) == (True, "")
     assert (combine_ok, combine_reason) == (True, "")
@@ -201,7 +202,7 @@ def test_finalize_candidates_stamps_vendor_playbook_and_sums_gpu_pct():
         },
     ]
     # total_dur = 700 + 300 + 100 = 1100 -> dispatch=63.636%, combine=27.273%.
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
     by_name = {item["name"]: item for item in out}
 
     dispatch = by_name["mori::EpDispatchCombineOp::dispatch"]
@@ -233,7 +234,7 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         _mori_dispatch_candidate(source_file=""),
         _mori_combine_candidate(source_file=""),
     ]
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
     by_name = {item["name"]: item for item in out}
     dispatch = by_name["mori::EpDispatchCombineOp::dispatch"]
     combine = by_name["mori::EpDispatchCombineOp::combine"]
@@ -252,7 +253,7 @@ def test_playbook_anchor_overrides_a_same_word_grep_collision():
         _mori_dispatch_candidate(source_file=collision),
         _mori_combine_candidate(source_file=collision),
     ]
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
 
     for item in out:
         assert item["patch_strategy"] == "vendor_playbook"
@@ -266,7 +267,7 @@ def test_playbook_anchor_also_overrides_a_correct_grep_hit():
         _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
         _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
     ]
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
 
     for item in out:
         assert item["patch_strategy"] == "vendor_playbook"
@@ -276,9 +277,9 @@ def test_playbook_anchor_also_overrides_a_correct_grep_hit():
 
 def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
     """Nothing displaced, nothing recorded."""
-    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
+    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: ())
     candidates = [_mori_dispatch_candidate(source_file="")]
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
 
     assert str(out[0]["source_file"]).endswith("mori_ep_config.py")
     assert "source_file_superseded_by_playbook" not in out[0]
@@ -302,10 +303,10 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     # Redirect the registry rather than patching ``Path.read_text``, which is ``pathlib.Path``'s and would answer for
     # every read in the process.
     monkeypatch.setattr("hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks._REGISTRY_PATH", registry)
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
     with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.trace_analysis._vendor_operator_playbooks"):
         loaded = load_vendor_operator_playbooks()
-    _reset_vendor_operator_playbooks_cache()
+    load_vendor_operator_playbooks.cache_clear()
 
     assert [entry["id"] for entry in loaded] == ["with-anchor"]
     assert "no-anchor" in caplog.text

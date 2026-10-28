@@ -32,7 +32,10 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     run_grid,
+    GridLaunch,
+    GridRecipe,
 )
+from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -45,6 +48,7 @@ from .conftest import (
     chatty_child,
     enable_multi_node,
     launches_by_round_slot,
+    make_coordinator,
 )
 
 
@@ -74,6 +78,12 @@ def _write_yaml(path: Path, *, framework: str = "vllm") -> None:
     }
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
+
+
+def _launch_kwargs(kwargs: dict) -> dict:
+    """A launch's keywords with its RoundWatch gates spelled out; a Ray round arrives already flat."""
+    watch = kwargs.get("watch")
+    return {**kwargs, **vars(watch)} if watch is not None else dict(kwargs)
 
 
 def _fake_workspace(slot: Path, *, tput: float) -> Path:
@@ -127,6 +137,7 @@ def _cold_then_hot_fake_run(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         if launches is not None:
@@ -468,6 +479,53 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     assert dropped["measure_round_sec"] < 1200.0, (
         "the pass alone did not fit, so this case does not show what it claims to"
     )
+
+
+def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
+    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
+    clock = _AClockOnlyThePassesMove()
+    fake_run, state = _cold_then_hot_fake_run(clock=clock, boot_sec=350.0, benchmark_sec=550.0)
+
+    def cold_round_also_ran_the_eval(cmd, *args, **kwargs):
+        first = state["calls"] == 0
+        completed = fake_run(cmd, *args, **kwargs)
+        if first:
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            (slot / "results_gsm8k.json").write_text(
+                json.dumps(
+                    {
+                        "results": {"gsm8k": {"exact_match,strict-match": 0.845}},
+                        "total_evaluation_time_seconds": "450.0",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return completed
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=_prelude_shared_state(usable_sec=1200.0),
+    )
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    with (
+        _passes_time_the_executor_believes(clock),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=cold_round_also_ran_the_eval,
+        ),
+    ):
+        result = _run(executor(ctx))
+
+    # Charged the eval, the hot pass (550 s) and a cold-priced variant (900 s) need 1450 s of the 1200 s left.
+    assert state["calls"] == 2, "the hot pass was priced with the cold round's accuracy eval"
+    assert result["status"] == "succeeded"
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert "measure_round_dropped" not in result
+    assert MEASURE_ROUND_DROPPED_WARNING not in result.get("nonfatal_warnings", [])
 
 
 def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp_path):
@@ -923,6 +981,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        kwargs = _launch_kwargs(kwargs)
         launches.append(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
@@ -1274,45 +1333,6 @@ def test_deferred_accuracy_skips_incomparable_performance(
 
 
 @pytest.mark.parametrize("with_policy", [False, True], ids=["legacy", "keep-policy"])
-def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path, with_policy):
-    """The staged accuracy round is an eval, so ``--no-eval`` drops it."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-
-    executor = _executor(base, tmp_path)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-            "defer_accuracy_until_after_measure": True,
-            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
-        }
-    )
-    ctx.extra["shared_state"] = _unbounded_shared_state(eval_disabled=True, baseline_double_run=True)
-    if with_policy:
-        ctx.task.params["post_measure_accuracy_keep_policy"] = {
-            "base_tput": _HOT_TPUT - 1,
-            "keep_threshold_pct": 1.0,
-            "stack_incremental_keep_threshold_pct": 0.5,
-        }
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert state["calls"] == 2
-    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false"]
-    assert "accuracy_stage" not in result
-
-
-@pytest.mark.parametrize("with_policy", [False, True], ids=["legacy", "keep-policy"])
 def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path, with_policy):
     """Ineligible lifecycle fallback must retain accuracy in its only round."""
     base = tmp_path / "base.yaml"
@@ -1441,44 +1461,6 @@ def test_replay_warm_recipe_double_run_forces_warmup_eval(tmp_path):
     assert captured[1]["benchmark"]["envs"]["RUN_EVAL"] == "false"
 
 
-def test_replay_warm_recipe_honours_no_eval(tmp_path):
-    """``--no-eval`` outranks the replay's forced warmup eval."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-    shared = _unbounded_shared_state(baseline_double_run=True, eval_disabled=True)
-    executor = BaselineExecutor(
-        magpie_python=sys.executable,
-        default_config_path=base,
-        session_dir=tmp_path,
-        shared_state=shared,
-    )
-    task = SimpleNamespace(
-        task_id="t-replay-no-eval",
-        kind="replay_warm_recipe",
-        params={
-            "output_dir": str(tmp_path / "ws"),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-            "model_path": "/wekafs/models/Qwen-Qwen3-8B",
-        },
-    )
-    ctx = SimpleNamespace(task=task, extra={"shared_state": shared})
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert state["calls"] == 2
-    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == [
-        "false",
-        "false",
-    ]
-
-
 def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch):
     """Focused callers may explicitly opt out of the default cold+hot baseline."""
     base = tmp_path / "base.yaml"
@@ -1509,6 +1491,16 @@ def test_baseline_double_run_can_be_disabled_by_task_param(tmp_path, monkeypatch
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
+def _candidate_grid(base: Path, output_dir: Path):
+    """The one-variant mi300x grid run the two ``run_grid`` round-count tests launch."""
+    return run_grid(
+        grid=[GridVariant(name="candidate")],
+        output_root=output_dir,
+        recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+        launch=GridLaunch(magpie_python=sys.executable),
+    )
+
+
 def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
     """The shared grid runner reports the HOT measured round when lifecycle reuse is eligible."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
@@ -1523,16 +1515,7 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 2
     assert len(results) == 1
@@ -1563,16 +1546,7 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
     ):
-        results = _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=output_dir,
-                magpie_python=sys.executable,
-                gpu_type="mi300x",
-            )
-        )
+        results = _run(_candidate_grid(base, output_dir))
 
     assert state["calls"] == 1
     assert len(results) == 1
@@ -2364,6 +2338,7 @@ def _capturing_fake_run(
         # The memoized interpreter probe is not a benchmark round.
         if "--output-dir" not in cmd:
             return subprocess.CompletedProcess(cmd, 0, "ok", "")
+        kwargs = _launch_kwargs(kwargs)
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         calls.append({"round_slot": slot.name, **kwargs})
         granted = float(kwargs.get("timeout") or 0.0)
@@ -2400,9 +2375,10 @@ class _CapturingLease:
     def __init__(self) -> None:
         self._run, self.calls = _capturing_fake_run()
 
-    def run_session_kill(self, cmd, **kwargs) -> tuple[int | None, str, str]:
+    def run_session_kill(self, bench_round) -> tuple[int | None, str, str]:
         """Record the launch and answer as the actor does, with a bare triple."""
-        proc = self._run(cmd, **kwargs)
+        fields = dict(vars(bench_round))
+        proc = self._run(fields.pop("cmd"), **fields)
         return proc.returncode, proc.stdout, proc.stderr
 
     def close(self) -> None:
@@ -2693,8 +2669,79 @@ def test_classify_fast_exit_unrecognized_args():
 
 
 def test_classify_slow_failure_not_arg_error():
-    """A slow failure (>30s) with the same stderr pattern must NOT be classified as arg error — it could be a real inference crash."""
+    """A generic runtime ValueError does not establish argument validation."""
     assert _classify_subprocess_error(120.0, "ValueError: some runtime error") == "subprocess_nonzero"
+
+
+_CACHE_CONFIG_ERROR = (
+    "pydantic_core._pydantic_core.ValidationError: 1 validation error for CacheConfig\n"
+    "gpu_memory_utilization\n"
+    "Input should be less than or equal to 1 [type=less_than_equal, input_value=1.5, input_type=float]"
+)
+
+
+@pytest.mark.parametrize("elapsed", [8.0, 30.0, 31.08, 31.09, 70.74])
+def test_cache_config_validation_is_not_a_worker_crash(elapsed):
+    assert _classify_subprocess_error(elapsed, _CACHE_CONFIG_ERROR, 1) == "fast_exit_arg_error"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            "ValidationError: 1 validation error for ModelConfig\nModel architecture is not registered",
+            "subprocess_nonzero",
+        ),
+        ("ValidationError: 1 validation error for Sample\nmissing field", "subprocess_nonzero"),
+        ("CacheConfig initialized\nRuntimeError: worker process died", "subprocess_nonzero"),
+    ],
+)
+def test_cache_config_validation_preserves_other_failure_routes(error, expected):
+    assert _classify_subprocess_error(70.74, error, 1) == expected
+
+
+@pytest.mark.asyncio
+async def test_slow_cache_config_failures_reach_the_argument_error_stop(tmp_path, session_dir):
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord = make_coordinator(session_dir)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    clock = _AClockOnlyThePassesMove()
+    elapsed = iter([70.74, 31.09])
+
+    def failed_run(cmd, *args, **kwargs):
+        clock.advance(next(elapsed))
+        workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_vllm_failed"
+        workspace.mkdir(parents=True)
+        (workspace / "benchmark_report.json").write_text(json.dumps({"success": False}))
+        return subprocess.CompletedProcess(cmd, 1, "", _CACHE_CONFIG_ERROR)
+
+    with (
+        _passes_time_the_executor_believes(clock),
+        patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=failed_run),
+    ):
+        for count, runtime in enumerate([70.74, 31.09], 1):
+            task = Task(
+                task_id=f"bad-cache-{count}", kind="baseline", state="running", params={}, idempotency_key=str(count)
+            )
+            ctx = _make_ctx({"output_dir": str(tmp_path / task.task_id), "timeout_sec": 600, "gpu_type": "mi300x"})
+            result = await _executor(base, tmp_path)(ctx)
+            assert result["error_class"] == "fast_exit_arg_error"
+            assert result["subprocess_runtime_sec"] == runtime
+            await coord.writeback.handle_unpromotable_result(task, result)
+            assert coord.shared_state.baseline_arg_error_streak == count
+            assert coord.shared_state.baseline_failure_streak == 0
+            assert coord.shared_state.enablement.launch_log == ""
+            assert coord.shared_state.stop_reason == ("baseline_arg_error" if count == 2 else "")
+
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (
+        machine_state.PHASE_CLOSE,
+        "baseline_arg_error",
+    )
 
 
 def test_classify_fast_exit_without_pattern():

@@ -448,16 +448,29 @@ def _binding_name(value: Any, where: str) -> str:
     return value
 
 
+def _compile_variadic(head: str, argument: Any, names: frozenset[str], location: str) -> Variadic:
+    function, arity = VARIADIC[head]
+    if not isinstance(argument, list):
+        raise MappingError(f"{location}: expects a list of arguments")
+    if arity is not None and len(argument) != arity:
+        raise MappingError(f"{location}: expects exactly {arity} arguments")
+    return Variadic(
+        head,
+        function,
+        tuple(compile_expression(item, names, f"{location}[{index}]") for index, item in enumerate(argument)),
+    )
+
+
 def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) -> Expression:
-    heads = [key for key in node if key in BUILTINS]
+    heads = BUILTINS.intersection(node)
     if len(heads) != 1:
         raise MappingError(
             f"{where}: a mapping must be exactly one built-in call "
             f"(known: {', '.join(sorted(BUILTINS))}); got keys {sorted(map(str, node))}"
         )
-    head = str(heads[0])
+    (head,) = heads
     allowed = STRUCTURED.get(head, frozenset({head}))
-    extra = sorted(str(key) for key in node if key not in allowed)
+    extra = sorted(map(str, node.keys() - allowed))
     if extra:
         raise MappingError(f"{where}: {head} does not accept {', '.join(extra)}")
     location = f"{where}.{head}"
@@ -465,16 +478,7 @@ def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) ->
     if head in UNARY:
         return Unary(head, UNARY[head], compile_expression(argument, names, location))
     if head in VARIADIC:
-        function, arity = VARIADIC[head]
-        if not isinstance(argument, list):
-            raise MappingError(f"{location}: expects a list of arguments")
-        if arity is not None and len(argument) != arity:
-            raise MappingError(f"{location}: expects exactly {arity} arguments")
-        return Variadic(
-            head,
-            function,
-            tuple(compile_expression(item, names, f"{location}[{index}]") for index, item in enumerate(argument)),
-        )
+        return _compile_variadic(head, argument, names, location)
     if head == "object":
         if not isinstance(argument, Mapping):
             raise MappingError(f"{location}: expects a mapping of field expressions")

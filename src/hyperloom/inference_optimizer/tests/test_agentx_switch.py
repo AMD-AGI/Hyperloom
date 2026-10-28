@@ -10,10 +10,8 @@ import os
 import subprocess
 import sys
 
-import pytest
 import yaml
 
-from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 _AGENTX_ENV_KEYS = (
@@ -62,7 +60,7 @@ def _materialize(src, out, **kw):
 def test_switch_off_keeps_synthetic_script(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
     assert not any(k.startswith("AGENTX") for k in bench.get("envs", {}))
 
@@ -71,7 +69,7 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
     """OFF output must carry no trace of the AgentX feature."""
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     dumped = yaml.safe_dump(bench).lower()
     assert "aiperf" not in dumped
     assert "agentx" not in dumped
@@ -79,72 +77,6 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
 
 
 # ── ON path: authoritative overwrite + env injection ─────────────────────────
-def test_switch_on_authoritative_overwrite(tmp_path, monkeypatch):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    src = _write(tmp_path / "base.yaml")
-    # gpu_type pre-pins vllm_mi300x.sh; the switch must overwrite it.
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-    assert bench["benchmark_script"] == "aiperf_client.sh"
-    assert "timeout_seconds" not in bench
-    assert "AGENTX_PHASE_WAIT_TIMEOUT_S" not in bench["envs"]
-
-
-def test_persisted_agentx_mode_switches_without_ambient_env(tmp_path, monkeypatch):
-    _clear_env(monkeypatch)
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(
-        src,
-        tmp_path / "out",
-        gpu_type="mi300x",
-        model_path="/m",
-        agentx_mode=True,
-    )
-    assert bench["benchmark_script"] == "aiperf_client.sh"
-
-
-def test_switch_on_injects_model_and_run_eval(tmp_path, monkeypatch):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "true")
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/model/x")
-    envs = bench["envs"]
-    assert envs["RUN_EVAL"] == "false"
-    assert envs["MODEL"] == "/model/x"
-
-
-def test_switch_on_passes_agentx_env(tmp_path, monkeypatch):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "on")
-    monkeypatch.setenv("AGENTX_DATASET", "semianalysis-cc-traces-weka-with-subagents")
-    monkeypatch.setenv("AGENTX_NUM_ENTRIES", "8")
-    monkeypatch.setenv("AIPERF_BIN", "/venv/bin/aiperf")
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-    envs = bench["envs"]
-    assert envs["AGENTX_DATASET"] == "semianalysis-cc-traces-weka-with-subagents"
-    assert envs["AGENTX_NUM_ENTRIES"] == "8"
-    assert envs["AIPERF_BIN"] == "/venv/bin/aiperf"
-
-
-def test_switch_on_materializes_workload_spec(tmp_path, monkeypatch):
-    """AgentX ON must stamp a self-describing workload_spec into the recipe."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "8")
-    monkeypatch.setenv("AGENTX_DURATION", "3600")
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Kimi-K3")
-    spec = bench.get("workload_spec") or {}
-    assert spec.get("kind") == "agentx_trace_replay"
-    assert spec.get("client") == "aiperf"
-    assert spec.get("scenario") == "inferencex-agentx-mvp"
-    assert spec.get("corpus") == "semianalysis_cc_traces_weka_062126"
-    assert spec.get("duration_s") == 3600
-    assert spec.get("geak_loop_duration_s") == 900
-    assert spec.get("concurrency") == 8
-    placeholder = spec.get("isl_osl_placeholder") or {}
-    assert placeholder.get("note")
 
 
 def _pin_extra_env(monkeypatch, **pins):
@@ -154,107 +86,17 @@ def _pin_extra_env(monkeypatch, **pins):
         monkeypatch.setenv(name, value)
 
 
-def test_operator_extra_env_pins_reach_the_published_spec(tmp_path, monkeypatch):
-    """``--extra-env`` AgentX pins are the operator's environment: the client and the spec see the same values."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "8")
-    _pin_extra_env(
-        monkeypatch,
-        AGENTX_CANONICAL_DATASET="semianalysis_cc_traces_weka_062126",
-        AGENTX_WARMUP_GRACE_PERIOD="600",
-        AGENTX_WARMUP_GRACE_CONC="4",
-    )
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/Unlisted-Model")
-    envs, spec = bench["envs"], bench["workload_spec"]
-    assert envs["AGENTX_CANONICAL_DATASET"] == "semianalysis_cc_traces_weka_062126"
-    assert spec["corpus"] == spec["canonical_corpus"] == "semianalysis_cc_traces_weka_062126"
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "1200"
-    assert spec["warmup_grace_period_s"] == 1200
-
-
-def test_rebuild_path_scales_an_extra_env_warmup_grace(monkeypatch):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    _pin_extra_env(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="600", AGENTX_WARMUP_GRACE_CONC="4")
-    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
-        apply_runtime_benchmark_overrides,
-    )
-
-    bench = {"framework": "sglang", "envs": {"AGENTX_WARMUP_GRACE_PERIOD": "600"}}
-    apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi355x", conc=8)
-    assert bench["envs"]["AGENTX_WARMUP_GRACE_PERIOD"] == "1200"
-    assert bench["workload_spec"]["warmup_grace_period_s"] == 1200
-
-
 def test_switch_off_omits_workload_spec(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"))
     assert "workload_spec" not in bench
 
 
-def test_switch_forwards_weka_loader_override(tmp_path, monkeypatch):
-    """Upstream's own corpus pin has no ``AGENTX_`` prefix."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-    assert bench["envs"]["WEKA_LOADER_OVERRIDE"] == "semianalysis_cc_traces_weka_062126"
-
-
-def test_switch_off_does_not_leak_weka_loader_override(tmp_path, monkeypatch):
-    """The synthetic path must not gain an env it never had."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("WEKA_LOADER_OVERRIDE", "semianalysis_cc_traces_weka_062126")
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-    assert "WEKA_LOADER_OVERRIDE" not in (bench.get("envs") or {})
-
-
 # ── A3: parsing ──────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
-def test_switch_off_tokens_keep_the_synthetic_script(tmp_path, monkeypatch, raw):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
-    src = _write(tmp_path / "base.yaml")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-    assert bench["benchmark_script"] == "vllm_mi300x.sh"
-
-
-def test_an_unreadable_switch_does_not_materialize_the_synthetic_workload(tmp_path, monkeypatch):
-    """A typo used to read as OFF here, benchmarking the run the operator did not ask for."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "ture")
-    src = _write(tmp_path / "base.yaml")
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        _materialize(src, tmp_path / "out", gpu_type="mi300x", model_path="/m")
-
-
-def test_switch_only_serving_frameworks(tmp_path, monkeypatch):
-    """Scriptable (image) frameworks must never be swapped to aiperf."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    src = _write(tmp_path / "base.yaml", framework="xdit")
-    bench = _materialize(src, tmp_path / "out", model_path="/m")
-    assert bench.get("benchmark_script") != "aiperf_client.sh"
 
 
 # ── Regression: the shared grid/baseline/profile rebuild path (E1 bug) ────────
-def test_runtime_overrides_honor_agentx_on(monkeypatch):
-    """apply_runtime_benchmark_overrides must apply the switch, else the gpu_type-derived synthetic script silently reverts a materialize-time swap (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
-        apply_runtime_benchmark_overrides,
-    )
-
-    bench = {"framework": "vllm"}
-    apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
-    assert bench["benchmark_script"] == "aiperf_client.sh"
-    assert bench["envs"]["RUN_EVAL"] == "false"
 
 
 def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
@@ -268,17 +110,6 @@ def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
 
 
-def test_runtime_overrides_preserve_materialized_agentx_without_env(monkeypatch):
-    _clear_env(monkeypatch)
-    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
-        apply_runtime_benchmark_overrides,
-    )
-
-    bench = {"framework": "vllm", "benchmark_script": "aiperf_client.sh"}
-    apply_runtime_benchmark_overrides(bench, model_path="/m", gpu_type="mi300x")
-    assert bench["benchmark_script"] == "aiperf_client.sh"
-
-
 # ── A2: OFF path never imports the agentx package (lazy-import guarantee) ─────
 _PROBE_OFF = """
 import sys
@@ -288,7 +119,7 @@ from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
 assert not we.agentx_enabled()
 we.materialize_config_with_envs(
-    Path(sys.argv[1]), Path(sys.argv[2]), gpu_type="mi300x", model_path="/m"
+    Path(sys.argv[1]), Path(sys.argv[2]), target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m")
 )
 leaked = [m for m in sys.modules if m.startswith("hyperloom.inference_optimizer.agentx")]
 assert not leaked, "agentx package imported on OFF path: %r" % (leaked,)
@@ -336,15 +167,6 @@ def test_agentx_package_importable_contrast():
 
 
 # ── Finding 1: framework injected so the wrapper delegates to the right builtin ─
-def test_switch_on_injects_framework_for_delegation(tmp_path, monkeypatch):
-    """ON must inject ``benchmark.framework`` into ``envs.FRAMEWORK`` so aiperf_client.sh delegates to ``{framework}_{gpu}.sh``."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    for fw in ("sglang", "vllm"):
-        src = _write(tmp_path / f"{fw}.yaml", framework=fw)
-        bench = _materialize(src, tmp_path / f"out_{fw}", gpu_type="mi300x", model_path="/m")
-        assert bench["benchmark_script"] == "aiperf_client.sh"
-        assert bench["envs"]["FRAMEWORK"] == fw
 
 
 def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
@@ -353,7 +175,7 @@ def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
     monkeypatch.setenv("CONC", "16")
     src = _write(tmp_path / "base.yaml", framework="sglang")
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi355x", model_path="/m"))
     assert bench["benchmark_script"] == "mlperf_agentic_client.sh"
     spec = bench.get("workload_spec") or {}
     assert spec.get("client") == "mlperf"
@@ -380,5 +202,7 @@ def test_mlperf_concurrency_follows_the_round_not_the_baseline(tmp_path, monkeyp
         framework="sglang",
         envs={"CONC": 4, "AGENTIC_CONCURRENCY": "16"},
     )
-    bench = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/models/kimi-k3")
+    bench = _materialize(
+        src, tmp_path / "out", target=we.BenchmarkTarget(gpu_type="mi355x", model_path="/models/kimi-k3")
+    )
     assert bench["envs"]["AGENTIC_CONCURRENCY"] == "4"

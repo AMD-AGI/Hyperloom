@@ -38,7 +38,6 @@
 /src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/                     @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/apply_kernel_patch.py        @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/kernel/gemm_tuning.py               @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/forge_gemm_tuning.py         @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/forge_fusion.py              @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_ray_runtime.py   @AMD-AGI/SaFE
@@ -59,7 +58,24 @@
 /src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py   @haofrank @AMD-AGI/SaFE
 
 # KERNEL opt (the kernel_optimization.py CLI wrapper was retired)
-/src/hyperloom/orchestrator/kernel/request_handlers.py          @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/request_handlers.py       @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_aiter_tuner_support.py   @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_forge_fusion_run.py      @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_forge_gemm_probe.py      @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_forge_gemm_tuning.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_forge_lane_budget.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_forge_shapes.py          @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_integrate_outcomes.py    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_integrate_payload.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_integrate_rebaseline.py  @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_shape_capture.py         @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_source_import.py         @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_tuning_audit_trace.py    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_untuned_gemm_csv.py      @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/_vllm_aiter_routing.py    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/integrate_accuracy.py     @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/keep_thresholds.py        @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/kernel/serving_log_evidence.py   @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/phases/kernel.py                    @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/kernelforge/cli/                                           @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 

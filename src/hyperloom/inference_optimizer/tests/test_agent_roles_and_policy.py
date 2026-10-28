@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom.orchestrator.roles.agent_role import (
-    BackendType,
-    default_role_registry,
-)
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (
+    EXTEND_LEASE_MAX_SEC,
     Intent,
     IntentType,
     IntentValidationError,
@@ -26,7 +24,6 @@ from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
-    REVIEW_VERDICTS,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -34,12 +31,13 @@ from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 # agent_role
-def test_default_claude_model_is_opus_5():
+def test_default_claude_model_is_opus_5_5():
     """The allowlist ladder is headed by the default, and the older rungs are the fallback order."""
     from hyperloom.inference_optimizer.cli.credentials import _CLAUDE_ALLOWED_MODELS
 
-    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5"
+    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5-5"
     assert _CLAUDE_ALLOWED_MODELS == (
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
@@ -62,8 +60,6 @@ def test_kernel_agent_not_a_role_but_still_a_request_target():
 
 def test_orchestration_permissions():
     role = default_role_registry()["orchestration"]
-    assert role.backend_type == BackendType.CLAUDE
-    assert role.model == DEFAULT_CLAUDE_MODEL
     assert role.can_delegate_side_effects is True
     assert IntentType.PROPOSE_ACTION in role.allowed_intents
     assert IntentType.DELEGATE in role.allowed_intents
@@ -73,10 +69,8 @@ def test_orchestration_permissions():
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
 
 
-def test_critic_review_only_codex_no_tools():
+def test_critic_review_only_no_tools():
     role = default_role_registry()["critic"]
-    assert role.backend_type == BackendType.CODEX
-    assert role.model == DEFAULT_CODEX_MODEL
     assert role.no_tools is True
     assert IntentType.REVIEW_VERDICT in role.allowed_intents
     assert IntentType.DELEGATE not in role.allowed_intents
@@ -101,9 +95,6 @@ def test_request_routing_v06_only_orchestration_to_kernel():
 
 def test_review_verdict_critic_only():
     assert REVIEW_VERDICT_SOURCE_ALLOWLIST == frozenset({"critic"})
-    assert "approve" in REVIEW_VERDICTS
-    assert "needs_review" in REVIEW_VERDICTS
-    assert "objection" not in REVIEW_VERDICTS
 
 
 def test_kill_task_is_not_a_valid_intent_type():
@@ -188,12 +179,12 @@ def test_gate_orchestration_propose_action_ok(gate):
 
 
 @pytest.mark.parametrize("precision", ["bf16", "fp8"])
-@pytest.mark.parametrize("backend_order", [None, "forge"])
-def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
+@pytest.mark.parametrize("kernel_optimizer", ["geak", "forge"])
+def test_gate_refuses_a_model_requested_gemm_tuning_run(precision, kernel_optimizer):
     """Refused by channel, not by applicability."""
-    if backend_order:
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
-    state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
+    state = SharedState(
+        phase="KERNEL_AGENT", precision=precision, framework="sglang", kernel_optimizer=kernel_optimizer
+    )
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -208,9 +199,8 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
 
 def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     """Source rewrite is the controller's, so the kind is unregistered."""
-    from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
+    from hyperloom.orchestrator.kernel.request_handlers import get_handler
 
-    assert has_handler("run_optimization") is False
     assert get_handler("run_optimization") is None
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 
@@ -309,6 +299,37 @@ def test_gate_critic_delegate_rejected_by_role(gate):
             ),
         )
     assert exc.value.rule == "role"
+
+
+def test_gate_role_denial_names_the_intents_the_role_may_emit(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REVIEW_VERDICT,
+                payload={"target_proposal_msg_id": "p1", "verdict": "approve"},
+            ),
+        )
+    assert exc.value.rule == "role"
+    assert exc.value.hint
+    for intent_type in default_role_registry()["orchestration"].allowed_intents:
+        assert intent_type.value in exc.value.hint
+    assert "review_verdict" not in exc.value.hint
+
+
+def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
+    """The hint says how far one call reaches and how to go further."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.EXTEND_LEASE,
+                payload={"task_id": "t1", "extra_sec": EXTEND_LEASE_MAX_SEC + 1},
+            ),
+        )
+    assert exc.value.rule == "extend_lease_bounds"
+    assert f"at most {EXTEND_LEASE_MAX_SEC}s per call" in exc.value.hint
+    assert "while the task runs" in exc.value.hint
 
 
 def test_gate_orchestration_prune_branch_requires_family(gate):

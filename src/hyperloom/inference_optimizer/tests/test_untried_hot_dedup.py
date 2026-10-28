@@ -7,15 +7,25 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.orchestrator.kernel import _kernel_decisions as kd
+import pytest
+
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
+from hyperloom.orchestrator.state import kernel_decision_settings as kds
 
 
-def _state(hot, *, rejected=(), attempts=None):
+@pytest.fixture(autouse=True)
+def _loose_gate(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", "10")
+
+
+def _state(hot, *, integrate_attempts=None, pending=None, controller=None):
     return SimpleNamespace(
         last_trace_analyze={"hot_kernels_top15": hot, "task_groups": []},
         optimization_stack=[],
-        rejected_kernel_ids=list(rejected),
-        kernel_opt_task_attempts=dict(attempts or {}),
+        kernel_integrate_attempts=dict(integrate_attempts or {}),
+        pending_kernel_integrations=dict(pending or {}),
+        kernel_rewrite_controller_result=dict(controller or {}),
     )
 
 
@@ -29,84 +39,100 @@ def _hot(kid, *, name, src="model.py", gpu_pct=47.8):
     }
 
 
-def test_twin_ids_collapse_when_one_is_rejected():
-    # k001 and k002 are the SAME kernel (identical src/name/gpu_pct). k001 was attempted and rejected; k002 must NOT
-    # resurface as untried.
-    hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="gemm_a8w8")]
-    attempts = {
-        "k001": {
-            "kernel_id": "k001",
-            "current_kernel_id": "k001",
-            "last_source_file": "model.py",
+def _rejected_integrate(kid, *, src="model.py"):
+    return {
+        f"{kid}|/tmp/{kid}.patch|": {
+            "kernel_id": kid,
             "task_group_key": "",
-            "rejected_reason": "slower than baseline",
+            "target_file": src,
+            "patch_path": f"/tmp/{kid}.patch",
+            "attempt_count": 1,
+            "rejected": {"reason": "revert_decision"},
         }
     }
-    state = _state(hot, rejected=["k001"], attempts=attempts)
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+
+def test_twin_ids_collapse_when_one_was_gated():
+    # k001 and k002 are the SAME kernel (identical src/name/gpu_pct). k001's patch was gated end to end and
+    # rejected; k002 must NOT resurface as untried.
+    hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="gemm_a8w8")]
+    state = _state(hot, integrate_attempts=_rejected_integrate("k001"))
+
+    untried = kd.untried_hot_reusable_kernels(state)
     assert untried == []
 
 
 def test_distinct_kernels_are_not_collapsed():
     # Different name => different identity => NOT the same kernel.
     hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="attention_fwd")]
-    attempts = {
-        "k001": {
-            "kernel_id": "k001",
-            "current_kernel_id": "k001",
-            "last_source_file": "model.py",
-            "task_group_key": "",
-            "rejected_reason": "slower than baseline",
-        }
-    }
-    state = _state(hot, rejected=["k001"], attempts=attempts)
+    state = _state(hot, integrate_attempts=_rejected_integrate("k001"))
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    untried = kd.untried_hot_reusable_kernels(state)
     assert untried == ["k002"]
 
 
-def test_an_op_fanout_sibling_retires_with_its_representative():
-    # Op fanout: two different operations over one file.
-    hot = [
-        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
-        _hot("k002", name="attention_fwd", gpu_pct=7.0),
-    ]
-    attempts = {
-        "k001": {
+def test_an_attempt_on_another_source_does_not_retire_a_reassigned_ordinal():
+    # Trace ordinals are reassigned on every profile: an integrate verdict for k001 on another file is not
+    # evidence about the kernel k001 names now.
+    hot = [_hot("k001", name="gemm_a8w8")]
+    state = _state(hot, integrate_attempts=_rejected_integrate("k001", src="other.py"))
+
+    untried = kd.untried_hot_reusable_kernels(state)
+    assert untried == ["k001"]
+
+
+def test_a_queued_patch_counts_as_tried():
+    hot = [_hot("k001", name="gemm_a8w8")]
+    pending = {
+        "kernel-integration:abc": {
+            "integration_id": "kernel-integration:abc",
             "kernel_id": "k001",
-            "current_kernel_id": "k001",
-            "last_source_file": "model.py",
             "task_group_key": "",
-            "attempts": 1,
-            "opfanout_collapsed_ids": ["k001", "k002"],
+            "source_file": "model.py",
+            "status": "pending",
         }
     }
-    state = _state(hot, attempts=attempts)
+    state = _state(hot, pending=pending)
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
-    assert untried == []
+    assert kd.untried_hot_reusable_kernels(state) == []
 
 
-def test_a_sibling_the_representative_did_not_cover_still_owes_an_attempt():
-    # The retirement follows the recorded merge, not the shared file.
-    hot = [
-        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
-        _hot("k002", name="attention_fwd", gpu_pct=7.0),
-    ]
-    attempts = {
-        "k001": {
-            "kernel_id": "k001",
-            "current_kernel_id": "k001",
-            "last_source_file": "model.py",
+def test_a_forge_nomination_retires_its_kernel_by_symbol():
+    # A nominated sibling patch is keyed by the kernel symbol Forge rewrote, never by the trace ordinal.
+    hot = [_hot("k001", name="FusedMoeKernel")]
+    pending = {
+        "kernel-integration:def": {
+            "integration_id": "kernel-integration:def",
+            "task_key": "forge_rewrite:fused_moe_kernel",
+            "kernel_id": "fused_moe_kernel",
             "task_group_key": "",
-            "attempts": 1,
+            "source_file": "/repo/fused_moe.py",
+            "status": "rejected",
         }
     }
-    state = _state(hot, attempts=attempts)
+    state = _state(hot, pending=pending)
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
-    assert untried == ["k002"]
+    assert kd.untried_hot_reusable_kernels(state) == []
+
+
+def test_an_operator_the_rewrite_controller_published_counts_as_tried():
+    # The controller's integration reverted the patch, so nothing reached the stack, but the operator was tried.
+    hot = [_hot("k001", name="_fwd_grouped_kernel_stage1")]
+    controller = {
+        "macro_cycle": 0,
+        "status": "completed",
+        "integration": {
+            "results": [
+                {
+                    "operator_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+                    "status": "reverted_no_gain",
+                }
+            ]
+        },
+    }
+    state = _state(hot, controller=controller)
+
+    assert kd.untried_hot_reusable_kernels(state) == []
 
 
 def test_no_attempts_all_untried_but_deduped():
@@ -114,7 +140,7 @@ def test_no_attempts_all_untried_but_deduped():
     hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="gemm_a8w8")]
     state = _state(hot)
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    untried = kd.untried_hot_reusable_kernels(state)
     assert len(untried) == 1
     assert untried[0] in {"k001", "k002"}
 
@@ -128,15 +154,15 @@ def test_geometry_only_shape_excluded_from_untried():
     ok["shape_dispatchable"] = True
     state = _state([geom, ok])
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    untried = kd.untried_hot_reusable_kernels(state)
     assert untried == ["k002"]
 
 
 def test_forge_loop_integration_retires_its_hot_kernel_by_operator_name():
     # Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
     # kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
-    # ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"), never touching
-    # kernel_opt_task_attempts and never sharing a kernel_id/source_file with the roofline trace's k001.
+    # ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"), never sharing a
+    # kernel_id/source_file with the roofline trace's k001.
     # Without operator-name reconciliation, k001 falsely resurfaces as untried despite being the exact
     # kernel that landed the session's validated gain.
     hot = [
@@ -156,7 +182,7 @@ def test_forge_loop_integration_retires_its_hot_kernel_by_operator_name():
         }
     ]
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    untried = kd.untried_hot_reusable_kernels(state)
     assert untried == []
 
 
@@ -166,5 +192,10 @@ def test_missing_shape_dispatchable_field_stays_untried():
     hot = [_hot("k001", name="gemm_a8w8")]  # no shape_dispatchable key
     state = _state(hot)
 
-    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    untried = kd.untried_hot_reusable_kernels(state)
     assert untried == ["k001"]
+
+
+def test_hot_kernel_floor_falls_back_on_an_unparseable_override(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "not-a-number")
+    assert kds.resolve_hot_kernel_min_gpu_pct() == kds._DEFAULT_HOT_KERNEL_MIN_GPU_PCT

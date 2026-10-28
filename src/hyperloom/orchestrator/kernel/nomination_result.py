@@ -5,8 +5,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+from hyperloom.common.coerce import to_int
+
+log = logging.getLogger(__name__)
 
 #: Dropping an entry is a contract problem worth surfacing, so every drop
 #: carries one of these instead of vanishing into a log line.
@@ -63,10 +68,24 @@ class NominationOutcome:
         """No usable patch. A valid outcome, and not the same as a failure."""
         return not self.patches
 
-    @property
-    def is_clean_empty(self) -> bool:
-        """Selected nothing, and said so in a shape this build understands."""
-        return not self.patches and not self.schema_error
+
+def summarize_dropped_patches(dropped: Any) -> dict[str, int]:
+    """Count dropped patch entries by reason, logging each one as it is counted.
+
+    ``parse_outcome`` names why every unusable entry was refused, but a reason
+    nobody reports is indistinguishable from forge never having offered the
+    entry at all.
+    """
+    counts: dict[str, int] = {}
+    for entry in dropped or ():
+        reason = str(getattr(entry, "reason", "") or "unknown")
+        counts[reason] = counts.get(reason, 0) + 1
+        log.warning(
+            "nomination landing: refused patch kernel=%s reason=%s",
+            str(getattr(entry, "kernel_name", "") or "<unnamed>"),
+            reason,
+        )
+    return counts
 
 
 def parse_outcome(payload: Any) -> NominationOutcome:
@@ -116,9 +135,9 @@ def parse_outcome(payload: Any) -> NominationOutcome:
     return NominationOutcome(
         patches=tuple(ordered),
         dropped=tuple(dropped),
-        candidates_seen=_int_or_zero(summary.get("candidates_seen")),
-        resolved=_int_or_zero(summary.get("resolved")),
-        selected=_int_or_zero(summary.get("selected")),
+        candidates_seen=to_int(summary.get("candidates_seen"), 0),
+        resolved=to_int(summary.get("resolved"), 0),
+        selected=to_int(summary.get("selected"), 0),
         schema_error=schema_error,
     )
 
@@ -161,14 +180,6 @@ def _finite_float(value: Any) -> float:
         return 0.0
     number = float(value)
     return number if math.isfinite(number) else 0.0
-
-
-def _int_or_zero(value: Any) -> int:
-    """A missing or unparsable count reports zero; counts are advisory."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _string_tuple(value: Any) -> tuple[str, ...]:

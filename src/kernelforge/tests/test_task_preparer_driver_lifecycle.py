@@ -145,7 +145,7 @@ def _prepare_with_spec_reading_driver(
         return ref_dir
 
     async def fake_agent(**kwargs):
-        prompt = kwargs["prompt"]
+        prompt = kwargs["turn"].prompt
         captured["prompt"] = prompt
         spec_rel = _runtime_spec_path(prompt)
         captured["spec_rel"] = spec_rel
@@ -185,15 +185,17 @@ def _prepare_with_spec_reading_driver(
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
-            invocation_spec_file=str(source_spec),
-            read_only_files=[str(source_spec)],
-            **prepare_kwargs,
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                read_only_files=[str(source_spec)],
+                **prepare_kwargs,
+            ),
         )
     )
     captured["result"] = result
@@ -305,8 +307,8 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
         driver.write_text("# prepared driver\n", encoding="utf-8")
         return "prepared"
 
-    async def recording_preflight(*_args, **kwargs):
-        captured["expected_case_ids"] = kwargs.get("expected_case_ids")
+    async def recording_preflight(_driver, contract, *_args, **kwargs):
+        captured["expected_case_ids"] = contract.expected_case_ids
         return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
@@ -331,14 +333,16 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
                     model="test-model",
                     experiments_dir=tmp_path / "experiments",
                 ),
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=["hipb_mm"],
-                source_files=[str(kernel)],
-                invocation_spec_file=str(source_spec),
-                expected_case_ids=["case_001", "case_002"],
+                task=task_preparer.PreparationTask(
+                    workspace_dir=str(workspace),
+                    kernel=str(kernel),
+                    driver=str(driver),
+                    program_md="# Task",
+                    target_functions=["hipb_mm"],
+                    source_files=[str(kernel)],
+                    invocation_spec_file=str(source_spec),
+                    expected_case_ids=["case_001", "case_002"],
+                ),
             )
         )
 
@@ -367,7 +371,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
         return ref_dir
 
     async def fake_agent(**kwargs):
-        prompts.append(kwargs["prompt"])
+        prompts.append(kwargs["turn"].prompt)
         driver.write_text(f"# attempt {len(prompts)}\n", encoding="utf-8")
         return "prepared"
 
@@ -392,12 +396,14 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
                     model="test-model",
                     experiments_dir=tmp_path / "experiments",
                 ),
-                workspace_dir=str(workspace),
-                kernel=str(kernel),
-                driver=str(driver),
-                program_md="# Task",
-                target_functions=["hipb_mm"],
-                source_files=[str(kernel)],
+                task=task_preparer.PreparationTask(
+                    workspace_dir=str(workspace),
+                    kernel=str(kernel),
+                    driver=str(driver),
+                    program_md="# Task",
+                    target_functions=["hipb_mm"],
+                    source_files=[str(kernel)],
+                ),
             )
         )
 
@@ -406,6 +412,97 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
     assert f"{task_preparer.REFERENCE_SUBDIR}/README.md" not in prompts[1]
     assert "No reference files were available" in prompts[1]
     assert "could not re-materialize the authoring reference bundle" in caplog.text
+
+
+_BROKEN_DRIVER = "# broken driver\n"
+_REPAIRED_DRIVER = "# repaired driver\n"
+
+
+def _prepare_a_driver_the_agent_repairs(tmp_path, monkeypatch, driver_relpath: str, *, after_init=None):
+    """Prepare a task whose driver fails preflight until the agent rewrites it; return the result and workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def hipb_mm(a, b):\n    return a @ b\n", encoding="utf-8")
+    driver = workspace / driver_relpath
+    driver.parent.mkdir(parents=True, exist_ok=True)
+    driver.write_text(_BROKEN_DRIVER, encoding="utf-8")
+    if driver.parent != workspace:
+        (driver.parent / ".gitignore").write_text("*\n", encoding="utf-8")
+    _init_repo(workspace)
+    if after_init is not None:
+        after_init(workspace)
+
+    async def repairing_agent(**_kwargs):
+        driver.write_text(_REPAIRED_DRIVER, encoding="utf-8")
+        return "prepared"
+
+    async def content_preflight(driver_script, *_args, **_kwargs):
+        ok = Path(driver_script).read_text(encoding="utf-8") == _REPAIRED_DRIVER
+        return task_preflight.PreflightResult(
+            ok=ok,
+            correctness_ok=ok,
+            bench_ok=ok,
+            graph_ok=True,
+            profile_ok=True,
+            reasons=[] if ok else ["bench exited 1"],
+        )
+
+    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _workspace: None)
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", repairing_agent)
+    monkeypatch.setattr(task_preparer, "_preflight_async", content_preflight)
+    monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
+    result = asyncio.run(
+        task_preparer.prepare_task(
+            config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
+        )
+    )
+    return result, workspace, driver
+
+
+def test_a_driver_git_ignores_is_prepared_in_place_without_a_commit(tmp_path, monkeypatch):
+    """The rewrite controller stages a driver in a folder that hides itself from git
+    (kernel_rewrite_controller/worktree.py), so repairing it leaves nothing to commit."""
+    base = tmp_path / "base"
+
+    def record_base(workspace):
+        base.write_text(task_preparer._git_head(workspace), encoding="utf-8")
+
+    result, workspace, driver = _prepare_a_driver_the_agent_repairs(
+        tmp_path, monkeypatch, ".forge-driver-0123abcd/driver.py", after_init=record_base
+    )
+
+    assert result.ok is True, result.message
+    assert result.rolled_back is False
+    assert driver.read_text(encoding="utf-8") == _REPAIRED_DRIVER
+    assert task_preparer._git_head(workspace) == base.read_text(encoding="utf-8")
+
+
+def test_a_staged_driver_whose_commit_does_not_land_still_fails_and_rolls_back(tmp_path, monkeypatch):
+    def reject_every_commit(workspace):
+        hook = workspace / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho rejected by hook\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    result, workspace, driver = _prepare_a_driver_the_agent_repairs(
+        tmp_path, monkeypatch, "driver.py", after_init=reject_every_commit
+    )
+
+    assert result.ok is False
+    assert result.rolled_back is True
+    assert "the git commit did not land" in result.message
+    assert driver.read_text(encoding="utf-8") == _BROKEN_DRIVER
+    code, log = task_preparer._git(workspace, "log", "--oneline")
+    assert code == 0, log
+    assert len([line for line in log.splitlines() if line.strip()]) == 1
 
 
 def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
@@ -521,12 +618,14 @@ def test_a_source_the_rollback_cannot_put_back_fails_the_preparation(tmp_path, m
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel), str(helper)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel), str(helper)],
+            ),
         )
     )
 
@@ -587,12 +686,14 @@ def test_a_source_that_comes_back_on_a_retry_is_not_still_reported_as_lost(tmp_p
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
         )
     )
 
@@ -635,12 +736,14 @@ def test_preparation_gives_back_the_source_the_caller_had_not_the_one_head_holds
     result = asyncio.run(
         task_preparer.prepare_task(
             config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+            ),
         )
     )
 
@@ -668,8 +771,8 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
         return ref_dir
 
     async def fake_agent(**kwargs):
-        staged = Path(kwargs["workspace"])
-        spec_rel = _runtime_spec_path(kwargs["prompt"])
+        staged = Path(kwargs["turn"].workspace)
+        spec_rel = _runtime_spec_path(kwargs["turn"].prompt)
         assert spec_rel == source_spec.name
         assert (staged / spec_rel).is_file()
         (staged / "driver.py").write_text(
@@ -702,14 +805,16 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
                 model="test-model",
                 experiments_dir=tmp_path / "experiments",
             ),
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            program_md="# Task",
-            target_functions=["hipb_mm"],
-            source_files=[str(kernel)],
-            invocation_spec_file=str(source_spec),
-            read_only_files=[str(source_spec)],
+            task=task_preparer.PreparationTask(
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["hipb_mm"],
+                source_files=[str(kernel)],
+                invocation_spec_file=str(source_spec),
+                read_only_files=[str(source_spec)],
+            ),
         )
     )
 

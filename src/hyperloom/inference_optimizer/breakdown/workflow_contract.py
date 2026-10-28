@@ -13,50 +13,33 @@ from importlib.resources import files
 from typing import Any, Mapping
 
 _CONTRACT_PACKAGE = "hyperloom.inference_optimizer.breakdown"
-WORKFLOW_CONTRACT_V1 = "hyperloom.workflow_evaluation.v1"
-CURRENT_WORKFLOW_CONTRACT_VERSION = "hyperloom.workflow_evaluation.v2"
-_CONTRACT_PATHS = {
-    WORKFLOW_CONTRACT_V1: "contracts/workflow_contract.v1.json",
-    CURRENT_WORKFLOW_CONTRACT_VERSION: "contracts/workflow_contract.v2.json",
-}
-_SCHEMA_PATHS = {
-    WORKFLOW_CONTRACT_V1: "contracts/session_breakdown.v6.workflow-evaluation.schema.json",
-    CURRENT_WORKFLOW_CONTRACT_VERSION: "contracts/session_breakdown.v6.workflow-evaluation.v2.schema.json",
-}
+_CONTRACT_PATH = "contracts/workflow_contract.v3.json"
+_SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v3.schema.json"
 
 
-@lru_cache(maxsize=2)
-def _load_workflow_contract(version: str) -> dict[str, Any]:
-    resource = files(_CONTRACT_PACKAGE).joinpath(_CONTRACT_PATHS[version])
+@lru_cache(maxsize=1)
+def _load_workflow_contract() -> dict[str, Any]:
+    resource = files(_CONTRACT_PACKAGE).joinpath(_CONTRACT_PATH)
     return json.loads(resource.read_text(encoding="utf-8"))
 
 
-def workflow_contract(version: str = CURRENT_WORKFLOW_CONTRACT_VERSION) -> dict[str, Any]:
+def workflow_contract() -> dict[str, Any]:
     """Return an isolated copy of the immutable packaged workflow contract."""
-    return deepcopy(_load_workflow_contract(version))
+    return deepcopy(_load_workflow_contract())
 
 
-def canonical_contract_bytes(
-    contract: Mapping[str, Any] | None = None, *, version: str = CURRENT_WORKFLOW_CONTRACT_VERSION
-) -> bytes:
-    """Serialize a contract with the documented digest canonicalization."""
-    payload = dict(_load_workflow_contract(version) if contract is None else contract)
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+def workflow_contract_digest() -> str:
+    """Return the SHA-256 hex identity of the packaged contract, over its documented canonicalization."""
+    canonical = json.dumps(_load_workflow_contract(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def workflow_contract_digest(version: str = CURRENT_WORKFLOW_CONTRACT_VERSION) -> str:
-    """Return the SHA-256 hex identity of the packaged contract."""
-    return hashlib.sha256(canonical_contract_bytes(version=version)).hexdigest()
-
-
-def workflow_metadata(
-    run_flags: Mapping[str, Any], *, version: str = CURRENT_WORKFLOW_CONTRACT_VERSION
-) -> dict[str, Any]:
+def workflow_metadata(run_flags: Mapping[str, Any]) -> dict[str, Any]:
     """Build the author-time metadata block consumed by workflow evaluation."""
-    contract = workflow_contract(version)
+    contract = workflow_contract()
     return {
         "workflow_contract_version": contract["workflow_contract_version"],
-        "contract_digest": workflow_contract_digest(version),
+        "contract_digest": workflow_contract_digest(),
         "run_flags": dict(run_flags),
         "phase_actions": contract["phase_actions"],
         "llm_proposable_actions": contract["llm_proposable_actions"],
@@ -66,28 +49,17 @@ def workflow_metadata(
     }
 
 
-def workflow_schema(version: str = CURRENT_WORKFLOW_CONTRACT_VERSION) -> dict[str, Any]:
+def workflow_schema() -> dict[str, Any]:
     """Return the packaged workflow-evaluation JSON Schema."""
-    resource = files(_CONTRACT_PACKAGE).joinpath(_SCHEMA_PATHS[version])
+    resource = files(_CONTRACT_PACKAGE).joinpath(_SCHEMA_PATH)
     return json.loads(resource.read_text(encoding="utf-8"))
-
-
-@lru_cache(maxsize=32)
-def contract_declares(version: str, definition: str, field: str) -> bool:
-    """Whether the version's schema declares ``field`` on ``$defs[definition]``."""
-    return field in workflow_schema(version)["$defs"][definition]["properties"]
-
-
-def manifest_contract_version(manifest: Mapping[str, Any]) -> str:
-    """Contract a session manifest is bound to; an unstamped manifest predates v2 and is v1."""
-    return str(manifest.get("workflow_contract_version") or WORKFLOW_CONTRACT_V1)
 
 
 def event_semantics(event_type: str, status: str, ext: Mapping[str, Any] | None) -> dict[str, Any]:
     """Project process and business semantics without inferring missing facts."""
     details = dict(ext or {})
     outcome: Any = None
-    mapping = _load_workflow_contract(CURRENT_WORKFLOW_CONTRACT_VERSION)["event_business_outcomes"].get(str(event_type))
+    mapping = _load_workflow_contract()["event_business_outcomes"].get(str(event_type))
     if isinstance(mapping, Mapping):
         value: Any = details
         for part in str(mapping.get("path") or "").split("."):
@@ -112,12 +84,7 @@ def event_semantics(event_type: str, status: str, ext: Mapping[str, Any] | None)
 
 
 __all__ = [
-    "CURRENT_WORKFLOW_CONTRACT_VERSION",
-    "WORKFLOW_CONTRACT_V1",
-    "canonical_contract_bytes",
-    "contract_declares",
     "event_semantics",
-    "manifest_contract_version",
     "workflow_contract",
     "workflow_contract_digest",
     "workflow_metadata",

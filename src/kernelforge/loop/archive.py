@@ -14,7 +14,14 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.loop.experiments_layout import (
+    ARCHIVE_TIME_FORMAT,
+    CANDIDATE_META,
+    ExperimentsLayout,
+    iteration_tag,
+    tagged_iteration,
+)
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +42,6 @@ class CandidateRecord:
     bench_detail: dict | None = None  # raw bench_wallclock dict
     snr_db: float | None = None
     vgpr: int | None = None
-    pmc_diagnosis: str = ""
-    # Structured profile metadata (profile_backend, bottleneck, target_kernels, roofline dtype/AI, HBM/compute pct,
-    # SoL metrics) — consumed from meta.json.
-    profile_meta: dict | None = None
 
     # Comparison anchors
     baseline_wall_ms: float | None = None
@@ -52,6 +55,10 @@ class CandidateRecord:
     # Why the agent session ended + turns spent (for end-reason analysis).
     session_end_reason: str = ""
     turns: int | None = None
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
 
     # Context
     kernel_file: str = ""
@@ -60,7 +67,6 @@ class CandidateRecord:
     # Full blobs written to their own files (kept out of meta.json to keep it small)
     kernel_source: str = ""
     change_diff: str = ""
-    pmc_full: str = ""
     validation_text: str = ""
 
 
@@ -68,7 +74,8 @@ class CandidateArchive:
     """Per-run store of full iteration solutions + measurements."""
 
     def __init__(self, workspace_dir: str, kernel_file: str = ""):
-        self.root = Path(workspace_dir) / "forge_experiments" / "candidates"
+        self._layout = ExperimentsLayout.of(workspace_dir)
+        self.root = self._layout.candidates
         self.index_path = self.root / "index.jsonl"
         # Snapshot file basename — use the real kernel filename so the archived copy is instantly recognizable (e.g.
         # flash_attn_kernel.py).
@@ -89,7 +96,7 @@ class CandidateArchive:
             self._mark_degraded(f"create {self.root}", e)
 
     def _iter_dir(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}"
+        return self._layout.candidate(iteration)
 
     def _mark_degraded(self, operation: str, error: Exception) -> None:
         self.degraded = True
@@ -125,13 +132,6 @@ class CandidateArchive:
             handle.flush()
             os.fsync(handle.fileno())
 
-    @staticmethod
-    def _iteration_from_dir(path: Path) -> int | None:
-        suffix = path.name.removeprefix("iter_")
-        if not suffix.isdigit():
-            return None
-        return int(suffix)
-
     def _inspect_complete_meta(
         self,
         directory: Path,
@@ -139,11 +139,11 @@ class CandidateArchive:
     ) -> tuple[str, dict | None]:
         """Classify metadata without treating transient I/O as corruption."""
         try:
-            meta = json.loads((directory / "meta.json").read_text())
+            meta = json.loads((directory / CANDIDATE_META).read_text())
         except FileNotFoundError:
             return "incomplete", None
         except OSError as error:
-            self._mark_degraded(f"read {directory / 'meta.json'}", error)
+            self._mark_degraded(f"read {directory / CANDIDATE_META}", error)
             return "unavailable", None
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
             return "incomplete", None
@@ -173,10 +173,6 @@ class CandidateArchive:
                 return "incomplete", None
         return "complete", meta
 
-    def _complete_meta(self, directory: Path, iteration: int) -> dict | None:
-        status, meta = self._inspect_complete_meta(directory, iteration)
-        return meta if status == "complete" else None
-
     def _quarantine_incomplete(self, directory: Path) -> bool:
         quarantine = self.root / (f".{directory.name}.incomplete-{os.getpid()}-{time.time_ns()}")
         try:
@@ -200,6 +196,10 @@ class CandidateArchive:
             "plan": meta.get("plan", ""),
             "session_end_reason": meta.get("session_end_reason", ""),
             "turns": meta.get("turns"),
+            "agent_profile_id": meta.get("agent_profile_id", ""),
+            "agent_provider": meta.get("agent_provider", ""),
+            "agent_model": meta.get("agent_model", ""),
+            "blockage_epoch": meta.get("blockage_epoch", 0),
             "dir": directory.name,
         }
 
@@ -241,7 +241,7 @@ class CandidateArchive:
             scan_unavailable = True
 
         for directory in directories:
-            iteration = self._iteration_from_dir(directory)
+            iteration = tagged_iteration(directory.name)
             if iteration is None:
                 continue
             try:
@@ -261,10 +261,15 @@ class CandidateArchive:
             if status == "incomplete":
                 self._quarantine_incomplete(directory)
                 continue
-            if meta is not None:
-                complete.append((iteration, directory, meta))
+            complete.append((iteration, directory, meta))
 
         expected = [self._index_entry_from_meta(meta, directory) for _iteration, directory, meta in sorted(complete)]
+        return self._reconcile_index_file(expected, uncertain_iterations, scan_unavailable)
+
+    def _reconcile_index_file(
+        self, expected: list[dict], uncertain_iterations: set[int], scan_unavailable: bool
+    ) -> list[dict]:
+        """Keep index lines the scan could not vouch for, and rewrite the index only after a clean scan."""
         try:
             current = self._read_index_file()
         except UnicodeDecodeError:
@@ -273,14 +278,11 @@ class CandidateArchive:
             self._mark_degraded(f"read index {self.index_path}", error)
             return expected
 
-        if scan_unavailable:
-            preserved = current
-        else:
-            preserved = [
-                entry
-                for entry in current
-                if isinstance(entry.get("iter"), int) and entry["iter"] in uncertain_iterations
-            ]
+        preserved = [
+            entry
+            for entry in current
+            if isinstance(entry.get("iter"), int) and (scan_unavailable or entry["iter"] in uncertain_iterations)
+        ]
         reconciled_by_iteration = {
             entry["iter"]: entry for entry in preserved + expected if isinstance(entry.get("iter"), int)
         }
@@ -310,6 +312,46 @@ class CandidateArchive:
         if mean_case_speedup is None or not best:
             return None
         return round((mean_case_speedup / best - 1.0) * 100.0, 3)
+
+    def _metadata(self, rec: CandidateRecord) -> dict:
+        """The meta.json record of one candidate: measurements, provenance, and which blobs were written."""
+        delta_vs_best = self._mean_case_speedup_delta_pct(
+            rec.mean_case_speedup,
+            rec.best_mean_case_speedup_before,
+        )
+        return {
+            "complete": True,
+            "iteration": rec.iteration,
+            "timestamp": time.strftime(ARCHIVE_TIME_FORMAT),
+            "commit_hash": rec.commit_hash,
+            "decision": rec.decision,
+            "kept": rec.kept,
+            "validation_passed": rec.validation_passed,
+            "wall_ms": rec.wall_ms,
+            "mean_case_speedup": rec.mean_case_speedup,
+            "bench": rec.bench_detail or {},
+            "snr_db": rec.snr_db,
+            "vgpr": rec.vgpr,
+            "baseline_wall_ms": rec.baseline_wall_ms,
+            "best_wall_ms_before": rec.best_wall_ms_before,
+            "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
+            "delta_vs_best_pct": delta_vs_best,
+            "plan": rec.plan,
+            "rationale": rec.rationale,
+            "session_end_reason": rec.session_end_reason,
+            "turns": rec.turns,
+            "agent_profile_id": rec.agent_profile_id,
+            "agent_provider": rec.agent_provider,
+            "agent_model": rec.agent_model,
+            "blockage_epoch": rec.blockage_epoch,
+            "kernel_file": self.kernel_basename,
+            "shape": rec.shape or {},
+            "files": {
+                "kernel": self.kernel_basename if rec.kernel_source else None,
+                "diff": "change.diff" if rec.change_diff else None,
+                "validation": "validation.txt" if rec.validation_text else None,
+            },
+        }
 
     def record(self, rec: CandidateRecord) -> Path | None:
         """Atomically persist one iteration's full solution + measurements."""
@@ -343,7 +385,7 @@ class CandidateArchive:
             temp_dir = Path(
                 tempfile.mkdtemp(
                     dir=str(self.root),
-                    prefix=f".iter_{rec.iteration:03d}.tmp-",
+                    prefix=f".{iteration_tag(rec.iteration)}.tmp-",
                 )
             )
 
@@ -353,56 +395,18 @@ class CandidateArchive:
             # 2) Full diff of the commit (captures sibling-file edits too).
             if rec.change_diff:
                 self._write_text(temp_dir / "change.diff", rec.change_diff)
-            # 3) Full profiling summary (rocprof-compute SoL or a PMC summary; profile_meta.backend says which).
-            if rec.pmc_full:
-                self._write_text(temp_dir / "profile.txt", rec.pmc_full)
-            # 4) Validation report / failure tail.
+            # 3) Validation report / failure tail.
             if rec.validation_text:
                 self._write_text(temp_dir / "validation.txt", rec.validation_text)
 
-            # 5) Structured metadata.
-            delta_vs_best = self._mean_case_speedup_delta_pct(
-                rec.mean_case_speedup,
-                rec.best_mean_case_speedup_before,
-            )
-            meta = {
-                "complete": True,
-                "iteration": rec.iteration,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "commit_hash": rec.commit_hash,
-                "decision": rec.decision,
-                "kept": rec.kept,
-                "validation_passed": rec.validation_passed,
-                "wall_ms": rec.wall_ms,
-                "mean_case_speedup": rec.mean_case_speedup,
-                "bench": rec.bench_detail or {},
-                "snr_db": rec.snr_db,
-                "vgpr": rec.vgpr,
-                "pmc_diagnosis": rec.pmc_diagnosis,
-                "profile": rec.profile_meta or {},
-                "baseline_wall_ms": rec.baseline_wall_ms,
-                "best_wall_ms_before": rec.best_wall_ms_before,
-                "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
-                "delta_vs_best_pct": delta_vs_best,
-                "plan": rec.plan,
-                "rationale": rec.rationale,
-                "session_end_reason": rec.session_end_reason,
-                "turns": rec.turns,
-                "kernel_file": self.kernel_basename,
-                "shape": rec.shape or {},
-                "files": {
-                    "kernel": self.kernel_basename if rec.kernel_source else None,
-                    "diff": "change.diff" if rec.change_diff else None,
-                    "profile": "profile.txt" if rec.pmc_full else None,
-                    "validation": "validation.txt" if rec.validation_text else None,
-                },
-            }
-            self._write_text(temp_dir / "meta.json", json.dumps(meta, indent=2))
+            # 4) Structured metadata.
+            meta = self._metadata(rec)
+            self._write_text(temp_dir / CANDIDATE_META, json.dumps(meta, indent=2))
             fsync_directory(temp_dir)
             os.rename(temp_dir, d)
             temp_dir = None
             fsync_directory(self.root)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"record iteration {rec.iteration}", e)
             return None
         finally:

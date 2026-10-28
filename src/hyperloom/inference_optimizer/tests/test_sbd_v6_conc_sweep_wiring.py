@@ -33,10 +33,10 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     conc_sweep_event_id,
     make_conc_sweep_recorder,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -105,7 +105,7 @@ def _materialize(src, out_dir, **_kw):
 
 def _recorder():
     recorder = make_conc_sweep_recorder(
-        make_sink(conc_sweep_event_id(phase="SWEEP", macro_cycle=2), producer=PRODUCER),
+        EventSink(conc_sweep_event_id(phase="SWEEP", macro_cycle=2), producer=PRODUCER),
         task_id="cs-1",
         task_kind="conc_sweep",
         reason="phase_entry",
@@ -124,7 +124,7 @@ def _sweep_event(session_dir: Path) -> dict[str, Any]:
 def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any, concs: list[int] | None = None):
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         return asyncio.run(
             run_conc_sweep(
@@ -319,9 +319,10 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     calls = []
     clock = {"now": 100.0}
 
-    async def _refuse_reuse(
-        *, grid: list[GridVariant], session_deadline_sec, variant_expected_sec, deadline_stop, **_kw
-    ):
+    async def _refuse_reuse(*, grid: list[GridVariant], stop: GridStop, **_kw):
+        session_deadline_sec = stop.session_deadline_sec
+        variant_expected_sec = stop.variant_expected_sec
+        deadline_stop = stop.deadline_stop
         calls.append((session_deadline_sec, variant_expected_sec, deadline_stop.error_class))
         if len(calls) == 1:
             clock["now"] += 6.0
@@ -348,7 +349,7 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
         ),
         patch("hyperloom.orchestrator.kernel.conc_sweep.time.monotonic", side_effect=lambda: clock["now"]),
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_refuse_reuse),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         asyncio.run(
             run_conc_sweep(
@@ -453,7 +454,7 @@ def test_the_dispatch_names_the_event_and_binds_the_session_itself(session_dir: 
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         result = asyncio.run(ConcSweepExecutor()(_ctx(session_dir)))
 
@@ -483,7 +484,7 @@ def test_a_sweep_that_raised_leaves_a_closed_failed_event(session_dir: Path, bas
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_explode),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_explode),
         pytest.raises(RuntimeError),
     ):
         asyncio.run(ConcSweepExecutor()(_ctx(session_dir)))
@@ -596,7 +597,7 @@ def _cancelled_arm(session_dir: Path, baseline_yaml: Path, *, rungs: int, lifecy
     lifecycle_params = {"eligible": lifecycle, "reason": "supported", "port": 8888, "framework": "sglang"}
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_cancelled_after(rungs)),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
         patch(
             "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
             return_value=lifecycle_params,
@@ -650,7 +651,7 @@ def test_a_dispatch_with_no_session_records_nothing_and_still_runs(session_dir: 
             return_value=False,
         ),
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_all_succeed),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_materialize),
     ):
         result = asyncio.run(ConcSweepExecutor()(ctx))
 

@@ -16,7 +16,9 @@ it does fire it must keep the most recent work per action.
 
 from __future__ import annotations
 
+import os
 import shutil
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,16 +36,19 @@ class _Reconciler:
 
     An open bring-up round holds one of those leases and can only be settled in
     the reconciler, so a second sweep here would reap a lease a live round still
-    holds. ``raises`` stands in for a report this pass could not produce.
+    holds.
     """
 
-    def __init__(self, reaped=0, raises=False, unverifiable=0, rate=(0, 0)):
-        self.last_report = (
-            None
-            if raises
-            else SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
-        )
+    def __init__(self, reaped=0, unverifiable=0):
+        self.last_report = SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
+
+
+class _Locks:
+    """``raises`` stands in for a cleanup-rate read the database refused."""
+
+    def __init__(self, raises=False, rate=(0, 0)):
         self._rate = rate
+        self._raises = raises
 
     async def cleanup_confirmation_rate(self):
         """The ratio that says whether retained lanes are routine.
@@ -53,6 +58,8 @@ class _Reconciler:
         summary that looks complete and is missing the one number the retention
         decision rests on.
         """
+        if self._raises:
+            raise sqlite3.OperationalError("database is locked")
         return self._rate
 
 
@@ -62,13 +69,23 @@ class _Pool:
 
 
 class _Tasks:
+    def __init__(self, *, queued=(), running=()):
+        self._queued, self._running = list(queued), list(running)
+
     async def reclaim_expired_running(self, *, reason):
         pytest.fail("maintenance must not fail tasks by age")
+
+    async def queued(self):
+        return self._queued
+
+    async def running(self):
+        return self._running
 
 
 def _host(**kw):
     return SimpleNamespace(
         reconciler=kw.get("reconciler", _Reconciler(reaped=2)),
+        locks=kw.get("locks", _Locks()),
         gpu_specialist_pool=kw.get("pool", _Pool()),
         tasks=kw.get("tasks", _Tasks()),
         db=kw.get("db", object()),
@@ -80,7 +97,7 @@ def _patch_retention(monkeypatch: pytest.MonkeyPatch, *, events=5, tasks=2, rais
 
     async def _run(_db):
         if raises:
-            raise RuntimeError("vacuum failed")
+            raise sqlite3.OperationalError("vacuum failed")
         return SimpleNamespace(events_deleted=events, tasks_deleted=tasks)
 
     monkeypatch.setattr(db_maint, "run_db_retention", _run)
@@ -136,10 +153,9 @@ class TestNoSingleStepCanEndTheRun:
         _patch_retention(monkeypatch)
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
+        await run_lease_and_db_reclaim(_host(locks=_Locks(raises=True)), summary, reason="r")
 
-        assert "leases_reaped" not in summary
-        assert "leases_unverifiable" not in summary
+        assert "cleanup_unconfirmed" not in summary
         assert "running_tasks_reclaimed" not in summary
         assert summary["events_pruned"] == 5
 
@@ -169,6 +185,7 @@ def _coordinator(session_dir: Path, **kw):
     return SimpleNamespace(
         session_dir=session_dir,
         reconciler=_Reconciler(),
+        locks=_Locks(),
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
         db=object(),
@@ -185,8 +202,6 @@ def _maintenance(session_dir: Path, **kw) -> MaintenanceCollaborator:
         c._STATE_JSON_WARN_BYTES = kw["warn_bytes"]  # type: ignore[assignment]
     if "free_min_gb" in kw:
         c._DISK_FREE_MIN_GB = kw["free_min_gb"]  # type: ignore[assignment]
-    if "used_max_frac" in kw:
-        c._DISK_USED_MAX_FRAC = kw["used_max_frac"]  # type: ignore[assignment]
     return c
 
 
@@ -206,7 +221,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         _fake_usage(monkeypatch, free_gb=0, used_frac=0, raises=True)
         c = _maintenance(tmp_path)
 
-        assert c._maybe_prune_runs_for_disk() is None
+        assert c._maybe_prune_runs_for_disk(frozenset()) is None
 
     def test_a_healthy_partition_reports_but_deletes_nothing(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.10)
@@ -215,7 +230,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
             (runs / f"task{i}").mkdir(parents=True)
         c = _maintenance(tmp_path, keep=2)
 
-        got = c._maybe_prune_runs_for_disk()
+        got = c._maybe_prune_runs_for_disk(frozenset())
 
         assert got is not None
         assert "runs_pruned" not in got
@@ -233,19 +248,20 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         (tmp_path / "runs" / "loose_file.txt").write_text("not an action dir", encoding="utf-8")
         c = _maintenance(tmp_path, keep=2)
 
-        got = c._maybe_prune_runs_for_disk()
+        got = c._maybe_prune_runs_for_disk(frozenset())
 
         assert got["runs_pruned"] == 3
         assert sorted(p.name for p in runs.iterdir()) == ["task3", "task4"]
 
-    def test_a_full_partition_triggers_the_trim_even_with_free_space(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
+    def test_a_shared_volume_mostly_used_by_others_is_not_low_on_space(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.99)
         runs = tmp_path / "runs" / "explore"
         for i in range(4):
             (runs / f"task{i}").mkdir(parents=True)
         c = _maintenance(tmp_path, keep=1)
 
-        assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 3
+        assert "runs_pruned" not in c._maybe_prune_runs_for_disk(frozenset())
+        assert len(list(runs.iterdir())) == 4
 
     def test_an_action_within_the_keep_budget_is_untouched(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
@@ -253,7 +269,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         (runs / "only_task").mkdir(parents=True)
         c = _maintenance(tmp_path, keep=2)
 
-        assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 0
+        assert c._maybe_prune_runs_for_disk(frozenset())["runs_pruned"] == 0
         assert (runs / "only_task").is_dir()
 
     def test_a_workspace_the_enablement_stack_replays_from_survives_the_trim(
@@ -272,7 +288,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         c.shared_state.enablement.kept_patches = [str(patch)]
         c.shared_state.enablement.kept_artifacts = [{"target": "fix.py", "source": str(source)}]
 
-        c._maybe_prune_runs_for_disk()
+        c._maybe_prune_runs_for_disk(frozenset())
 
         survivors = {p.name for p in runs.iterdir()}
         assert {"task0", "task1"} <= survivors < {f"task{i}" for i in range(4)}
@@ -281,7 +297,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
         c = _maintenance(tmp_path)
 
-        got = c._maybe_prune_runs_for_disk()
+        got = c._maybe_prune_runs_for_disk(frozenset())
 
         assert "runs_pruned" not in got
         assert got["free_gb"] == 1.0
@@ -298,7 +314,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         c = _maintenance(tmp_path, warn_bytes=1024)
 
         with caplog.at_level("WARNING"):
-            c._maybe_prune_runs_for_disk()
+            c._maybe_prune_runs_for_disk(frozenset())
 
         assert "state.json is" in caplog.text
         assert state_path.is_file(), "the warning must not delete state"
@@ -320,7 +336,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
             (runs / f"task{i}").mkdir(parents=True)
         c = _maintenance(tmp_path, keep=1)
 
-        assert c._maybe_prune_runs_for_disk()["runs_pruned"] == 2
+        assert c._maybe_prune_runs_for_disk(frozenset())["runs_pruned"] == 2
 
     def test_a_workspace_that_refuses_to_delete_is_logged_not_raised(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
@@ -337,7 +353,7 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
         c = _maintenance(tmp_path, keep=1)
 
         with caplog.at_level("WARNING"):
-            got = c._maybe_prune_runs_for_disk()
+            got = c._maybe_prune_runs_for_disk(frozenset())
 
         assert got["runs_pruned"] == 0
         assert "failed to prune" in caplog.text
@@ -355,3 +371,31 @@ class TestTheTickItself:
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
         assert got["events_pruned"] == 5
+
+    @pytest.mark.asyncio
+    async def test_a_low_disk_tick_spares_every_workspace_a_live_task_still_reads(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A queued integrate reads its specialist's patch, and a running one its own workspace."""
+        _patch_retention(monkeypatch)
+        _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
+        for action, name, mtime in (
+            ("specialist", "authored", 1_700_000_000),
+            ("specialist", "stale", 1_700_000_000),
+            ("specialist", "newest", 1_700_000_100),
+            ("integrate_patch", "measuring", 1_700_000_000),
+            ("integrate_patch", "newest", 1_700_000_100),
+        ):
+            workspace = tmp_path / "runs" / action / name
+            workspace.mkdir(parents=True)
+            os.utime(workspace, (mtime, mtime))
+        c = _maintenance(tmp_path, keep=1)
+        c._coord.tasks = _Tasks(
+            queued=[SimpleNamespace(task_id="waiting", params={"specialist_task_id": "authored"})],
+            running=[SimpleNamespace(task_id="measuring", params={})],
+        )
+
+        await c.run(tick=12)
+
+        assert sorted(p.name for p in (tmp_path / "runs" / "specialist").iterdir()) == ["authored", "newest"]
+        assert sorted(p.name for p in (tmp_path / "runs" / "integrate_patch").iterdir()) == ["measuring", "newest"]

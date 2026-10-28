@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 from hyperloom.agents.quantization.driver import retry
 from hyperloom.agents.quantization.driver.outcomes import ASK_RETRYABLE, OutcomeId
-
-
-def test_read_counter_corrupt_file(tmp_path: Path) -> None:
-    (tmp_path / retry._COUNTER_FILE).write_text("not-an-int", encoding="utf-8")
-    # ValueError swallowed -> 0.
-    assert retry._read_counter(tmp_path) == 0
 
 
 def test_resolve_interactive_explicit_and_error(monkeypatch) -> None:
@@ -47,8 +40,7 @@ def test_decide_next_step_operator_declines_retry(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(retry, "_ask_operator", lambda _msg: False)
     decision = retry._decide_next_step(
         outcome,
-        workspace=tmp_path,
-        attempt_number=1,
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
         interactive=True,
         max_requantize_attempts=3,
         counter=0,
@@ -62,8 +54,7 @@ def test_decide_next_step_no_fix_hypothesis(tmp_path) -> None:
     outcome = next(iter(ASK_RETRYABLE))
     decision = retry._decide_next_step(
         outcome,
-        workspace=tmp_path,
-        attempt_number=1,
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
         interactive=False,
         max_requantize_attempts=3,
         counter=0,
@@ -75,8 +66,7 @@ def test_decide_next_step_no_fix_hypothesis(tmp_path) -> None:
 def test_decide_next_step_checkpoint_aborted(tmp_path) -> None:
     decision = retry._decide_next_step(
         OutcomeId.checkpoint_aborted,
-        workspace=tmp_path,
-        attempt_number=1,
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
         interactive=False,
         max_requantize_attempts=1,
         counter=0,

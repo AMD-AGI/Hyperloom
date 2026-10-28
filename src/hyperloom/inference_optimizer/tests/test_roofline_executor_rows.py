@@ -59,9 +59,9 @@ def _ta_ok(md: Path, *, hot: int = 0, host_bound: bool = False) -> dict[str, Any
 def _ta_empty_chunk() -> dict[str, Any]:
     return {
         "status": "failed",
-        "error": "steady_state_chunk_empty",
+        "error": "steady_state_chunk_low_quality",
         "trace_health_warnings": [
-            {"code": "steady_state_chunk_empty", "requested_mode": "mixed", "non_empty_modes": ["decode_only"]}
+            {"code": "steady_state_chunk_low_quality", "requested_mode": "mixed", "non_empty_modes": ["decode_only"]}
         ],
     }
 
@@ -224,10 +224,9 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
         "applied": True,
         "from_mode": "mixed",
         "to_mode": "decode_only",
-        "source_warning_code": "steady_state_chunk_empty",
+        "source_warning_code": "steady_state_chunk_low_quality",
     }
-    assert result["status"] == "succeeded"
-    assert result["profile_recovered"] is True
+    assert result["status"] == "recovered"
     assert result["profile_warning"] == {"status": "failed", "error_class": "stop_profile", "error": "dup stop"}
 
 
@@ -286,7 +285,7 @@ async def test_a_cancelled_profile_is_not_recovered_from_the_trace_it_flushed(tm
     assert action["profile"]["recovered"] is False
     assert action["analysis"]["runs"] == []
     assert result["status"] == "failed"
-    assert "profile_recovered" not in result
+    assert "profile_warning" not in result
 
 
 @pytest.mark.asyncio

@@ -10,10 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
-    _geak_overlay_is_loadable,
+    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -55,16 +56,33 @@ def test_env_selections_are_excluded() -> None:
     assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["_mxfp8_linear_kernel"]
 
 
-def test_non_positive_and_unparseable_deltas_are_dropped() -> None:
+def test_geaks_own_delta_never_decides_whether_a_kernel_counts() -> None:
     result = {
         "accepted_kernels": [
             _spec("regression", -1.2),
             _spec("flat", 0.0),
             _spec("unparseable", "not-a-number"),
+            {"short_name": "unstated"},
             _spec("real", 2.5),
         ]
     }
-    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["real"]
+    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == [
+        "regression",
+        "flat",
+        "unparseable",
+        "unstated",
+        "real",
+    ]
+
+
+def test_two_rows_without_a_stated_delta_are_not_twins() -> None:
+    result = {
+        "accepted_kernels": [
+            {"short_name": "cand_c0_triton", "op_kind": "gemm"},
+            {"short_name": "gemm_kernel", "op_kind": "gemm"},
+        ]
+    }
+    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["cand_c0_triton", "gemm_kernel"]
 
 
 def test_unnamed_and_non_dict_rows_are_skipped() -> None:
@@ -118,7 +136,7 @@ def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
     root.mkdir()
     (root / "sitecustomize.py").write_text("# loads\n")
     (root / "_overlay_manifest.json").write_text(json.dumps(["rebinds"]))
-    assert _geak_overlay_is_loadable(str(root)) is False
+    assert geak_overlay_is_loadable(str(root)) is False
 
 
 def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
@@ -139,7 +157,7 @@ def _phase() -> SimpleNamespace:
 
 
 def _record(phase: SimpleNamespace, result: Any, **kw: Any) -> None:
-    KernelPhase._record_geak_adopted_kernels(
+    KernelPhase.record_geak_adopted_kernels(
         phase,
         result,
         measured_tput=kw.get("measured_tput", 120.0),
@@ -228,8 +246,7 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``by_kernel`` and ``kernel_lifecycle`` read ``best_gain_pct`` from this writer and from ``_kernel_decisions.py``
-    # alike, and that one is a max.
+    # ``kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%
@@ -274,7 +291,7 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),
@@ -309,7 +326,7 @@ def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path)
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
         recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.finish(KernelExit(tput_after=120.0))
 
         _record(
             _phase(),

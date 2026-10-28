@@ -8,14 +8,15 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from ..state.round_store import RoundRequest
+from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from .generation_scan import GenerationScan
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -52,47 +53,46 @@ class EnablementRevalidation(CoordinatorCollaborator):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": ENABLEMENT_REVALIDATION_REASON,
-            "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
         benchmark_script = state.accepted_baseline_script()
         if benchmark_script:
             params["benchmark_script"] = benchmark_script
-        accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
-        probe_cfg = str(state.enablement.probe_config_path or "").strip()
-        cfg = accepted_cfg or probe_cfg
-        if cfg:
-            params["config_path"] = cfg
-        effective = state.enablement.accepted_config
-        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
-            if effective.get(key):
-                params[key] = effective[key]
-        # Carry the active runtime override so the revalidation baseline runs under the same framework runtime as the
-        # KEEP'd candidate.
-        active_rt = state.enablement.active_runtime or {}
-        if isinstance(active_rt, dict) and active_rt:
-            from .runtime.stack_actions import FrameworkRuntime
-
-            rt_obj = FrameworkRuntime.from_state(active_rt)
-            rt_override = rt_obj.to_runtime_override()
-            if rt_override:
-                params["runtime_override"] = rt_override
+        params.update(self.baseline_launch_params())
         task_id = await self._open_revalidation_row(params)
         if not task_id:
             return ""
         enablement_event.record_revalidation(
             generation=int(state.enablement.revalidation_generation or 0),
             task_id=task_id,
-            config_path=cfg,
+            config_path=params.get("config_path", ""),
         )
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
+
+    def baseline_launch_params(self) -> dict[str, Any]:
+        """The config, launch controls and framework runtime every baseline-arm launch boots under."""
+        enablement = self.shared_state.enablement
+        params: dict[str, Any] = {}
+        cfg = enablement.accepted_config_path or enablement.probe_config_path
+        if cfg:
+            params["config_path"] = cfg
+        for key in ("extra_envs", "extra_server_args", "remove_args", "unset_envs", "args_mode"):
+            if enablement.accepted_config.get(key):
+                params[key] = enablement.accepted_config[key]
+        if enablement.active_runtime:
+            from .runtime.stack_actions import FrameworkRuntime
+
+            rt_override = FrameworkRuntime.from_state(enablement.active_runtime).to_runtime_override()
+            if rt_override:
+                params["runtime_override"] = rt_override
+        return params
 
     async def _open_revalidation_row(self, params: dict[str, Any]) -> str:
         """Open this revalidation window's round, on a generation it can use.
@@ -109,8 +109,10 @@ class EnablementRevalidation(CoordinatorCollaborator):
         baseline_lanes, baseline_ttl = self._coord.dispatcher.registry_lanes_ttl("baseline")
         task_id, generation = await self._open_round_past_spent_generations(
             params=params,
-            key_for=lambda gen: f"enablement_revalidation:gen{gen}",
-            generation=int(state.enablement.revalidation_generation or 0),
+            scan=GenerationScan(
+                key_for=lambda gen: f"enablement_revalidation:gen{gen}",
+                generation=int(state.enablement.revalidation_generation or 0),
+            ),
             # Both halves of the catalogue contract: a baseline re-launches the
             # server, so it must hold the same lanes any other baseline does.
             requires_lanes=baseline_lanes,
@@ -124,22 +126,23 @@ class EnablementRevalidation(CoordinatorCollaborator):
         *,
         kind: str,
         params: dict[str, Any],
-        key_for: Callable[[int], str],
-        generation: int,
+        scan: GenerationScan,
         label: str,
-        attempts: int = 2,
         **create_kwargs: Any,
     ) -> tuple["Task | None", int]:
         """Create or re-use a task row, skipping generations already spent."""
         from ..state.task_registry import TERMINAL_STATES
 
-        for _attempt in range(max(1, attempts)):
+        generation = scan.generation
+        for _attempt in range(max(1, scan.attempts)):
             task, _existing = await self.tasks.create_or_return_existing(
-                kind=kind,
-                params=params,
-                idempotency_key=key_for(generation),
-                **create_kwargs,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind=kind,
+                    params=params,
+                    idempotency_key=scan.key_for(generation),
+                    **create_kwargs,
+                    dispatch_class="coordinator",
+                )
             )
             if str(getattr(task, "state", "") or "") not in TERMINAL_STATES:
                 return task, generation
@@ -159,11 +162,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
         self,
         *,
         params: dict[str, Any],
-        key_for: Callable[[int], str],
-        generation: int,
+        scan: GenerationScan,
         requires_lanes: list[str],
         lease_ttl_sec: int,
-        attempts: int = 2,
     ) -> tuple[str, int]:
         """Acquire a bring-up round for a baseline row, skipping spent generations.
 
@@ -178,32 +179,33 @@ class EnablementRevalidation(CoordinatorCollaborator):
 
         Args:
             params: The baseline task params.
-            key_for: Builds the idempotency key for a generation number.
-            generation: The generation to try first.
+            scan: The generations to try, from the first one.
             requires_lanes: Lanes the baseline must hold while running.
             lease_ttl_sec: The baseline's lease, and the round's first one.
-            attempts: How many generations to try before giving up this pass.
 
         Returns:
             tuple[str, int]: The holder task id and the generation it sits on,
             or ``""`` with the generation to try next. The caller persists the
             generation.
         """
-        for _attempt in range(max(1, attempts)):
-            key = key_for(generation)
+        generation = scan.generation
+        for _attempt in range(max(1, scan.attempts)):
+            key = scan.key_for(generation)
             holder = uuid.uuid4().hex
 
             def _join(cur: sqlite3.Cursor, _key: str = key, _holder: str = holder) -> None:
                 _task, existing = create_in_cursor(
                     cur,
-                    kind="baseline",
-                    params=params,
-                    idempotency_key=_key,
-                    requires_lanes=requires_lanes,
-                    lease_ttl_sec=lease_ttl_sec,
-                    task_id=_holder,
-                    dispatch_class="coordinator",
-                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                    TaskSpec(
+                        kind="baseline",
+                        params=params,
+                        idempotency_key=_key,
+                        requires_lanes=requires_lanes,
+                        lease_ttl_sec=lease_ttl_sec,
+                        task_id=_holder,
+                        dispatch_class="coordinator",
+                        dispatch_origin=task_dispatch_origin(self.shared_state),
+                    ),
                 )
                 if existing:
                     # A live row already runs this generation, under the round
@@ -213,11 +215,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             try:
                 acquired = await self.rounds.open(
                     f"revalidation-{holder}",
+                    RoundRequest(now_unix=time.time(), request_id=key, evidence={"idempotency_key": key}),
                     holder_task_id=holder,
                     lease_sec=float(lease_ttl_sec),
-                    now_unix=time.time(),
-                    request_id=key,
-                    evidence={"idempotency_key": key},
                     join=_join,
                 )
             except _RowAlreadyLive:

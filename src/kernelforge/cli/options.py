@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 import click
+
+from kernelforge.option_groups import option_group
 
 
 MIN_MAX_HOURS = 1.0  # a run shorter than this can't complete a productive campaign
@@ -33,18 +36,60 @@ CEILING_ON = "on"
 CEILING_OFF = "off"
 
 
+@dataclass(frozen=True)
+class CeilingSwitch:
+    """The ``--roofline-ceiling`` choice."""
+
+    roofline_ceiling: str
+
+    @property
+    def enabled(self) -> bool:
+        return self.roofline_ceiling == CEILING_ON
+
+
+@dataclass(frozen=True)
+class GpuOptions:
+    """The ROCm compilation architecture and the hardware SKU used in KB identities."""
+
+    gpu_target: str | None
+    gpu_type: str
+
+
+def _gpu_options(gpu_type_help: str):
+    """The ``--gpu-target`` and ``--gpu-type`` options, with the command's own wording for the SKU."""
+    return option_group(
+        "gpu",
+        GpuOptions,
+        click.option(
+            "--gpu-target",
+            default=None,
+            help="ROCm compilation architecture, e.g. gfx950 (also exported to env)",
+        ),
+        click.option(
+            "--gpu-type",
+            default=None,
+            callback=_normalize_gpu_type,
+            help=gpu_type_help,
+        ),
+    )
+
+
 def _roofline_ceiling_option(help_text: str):
     """The ``--roofline-ceiling`` switch, spelled once for every command that offers it.
 
     Off by default everywhere: an estimate costs a profiler pass and an analyst
     session, so nobody pays for one without asking.
     """
-    return click.option(
-        "--roofline-ceiling",
+    return option_group(
         "roofline_ceiling",
-        type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
-        default=CEILING_OFF,
-        help=help_text,
+        CeilingSwitch,
+        click.option(
+            "--roofline-ceiling",
+            "roofline_ceiling",
+            type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
+            default=CEILING_OFF,
+            help=help_text,
+        ),
     )
 
 
@@ -99,95 +144,98 @@ def _validate_optional_agent_provider(ctx, param, value):
     return _validate_agent_provider(ctx, param, value)
 
 
-def _agent_runtime_options(func):
-    """Attach provider-neutral Agent runtime options to one command."""
-    decorators = (
-        click.option("--model", default=None, help="Selected provider model"),
-        click.option(
-            "--agent-backend",
-            default=None,
-            callback=_validate_agent_provider,
-            help="Registered local Agent provider",
-        ),
-        click.option(
-            "--agent-cli",
-            default=None,
-            help="Provider executable path or command",
-        ),
-        click.option(
-            "--agent-timeout-sec",
-            type=click.IntRange(min=1),
-            default=None,
-            help="Timeout for one Agent session",
-        ),
-        click.option(
-            "--agent-reasoning-effort",
-            default=None,
-            help="Provider reasoning effort value",
-        ),
-        click.option(
-            "--agent-sandbox-mode",
-            default=None,
-            help="Provider sandbox mode",
-        ),
-        click.option(
-            "--agent-fallback-provider",
-            default=None,
-            callback=_validate_fallback_provider,
-            help="Fallback provider name, or 'none'",
-        ),
-        click.option(
-            "--agent-precheck/--no-agent-precheck",
-            default=None,
-            help="Enable provider preflight and capability probe",
-        ),
-        click.option(
-            "--agent-options-json",
-            default=None,
-            help="Provider extension options as a JSON object",
-        ),
-    )
-    for decorator in reversed(decorators):
-        func = decorator(func)
-    return func
+@dataclass(frozen=True)
+class AgentRuntimeOptions:
+    """Provider-neutral Agent runtime options; ``None`` leaves a setting to ``Config.from_env``."""
+
+    model: str | None
+    agent_backend: str | None
+    agent_cli: str | None
+    agent_timeout_sec: int | None
+    agent_reasoning_effort: str | None
+    agent_sandbox_mode: str | None
+    agent_fallback_provider: str | None
+    agent_precheck: bool | None
+    agent_options_json: str | None
 
 
-def _agent_runtime_overrides(
-    *,
-    model: str | None,
-    agent_backend: str | None,
-    agent_cli: str | None,
-    agent_timeout_sec: int | None,
-    agent_reasoning_effort: str | None,
-    agent_sandbox_mode: str | None,
-    agent_fallback_provider: str | None,
-    agent_precheck: bool | None,
-    agent_options_json: str | None,
-) -> dict:
+# Provider-neutral Agent runtime options, one ``AgentRuntimeOptions`` per command.
+_agent_runtime_options = option_group(
+    "agent",
+    AgentRuntimeOptions,
+    click.option("--model", default=None, help="Selected provider model"),
+    click.option(
+        "--agent-backend",
+        default=None,
+        callback=_validate_agent_provider,
+        help="Registered local Agent provider",
+    ),
+    click.option(
+        "--agent-cli",
+        default=None,
+        help="Provider executable path or command",
+    ),
+    click.option(
+        "--agent-timeout-sec",
+        type=click.IntRange(min=1),
+        default=None,
+        help="Timeout for one Agent session",
+    ),
+    click.option(
+        "--agent-reasoning-effort",
+        default=None,
+        help="Provider reasoning effort value",
+    ),
+    click.option(
+        "--agent-sandbox-mode",
+        default=None,
+        help="Provider sandbox mode",
+    ),
+    click.option(
+        "--agent-fallback-provider",
+        default=None,
+        callback=_validate_fallback_provider,
+        help="Fallback provider name, or 'none'. Under model relay it is the member preferred when the primary "
+        "cannot run, and 'none' refuses to start a session that has no profile to resume on any other member",
+    ),
+    click.option(
+        "--agent-precheck/--no-agent-precheck",
+        default=None,
+        help="Enable provider preflight and capability probe",
+    ),
+    click.option(
+        "--agent-options-json",
+        default=None,
+        help="Provider extension options as a JSON object",
+    ),
+)
+
+
+def _agent_runtime_overrides(options: AgentRuntimeOptions) -> dict:
     """Convert provider-neutral CLI values into Config overrides."""
     values = {
-        "agent_model": model,
-        "agent_backend": agent_backend,
-        "agent_cli": agent_cli,
-        "agent_timeout_sec": agent_timeout_sec,
-        "agent_reasoning_effort": agent_reasoning_effort,
-        "agent_sandbox_mode": agent_sandbox_mode,
-        "agent_fallback_provider": agent_fallback_provider,
-        "agent_precheck": agent_precheck,
+        "agent_model": options.model,
+        "agent_backend": options.agent_backend,
+        "agent_cli": options.agent_cli,
+        "agent_timeout_sec": options.agent_timeout_sec,
+        "agent_reasoning_effort": options.agent_reasoning_effort,
+        "agent_sandbox_mode": options.agent_sandbox_mode,
+        "agent_fallback_provider": options.agent_fallback_provider,
+        "agent_precheck": options.agent_precheck,
     }
     overrides = {key: value for key, value in values.items() if value is not None}
-    if agent_options_json is not None:
+    if options.agent_options_json is not None:
         try:
-            options = json.loads(agent_options_json)
+            provider_options = json.loads(options.agent_options_json)
         except json.JSONDecodeError as exc:
             raise click.BadParameter(
                 f"invalid JSON: {exc}",
                 param_hint="--agent-options-json",
             ) from exc
-        if not isinstance(options, dict):
+        if not isinstance(provider_options, dict):
             raise click.BadParameter(
                 "must be a JSON object",
                 param_hint="--agent-options-json",
             )
-        overrides["agent_options"] = options
+        overrides["agent_options"] = provider_options
     return overrides

@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     is_protected_path,
     protected_path_inventory,
 )
@@ -48,7 +48,7 @@ class WorkspaceSafetyError(AgentProviderError):
 
 def _git_output(cwd: Path, *args: str) -> str:
     """Run a read-only git query and return decoded stdout."""
-    result = git(*args, cwd=cwd, check=False, text=False)
+    result = git_bytes(*args, cwd=cwd, check=False)
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise WorkspaceSafetyError(f"git {' '.join(args)} failed: {detail}", rejection=False)
@@ -106,6 +106,14 @@ class WorkspaceGuard:
     def _guards_dirty_baseline(self) -> bool:
         """Whether this turn inherits, instead of rejecting, a dirty worktree."""
         return self.spec.read_only_resume or self.allow_dirty_baseline
+
+    def _require_read_only_tools(self) -> None:
+        """Refuse a read-only resume whose spec or tool policy would still let the agent write."""
+        policy = self.spec.tool_policy
+        if self.spec.writable or policy is None or policy.write or policy.shell:
+            raise WorkspaceSafetyError(
+                "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
+            )
 
     def _resolve_path(self, value: str) -> Path:
         """Resolve a spec path against the session working directory."""
@@ -179,26 +187,16 @@ class WorkspaceGuard:
 
         unstaged, staged, untracked = self._current_changes()
         if self.spec.read_only_resume:
-            policy = self.spec.tool_policy
-            if self.spec.writable or policy is None or policy.write or policy.shell:
-                raise WorkspaceSafetyError(
-                    "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
-                )
-        elif self._guards_dirty_baseline():
+            self._require_read_only_tools()
+        # The caller owns whether untracked state is expected: the loop writes its own experiment ledger into the
+        # workspace it hands the implementer, so every iteration would otherwise be refused for the caller's files.
+        refused_untracked = [] if self.spec.allow_untracked else untracked
+        if self._guards_dirty_baseline():
             # Nothing to validate up front: this state was inherited, not produced by the turn, and refusing it here
             # would make the phase unrunnable in the only worktrees it ever runs in. verify() judges the deviations.
             pass
         elif self.spec.allow_dirty_targets:
-            unexpected = [
-                relative for relative in unstaged if (self.root / relative).resolve() not in self.target_paths
-            ]
-            violations: list[str] = []
-            if staged:
-                violations.append(f"staged changes: {', '.join(staged)}")
-            if untracked and not self.spec.allow_untracked:
-                violations.append(f"untracked files: {', '.join(untracked)}")
-            if unexpected:
-                violations.append(f"non-target changes: {', '.join(unexpected)}")
+            violations = self._resumed_baseline_violations(unstaged, staged, refused_untracked)
             if violations:
                 raise WorkspaceSafetyError(
                     "a resumed session requires only unstaged target changes; " + "; ".join(violations)
@@ -207,12 +205,8 @@ class WorkspaceGuard:
             blocking = [
                 *(f"staged: {relative}" for relative in staged),
                 *(f"modified: {relative}" for relative in unstaged),
+                *(f"untracked: {relative}" for relative in refused_untracked),
             ]
-            # The caller owns whether untracked state is expected here, exactly as it does in the resume branch above:
-            # the loop writes its own experiment ledger into the workspace it hands the implementer, so every
-            # iteration would otherwise be refused for the caller's files.
-            if not self.spec.allow_untracked:
-                blocking.extend(f"untracked: {relative}" for relative in untracked)
             if blocking:
                 raise WorkspaceSafetyError(
                     "the workspace guard requires a clean tracked and non-ignored "
@@ -220,10 +214,9 @@ class WorkspaceGuard:
                 )
 
         for path in self.target_paths:
-            exists = path.is_file()
-            content = path.read_bytes() if exists else b""
-            mode = path.stat().st_mode & 0o777 if exists else 0
-            self.target_snapshots[path] = (exists, content, mode)
+            self.target_snapshots[path] = (
+                (True, path.read_bytes(), path.stat().st_mode & 0o777) if path.is_file() else (False, b"", 0)
+            )
 
         self.head = _git_output(self.root, "rev-parse", "HEAD").strip()
         self.branch = _git_output(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
@@ -235,6 +228,18 @@ class WorkspaceGuard:
         if self._guards_dirty_baseline():
             self._snapshot_baseline(unstaged, staged, untracked)
         self.prepared = True
+
+    def _resumed_baseline_violations(self, unstaged: list[str], staged: list[str], untracked: list[str]) -> list[str]:
+        """Describe the starting state a resumed session may not inherit: anything but unstaged target edits."""
+        unexpected = [relative for relative in unstaged if (self.root / relative).resolve() not in self.target_paths]
+        violations: list[str] = []
+        if staged:
+            violations.append(f"staged changes: {', '.join(staged)}")
+        if untracked:
+            violations.append(f"untracked files: {', '.join(untracked)}")
+        if unexpected:
+            violations.append(f"non-target changes: {', '.join(unexpected)}")
+        return violations
 
     def _unsupported_untracked(self, untracked: list[str]) -> list[str]:
         """List new paths the caller has not authorized as campaign sources."""
@@ -455,7 +460,7 @@ class WorkspaceGuard:
 
     def _run_git_restore(self, *args: str) -> None:
         """Run one repository mutation used only for exact safety recovery."""
-        result = git(*args, cwd=self.root, check=False, text=False)
+        result = git_bytes(*args, cwd=self.root, check=False)
         if result.returncode != 0:
             detail = result.stderr.decode(errors="replace").strip()
             raise WorkspaceSafetyError(
@@ -561,14 +566,19 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
+        protected_ignored = self._protected_ignored_changes()
+        if protected_ignored:
+            violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
+        return violations
+
+    def _protected_ignored_changes(self) -> list[str]:
+        """Protected ignored paths whose snapshot no longer matches, then those created since the baseline."""
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [
             str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
         ]
         new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
-        if changed_snapshots or new_protected:
-            violations.append("protected ignored files changed: " + ", ".join([*changed_snapshots, *new_protected]))
-        return violations
+        return [*changed_snapshots, *new_protected]
 
     def _read_only_state(self) -> tuple:
         """Fingerprint all Git-visible state a read-only turn must preserve."""
@@ -735,11 +745,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        current_protected = self._ignored_protected_paths()
-        changed_snapshots = [
-            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
-        ]
-        new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
+        protected_ignored = self._protected_ignored_changes()
 
         violations: list[str] = []
         if index_changed:
@@ -752,9 +758,8 @@ class WorkspaceGuard:
             violations.append(f"protected tracked files changed: {', '.join(protected_changes)}")
         if protected_untracked:
             violations.append(f"protected files created: {', '.join(protected_untracked)}")
-        if changed_snapshots or new_protected:
-            paths = [*changed_snapshots, *new_protected]
-            violations.append(f"protected ignored files changed: {', '.join(paths)}")
+        if protected_ignored:
+            violations.append(f"protected ignored files changed: {', '.join(protected_ignored)}")
         unsupported = self._unsupported_untracked(untracked)
         if unsupported:
             violations.append(f"new non-ignored files are unsupported: {', '.join(unsupported)}")

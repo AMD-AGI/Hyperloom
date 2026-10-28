@@ -8,11 +8,12 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ._subprocess_kill import run_with_session_kill
+from ._subprocess_kill import RoundWatch, run_with_session_kill
 
 log = logging.getLogger(__name__)
 
@@ -44,11 +45,11 @@ def _resolve_magpie_python(env: Mapping[str, str] | None = None) -> str:
                     "-c",
                     "import importlib.util as u, sys; sys.exit(0 if u.find_spec('Magpie') and u.find_spec('yaml') else 1)",
                 ],
-                timeout=10,
+                watch=RoundWatch(timeout=10),
                 env=probe_env,
             )
             return getattr(proc, "returncode", 1) == 0
-        except Exception:  # noqa: BLE001 - probe subprocess; absence answers False
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     env_val = resolved_env.get("MAGPIE_PYTHON", "").strip()

@@ -19,11 +19,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
+from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
+
 from ..base import (
     RenderedSection,
-    as_dict,
     critic_iterations_of,
-    dict_rows,
     md_kv_list,
     md_table,
     register_renderer,
@@ -37,15 +38,16 @@ _SUMMARY_CELL = 120
 def _iteration_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
     """One table row per pass: when it ran, where, and how it ruled."""
     rows: list[list[Any]] = []
-    for it in iterations:
+    for seq, it in enumerate(iterations, start=1):
+        said = str(it.get("summary") or "")
         rows.append(
             [
-                it.get("iter"),
+                seq,
                 it.get("phase") or "—",
                 it.get("macro_cycle"),
                 it.get("topic") or "—",
                 it.get("verdict") or "—",
-                str(it.get("summary") or "")[:_SUMMARY_CELL] or "—",
+                "—" if said == DEFAULT_IDLE_BODY else said[:_SUMMARY_CELL] or "—",
             ]
         )
     return rows
@@ -58,13 +60,13 @@ def _review_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
     still ran, and reporting either alone misreads what happened.
     """
     rows: list[list[Any]] = []
-    for it in iterations:
+    for seq, it in enumerate(iterations, start=1):
         for review in dict_rows(it.get("framework_reviews")):
             verdict = str(review.get("verdict") or "")
             effective = str(review.get("effective_verdict") or "")
             rows.append(
                 [
-                    it.get("iter"),
+                    seq,
                     review.get("proposal_msg_id") or "—",
                     review.get("variant_name") or review.get("candidate_id") or "—",
                     review.get("arm") or "—",
@@ -82,7 +84,7 @@ def _totals(iterations: list[dict[str, Any]]) -> dict[str, int]:
     """The session-wide ruling distribution, summed over every pass."""
     totals: dict[str, int] = {}
     for it in iterations:
-        counts = as_dict(it.get("verdict_counts"))
+        counts = to_mapping(it.get("verdict_counts"))
         for verdict, count in counts.items():
             try:
                 totals[str(verdict)] = totals.get(str(verdict), 0) + int(count)
@@ -93,14 +95,14 @@ def _totals(iterations: list[dict[str, Any]]) -> dict[str, int]:
 
 def _priors_facts(iterations: list[dict[str, Any]]) -> list[str]:
     """What the knowledge base contributed, when it was wired up at all."""
-    configured = [it for it in iterations if as_dict(it.get("kb_priors")).get("configured")]
+    configured = [it for it in iterations if to_mapping(it.get("kb_priors")).get("configured")]
     if not configured:
         return []
-    referenced = sum(1 for it in configured if as_dict(it.get("kb_priors")).get("referenced_in_verdict"))
+    referenced = sum(1 for it in configured if to_mapping(it.get("kb_priors")).get("referenced_in_verdict"))
     priors = 0
     for it in configured:
         try:
-            priors += int(as_dict(it.get("kb_priors")).get("prior_count") or 0)
+            priors += int(to_mapping(it.get("kb_priors")).get("prior_count") or 0)
         except (TypeError, ValueError):
             continue
     return [
@@ -125,7 +127,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         return RenderedSection(section_id="critic", title="Critic", skipped=True)
 
     totals = _totals(iterations)
-    ruling_passes = sum(1 for it in iterations if as_dict(it.get("verdict_counts")))
+    ruling_passes = sum(1 for it in iterations if to_mapping(it.get("verdict_counts")))
     facts = [
         f"The critic ran {len(iterations)} pass(es); {ruling_passes} of them ruled on at least one proposal.",
     ]
@@ -137,7 +139,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     parts: list[str] = []
     passes = md_table(
-        ["iter", "phase", "macro_cycle", "topic", "rulings", "said"],
+        ["#", "phase", "macro_cycle", "topic", "rulings", "said"],
         _iteration_rows(iterations),
     )
     if passes:
@@ -145,7 +147,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         parts.append("")
 
     reviews = md_table(
-        ["iter", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],
+        ["#", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],
         _review_rows(iterations),
     )
     if reviews:
@@ -162,7 +164,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ]
     )
     if artifacts:
-        parts.append(f"**Artifacts of the last pass** (iter {last.get('iter')})\n\n" + artifacts)
+        parts.append(f"**Artifacts of the last pass** (pass {len(iterations)})\n\n" + artifacts)
         parts.append("")
 
     return RenderedSection(

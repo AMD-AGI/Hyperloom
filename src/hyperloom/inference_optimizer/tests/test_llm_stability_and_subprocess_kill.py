@@ -16,10 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.llm_stability_env import (
-    DEFAULT_API_TIMEOUT_MS,
-    apply_llm_stability_env,
-)
+from hyperloom.common.llm_stability_env import apply_llm_stability_env
 from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _run_subprocess, _tool_label
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 
@@ -32,7 +29,6 @@ def test_apply_llm_stability_env_sets_defaults():
     # API_TIMEOUT_MS is opt-in: some clients treat it as a total request timeout that can kill a legitimate long
     # streaming response.
     assert "API_TIMEOUT_MS" not in env
-    assert DEFAULT_API_TIMEOUT_MS == "300000"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
@@ -43,12 +39,6 @@ def test_apply_llm_stability_env_respects_operator_override():
     # Must not clobber an operator-set value.
     assert env["API_TIMEOUT_MS"] == "60000"
     assert env["DISABLE_AUTOUPDATER"] == "1"
-
-
-def test_apply_llm_stability_env_custom_timeout():
-    env: dict[str, str] = {}
-    apply_llm_stability_env(env, api_timeout_ms="120000")
-    assert env["API_TIMEOUT_MS"] == "120000"
 
 
 async def test_run_subprocess_returns_output_normally():
@@ -129,7 +119,7 @@ def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, strea
             return written
 
     sink = Sink()
-    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink))
+    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink, flush=sink.flush))
     descriptor = 1 if stream_name == "stdout" else 2
     script = (
         f"import os,sys; os.write({descriptor}, b'A\\xe2'); "

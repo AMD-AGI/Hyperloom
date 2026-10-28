@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import Recipe, ValidationResult
-from kernelforge.experience_distillation import (
+from kernelforge.knowledge.experience.distillation import (
     ConstraintMemory,
     extract_signature,
     render_ledger,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
+from .campaign import _failed_campaign
 from .validate import DEFAULT_TARGET_SPEEDUP
 
 log = logging.getLogger("forge_fusion")
@@ -326,6 +327,17 @@ def _default_lesson(vr: ValidationResult) -> str:
     return "Correct but not fast enough; try a cheaper fused schedule to clear the speedup target."
 
 
+def _campaign_verdict(campaign_fn: CampaignFn, recipe: Recipe, experience: str) -> ValidationResult:
+    """The recipe's campaign verdict; a campaign that crashes costs that one recipe, not the run."""
+    try:
+        return campaign_fn(recipe, experience)
+    except FusionAbort:
+        raise
+    except Exception as e:  # isolation boundary: one recipe's campaign
+        log.exception("campaign for %s raised %s: %s", recipe.pattern_id, type(e).__name__, e)
+        return _failed_campaign(f"{type(e).__name__}: {e}").result
+
+
 def _is_better_fallback(cand: ValidationResult, best: Optional[ValidationResult]) -> bool:
     """Rank non-kept results so the loop can still report its best near-miss."""
     if best is None:
@@ -343,53 +355,25 @@ def run_fusion_loop(
     framework: str,
     campaign_fn: CampaignFn,
     config: Optional[LoopConfig] = None,
-    ledger: Optional[FusionExperienceLedger] = None,
     on_keep: Optional[OnKeepFn] = None,
 ) -> LoopResult:
     """Try each ranked recipe as one forge-loop campaign, best first."""
     cfg = config or LoopConfig()
-    ledger = ledger or FusionExperienceLedger(cfg.output_dir)
+    ledger = FusionExperienceLedger(cfg.output_dir)
 
     history: list[LoopIteration] = []
     best_result: Optional[ValidationResult] = None
     best_recipe: Optional[Recipe] = None
-    global_best_speedup: Optional[float] = None
     kept_any = False
     # Keepers accumulate as (speedup-key, patch) so they can be ordered strongest-first once the whole budget has run.
     kept_patches: list[tuple[float, RecipePatch]] = []
 
-    considered = [r for r in recipes if not getattr(r, "already_satisfied", False)]
+    considered = [r for r in recipes if not r.already_satisfied]
     for ri, recipe in enumerate(considered[: cfg.max_recipes]):
         label = f"recipe {ri + 1}/{min(len(considered), cfg.max_recipes)} ({recipe.pattern_id})"
-        best_ctx = (
-            f"best kept speedup so far = {global_best_speedup}x"
-            if global_best_speedup is not None
-            else "no kept fusion yet"
-        )
-
-        experience = ledger.render_for_prompt()
-        try:
-            vr = campaign_fn(recipe, experience)
-        except FusionAbort:
-            raise
-        except Exception as e:  # noqa: BLE001 — a campaign crash costs one recipe.
-            log.error(
-                "campaign for %s raised %s: %s",
-                recipe.pattern_id,
-                type(e).__name__,
-                e,
-            )
-            vr = ValidationResult(
-                correctness_passed=False,
-                max_abs_err=None,
-                rtol=None,
-                kernel_speedup=None,
-                eager_us=None,
-                fused_us=None,
-                kept=False,
-                note=f"CAMPAIGN FAILED: {type(e).__name__}: {e}",
-                correctness_measured=False,
-            )
+        speedups = [it.kernel_speedup for it in history if it.kernel_speedup is not None]
+        best_ctx = f"best kept speedup so far = {max(speedups)}x" if speedups else "no kept fusion yet"
+        vr = _campaign_verdict(campaign_fn, recipe, ledger.render_for_prompt())
 
         # Export + gate the keeper BEFORE recording it, so a hook that demotes the sibling (e.g. a serving-smoke
         # crash) is reflected in ``history`` and in the ``best``/``kept_any`` decisions below rather than leaving
@@ -399,8 +383,7 @@ def run_fusion_loop(
             patch = on_keep(recipe, vr)
 
         lesson = _default_lesson(vr)
-        outcome = _outcome_label(vr)
-        ledger.record(label=label, outcome=outcome, error_text=vr.note, lesson=lesson, best_so_far=best_ctx)
+        ledger.record(label=label, outcome=_outcome_label(vr), error_text=vr.note, lesson=lesson, best_so_far=best_ctx)
         history.append(
             LoopIteration(
                 recipe_index=ri,
@@ -416,27 +399,17 @@ def run_fusion_loop(
             )
         )
 
-        if vr.kernel_speedup is not None and (global_best_speedup is None or vr.kernel_speedup > global_best_speedup):
-            global_best_speedup = vr.kernel_speedup
-
+        # The strongest keeper is also the loop's reported best, so combine-path callers (which ignore patches[])
+        # still see it; a near-miss only becomes the reported best while nothing has been kept.
+        if (vr.kept or not kept_any) and _is_better_fallback(vr, best_result):
+            best_result, best_recipe = vr, recipe
+        # Do NOT early-exit on a keeper: the remaining recipes are independent siblings.
         if vr.kept:
             kept_any = True
             log.info("fusion loop KEPT at %s: speedup=%s", label, vr.kernel_speedup)
-            # The strongest keeper is also the loop's reported best, so combine-path callers (which ignore patches[])
-            # still see it.
-            if _is_better_fallback(vr, best_result):
-                best_result, best_recipe = vr, recipe
             if patch is not None:
                 # None speedup sorts weakest so a measured keeper always outranks an unmeasured one.
-                sort_key = vr.kernel_speedup if vr.kernel_speedup is not None else -1.0
-                kept_patches.append((sort_key, patch))
-            # Do NOT early-exit: the remaining recipes are independent siblings.
-            continue
-
-        # A near-miss only becomes the reported best while nothing has been kept; once any keeper exists it owns
-        # ``best``/``best_recipe``.
-        if not kept_any and _is_better_fallback(vr, best_result):
-            best_result, best_recipe = vr, recipe
+                kept_patches.append((vr.kernel_speedup if vr.kernel_speedup is not None else -1.0, patch))
 
     ledger.flush()
     kept_patches.sort(key=lambda item: item[0], reverse=True)

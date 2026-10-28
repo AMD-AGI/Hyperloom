@@ -44,6 +44,7 @@ Two rules run through everything below:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -57,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +71,11 @@ __all__ = [
     "AiperfProgressPoller",
     "KvMetricsPoller",
     "KvMetricsRecorder",
+    "KvRound",
     "KvSample",
     "canonical_label_key",
     "counter_delta",
     "families_from_aiperf_record",
-    "find_server_metrics_export",
     "parse_prometheus_text",
     "read_aiperf_server_metrics",
     "resolve_metrics_url",
@@ -265,14 +268,84 @@ def _server_metrics_exports(workspace: Any) -> list[Path]:
     return found
 
 
-def find_server_metrics_export(workspace: Any) -> Path | None:
-    """Locate the preferred aiperf server-metrics export."""
-    exports = _server_metrics_exports(workspace)
-    return exports[0] if exports else None
+def _ns(raw: Any) -> int:
+    return int(_number(raw) or 0)
 
 
-def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Rebuild scrape-like samples from AIPerf 0.12 aggregate JSON timeslices."""
+def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tuple[int, int]]]:
+    summary = payload.get("summary")
+    ranges = (summary if isinstance(summary, dict) else {}).get("phase_time_ranges") or {}
+
+    def window(name: str) -> tuple[int, int]:
+        value = ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return _ns(value.get("start_ns")), _ns(value.get("end_ns"))
+
+    blocks: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
+    warmup = payload.get("warmup_metrics")
+    if isinstance(warmup, dict):
+        blocks.append(("warmup", warmup, window("warmup")))
+    measured = payload.get("metrics")
+    if isinstance(measured, dict):
+        metrics_phase = str(payload.get("metrics_phase") or "").lower()
+        blocks.append((_CREDIT_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
+    return blocks
+
+
+def _timeslices_in_window(series: dict[str, Any], window: tuple[int, int]) -> list[dict[str, Any]]:
+    start, end = window
+    return [
+        item
+        for item in (series.get("timeslices") or [])
+        if isinstance(item, dict)
+        and (not start or _ns(item.get("end_ns")) > start)
+        and (not end or _ns(item.get("start_ns")) < end)
+    ]
+
+
+def _series_readings(
+    series: dict[str, Any], metric_type: str, window: tuple[int, int], running: float
+) -> tuple[list[tuple[int, int, float]], float]:
+    counter = metric_type == "counter"
+    slices = _timeslices_in_window(series, window)
+    rows: list[tuple[int, int, float]] = []
+    if counter and slices:
+        opening = _ns(slices[0].get("start_ns"))
+        if opening > 0:
+            # AIPerf stores per-timeslice increments. Emit the opening cumulative snapshot so
+            # phase deltas include the first interval instead of starting after it.
+            rows.append((opening, opening, running))
+    for item in slices:
+        end = _ns(item.get("end_ns"))
+        value = _number(item.get("total" if counter else "avg"))
+        if end <= 0 or value is None:
+            continue
+        if counter:
+            running += value
+            value = running
+        rows.append((_ns(item.get("start_ns")), end, value))
+    return rows, running
+
+
+def _metric_readings(
+    metric: dict[str, Any], window: tuple[int, int], name: str, cumulative: dict[tuple[str, str], float]
+) -> list[tuple[int, int, dict[str, str], float]]:
+    rows: list[tuple[int, int, dict[str, str], float]] = []
+    metric_type = str(metric.get("type") or "").lower()
+    for series in metric.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        labels = series.get("labels")
+        label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+        key = (name, canonical_label_key(label_map))
+        readings, cumulative[key] = _series_readings(series, metric_type, window, cumulative.get(key, 0.0))
+        rows += [(start, end, label_map, value) for start, end, value in readings]
+    return rows
+
+
+def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -280,89 +353,20 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
         return []
     if not isinstance(payload, dict):
         return []
-
-    phase_ranges = (
-        ((payload.get("summary") or {}).get("phase_time_ranges") or {})
-        if isinstance(payload.get("summary"), dict)
-        else {}
-    )
-
-    def bounds(name: str) -> tuple[int, int]:
-        value = phase_ranges.get(name)
-        if not isinstance(value, dict):
-            return 0, 0
-        return int(_number(value.get("start_ns")) or 0), int(_number(value.get("end_ns")) or 0)
-
-    blocks: list[tuple[str, Any, tuple[int, int]]] = []
-    warmup = payload.get("warmup_metrics")
-    if isinstance(warmup, dict):
-        blocks.append(("warmup", warmup, bounds("warmup")))
-    measured = payload.get("metrics")
-    if isinstance(measured, dict):
-        metrics_phase = str(payload.get("metrics_phase") or "").lower()
-        phase = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
-        blocks.append((phase, measured, bounds(metrics_phase)))
-
     cumulative: dict[tuple[str, str], float] = {}
-    rows: list[tuple[int, int, str, str, dict[str, str], float]] = []
-    for phase, metrics, (phase_start, phase_end) in blocks:
+    grouped: dict[tuple[int, int, str], dict[str, list[dict[str, Any]]]] = {}
+    for phase, metrics, window in _phase_blocks(payload):
         for name, metric in metrics.items():
             if not isinstance(metric, dict):
                 continue
-            metric_type = str(metric.get("type") or "").lower()
-            for series in metric.get("series") or []:
-                if not isinstance(series, dict):
-                    continue
-                labels = series.get("labels")
-                label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
-                series_key = (str(name), canonical_label_key(label_map))
-                running = cumulative.get(series_key, 0.0)
-                timeslices = [
-                    item
-                    for item in (series.get("timeslices") or [])
-                    if isinstance(item, dict)
-                    and (not phase_start or int(_number(item.get("end_ns")) or 0) > phase_start)
-                    and (not phase_end or int(_number(item.get("start_ns")) or 0) < phase_end)
-                ]
-                if metric_type == "counter" and timeslices:
-                    start = int(_number(timeslices[0].get("start_ns")) or 0)
-                    if start > 0:
-                        # AIPerf stores per-timeslice increments. Emit the
-                        # opening cumulative snapshot so phase deltas include
-                        # the first interval instead of starting after it.
-                        rows.append((start, start, phase, str(name), label_map, running))
-                for timeslice in timeslices:
-                    start = int(_number(timeslice.get("start_ns")) or 0)
-                    end = int(_number(timeslice.get("end_ns")) or 0)
-                    if end <= 0:
-                        continue
-                    if metric_type == "counter":
-                        delta = _number(timeslice.get("total"))
-                        if delta is None:
-                            continue
-                        running += delta
-                        value = running
-                    else:
-                        value = _number(timeslice.get("avg"))
-                        if value is None:
-                            continue
-                    rows.append((start, end, phase, str(name), label_map, value))
-                cumulative[series_key] = running
-
-    grouped: dict[tuple[int, int, str], ParsedFamilies] = {}
-    for start, end, phase, name, labels, value in rows:
-        grouped.setdefault((start, end, phase), {}).setdefault(name, []).append((labels, value))
+            for start, end, label_map, value in _metric_readings(metric, window, str(name), cumulative):
+                group = grouped.setdefault((start, end, phase), {})
+                group.setdefault(str(name), []).append({"labels": label_map, "value": value})
 
     out: list[tuple[KvSample, dict[str, Any], str | None]] = []
-    for (start, end, phase), families in sorted(grouped.items()):
-        families = families_from_aiperf_record(
-            {
-                name: [{"labels": labels, "value": value} for labels, value in samples]
-                for name, samples in families.items()
-            }
-        )
+    for (start, end, phase), record in sorted(grouped.items()):
         ts = end / 1e9
-        sample = sample_from_families(families, ts=ts, mono=ts)
+        sample = sample_from_families(families_from_aiperf_record(record), ts=ts, mono=ts)
         if not sample.has_readings():
             continue
         out.append(
@@ -377,11 +381,6 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
             )
         )
     return out
-
-
-def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
-    return _read_aiperf_aggregate_json(path)
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:
@@ -544,6 +543,15 @@ class KvSample:
         )
 
 
+def _outranks(candidate: dict[str, Any], best: dict[str, Any]) -> bool:
+    for metric in ("active", "physical", "used"):
+        mine, theirs = candidate.get(metric), best.get(metric)
+        if mine is None and theirs is None:
+            continue
+        return theirs is None or (mine is not None and mine > theirs)
+    return False
+
+
 def _detect_engine(families: ParsedFamilies) -> str:
     """Identify the engine from its metric-name prefix."""
     for name in families:
@@ -568,7 +576,7 @@ def sample_from_families(
     # Assemble each rank in full before choosing one. Taking a per-field max across ranks silently welds numbers from
     # different sides of the engine together: rank A's capacity against rank B's used tokens produced a physical
     # occupancy of 1.7 on two individually valid readings.
-    best: dict[str, Any] | None = None
+    best: dict[str, Any] = {}
     for key in keys:
         used = _read(families, _SGL_USED, key)
         available = _read(families, _SGL_AVAILABLE, key)
@@ -577,29 +585,23 @@ def sample_from_families(
         # Engine-reported capacity wins; the sum is a fallback for builds that do not expose it, flagged so a consumer
         # knows it may run short of the true pool size.
         capacity = _read(families, _SGL_CAPACITY_TOKENS, key)
+        evicted = evictable or 0.0
         capacity_derived = False
         if capacity is None and used is not None and available is not None:
-            capacity = used + available + (evictable or 0.0)
+            capacity = used + available + evicted
             capacity_derived = True
 
         physical: float | None = None
         if capacity and capacity > 0 and used is not None:
-            physical = (used + (evictable or 0.0)) / capacity
+            physical = (used + evicted) / capacity
 
         # ``token_usage`` is already the maximum across the full, SWA and Mamba subpools on current SGLang, so it is
         # read directly. The per-subpool gauges are only consulted when it is missing, which is what an older build
         # looks like.
         active = _read(families, _SGL_USAGE_PRIMARY, key)
-        if active is None:
-            active = max(
-                (v for n in _SGL_USAGE_FALLBACK if (v := _read(families, n, key)) is not None),
-                default=None,
-            )
-        if active is None:
-            active = max(
-                (v for n in _VLLM_USAGE if (v := _read(families, n, key)) is not None),
-                default=None,
-            )
+        for names in (_SGL_USAGE_FALLBACK, _VLLM_USAGE):
+            if active is None:
+                active = max((v for n in names if (v := _read(families, n, key)) is not None), default=None)
 
         candidate = {
             "active": active,
@@ -613,41 +615,24 @@ def sample_from_families(
         }
         # The most pressured rank is the one that will retract, so it is the one worth reporting. Fall back to physical,
         # then to having read anything.
-        if best is None:
+        if not best or _outranks(candidate, best):
             best = candidate
-            continue
-        for metric in ("active", "physical", "used"):
-            mine, theirs = candidate.get(metric), best.get(metric)
-            if mine is None and theirs is None:
-                continue
-            if theirs is None or (mine is not None and mine > theirs):
-                best = candidate
-            break
-
-    assembled = best or {}
-    used = assembled.get("used")
-    available = assembled.get("available")
-    evictable = assembled.get("evictable")
-    capacity = assembled.get("capacity")
-    capacity_derived = bool(assembled.get("capacity_derived"))
-    physical = assembled.get("physical")
-    active = assembled.get("active")
 
     return KvSample(
         ts=time.time() if ts is None else ts,
         mono=time.monotonic() if mono is None else mono,
         engine=engine,
-        active_pool_usage=active,
-        physical_pool_usage=physical,
-        used_tokens=used,
-        evictable_tokens=evictable,
-        available_tokens=available,
-        capacity_tokens=capacity,
-        capacity_derived=capacity_derived,
+        active_pool_usage=best.get("active"),
+        physical_pool_usage=best.get("physical"),
+        used_tokens=best.get("used"),
+        evictable_tokens=best.get("evictable"),
+        available_tokens=best.get("available"),
+        capacity_tokens=best.get("capacity"),
+        capacity_derived=bool(best.get("capacity_derived")),
         series_count=len(keys) if keys != [""] else 0,
         # From the rank that was assembled, not re-read: a fresh lookup would be free to land on a different rank than
         # every field above it.
-        capacity_gb=assembled.get("capacity_gb"),
+        capacity_gb=best.get("capacity_gb"),
         retract_total=_series(families, _SGL_RETRACT_TOTAL),
         preempt_total=_series(families, _VLLM_PREEMPT_TOTAL),
         prefix_cache_queries=_series(families, _VLLM_PREFIX_QUERIES),
@@ -714,10 +699,8 @@ def port_from_workspace(workspace: Any) -> int | None:
         for pattern in ("*.yaml", "*/config.yaml"):
             for candidate in sorted(root.glob(pattern)):
                 try:
-                    import yaml
-
                     payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001 - a config we cannot read is not a reason to fail a round
+                except (OSError, ValueError, yaml.YAMLError):
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -863,7 +846,7 @@ class KvMetricsPoller:
         try:
             with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
                 body = response.read().decode("utf-8", "ignore")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Both a count and a clock. On the count alone, three misses inside six seconds park the poller for the rest
             # of the round -- and an engine that has logged "ready" can still be a few seconds from accepting a request,
@@ -974,7 +957,7 @@ class AiperfProgressPoller:
         try:
             with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=self.timeout_sec) as response:
                 payload = json.loads(response.read().decode("utf-8", "ignore"))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
             # that has exited, and the timeline already collected is still the authority for this round.
@@ -995,7 +978,7 @@ KV_ARTIFACT_NAME = "kv_metrics.json"
 #: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
 #: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
 #: may enter a comparison.
-PHASES = ("boot", "warmup", "measured", "eval")
+PHASES = ("boot", "warmup", "measured", "finished", "eval")
 
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
@@ -1054,11 +1037,20 @@ def counter_delta(first: dict[str, dict[str, float]], last: dict[str, dict[str, 
     return aggregate_series(deltas) or 0.0
 
 
+@dataclass(frozen=True)
+class KvRound:
+    """The round a KV recorder collects for: where its artifact goes, its directory and the scope it records."""
+
+    output_path: str | None = None
+    workspace: Any = None
+    scope: dict[str, Any] | None = None
+
+
 class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
     Owns everything stateful about collection so the watchdog loop it hangs off keeps a single call per pass and one
-    ``finally``. Like the poller, nothing here raises: a recorder that fails must cost the round nothing.
+    ``finally``. Like the poller, a failed scrape costs the round one sample: the pollers treat connection and truncated-response errors as a miss.
 
     The phase machine is driven by markers the loop already detects, plus aiperf's own phase lines under AgentX. It is
     never inferred from elapsed time, because the boundaries move by tens of minutes between rounds -- an AgentX warmup
@@ -1069,19 +1061,21 @@ class KvMetricsRecorder:
         self,
         *,
         poller: KvMetricsPoller,
-        output_path: str | None = None,
-        scope: dict[str, Any] | None = None,
+        kv_round: KvRound = KvRound(),
         min_interval_sec: float | None = None,
         progress: AiperfProgressPoller | None = None,
-        workspace: Any = None,
     ) -> None:
         """Prepare a recorder without contacting anything."""
         self._poller = poller
-        self._output_path = output_path
+        self._output_path = kv_round.output_path
         # The round's own directory, which is where both aiperf's export and our artifacts live. Derived from the
         # output path when not given, so the two can never point at different rounds.
-        self._workspace = workspace if workspace is not None else (Path(output_path).parent if output_path else None)
-        self._scope = dict(scope or {})
+        self._workspace = (
+            kv_round.workspace
+            if kv_round.workspace is not None
+            else (Path(kv_round.output_path).parent if kv_round.output_path else None)
+        )
+        self._scope = dict(kv_round.scope or {})
         self._min_interval = resolve_scrape_interval_sec() if min_interval_sec is None else float(min_interval_sec)
         self._progress = progress
         self._phase_timeline: dict[str, dict[str, Any]] = {}
@@ -1097,8 +1091,6 @@ class KvMetricsRecorder:
         self._capacity_derived = False
         self._capacity_gb: float | None = None
         self._series_count = 0
-        self._prefix_first: dict[str, float] = {}
-        self._prefix_last: dict[str, float] = {}
         self._closed = False
 
     @property
@@ -1166,11 +1158,7 @@ class KvMetricsRecorder:
         workload = self._poll_progress()
         start_mono = time.monotonic()
         start_unix = time.time()
-        try:
-            sample = self._poller.sample()
-        except Exception:
-            log.debug("kv_metrics: sample failed", exc_info=True)
-            return None
+        sample = self._poller.sample()
         end_mono = time.monotonic()
         if sample is None:
             return None
@@ -1201,11 +1189,7 @@ class KvMetricsRecorder:
         """
         if self._progress is None:
             return None
-        try:
-            phases = self._progress.poll()
-        except Exception:
-            log.debug("kv_metrics: progress poll failed", exc_info=True)
-            return None
+        phases = self._progress.poll()
         if not phases:
             return None
         active: dict[str, Any] | None = None
@@ -1340,51 +1324,47 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            export = None
-            records = []
-            for candidate in _server_metrics_exports(self._workspace):
-                records = read_aiperf_server_metrics(candidate)
-                if records:
-                    export = candidate
-                    break
-            if export is None:
-                return None
-            # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
-            # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
-            # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
-            # timestamp lands mid-window and let it close a counter window it has no business closing.
-            covered_from = records[0][0].ts
-            covered_to = records[-1][0].ts
-            kept = [
-                r
-                for r in self._rows
-                if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
-            ]
-            # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
-            self._rows = []
-            self._first_counters = {}
-            self._last_counters = {}
-            previous_phase = self._phase
-            for sample, timing, phase in records:
-                # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
-                # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
-                # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
-                # prefix-cache delta of 34,395 describing nothing that happened.
-                self._phase = phase or "boot"
-                self._absorb(sample, timing=timing)
-            self._phase = previous_phase
-            if kept:
-                # Time order, because the counter windows below are bracketed by walking the rows in sequence.
-                self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
-            # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
-            # transition, but tags it with the phase that is ending, so without this the next phase's window would open
-            # at its first periodic sample and the increment in between would be credited to neither.
-            self._rebuild_counter_windows()
-            return str(export)
-        except Exception:
-            log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
+        export = None
+        records = []
+        for candidate in _server_metrics_exports(self._workspace):
+            records = read_aiperf_server_metrics(candidate)
+            if records:
+                export = candidate
+                break
+        if export is None:
             return None
+        # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
+        # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
+        # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
+        # timestamp lands mid-window and let it close a counter window it has no business closing.
+        covered_from = records[0][0].ts
+        covered_to = records[-1][0].ts
+        kept = [
+            r
+            for r in self._rows
+            if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
+        ]
+        # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
+        self._rows = []
+        self._first_counters = {}
+        self._last_counters = {}
+        previous_phase = self._phase
+        for sample, timing, phase in records:
+            # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
+            # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
+            # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
+            # prefix-cache delta of 34,395 describing nothing that happened.
+            self._phase = phase or "boot"
+            self._absorb(sample, timing=timing)
+        self._phase = previous_phase
+        if kept:
+            # Time order, because the counter windows below are bracketed by walking the rows in sequence.
+            self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
+        # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
+        # transition, but tags it with the phase that is ending, so without this the next phase's window would open
+        # at its first periodic sample and the increment in between would be credited to neither.
+        self._rebuild_counter_windows()
+        return str(export)
 
     def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
         """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
@@ -1495,33 +1475,29 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            from ._agentx_timeline import (
-                TIMELINE_ARTIFACT_NAME,
-                build_events,
-                correlate_rows,
-                find_profile_export,
-                parse_profile_export,
-                write_timeline,
-            )
+        from ._agentx_timeline import (
+            TIMELINE_ARTIFACT_NAME,
+            build_events,
+            correlate_rows,
+            find_profile_export,
+            parse_profile_export,
+            write_timeline,
+        )
 
-            export = find_profile_export(self._workspace)
-            if export is None:
-                return None
-            records = parse_profile_export(export)
-            if not records:
-                return None
-            events, summary = build_events(records, self._authoritative_bounds())
-            # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
-            # had to be sampled.
-            summary["rows_correlated"] = correlate_rows(self._rows, records)
-            path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
-            summary["path"] = path.name if write_timeline(path, events) else None
-            summary["source"] = str(export)
-            return summary
-        except Exception:
-            log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
+        export = find_profile_export(self._workspace)
+        if export is None:
             return None
+        records = parse_profile_export(export)
+        if not records:
+            return None
+        events, summary = build_events(records, self._authoritative_bounds())
+        # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
+        # had to be sampled.
+        summary["rows_correlated"] = correlate_rows(self._rows, records)
+        path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
+        summary["path"] = path.name if write_timeline(path, events) else None
+        summary["source"] = str(export)
+        return summary
 
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap."""
@@ -1602,7 +1578,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

@@ -61,16 +61,14 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
         return [fake]
 
     monkeypatch.setattr(sr, "default_baseline_config", lambda: str(tmp_path / "base.yaml"))
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "mat.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
     res = await sr.run_specialist_rebench(
-        config_path=None,
         output_dir=str(tmp_path / "out"),
-        base_extra_args="--kv-cache-dtype fp8_e4m3",
-        extra_envs={"E": "1"},
-        port=12321,
+        benchmark=sr.RebenchBenchmark(config_path=None),
+        server=sr.RebenchServer(base_extra_args="--kv-cache-dtype fp8_e4m3", extra_envs={"E": "1"}, port=12321),
     )
     assert res["ok"] is True
     assert res["status"] == "succeeded"
@@ -78,7 +76,7 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     assert res["port"] == 12321
     assert res["gpu_ids"] == "4,5,6,7"
     assert "w1" in res["warnings"]
-    assert seen["base_extra_args"] == "--kv-cache-dtype fp8_e4m3"
+    assert seen["recipe"].base.extra_server_args == "--kv-cache-dtype fp8_e4m3"
     assert seen["grid"][0].extra_server_args == ""
 
 
@@ -97,12 +95,11 @@ async def test_run_specialist_rebench_failed_status(tmp_path, monkeypatch) -> No
     async def _fake_run_grid(**kwargs):
         return [fake]
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "mat.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert any("rebench_failed" in w for w in res["warnings"])
@@ -113,12 +110,11 @@ async def test_run_specialist_rebench_no_result(tmp_path, monkeypatch) -> None:
     async def _fake_run_grid(**kwargs):
         return []
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "m.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert "no result" in res["error"]
@@ -129,12 +125,11 @@ async def test_run_specialist_rebench_exception_surfaced(tmp_path, monkeypatch) 
     async def _boom(**kwargs):
         raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "m.yaml")
     monkeypatch.setattr(sr, "run_grid", _boom)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert "kaboom" in res["error"]

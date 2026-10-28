@@ -22,7 +22,9 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -41,7 +43,7 @@ def _bound_session(tmp_path):
 
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext
@@ -165,8 +167,8 @@ def test_the_real_marker_lands_in_the_phase_it_was_raised_in(tmp_path):
 def test_a_transition_still_happens_when_recording_cannot(tmp_path, monkeypatch):
     state = _state(tmp_path)
 
-    def _boom(**_kwargs):
-        raise RuntimeError("spool is gone")
+    def _boom(_entry):
+        raise OSError("spool is gone")
 
     monkeypatch.setattr(phase_event, "record_entry", _boom)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="session_start")
@@ -289,7 +291,7 @@ def test_a_dispatch_does_not_run_when_recording_cannot(tmp_path, monkeypatch):
     state = _state(tmp_path)
     machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="start")
 
-    monkeypatch.setattr(phase_event, "record_dispatch", lambda **_kwargs: False)
+    monkeypatch.setattr(phase_event, "record_dispatch", lambda _dispatch: False)
     sub = _Sub(result="done")
     dispatcher = _dispatcher(tmp_path, state, sub)
 
@@ -324,10 +326,7 @@ def test_the_recorder_needs_no_knowledge_of_the_catalogue(tmp_path):
     kinds = sorted(ACTION_CATALOGUE)
     for index, kind in enumerate(kinds):
         phase_event.record_dispatch(
-            action=kind,
-            task_id=f"t-{index}",
-            phase="FRAMEWORK_AGENT",
-            macro_cycle=0,
+            ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action=kind, task_id=f"t-{index}")
         )
 
     assert _ext("FRAMEWORK_AGENT")["actions"]["kinds"] == kinds

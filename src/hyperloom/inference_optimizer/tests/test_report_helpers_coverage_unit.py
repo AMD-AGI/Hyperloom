@@ -189,12 +189,6 @@ def test_highlight_topics():
 
 
 # ---- _explain_stop_reason ----
-def test_explain_stop_reason_robustness_escalated():
-    msg = rp._explain_stop_reason("robustness_escalated")
-    assert msg
-    assert "robustness" in msg.lower()
-
-
 def test_explain_stop_reason_target_reached():
     assert "target" in rp._explain_stop_reason("target_reached").lower()
 
@@ -210,8 +204,8 @@ def test_format_md_renders_stop_explanation():
             "session_id": "s",
             "model_name": "m",
             "model_path": "/m",
-            "stop_reason": "robustness_escalated",
-            "stop_reason_explanation": "Robustness escalated: stopped early to protect validated gains.",
+            "stop_reason": "target_reached",
+            "stop_reason_explanation": "Target reached: the run stopped once the goal was met.",
             "max_minutes": 60,
             "report_generated_at": "t0",
             "framework": "sglang",
@@ -227,7 +221,7 @@ def test_format_md_renders_stop_explanation():
         }
     )
     assert "Why it stopped" in md
-    assert "Robustness escalated" in md
+    assert "Target reached" in md
 
 
 # ---- stop_reason explanation vocabulary coverage ----
@@ -282,3 +276,15 @@ def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
 def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
     md = rp._format_md(_summary_without_platform(platform={"status": "unavailable", "reason": "no host CPU sysfs"}))
     assert "not recorded — no host CPU sysfs" in md
+
+
+def test_platform_fingerprint_propagates_a_node_scope_failure(monkeypatch):
+    import pytest
+
+    def _boom():
+        raise RuntimeError("node scope unreadable")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._multi_node_env.is_multi_node", _boom)
+
+    with pytest.raises(RuntimeError, match="node scope unreadable"):
+        rp._platform_fingerprint()

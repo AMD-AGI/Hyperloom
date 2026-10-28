@@ -8,11 +8,15 @@ import pytest
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
     GRADED_INTVTY,
+    GRADED_REQUESTS_TOTAL,
     GRADED_TOTAL,
+    GRADED_UNSERVED_REQUESTS,
     INTVTY_V1,
-    agentx_enabled,
     holds_within_band,
+    incomparability_reason,
     intvty_grading_enabled,
     intvty_of,
     intvty_serving_grading_enabled,
@@ -190,7 +194,7 @@ def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
     """The corpus this grading exists for must not need an opt-in to get it."""
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert intvty_grading_enabled() is True
+    assert intvty_grading_enabled(benchmark_mode="agentx") is True
 
 
 def test_a_synthetic_run_still_grades_on_output(monkeypatch):
@@ -217,31 +221,6 @@ def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     assert intvty_grading_enabled() is False
-
-
-def test_an_unreadable_agentx_value_is_not_silently_off(monkeypatch):
-    """Grading the wrong metric for a whole run is worse than refusing to start."""
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        intvty_grading_enabled()
-
-
-def test_the_wrapper_reader_answers_by_the_same_rule_as_the_grader(monkeypatch):
-    """One variable, one vocabulary: this is the reader the workload and server-args paths ask."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "off")
-    assert agentx_enabled() is False
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        agentx_enabled()
-
-
-def test_a_grid_variant_env_is_read_by_the_same_rule(monkeypatch):
-    """A variant's environment is built before it exists as a process, so it arrives as a mapping."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    assert agentx_enabled({"HYPERLOOM_AGENTX": "1"}) is True
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        agentx_enabled({"HYPERLOOM_AGENTX": "ture"})
 
 
 # --- the persisted marker ---
@@ -348,6 +327,18 @@ def test_output_per_gpu_is_left_unstamped_without_a_chip_count():
         assert GRADED_OUTPUT_PER_GPU not in measurement, f"chips={chips!r} should leave the axis unstamped"
 
 
+def test_a_stamped_copy_carries_the_per_gpu_output_and_leaves_its_source_alone():
+    from hyperloom.common.perf_metric import with_output_per_gpu
+
+    source = {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+    assert with_output_per_gpu(source, 8) == {
+        "output_throughput": 1120.0,
+        "ttft_mean_ms": 100.0,
+        "output_tput_per_gpu": 140.0,
+    }
+    assert source == {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+
+
 def test_graded_axes_publish_the_display_figures():
     """SBD reads these through graded_axes_of, so they have to survive the projection."""
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_OUTPUT_PER_GPU, graded_axes_of
@@ -388,3 +379,67 @@ def test_the_comparability_inputs_are_published_axes():
     # Zero errors is a measured fact, not a missing one: coalescing it away would publish the clean round and the
     # unreported round as the same thing.
     assert axes[GRADED_ERROR_RATE] == 0.0
+
+
+def test_baseline_on_axis_reads_the_graded_axis_of_the_baseline_snapshot():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, baseline_on_axis
+
+    state = SimpleNamespace(baseline_tput=183.44, baseline_perf=perf_snapshot_from_mapping(_BASELINE))
+    assert baseline_on_axis(state, GRADED_INTVTY_P50) == 56.55
+    assert baseline_on_axis(state, GRADED_INTVTY) == 22.56
+
+
+def test_baseline_on_axis_reads_the_output_baseline_for_an_output_objective():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_OUTPUT, baseline_on_axis
+
+    state = SimpleNamespace(baseline_tput=183.44, baseline_perf={})
+    assert baseline_on_axis(state, GRADED_OUTPUT) == 183.44
+
+
+def test_baseline_on_axis_is_none_when_the_axis_was_not_measured():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT, baseline_on_axis
+
+    assert baseline_on_axis(SimpleNamespace(baseline_tput=183.44, baseline_perf={}), GRADED_INTVTY_P50) is None
+    assert baseline_on_axis(SimpleNamespace(baseline_tput=0.0, baseline_perf={}), GRADED_OUTPUT) is None
+
+
+# --- the extra-failed-requests guard ---
+
+_WINDOW = {GRADED_DURATION: 3600.0}
+# 1000 requests, 2 of them unserved and 18 short: the client counted 20 failed.
+_COUNTED = {**_WINDOW, GRADED_ERROR_RATE: 2.0, GRADED_UNSERVED_REQUESTS: 2.0, GRADED_REQUESTS_TOTAL: 1000.0}
+_UNCOUNTED = {**_WINDOW, GRADED_ERROR_RATE: 30.0}
+
+
+def test_the_guard_compares_unserved_rates_not_counts():
+    """A round that sent twice the requests may leave twice as many unserved at the same rate."""
+    candidate = {**_COUNTED, GRADED_UNSERVED_REQUESTS: 4.0, GRADED_REQUESTS_TOTAL: 2000.0}
+    assert incomparability_reason(candidate, _COUNTED) == ""
+    assert incomparability_reason({**candidate, GRADED_REQUESTS_TOTAL: 500.0}, _COUNTED) == "extra_failed_requests"
+
+
+def test_a_side_that_did_not_count_is_judged_on_every_failed_request():
+    """An uncounted side may have left all its failures unserved, so it is never read as having left none."""
+    assert incomparability_reason(_UNCOUNTED, _COUNTED) == "extra_failed_requests"
+    assert incomparability_reason(_COUNTED, _UNCOUNTED) == ""
+
+
+def test_a_pair_reporting_no_failures_at_all_is_not_comparable():
+    assert incomparability_reason(_WINDOW, _COUNTED) == "comparability_inputs_missing"
+    assert incomparability_reason(_COUNTED, _WINDOW) == "comparability_inputs_missing"
+
+
+def test_the_request_counts_survive_both_projections():
+    """The KEEP decision reads the snapshot, and the next anchor is the record ``graded_axes_of`` stamps."""
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    source = {**_BASELINE, **_COUNTED, GRADED_UNSERVED_REQUESTS: 0.0}
+    for projected in (perf_snapshot_from_mapping(source), graded_axes_of(source)):
+        assert projected[GRADED_UNSERVED_REQUESTS] == 0.0
+        assert projected[GRADED_REQUESTS_TOTAL] == 1000.0

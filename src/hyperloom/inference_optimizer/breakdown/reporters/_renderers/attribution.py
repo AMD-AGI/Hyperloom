@@ -7,11 +7,32 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import Decision, RenderedSection, as_dict, fmt_pct, md_table, register_renderer, validation_of
+
+from hyperloom.common.coerce import to_mapping
+
+from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer, validation_of
 
 #: Below this the residue is float noise from re-serialized throughputs, well
 #: under any measurement's own repeatability.
 _NOISE_PP = 0.01
+
+
+def _share_rows(by_source: dict[str, Any], unattributed: Any, total: Any) -> list[list[Any]]:
+    """Rows of source, claimed gain and share %, with the residue between adopted steps as a row of its own."""
+    claimed = [[source, to_mapping(bucket).get("total_gain_pct")] for source, bucket in by_source.items()]
+    if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
+        claimed.append(["unattributed (between adopted steps)", unattributed])
+    share_total = total
+    if not isinstance(share_total, (int, float)) or not share_total:
+        share_total = sum(float(gain) for _source, gain in claimed if isinstance(gain, (int, float)))
+    return [
+        [
+            source,
+            gain,
+            (float(gain) / float(share_total) * 100.0 if isinstance(gain, (int, float)) and share_total else None),
+        ]
+        for source, gain in claimed
+    ]
 
 
 @register_renderer("attribution")
@@ -32,37 +53,17 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             per-source split to show.
     """
     validation = validation_of(breakdown)
-    attribution = as_dict(validation.get("attribution"))
-    notes = [str(note) for note in validation.get("notes") or []]
-
-    claimed = [
-        [source, as_dict(bucket).get("total_gain_pct")]
-        for source, bucket in as_dict(attribution.get("by_source")).items()
-    ]
+    attribution = to_mapping(validation.get("attribution"))
     total_v = validation.get("validated_total_gain_pct")
-    unattributed = validation.get("unattributed_gain_pct")
-    if isinstance(unattributed, (int, float)) and abs(float(unattributed)) > _NOISE_PP:
-        claimed.append(["unattributed (between adopted steps)", unattributed])
-
-    share_total = total_v
-    if not isinstance(share_total, (int, float)) or not share_total:
-        share_total = sum(float(gain) for _source, gain in claimed if isinstance(gain, (int, float)))
-    rows = [
-        [
-            source,
-            gain,
-            (float(gain) / float(share_total) * 100.0 if isinstance(gain, (int, float)) and share_total else None),
-        ]
-        for source, gain in claimed
-    ]
+    rows = _share_rows(to_mapping(attribution.get("by_source")), validation.get("unattributed_gain_pct"), total_v)
 
     facts: list[str] = []
     if total_v is not None:
         facts.append(f"Validated total gain attributed: {fmt_pct(total_v, plus=True)}.")
+    has_any_split = any(r[1] not in (None, 0, 0.0) for r in rows)
     if not attribution.get("available"):
         facts.append("No stack ledger was recorded, so nothing can be attributed.")
-    has_any_split = any(r[1] not in (None, 0, 0.0) for r in rows)
-    if not has_any_split and attribution.get("available"):
+    elif not has_any_split:
         facts.append(
             "No per-source split available — the ledger holds no adoption with "
             "a measurable contribution, either because the session kept nothing "
@@ -72,30 +73,25 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         if pct in (None, 0, 0.0):
             continue
         facts.append(f"{src}: {fmt_pct(pct)} of total" + (f" ({fmt_pct(share)} share)" if share is not None else ""))
-    for n in notes:
-        facts.append(f"Note: {n}")
+    facts.extend(f"Note: {note}" for note in validation.get("notes") or [])
 
-    decisions: list[Decision] = []
-    for src, pct, _share in rows:
-        # The unattributed row is a residue, not a contributor; crediting it as a decision would put "nobody" on the
-        # leaderboard.
-        if pct and pct > 0 and not src.startswith("unattributed"):
-            decisions.append(
-                Decision(
-                    kind="kept",
-                    subject=f"attribution:{src}",
-                    metric_pct=float(pct),
-                    rationale="contributed positive validated gain",
-                )
-            )
-
-    # Only emit the table when some source is non-zero.
-    md = md_table(["source", "pct_of_total", "share_pct"], rows) if has_any_split else ""
+    # The unattributed row is a residue, not a contributor; crediting it as a decision would put "nobody" on the
+    # leaderboard.
+    decisions = [
+        Decision(
+            kind="kept",
+            subject=f"attribution:{src}",
+            metric_pct=float(pct),
+            rationale="contributed positive validated gain",
+        )
+        for src, pct, _share in rows
+        if pct and pct > 0 and not src.startswith("unattributed")
+    ]
     return RenderedSection(
         section_id="attribution",
         title="Source Attribution",
         key_facts=facts,
-        markdown_block=md,
+        markdown_block=md_table(["source", "pct_of_total", "share_pct"], rows) if has_any_split else "",
         decisions=decisions,
         warnings=[],
         skipped=not has_any_split,

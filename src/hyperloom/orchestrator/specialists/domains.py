@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from hashlib import sha1
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,17 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
+        key="speculative_decoding_specialist",
+        layer="speculative decoding: MTP / EAGLE / block drafters / draft model / n-gram",
+        kb_anchor="speculative_decoding",
+        description=(
+            "Decides whether speculative decoding (MTP, EAGLE/EAGLE-3, block "
+            "drafters, draft model, n-gram/suffix) should be on and how, for "
+            "memory-bound decode: small batch or long context, judged from "
+            "profiling and roofline evidence."
+        ),
+    ),
+    SpecialistDomain(
         key="candidate_discovery_specialist",
         layer="upstream candidate discovery / ranking / audit",
         kb_anchor="pr_intelligence",
@@ -121,7 +135,8 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="static_recon",
         default_mode="research",
         description=(
-            "Read-only static-source reconnaissance dispatched at PRELUDE. "
+            "Read-only static-source reconnaissance dispatched at PRELUDE (and "
+            "again once per macro-cycle when the config arm plateaus). "
             "Greps the framework source tree (vLLM / SGLang) for un-bridged "
             "capability switches — fast paths that should be enabled for the "
             "current (model, GPU, precision) but are silently disabled by a "
@@ -272,11 +287,41 @@ def normalize_dispatch_tags(params: dict) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
+def dispatch_domain_key(params: dict) -> str:
+    """The domain a dispatch names: its ``domain`` key, else its first knowledge-domain tag."""
+    named = str(params.get("domain") or "").strip()
+    if named:
+        return named
+    tags = normalize_dispatch_tags(params)
+    return tags[0] if tags else ""
+
+
+def dispatch_domain(params: dict) -> "SpecialistDomain | None":
+    """The catalogue entry :func:`dispatch_domain_key` resolves to, by KB anchor first and then by key."""
+    return domain_for_tag(dispatch_domain_key(params))
+
+
+def gap_backfilled_domain(params: Mapping[str, Any], find_gap: Callable[[str], Mapping[str, Any] | None]) -> str:
+    """The ``domain`` a dispatch is stored with: its own, else the ``domain_hint`` of the ledger gap it cites."""
+    named = str(params.get("domain") or "").strip()
+    if named:
+        return named
+    gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+    gap = find_gap(gap_cid) if gap_cid else None
+    return str((gap or {}).get("domain_hint") or "").strip()
+
+
 def is_custom_specialist_dispatch(params: dict) -> bool:
     """Whether a dispatch names ``custom_specialist`` as its domain or as a tag."""
     if str(params.get("domain") or "").strip() == CUSTOM_SPECIALIST_KEY:
         return True
     return CUSTOM_SPECIALIST_KEY in normalize_dispatch_tags(params)
+
+
+def custom_specialist_key(macro_cycle: int, prompt: str) -> str:
+    """Idempotency key of the one custom-specialist dispatch a macro cycle gets for this definition."""
+    digest = sha1(prompt.encode(), usedforsecurity=False).hexdigest()[:8]
+    return f"custom-c{int(macro_cycle)}-{digest}"
 
 
 def get_domain(key: str) -> SpecialistDomain | None:
@@ -328,7 +373,11 @@ __all__ = [
     "SPECIALIST_DOMAIN_KEYS",
     "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",
+    "custom_specialist_key",
+    "dispatch_domain",
+    "dispatch_domain_key",
     "domain_for_tag",
+    "gap_backfilled_domain",
     "get_domain",
     "is_custom_specialist_dispatch",
     "normalize_dispatch_tags",

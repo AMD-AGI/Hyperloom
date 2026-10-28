@@ -20,24 +20,20 @@ recipe audit log also carries KB writes and the mid-session reads from
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
 
-from .event_fields import (
-    as_dict as _as_dict,
-    bool_or_none as _bool_or_none,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
-    text_or_none as _text_or_none,
-)
+from hyperloom.common.coerce import text_or_none as _text_or_none, to_float as _float_or_none, to_mapping as _as_dict
+
+from .construct import event_header
+from .event_fields import bool_or_none as _bool_or_none, now_iso_seconds as _now
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_sink import EventSink
+from .event_timeline import EventHeader, finish_event, open_event
+from .sections import WARM_START_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +68,6 @@ MATCH_MISS = "miss"
 # ``seed_only``, a miss -- is a lookup that ran and answered, so all three are
 # ``succeeded`` and the finding is read off ``match_status``.
 STATUS_SUCCEEDED = "succeeded"
-STATUS_FAILED = "failed"
 
 #: Match statuses that mean the event should carry a ``matched`` block.
 MATCHED_STATUSES = frozenset({MATCH_HIT, MATCH_SEED_ONLY})
@@ -154,7 +149,7 @@ class WarmStartEventRecorder:
 
     def __init__(
         self,
-        sink: RecordSink,
+        sink: EventSink,
         *,
         requested_canonical_id: str,
         scope: Mapping[str, Any] | None,
@@ -168,7 +163,6 @@ class WarmStartEventRecorder:
         self._token: Token[WarmStartEventRecorder | None] | None = None
         self._reads = 0
         self._start_time = start_time
-        self._t0 = time.monotonic()
         self._request = {
             # The identity T0 actually queried. Its hardware dimension is
             # topology-aware and resolved from the runtime environment, so
@@ -185,11 +179,6 @@ class WarmStartEventRecorder:
     def event_id(self) -> str:
         """str: The event every row this recorder writes is tagged with."""
         return self._sink.event_id
-
-    @property
-    def closed(self) -> bool:
-        """bool: Whether the lookup has settled."""
-        return self._closed
 
     def next_read_ordinal(self) -> int:
         """Claim the next read's position in service order."""
@@ -224,66 +213,45 @@ class WarmStartEventRecorder:
         is what says how far it got.
         """
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"request": dict(self._request)},
         )
         self._token = _ACTIVE.set(self)
 
-    def finish(
-        self,
-        *,
-        match_status: str,
-        matched: Mapping[str, Any] | None = None,
-        error: str = "",
-        exc: BaseException | None = None,
-    ) -> None:
+    def finish(self, *, match_status: str, matched: Mapping[str, Any] | None = None) -> None:
         """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        ``exc`` (or ``error`` as a bare class name) carries the exception when
-        the lookup itself failed, which is not the same as having looked and
-        found nothing. The failure block is the canonical
-        ``{stage, error_class, message}`` shape every other event uses.
+        A miss is ``succeeded``: the KB was asked and it answered. A lookup
+        that raised never reaches here and leaves its event open.
         """
         if self._closed:
             return
         self._closed = True
         self._release()
         end_time = _now()
-        found = str(match_status or "").strip().lower()
-        failed = exc is not None or bool(error)
-        status = _status_for(found, error="failed" if failed else "")
         payload: dict[str, Any] = {
-            "status": status,
-            "match_status": found,
+            "status": STATUS_SUCCEEDED,
+            "match_status": str(match_status or "").strip().lower(),
             "end_time": end_time,
-            "duration_sec": round(time.monotonic() - self._t0, 3),
         }
         if matched:
             payload["matched"] = dict(matched)
-        if exc is not None:
-            payload["failure"] = _failure_row(stage="lookup", exc=exc)
-        elif error:
-            payload["failure"] = _failure_row(stage="lookup", error_class=str(error))
         self._sink.record(SECTION_EVENT, payload)
 
-        from .assembler import warm_start_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_warm_start_ext(
+                event_parts(WARM_START_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
-                status=derived or status,
+                status=derived or STATUS_SUCCEEDED,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:
@@ -298,14 +266,6 @@ class WarmStartEventRecorder:
             _ACTIVE.reset(token)
         except ValueError:
             _ACTIVE.set(None)
-
-
-def _status_for(match_status: str, *, error: str = "") -> str:
-    """The lookup's own outcome, which is independent of what it found.
-
-    A miss is ``succeeded``: the KB was asked and it answered.
-    """
-    return STATUS_FAILED if error else STATUS_SUCCEEDED
 
 
 def make_warm_start_recorder(
@@ -325,7 +285,7 @@ def make_warm_start_recorder(
     if decline_unbound("warm_start"):
         return None
     recorder = WarmStartEventRecorder(
-        make_sink(warm_start_event_id(macro_cycle), producer=PRODUCER),
+        EventSink(warm_start_event_id(macro_cycle), producer=PRODUCER),
         requested_canonical_id=requested_canonical_id,
         scope=scope,
         start_time=start_time or _now(),
@@ -346,8 +306,7 @@ def assemble_warm_start_ext(
     other than ``event`` are ignored. The returned status is empty when no
     write has closed the event, which leaves the caller's own reading standing.
     """
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
     reads = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_READ) or [], event), keys=("ordinal", "ts")),
         drop=("event_id", "ordinal"),
@@ -389,24 +348,25 @@ def _reads_block(reads: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 def matched_block(
     *,
-    tier: str,
-    confidence: Any,
-    source: str,
-    canonical_id: str,
+    match: Mapping[str, Any],
     recipe: Mapping[str, Any] | None,
+    experience: Mapping[str, Any],
     expected_gain_pct: Any = None,
-    lessons: Any = None,
-    pitfalls: Any = None,
 ) -> dict[str, Any]:
-    """Build the ``matched`` block from the record T0 anchored on."""
+    """Build the ``matched`` block from the record T0 anchored on.
+
+    ``match`` is the lookup context's ``match`` block; ``experience`` carries the
+    ``lessons`` and ``pitfalls`` T0 published beside it.
+    """
     row = _as_dict(recipe)
-    tier_text = str(tier or "").strip()
+    lessons, pitfalls = experience["lessons"], experience["pitfalls"]
+    tier_text = str(match.get("tier") or "").strip()
     block: dict[str, Any] = {
         "match_type": _EXACT_TIER if tier_text.lower() == _EXACT_TIER else "degraded",
         "tier": tier_text,
-        "confidence": _float_or_none(confidence),
-        "source": str(source or ""),
-        "canonical_id": str(canonical_id or ""),
+        "confidence": _float_or_none(match.get("confidence")),
+        "source": str(match.get("source") or ""),
+        "canonical_id": str(match.get("canonical_id") or ""),
         "optimized_throughput": _float_or_none(row.get("best_throughput")),
         "validated_gain_pct": _float_or_none(row.get("validated_gain_pct")),
         "expected_gain_pct": _float_or_none(expected_gain_pct),
@@ -451,7 +411,6 @@ __all__ = [
     "PRODUCER",
     "SECTION_EVENT",
     "SECTION_READ",
-    "STATUS_FAILED",
     "STATUS_SUCCEEDED",
     "WarmStartEventRecorder",
     "assemble_warm_start_ext",

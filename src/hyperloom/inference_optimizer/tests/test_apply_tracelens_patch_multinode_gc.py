@@ -217,8 +217,8 @@ def test_infera_forwards_patch_set(monkeypatch):
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     op_args: list[str] = []
 
-    def _ssh(st, ip, script, python, args, **kw):
-        op_args.append(args)
+    def _ssh(st, ip, script, **kw):
+        op_args.append(script.args)
         stdout = '{"status":"applied","per_pod":[{"status":"applied"}]}'
         return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
@@ -248,14 +248,15 @@ def _fan_out_calls(monkeypatch, tmp_path: Path, *, patch_set: str, torch_profile
     calls: list[str] = []
     monkeypatch.setattr(cli, "cmd_apply_tracelens_patch", lambda ns: calls.append(ns.patch_set) or 0)
 
-    def _stop() -> int:
+    def _stop(*_args: object) -> tuple[int, int]:
         raise _StopAfterFanOut
 
-    monkeypatch.setattr(cli, "_resolve_poll_timeout_s", _stop)
+    monkeypatch.setattr(lifecycle, "_health_wait_budget", _stop)
     with pytest.raises(Exception) as excinfo:
         asyncio.run(
             lifecycle.restart_server_for_round(
-                framework="sglang", model_path="/m", tp=8, ep=1, torch_profiler_dir=torch_profiler_dir
+                lifecycle.RoundServer(framework="sglang", model_path="/m", tp=8, ep=1),
+                torch_profiler_dir=torch_profiler_dir,
             )
         )
     chain, exc = [], excinfo.value
@@ -296,10 +297,7 @@ def test_a_failed_restart_restores_the_round_env(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         asyncio.run(
             lifecycle.restart_server_for_round(
-                framework="sglang",
-                model_path="/m",
-                tp=8,
-                ep=1,
+                lifecycle.RoundServer(framework="sglang", model_path="/m", tp=8, ep=1),
                 torch_profiler_dir=str(tmp_path / "trace"),
                 extra_env={"HYPERLOOM_TEST_FWD": "1"},
                 unset_env=["HYPERLOOM_TEST_DROP"],

@@ -54,12 +54,6 @@ def add_llm_request_observer(observer: LLMRequestObserver) -> None:
         _OBSERVERS.append(observer)
 
 
-def remove_llm_request_observer(observer: LLMRequestObserver) -> None:
-    """Drop ``observer`` if registered."""
-    if observer in _OBSERVERS:
-        _OBSERVERS.remove(observer)
-
-
 def _notify(record: LLMRequestRecord) -> None:
     for observer in tuple(_OBSERVERS):
         try:
@@ -77,7 +71,6 @@ class RequestObservation:
     operation: str
     model: str | None
     streamed: bool
-    clock: Callable[[], float] = time.time
     start: float = 0.0
     first_token: float | None = None
     response_id: str | None = None
@@ -86,7 +79,7 @@ class RequestObservation:
 
     def mark_first_token(self) -> None:
         if self.first_token is None:
-            self.first_token = self.clock()
+            self.first_token = time.time()
 
     def update(
         self,
@@ -114,7 +107,7 @@ class RequestObservation:
             model=self.model,
             response_id=self.response_id,
             start=self.start,
-            end=self.clock(),
+            end=time.time(),
             first_token=self.first_token,
             stop_reason=self.stop_reason,
             usage=dict(self.usage),
@@ -144,7 +137,7 @@ def observed_request(
     if not _OBSERVERS:
         yield observation
         return
-    observation.start = observation.clock()
+    observation.start = time.time()
     try:
         yield observation
     except BaseException as exc:
@@ -161,5 +154,4 @@ __all__ = [
     "RequestObservation",
     "add_llm_request_observer",
     "observed_request",
-    "remove_llm_request_observer",
 ]

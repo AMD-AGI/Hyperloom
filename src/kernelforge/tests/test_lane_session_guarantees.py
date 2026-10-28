@@ -29,6 +29,7 @@ import click
 import pytest
 
 import kernelforge.loop.insession_gate as gate_module
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -39,6 +40,7 @@ from kernelforge.agent_backends.registry import AgentProvider, register_agent_pr
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.loop import fanout
+from kernelforge.evaluation.scoring import GateScoring
 
 
 @pytest.fixture(autouse=True)
@@ -99,13 +101,15 @@ def _lane_factory(tmp_path: Path):
     return cli_lanes._make_lane_agent_factory(
         make_agent=agent_module.make_agent_fn,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={
-            "program_md": "Optimize VALUE.",
-            "agent_backend": "claude",
-        },
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            session=agent_module.SessionOptions(agent_backend="claude"),
+        ),
     )
 
 
@@ -126,6 +130,75 @@ def _run_lane_session(
 
     assert len(specs) == 1
     return specs[0], lane_dir
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_every_lane_round_releases_the_backend_it_built(tmp_path, monkeypatch, fails):
+    """Each round builds a fresh backend per lane, so nothing but the lane can release it.
+
+    The DeepSeek backend keeps one harness process per workspace for resumes. A
+    lane session is never resumed once it returns, and the next round builds a
+    new backend that cannot see the old one's processes.
+    """
+    backends = []
+
+    class Backend:
+        """Stand in for a provider that holds a process between sessions."""
+
+        name = "claude"
+        capabilities = AgentCapabilities(resumable=True, stop_hooks=True)
+
+        def __init__(self, runtime):
+            self.runtime = runtime
+            self.closed = False
+            backends.append(self)
+
+        async def run(self, spec: AgentRunSpec, usage=None) -> AgentRunResult:
+            """Answer, or fail the way a lost provider does."""
+            if fails:
+                raise RuntimeError("provider lost")
+            return AgentRunResult(text="PLAN: tune it")
+
+        def close(self) -> None:
+            """Record the release."""
+            self.closed = True
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", lambda runtime, **_kwargs: Backend(runtime))
+    factory = _lane_factory(tmp_path)
+
+    for round_number in (1, 2):
+        lane_dir = _tree(tmp_path / f"round{round_number}" / "1")
+        session = factory(str(lane_dir), None)
+        if fails:
+            with pytest.raises(RuntimeError):
+                asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
+        else:
+            asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
+
+    assert len(backends) == 2
+    assert all(backend.closed for backend in backends)
+
+
+def test_a_lane_session_is_given_no_extra_directory(tmp_path, monkeypatch):
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
+
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
+    assert "reasoning log" not in spec.system_prompt.lower()
+
+
+def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeypatch):
+    """The lesson turn resumes the lane session, so the sink has to reach the agent that names it."""
+    _record_backend_specs(monkeypatch)
+    lane_dir = _tree(tmp_path / "lanes" / "1")
+    session = _lane_factory(tmp_path)(str(lane_dir), None)
+    sink: dict = {}
+
+    asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 2", session_sink=sink))
+
+    assert sink["session_started"] is True
+    assert sink["end_reason"]
+    assert "progress_log" in sink
 
 
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
@@ -370,28 +443,32 @@ def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(tmp_path, monke
 
 
 def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """Pin the single-session path: it self-corrects, and that has not changed."""
+    """Pin the single-session path: it self-corrects against the scoring it was handed, and that has not changed."""
     specs = _record_backend_specs(monkeypatch)
     workspace = _tree(tmp_path / "workspace")
 
     agent_fn = agent_module.make_agent_fn(
-        config=Config(
+        Config(
             workspace=str(workspace),
             agent_backend="claude",
             agent_model="claude-test",
             agent_precheck=False,
         ),
-        program_md="Optimize VALUE.",
-        agent_backend="claude",
-        insession_gate=True,
-        driver_script=str(workspace / "forge_driver.py"),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(workspace / "forge_driver.py")),
+            session=agent_module.SessionOptions(agent_backend="claude", insession_gate=True),
+        ),
     )
-    asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), ""))
+    asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), "", gate_scoring=GateScoring({"case": 2.0}, 1.25)))
 
     spec = specs[0]
     assert spec.hooks is not None
     assert len(spec.hooks.stop) == 1
     assert "ONE self-correcting session" in spec.system_prompt
+    gate = spec.hooks.stop[0].callback.__self__
+    assert (gate.baseline_case_times, gate.best_mean_case_speedup) == ({"case": 2.0}, 1.25)
+    assert "Current best pristine-relative score: 1.25." in spec.system_prompt
 
 
 @pytest.mark.parametrize("stop_check", [True, False])
@@ -399,9 +476,8 @@ def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
     """Neither mode may re-derive what counts as the measurement surface."""
     workspace = _tree(tmp_path / "workspace")
     gate = gate_module.InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(workspace / "src" / "kernel.py"),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
     )
 
     hooks = gate.make_agent_hooks(stop_check=stop_check)

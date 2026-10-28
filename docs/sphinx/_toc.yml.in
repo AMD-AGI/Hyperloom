@@ -7,6 +7,8 @@ subtrees:
 - entries:
   - file: what-is-hyperloom.md
     title: What is Hyperloom?
+  - file: upstream-results.md
+    title: Upstream optimizations merged into vLLM and SGLang
   - file: release-notes.md
     title: Release notes
   - file: compatibility.rst
@@ -75,6 +77,8 @@ subtrees:
     title: Operator scripts
   - file: reference/multi-node.md
     title: Multi-node inference optimization
+  - file: reference/primatune-predictor.md
+    title: PrimaTune predictor
   - file: reference/troubleshooting.md
     title: Troubleshooting
 

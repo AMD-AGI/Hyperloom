@@ -39,7 +39,7 @@ patch *files*; this action produces *outcomes*.
 | `specialist_task_id` | string   | yes      | Task id of the specialist whose worktree carries the patches. |
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
-| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput; defaults to the session's decaying per-cycle bar (read from `SharedState`). |
+| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput. The session's decaying per-cycle bar (read from `SharedState`) is the floor: a higher finite value raises the bar, anything lower or non-numeric is replaced by it. |
 | `accuracy_baseline`  | float    | no       | Baseline accuracy score (0-1). Backfilled from `SharedState.baseline_accuracy` when omitted; `<= 0` skips the gate. |
 
 ## EMIT format
@@ -66,7 +66,9 @@ delegate{
    cleanly. A patch that does not apply, and is not already in the tree,
    is REVERT-immediate (record `apply_failed`); a failed apply leaves the
    tree untouched, and the revert resets it to the HEAD recorded before
-   the attempt.
+   the attempt. When every patch is already in the tree and the task
+   changes nothing else, the action ends `already_present` here: no
+   restart, no benchmark.
 4. Layer `config_changes` onto the server-launch env.
 5. Stop the server this session launched, by the pid and process group it
    recorded; wait for VRAM to drain. No pattern-based kill runs.
@@ -88,7 +90,7 @@ delegate{
 
 ```
 {
-  "status":          "kept" | "reverted" | "apply_failed",
+  "status":          "kept" | "reverted" | "apply_failed" | "already_present",
   "output_throughput": <float | null>,
   "delta_pct":         <float | null>,
   "accuracy_pass":   <bool | null>,
@@ -112,6 +114,7 @@ hash and `optimization_stack` is the authoritative ledger.
 | Symptom | Cause | Mitigation |
 |---|---|---|
 | `git apply` rejects | base HEAD drifted under specialist | reject patch, record `apply_failed`, REVERT path |
+| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` when the candidate carries an upstream PR identity |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
 | accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |
 | throughput unchanged within keep_threshold | no-op patch | REVERT, log low-confidence specialist for the gap |

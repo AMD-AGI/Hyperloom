@@ -50,6 +50,7 @@ import logging
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,9 +61,9 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
-from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport
-from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle
+from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle, KnownCases, PerformanceRun
 from kernelforge.roofline_ceiling.report import (
     DOCUMENT_FILENAME,
     EVIDENCE_DIRNAME,
@@ -95,22 +96,33 @@ class CeilingAnalysisError(RuntimeError):
     """Raised when no readable ceiling file with a derivation beside it could be obtained."""
 
 
+@dataclass(frozen=True)
+class AnalystSession:
+    """The model, wall-clock budget and turn cap of one analyst session."""
+
+    model: str = ""
+    timeout_sec: int = 3600
+    turns: int = DEFAULT_ANALYST_TURNS
+
+
+@dataclass(frozen=True)
+class CeilingTask:
+    """The kernel a ceiling is estimated for: how it is run, what it is made of, and what is known about it."""
+
+    run: PerformanceRun
+    kernel_files: Sequence[str]
+    driver_script: str = ""
+    case_params: Mapping[str, Any] | None = None
+    arch: str = ""
+    known: KnownCases | None = None
+
+
 def load_role(project_root: str | Path | None = None) -> str:
     """Read the analyst role document shipped with the package."""
     return (resource_path("roofline_ceiling", project_root) / ROLE_FILENAME).read_text(encoding="utf-8")
 
 
-def build_request(
-    *,
-    kernel_files: Sequence[str],
-    driver_script: str,
-    performance_command: Sequence[str],
-    case_ids: Sequence[str],
-    case_params: Mapping[str, Any],
-    evidence: EvidenceBundle,
-    output_dir: str,
-    tools_dir: str,
-) -> str:
+def build_request(task: CeilingTask, evidence: EvidenceBundle, output_dir: str, tools_dir: str) -> str:
     """Build the analyst's request payload.
 
     It states the machine rather than its roofs, because establishing those is
@@ -141,11 +153,11 @@ def build_request(
                 "shape, and every assumption."
             ),
         },
-        "kernel_files": list(kernel_files),
-        "driver_script": driver_script,
-        "performance_command": list(performance_command),
-        "scored_case_ids": list(case_ids),
-        "case_parameters": dict(case_params),
+        "kernel_files": list(task.kernel_files),
+        "driver_script": task.driver_script,
+        "performance_command": list(task.run.command),
+        "scored_case_ids": list(evidence.scored_case_ids),
+        "case_parameters": dict(task.case_params or {}),
         "machine": device.describe(),
         "evidence_dir": str(evidence.artifacts_dir),
         "evidence_files": evidence.artifact_paths(),
@@ -202,30 +214,27 @@ def _writable_only_within(directories: Sequence[str]) -> AgentHooks:
 
 def _spec(
     *,
-    system_prompt: str,
     user_prompt: str,
     workdir: str,
-    model: str,
-    timeout_sec: int,
+    session: AnalystSession,
     writable_dirs: Sequence[str],
     protected_paths: Sequence[str],
-    turns: int,
 ) -> AgentRunSpec:
     """One analyst session: reads the workspace, writes only where it is told."""
     return AgentRunSpec(
-        system_prompt=system_prompt,
+        system_prompt=load_role(),
         user_prompt=user_prompt,
         role="ceiling analyst",
         cwd=workdir,
-        model=model,
+        model=session.model,
         writable=True,
-        timeout_sec=max(1, int(timeout_sec)),
+        timeout_sec=max(1, int(session.timeout_sec)),
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
             write=True,
             shell=True,
-            max_turns=turns,
+            max_turns=session.turns,
         ),
         # Two lines, because a shell gets past the first: the hook refuses the
         # editing tools outside the output directories, and the workspace guard
@@ -312,53 +321,31 @@ def _move_into_place(scratch: Path, destination: Path) -> None:
 
 async def run_ceiling_analysis(
     backend: Any,
-    *,
-    workdir: str,
-    output_dir: str | Path,
-    kernel_files: Sequence[str],
-    driver_script: str,
-    performance_command: Sequence[str],
-    case_ids: Sequence[str],
-    case_params: Mapping[str, Any],
+    task: CeilingTask,
     evidence: EvidenceBundle,
-    model: str = "",
-    timeout_sec: int = 3600,
-    turns: int = DEFAULT_ANALYST_TURNS,
-    project_root: str | Path | None = None,
+    output_dir: str | Path,
+    session: AnalystSession = AnalystSession(),
 ) -> CeilingReport:
     """Run the analyst until it leaves a readable ceiling and its derivation, or give up."""
     destination = Path(output_dir)
-    system_prompt = load_role(project_root)
     scratch = Path(tempfile.mkdtemp(prefix="forge_ceiling_"))
     tools = Path(tempfile.mkdtemp(prefix="forge_ceiling_tools_"))
     report_path = scratch / REPORT_FILENAME
     document_path = scratch / DOCUMENT_FILENAME
 
     try:
-        attempt_prompt = build_request(
-            kernel_files=kernel_files,
-            driver_script=driver_script,
-            performance_command=performance_command,
-            case_ids=case_ids,
-            case_params=case_params,
-            evidence=evidence,
-            output_dir=str(scratch),
-            tools_dir=str(tools),
-        )
+        attempt_prompt = build_request(task, evidence, str(scratch), str(tools))
 
         last_problem = ""
         for attempt in range(MAX_REPAIR_ROUNDS + 1):
             await _ask(
                 backend,
                 _spec(
-                    system_prompt=system_prompt,
                     user_prompt=attempt_prompt,
-                    workdir=workdir,
-                    model=model,
-                    timeout_sec=timeout_sec,
+                    workdir=str(Path(task.run.workdir)),
+                    session=session,
                     writable_dirs=[str(scratch), str(tools)],
-                    protected_paths=[*kernel_files, driver_script],
-                    turns=turns,
+                    protected_paths=[*task.kernel_files, task.driver_script],
                 ),
             )
             report_problem = ""
@@ -394,7 +381,9 @@ __all__ = [
     "DEFAULT_ANALYST_TURNS",
     "MAX_REPAIR_ROUNDS",
     "ROLE_FILENAME",
+    "AnalystSession",
     "CeilingAnalysisError",
+    "CeilingTask",
     "build_request",
     "load_role",
     "run_ceiling_analysis",

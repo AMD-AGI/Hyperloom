@@ -96,7 +96,6 @@ class EnablementRound:
     # Off-loop targeted-build state.
     build_manifest: list = field(default_factory=list)
     last_build_failure: dict = field(default_factory=dict)
-    build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.

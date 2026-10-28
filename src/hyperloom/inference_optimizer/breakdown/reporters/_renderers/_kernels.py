@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import as_dict, dict_rows, events_of
+from hyperloom.common.coerce import dict_rows, to_mapping
+
+from ..base import events_of
 
 __all__ = [
     "FORGE_SOURCES",
@@ -38,6 +40,10 @@ GEAK_SOURCES = ("geak_authored_kernel", "geak_env_selection")
 #: Attempt outcomes that say the candidate was ruled against rather than left
 #: unsettled. ``needs_review`` is deliberately absent: nothing concluded.
 _REJECTED_OUTCOMES = frozenset({"rejected", "failed"})
+
+#: Kernel-row verdicts the integrate gate or an attempt's own end-to-end ruling can set.
+_ATTEMPTED = "attempted"
+_REVERTED = "reverted"
 
 #: The counters ``source_counters`` reports. ``e2e_gain_pct`` is a maximum
 #: rather than a sum and is handled separately.
@@ -62,7 +68,7 @@ def _visits(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     Returns:
         list[dict[str, Any]]: One entry per ``kernel`` event.
     """
-    return [as_dict(event.get("ext")) for event in events_of(breakdown, "kernel")]
+    return [to_mapping(event.get("ext")) for event in events_of(breakdown, "kernel")]
 
 
 def _best(current: Any, candidate: Any) -> float | None:
@@ -73,6 +79,11 @@ def _best(current: Any, candidate: Any) -> float | None:
     """
     values = [float(v) for v in (current, candidate) if isinstance(v, (int, float))]
     return max(values) if values else None
+
+
+def _measured_speedup(value: Any) -> Any:
+    """``value`` when it is a speedup a run measured; an unmeasured attempt carries ``0.0``."""
+    return value if isinstance(value, (int, float)) and value > 0 else None
 
 
 def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
@@ -104,20 +115,19 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
             continue
         totals["attempted"] += 1
         outcome = str(row.get("outcome") or "")
-        if outcome in totals:
-            totals[outcome] += 1
-        e2e = as_dict(row.get("e2e"))
+        e2e = to_mapping(row.get("e2e"))
         decision = str(e2e.get("decision") or "").upper()
-        if decision == "KEEP":
-            totals["keeps"] += 1
-        elif decision:
+        if decision == "REVERT":
+            # A revoked keep is a revert whatever outcome the rebench settled on.
             totals["reverts"] += 1
         elif outcome == "adopted":
-            # Kept without the end-to-end gate ever ruling: either a rebench
-            # promoted it, or a forge lane kept it and the gate runs after the
-            # visit that produced it.
-            totals["micro_only_keeps"] += 1
-        totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
+            # Without an end-to-end ruling the keep is micro-only: a rebench
+            # promoted it, or a forge lane kept it ahead of the integrate gate.
+            totals["keeps" if decision else "micro_only_keeps"] += 1
+            totals["adopted"] += 1
+            totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
+        elif outcome in totals:
+            totals[outcome] += 1
     return totals
 
 
@@ -158,7 +168,7 @@ def _fold_discovered(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> No
         rows (dict[str, dict[str, Any]]): The rollup, updated in place.
         ext (dict[str, Any]): One kernel visit's ``ext``.
     """
-    for entry in dict_rows(as_dict(ext.get("forge")).get("discovered_kernels")):
+    for entry in dict_rows(to_mapping(ext.get("forge")).get("discovered_kernels")):
         kernel_id = str(entry.get("kernel_id") or "")
         if not kernel_id:
             continue
@@ -197,15 +207,18 @@ def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None
         row["selected_for_optimization"] = True
         summary = row.get(lane) or {"attempts": 0, "best_speedup": None, "decision": ""}
         summary["attempts"] = int(summary["attempts"]) + 1
-        summary["best_speedup"] = _best(summary["best_speedup"], entry.get("speedup"))
-        decision = str(as_dict(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
+        summary["best_speedup"] = _best(summary["best_speedup"], _measured_speedup(entry.get("speedup")))
+        decision = str(to_mapping(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
         if decision:
             summary["decision"] = decision
         row[lane] = summary
-        if str(entry.get("outcome") or "") in _REJECTED_OUTCOMES and row["final_decision"] == "not_optimized":
+        revoked = str(to_mapping(entry.get("e2e")).get("decision") or "").upper() == "REVERT"
+        if revoked and row["final_decision"] in {"not_optimized", _ATTEMPTED, "rejected"}:
+            row["final_decision"] = _REVERTED
+        elif str(entry.get("outcome") or "") in _REJECTED_OUTCOMES and row["final_decision"] == "not_optimized":
             row["final_decision"] = "rejected"
         elif row["final_decision"] == "not_optimized":
-            row["final_decision"] = "attempted"
+            row["final_decision"] = _ATTEMPTED
 
 
 def _fold_integrate(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None:
@@ -224,7 +237,7 @@ def _fold_integrate(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> Non
         if not kernel_id or not decision:
             continue
         row = _seed(rows, kernel_id)
-        row["final_decision"] = "kept" if decision == "KEEP" else "reverted"
+        row["final_decision"] = "kept" if decision == "KEEP" else _REVERTED
 
 
 def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
@@ -239,7 +252,7 @@ def _fold_adopted_by(rows: dict[str, dict[str, Any]]) -> None:
         rows (dict[str, dict[str, Any]]): The rollup, updated in place.
     """
     for row in rows.values():
-        if row["final_decision"] not in {"kept", "reverted"}:
+        if row["final_decision"] not in {"kept", _REVERTED}:
             continue
         touched = [lane for lane in ("geak", "forge") if row.get(lane)]
         if touched:

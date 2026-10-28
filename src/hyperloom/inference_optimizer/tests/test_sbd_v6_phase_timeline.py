@@ -17,8 +17,21 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
+    ActionDispatch,
+    ActionSettlement,
+    PhaseCycle,
+    PhaseDenial,
+    PhaseEntry,
+    PhaseExit,
+    PhaseMarker,
+    PhaseProposal,
+    ProposalOutcome,
+    ProposalReview,
+)
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 
@@ -33,7 +46,7 @@ def _bound_session(tmp_path):
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     """Assemble one phase event's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext
@@ -41,7 +54,7 @@ def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
 
 def _status(phase: str, macro_cycle: int = 0) -> str:
     _ext_, status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return status
@@ -53,24 +66,26 @@ def _events(session_dir: Path) -> list[dict[str, Any]]:
 
 def _enter(phase: str, *, sequence: int, cycle: int = 0, at: float, from_phase: str = "", reason: str = "") -> None:
     phase_event.record_entry(
-        phase=phase,
-        macro_cycle=cycle,
-        sequence=sequence,
-        from_phase=from_phase,
-        reason=reason,
-        entered_at=f"2026-01-01T00:00:{int(at):02d}+00:00",
-        entered_unix=at,
+        PhaseEntry(
+            at=PhaseCycle(phase, cycle),
+            sequence=sequence,
+            from_phase=from_phase,
+            reason=reason,
+            entered_at=f"2026-01-01T00:00:{int(at):02d}+00:00",
+            entered_unix=at,
+        )
     )
 
 
 def _exit(phase: str, *, cycle: int = 0, at: float, to_phase: str = "", reason: str = "") -> None:
     phase_event.record_exit(
-        phase=phase,
-        macro_cycle=cycle,
-        to_phase=to_phase,
-        reason=reason,
-        exited_at=f"2026-01-01T00:00:{int(at):02d}+00:00",
-        exited_unix=at,
+        PhaseExit(
+            at=PhaseCycle(phase, cycle),
+            to_phase=to_phase,
+            reason=reason,
+            exited_at=f"2026-01-01T00:00:{int(at):02d}+00:00",
+            exited_unix=at,
+        )
     )
 
 
@@ -158,12 +173,9 @@ def test_a_loopback_that_bumped_the_cycle_still_closes_the_right_event(tmp_path)
 def test_a_dispatch_is_charged_to_the_phase_that_ordered_it(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(
-        action="baseline",
-        task_id="t-1",
-        phase="FRAMEWORK_AGENT",
-        macro_cycle=0,
-        tick=7,
-        dispatched_unix=12.0,
+        ActionDispatch(
+            at=PhaseCycle("FRAMEWORK_AGENT", 0), action="baseline", task_id="t-1", tick=7, dispatched_unix=12.0
+        )
     )
 
     actions = _ext("FRAMEWORK_AGENT")["actions"]
@@ -181,23 +193,13 @@ def test_a_dispatch_is_charged_to_the_phase_that_ordered_it(tmp_path):
 def test_an_action_that_outlived_its_phase_stays_with_its_phase(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(
-        action="baseline",
-        task_id="t-1",
-        phase="FRAMEWORK_AGENT",
-        macro_cycle=0,
-        dispatched_unix=12.0,
+        ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="baseline", task_id="t-1", dispatched_unix=12.0)
     )
     _exit("FRAMEWORK_AGENT", at=30.0, to_phase="KERNEL_AGENT")
     _enter("KERNEL_AGENT", sequence=2, at=30.0, from_phase="FRAMEWORK_AGENT")
     # The result lands well after the phase that ordered it is gone.
     phase_event.record_settle(
-        task_id="t-1",
-        status="succeeded",
-        decision="adopted",
-        settled_unix=44.0,
-        phase="KERNEL_AGENT",
-        macro_cycle=0,
-        action="baseline",
+        ActionSettlement(task_id="t-1", status="succeeded", decision="adopted", settled_unix=44.0)
     )
 
     ordered = _ext("FRAMEWORK_AGENT")["actions"]
@@ -212,7 +214,9 @@ def test_an_action_that_outlived_its_phase_stays_with_its_phase(tmp_path):
 
 def test_a_dispatch_killed_mid_flight_reads_as_dispatched(tmp_path):
     _enter("SWEEP", sequence=1, at=10.0)
-    phase_event.record_dispatch(action="conc_sweep", task_id="t-9", phase="SWEEP", macro_cycle=0, dispatched_unix=11.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("SWEEP", 0), action="conc_sweep", task_id="t-9", dispatched_unix=11.0)
+    )
     _exit("SWEEP", at=20.0, to_phase="CLOSE")
 
     actions = _ext("SWEEP")["actions"]
@@ -224,14 +228,18 @@ def test_a_dispatch_killed_mid_flight_reads_as_dispatched(tmp_path):
 
 def test_a_failed_dispatch_keeps_its_error_class(tmp_path):
     _enter("PRELUDE", sequence=1, at=10.0)
-    phase_event.record_dispatch(action="baseline", task_id="t-2", phase="PRELUDE", macro_cycle=0, dispatched_unix=11.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("PRELUDE", 0), action="baseline", task_id="t-2", dispatched_unix=11.0)
+    )
     phase_event.record_settle(
-        task_id="t-2",
-        status="failed",
-        decision="failed",
-        error_class="server_init_dead",
-        workspace="/s/ws/t-2",
-        settled_unix=25.0,
+        ActionSettlement(
+            task_id="t-2",
+            status="failed",
+            decision="failed",
+            error_class="server_init_dead",
+            workspace="/s/ws/t-2",
+            settled_unix=25.0,
+        )
     )
 
     rows = _ext("PRELUDE")["actions"]["rows"]
@@ -245,11 +253,7 @@ def test_every_kind_is_recorded_not_just_the_audited_four(tmp_path):
     _enter("CLOSE", sequence=1, at=10.0)
     for index, kind in enumerate(("report", "recover", "session_breakdown", "target_analysis")):
         phase_event.record_dispatch(
-            action=kind,
-            task_id=f"t-{index}",
-            phase="CLOSE",
-            macro_cycle=0,
-            dispatched_unix=11.0 + index,
+            ActionDispatch(at=PhaseCycle("CLOSE", 0), action=kind, task_id=f"t-{index}", dispatched_unix=11.0 + index)
         )
 
     actions = _ext("CLOSE")["actions"]
@@ -260,13 +264,7 @@ def test_every_kind_is_recorded_not_just_the_audited_four(tmp_path):
 def test_a_settle_with_no_dispatch_row_does_not_invent_provenance(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     phase_event.record_settle(
-        task_id="t-orphan",
-        status="succeeded",
-        decision="adopted",
-        settled_unix=20.0,
-        phase="KERNEL_AGENT",
-        macro_cycle=0,
-        action="kernel_opt",
+        ActionSettlement(task_id="t-orphan", status="succeeded", decision="adopted", settled_unix=20.0)
     )
 
     assert _ext("KERNEL_AGENT")["actions"]["rows"] == []
@@ -274,8 +272,8 @@ def test_a_settle_with_no_dispatch_row_does_not_invent_provenance(tmp_path):
 
 def test_an_unidentified_settle_is_not_recorded(tmp_path):
     _enter("PRELUDE", sequence=1, at=10.0)
-    phase_event.record_settle(task_id="", status="succeeded")
-    phase_event.record_settle(task_id="t-nowhere", status="succeeded")
+    phase_event.record_settle(ActionSettlement(task_id="", status="succeeded"))
+    phase_event.record_settle(ActionSettlement(task_id="t-nowhere", status="succeeded"))
 
     assert _ext("PRELUDE")["actions"]["count"] == 0
 
@@ -283,12 +281,13 @@ def test_an_unidentified_settle_is_not_recorded(tmp_path):
 def test_a_marker_lands_in_the_phase_that_raised_it(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
     phase_event.record_marker(
-        phase="FRAMEWORK_AGENT",
-        macro_cycle=0,
-        sequence=2,
-        reason="plateau_proxy_provisional",
-        evidence={"r09_provisional": True},
-        ts="2026-01-01T00:00:15+00:00",
+        PhaseMarker(
+            at=PhaseCycle("FRAMEWORK_AGENT", 0),
+            sequence=2,
+            reason="plateau_proxy_provisional",
+            evidence={"r09_provisional": True},
+            ts="2026-01-01T00:00:15+00:00",
+        )
     )
 
     markers = _ext("FRAMEWORK_AGENT")["markers"]
@@ -299,7 +298,7 @@ def test_a_marker_lands_in_the_phase_that_raised_it(tmp_path):
 
 
 def test_a_marker_alone_still_opens_the_phase(tmp_path):
-    phase_event.record_marker(phase="PRELUDE", macro_cycle=0, sequence=1, reason="install_degraded")
+    phase_event.record_marker(PhaseMarker(at=PhaseCycle("PRELUDE", 0), sequence=1, reason="install_degraded"))
 
     finalize_events(tmp_path)
     assert [event["id"] for event in _events(tmp_path)] == ["prelude:0:phase"]
@@ -307,10 +306,10 @@ def test_a_marker_alone_still_opens_the_phase(tmp_path):
 
 def test_a_phase_that_dispatched_a_failure_still_succeeded(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
-    phase_event.record_dispatch(action="explore", task_id="t-1", phase="FRAMEWORK_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-1", status="failed", decision="failed")
-    phase_event.record_dispatch(action="baseline", task_id="t-2", phase="FRAMEWORK_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-2", status="succeeded", decision="adopted")
+    phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="explore", task_id="t-1"))
+    phase_event.record_settle(ActionSettlement(task_id="t-1", status="failed", decision="failed"))
+    phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="baseline", task_id="t-2"))
+    phase_event.record_settle(ActionSettlement(task_id="t-2", status="succeeded", decision="adopted"))
     _exit("FRAMEWORK_AGENT", at=60.0, to_phase="KERNEL_AGENT")
 
     assert _status("FRAMEWORK_AGENT") == phase_event.STATUS_SUCCEEDED
@@ -318,8 +317,8 @@ def test_a_phase_that_dispatched_a_failure_still_succeeded(tmp_path):
 
 def test_a_phase_where_nothing_settled_well_is_degraded(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    phase_event.record_dispatch(action="kernel_opt", task_id="t-1", phase="KERNEL_AGENT", macro_cycle=0)
-    phase_event.record_settle(task_id="t-1", status="failed", decision="failed")
+    phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="kernel_opt", task_id="t-1"))
+    phase_event.record_settle(ActionSettlement(task_id="t-1", status="failed", decision="failed"))
     _exit("KERNEL_AGENT", at=60.0, to_phase="SWEEP")
 
     assert _status("KERNEL_AGENT") == phase_event.STATUS_DEGRADED
@@ -337,11 +336,7 @@ def test_finalize_publishes_every_phase_it_finds(tmp_path):
     _exit("PRELUDE", at=30.0, to_phase="FRAMEWORK_AGENT")
     _enter("FRAMEWORK_AGENT", sequence=2, at=30.0, from_phase="PRELUDE")
     phase_event.record_dispatch(
-        action="baseline",
-        task_id="t-1",
-        phase="FRAMEWORK_AGENT",
-        macro_cycle=0,
-        dispatched_unix=31.0,
+        ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="baseline", task_id="t-1", dispatched_unix=31.0)
     )
 
     finalize_events(tmp_path)
@@ -356,13 +351,11 @@ def test_finalize_publishes_every_phase_it_finds(tmp_path):
 def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
     _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(
-        action="baseline",
-        task_id="t-1",
-        phase="FRAMEWORK_AGENT",
-        macro_cycle=0,
-        dispatch_class="coordinator",
+        ActionDispatch(
+            at=PhaseCycle("FRAMEWORK_AGENT", 0), action="baseline", task_id="t-1", dispatch_class="coordinator"
+        )
     )
-    phase_event.record_settle(task_id="t-1", status="succeeded", decision="adopted")
+    phase_event.record_settle(ActionSettlement(task_id="t-1", status="succeeded", decision="adopted"))
 
     row = _ext("FRAMEWORK_AGENT")["actions"]["rows"][0]
     assert set(row) == {
@@ -388,12 +381,13 @@ def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
 
 def _propose(msg_id: str, *, phase: str = "KERNEL_AGENT", action: str = "kernel_opt", cycle: int = 0, **kw) -> None:
     phase_event.record_proposal(
-        proposal_msg_id=msg_id,
-        action=action,
-        phase=phase,
-        macro_cycle=cycle,
-        from_agent="orchestration",
-        **kw,
+        PhaseProposal(
+            at=PhaseCycle(phase, cycle),
+            proposal_msg_id=msg_id,
+            action=action,
+            from_agent="orchestration",
+            **kw,
+        )
     )
 
 
@@ -414,11 +408,13 @@ def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     _propose("m-1")
     phase_event.record_proposal_review(
-        proposal_msg_id="m-1",
-        verdict="reject",
-        reasoning="the kernel is already fused",
-        confidence=0.8,
-        failure_reason_code="no_headroom",
+        ProposalReview(
+            proposal_msg_id="m-1",
+            verdict="reject",
+            reasoning="the kernel is already fused",
+            confidence=0.8,
+            failure_reason_code="no_headroom",
+        ),
     )
 
     review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
@@ -432,7 +428,9 @@ def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
 def test_a_ruling_the_envelope_overrode_says_it_was_held_to_a_rule(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     _propose("m-1")
-    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve", effective_verdict="needs_review")
+    phase_event.record_proposal_review(
+        ProposalReview(proposal_msg_id="m-1", verdict="approve", effective_verdict="needs_review")
+    )
 
     review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
     assert review["verdict"] == "approve"
@@ -445,7 +443,7 @@ def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(t
     _propose("m-1")
     _exit("KERNEL_AGENT", at=20.0, to_phase="FRAMEWORK_AGENT")
     _enter("FRAMEWORK_AGENT", sequence=2, at=20.0)
-    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve")
+    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="approve"))
 
     assert _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]["verdict"] == "approve"
     assert _ext("FRAMEWORK_AGENT")["proposals"]["count"] == 0
@@ -453,7 +451,7 @@ def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(t
 
 def test_a_ruling_for_a_proposal_that_was_never_recorded_mints_nothing(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    phase_event.record_proposal_review(proposal_msg_id="ghost", verdict="approve")
+    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="ghost", verdict="approve"))
 
     assert _ext("KERNEL_AGENT")["proposals"]["count"] == 0
 
@@ -461,9 +459,9 @@ def test_a_ruling_for_a_proposal_that_was_never_recorded_mints_nothing(tmp_path)
 def test_the_task_a_proposal_became_joins_it_to_its_dispatch(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     _propose("m-1")
-    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="approve")
-    phase_event.record_proposal_outcome(proposal_msg_id="m-1", materialized=True, task_id="t-9")
-    phase_event.record_dispatch(action="kernel_opt", task_id="t-9", phase="KERNEL_AGENT", macro_cycle=0)
+    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="approve"))
+    phase_event.record_proposal_outcome(ProposalOutcome(proposal_msg_id="m-1", materialized=True, task_id="t-9"))
+    phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="kernel_opt", task_id="t-9"))
 
     ext = _ext("KERNEL_AGENT")
     outcome = ext["proposals"]["rows"][0]["outcome"]
@@ -476,7 +474,7 @@ def test_a_proposal_the_critic_never_reached_is_not_a_refused_one(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     _propose("m-1")
     _propose("m-2")
-    phase_event.record_proposal_review(proposal_msg_id="m-1", verdict="reject")
+    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="reject"))
 
     proposals = _ext("KERNEL_AGENT")["proposals"]
     assert proposals["count"] == 2
@@ -522,15 +520,47 @@ def test_repeated_denials_without_proposal_ids_are_not_collapsed(tmp_path):
     _enter("PRELUDE", sequence=1, at=10.0)
     for _ in range(2):
         phase_event.record_denial(
-            actor="orchestration",
-            proposal_msg_id=None,
-            action="profile",
-            phase="PRELUDE",
-            macro_cycle=0,
-            rule="phase_action_not_allowed",
-            hint="use baseline",
+            PhaseDenial(
+                at=PhaseCycle("PRELUDE", 0),
+                actor="orchestration",
+                proposal_msg_id=None,
+                action="profile",
+                rule="phase_action_not_allowed",
+                hint="use baseline",
+            ),
         )
 
     rows = _ext("PRELUDE")["denials"]["rows"]
     assert len(rows) == 2
     assert all(row["proposal_msg_id"] is None for row in rows)
+
+
+def test_a_settle_emits_candidate_settled_with_the_kind_the_dispatch_recorded(tmp_path):
+    from hyperloom.plugs import Implementation, ManifestSources, PlugHost, activated, builtin_registry, resolve_manifest
+
+    seen: list[tuple[str, dict]] = []
+
+    class _Spy:
+        def emit(self, event_type, data):
+            seen.append((event_type, dict(data)))
+
+        def flush(self):
+            pass
+
+    registry = builtin_registry()
+    registry.register(Implementation("events", "spy", lambda ctx: _Spy()))
+    host = PlugHost(resolve_manifest(registry, ManifestSources(cli_plugs=("events=spy",))), registry, session_dir=None)
+    host.start()
+    _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="explore", task_id="t-5", dispatched_unix=12.0)
+    )
+    with activated(host):
+        phase_event.record_settle(ActionSettlement(task_id="t-5", status="succeeded", decision="adopted"))
+
+    assert seen == [
+        (
+            "hyperloom.candidate_settled",
+            {"task_id": "t-5", "action": "explore", "decision": "adopted", "gain_pct": None},
+        )
+    ]

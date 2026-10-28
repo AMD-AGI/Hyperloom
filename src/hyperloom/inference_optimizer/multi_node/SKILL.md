@@ -71,7 +71,18 @@ launches on the pods it was handed.
 ## Cluster hand-off (env-provided)
 
 `HYPERLOOM_MN_EXT_SERVICE_URL` is what marks a cluster as available: without it
-a `--nodes >= 2` run has nothing to drive and exits 2.
+(and without `TOPOLOGY_HANDOFF_FILE`) a `--nodes >= 2` run has nothing to drive and
+exits 2.
+
+**Topology file.** If `TOPOLOGY_HANDOFF_FILE` is set, it names a TopologyHandoff v1
+JSON file (`"schema": "topology-handoff/v1"`) that is read instead of the env
+vars below. It carries `backend`, `nodes`, `gpus_per_node`, `service_url` and the
+`ray` or `infera` block; credentials are file paths. A file that cannot be used
+is an error naming the file (no fallback to the env vars); when both are present
+the file wins and a warning names the differing fields, except that the launch
+flags `--nodes`, `--gpus-per-node` and `--mn-backend` win over the file's
+`nodes`, `gpus_per_node` and `backend`. Unset: the env vars apply
+unchanged.
 
 **Common (both backends)**
 
@@ -169,7 +180,7 @@ TP / flag change — the CLI fans out across all pods; never per-pod invocations
 **Sandbox-only exports** (consumed by `install.sh` / `optimize` /
 `_workload_envs.py` in the **sandbox**; never ask the platform to bake them into
 pod env — nothing in the pods reads them, and they shadow real pod values):
-`KERNEL_OPT_*`, `RANDOM_RANGE_RATIO`, `RUN_EVAL`, the `optimize`-flag mirrors
+`KERNEL_OPT_*`, `RANDOM_RANGE_RATIO`, the `optimize`-flag mirrors
 (`MODEL_PATH`, `TP`, `EP`, …), all `PD_*` knobs, and
 `HYPERLOOM_MN_POLL_TIMEOUT_S` / `HYPERLOOM_MN_HEALTH_WAIT_S`.
 
@@ -216,7 +227,7 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   Dashboard REST only, never `import ray` / `ray.init(address=…)` against the
   inference RayJob. (Code running *inside* RayJob pods is exempt.)
 * **Kernel-agent fan-out** — kernel edits in the sandbox do NOT reach the pods
-  (per-pod local fs). Use `apply-patch` / `revert-patch` / `kernel-bench` (route
+  (per-pod local fs). Use `apply-patch` / `revert-patch` (route
   by `state.backend`; on infera GEAK runs on a GPU pod over SSH, installed once
   per cluster via `install-geak`). The integrate path auto-restarts the server
   after `apply-patch` — do not restart manually.

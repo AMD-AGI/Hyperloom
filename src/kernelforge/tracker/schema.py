@@ -15,7 +15,7 @@ EXPERIMENT_INTERRUPTED = "interrupted"
 
 @dataclass
 class Iteration:
-    """A single build-test-bench-profile cycle."""
+    """A single build-test-bench cycle."""
 
     iteration_id: int
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -25,8 +25,6 @@ class Iteration:
 
     # Correctness
     snr_db: float | None = None
-    allclose: bool | None = None
-    max_diff: float | None = None
 
     # Raw aggregate diagnostic; not the optimization objective and not monotonic,
     # but it withdraws the published improvement badge when it contradicts the
@@ -34,18 +32,9 @@ class Iteration:
     wall_ms: float | None = None
     # Equal-weight arithmetic mean of per-case speedups.
     mean_case_speedup: float | None = None
-    min_ms: float | None = None
-    max_ms: float | None = None
-
-    # PMC analysis
-    pmc: dict = field(default_factory=dict)
-    wait_mfma_ratio: float | None = None
-    pmc_diagnosis: str = ""
 
     # Register info
     vgpr: int | None = None
-    agpr: int | None = None
-    spill_bytes: int = 0
 
     # Decision made after this iteration
     decision: str = ""  # "KEEP" / "REVERT" / ""
@@ -59,6 +48,27 @@ class Iteration:
     @classmethod
     def from_dict(cls, d: dict) -> Iteration:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass(frozen=True)
+class ExperimentSubject:
+    """What an experiment optimizes: the task, its backends and its timing targets."""
+
+    task_id: str = ""
+    backend: str = ""
+    kernel_backend: str = ""
+    description: str = ""
+    target_wall_ms: float | None = None
+    baseline_wall_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class CampaignSegment:
+    """Where an experiment sits in a campaign; the empty segment is a standalone experiment."""
+
+    campaign_id: str = ""
+    segment_index: int = 0
+    parent_experiment_id: str = ""
 
 
 @dataclass

@@ -16,7 +16,11 @@ from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
     DriverPreflight,
 )
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
-from kernelforge.conftest import kb_store_run_config as _kb_store_config
+from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
+from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun, RewriteWorkspace
+from kernelforge.tests.conftest import kb_store_run_config as _kb_store_config
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_READ_ERROR_LENGTH = 240
@@ -53,6 +57,15 @@ OUTSIDE_PATCH = """diff --git a/helper.py b/helper.py
 -old
 +new
 """
+
+
+def _warmstart(repo):
+    """Warm-start the repository's kernel.py through the standard test driver."""
+    return integ.kb_warmstart(
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
+    )
 
 
 def _run(cmd: list[str], cwd: Path) -> str:
@@ -161,21 +174,9 @@ def test_git_apply_rewrites_matching_canonical_owner_paths(tmp_path):
     allowed = {"src/aiter/ops/kernel.py"}
     source_map = {"aiter/ops/kernel.py": "src/aiter/ops/kernel.py"}
 
-    assert integ._git_apply(
-        str(repo),
-        producer_patch,
-        check_only=True,
-        allowed_paths=allowed,
-        canonical_source_paths={"aiter/ops/kernel.py"},
-        consumer_source_map=source_map,
-    )
-    assert integ._git_apply(
-        str(repo),
-        producer_patch,
-        allowed_paths=allowed,
-        canonical_source_paths={"aiter/ops/kernel.py"},
-        consumer_source_map=source_map,
-    )
+    target = integ._PatchTarget(allowed, {"aiter/ops/kernel.py"}, source_map)
+    assert integ._git_apply(str(repo), producer_patch, check_only=True, target=target)
+    assert integ._git_apply(str(repo), producer_patch, target=target)
     assert consumer.read_text() == "new\n"
 
 
@@ -224,11 +225,8 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(consumer),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        framework="aiter",
+        kernel=LoopKernel(kernel_path=str(consumer), kernel_backend="triton", framework="aiter", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is True
@@ -312,13 +310,7 @@ def test_kb_warmstart_cold_starts_without_candidate(monkeypatch, tmp_path):
         lambda **_kwargs: [],
     )
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm == {
         "candidate": False,
@@ -344,13 +336,7 @@ def test_kb_warmstart_propagates_reader_no_hit_status(monkeypatch, tmp_path):
         no_hit,
     )
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm == {
         "candidate": False,
@@ -383,13 +369,7 @@ def test_fresh_kb_lookup_clears_stale_references(
         "kernelforge.knowledge.kb_store.reader.read_top_solutions",
         lookup,
     )
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     if lookup_mode == "error":
         assert warm["read_reason"] == "warm_start_error"
@@ -434,13 +414,7 @@ def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is True
@@ -464,13 +438,7 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["solution_slug"] == "kernelforge-exp/kernel/second"
@@ -496,13 +464,7 @@ def test_kb_warmstart_persists_all_available_references_without_truncation(
     )
     monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     root = repo / "forge_experiments" / "kb_references"
     assert warm["num_references"] == 2
@@ -641,10 +603,8 @@ def test_kb_warmstart_resume_skips_read_and_restores_reference_pointer(
     )
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
         resume=True,
     )
 
@@ -662,13 +622,7 @@ def test_kb_warmstart_applies_benches_and_commits(monkeypatch, tmp_path):
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is True
@@ -716,11 +670,8 @@ def test_kb_warmstart_preserves_candidate_measurements_and_repeat(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        bench_repeat=4,
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py", bench_repeat=4),
     )
 
     assert warm["applied"] is True
@@ -774,13 +725,7 @@ def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["pristine_ms"] == 10.0
@@ -854,13 +799,7 @@ def test_kb_warmstart_matches_mean_only_keep_policy(
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is expected_applied
     assert warm["reference_reason"] == expected_reason
@@ -878,13 +817,7 @@ def test_kb_warmstart_is_reference_only_without_pristine_baseline(
         raise AssertionError("warm-start must not apply without a pristine baseline")
 
     monkeypatch.setattr(integ, "_git_apply", fail_apply)
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["pristine_ms"] is None
@@ -911,10 +844,8 @@ def test_kb_warmstart_preserves_preexisting_staged_changes(
     monkeypatch.setattr(integ, "_git_apply", fail_mutation)
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(kernel),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is False
@@ -936,11 +867,13 @@ def test_kb_warmstart_rollback_preserves_existing_untracked_and_removes_new(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        source_files=[str(helper)],
+        kernel=LoopKernel(
+            kernel_path=str(repo / "kernel.py"),
+            kernel_backend="triton",
+            source_files=[str(helper)],
+            workspace=str(repo),
+        ),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is False
@@ -961,11 +894,13 @@ def test_kb_warmstart_commits_allowed_new_source_file(monkeypatch, tmp_path):
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        source_files=[str(helper)],
+        kernel=LoopKernel(
+            kernel_path=str(repo / "kernel.py"),
+            kernel_backend="triton",
+            source_files=[str(helper)],
+            workspace=str(repo),
+        ),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is True
@@ -984,13 +919,7 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
     )
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: _bench(10.0))
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1012,13 +941,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tm
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1036,13 +959,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypat
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1078,13 +995,7 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
 
     monkeypatch.setattr(integ, "_correctness_once", fail_correctness)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert preserved.read_text() == "keep\n"
@@ -1103,13 +1014,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1148,10 +1053,8 @@ def test_kb_warmstart_applies_for_every_backend_when_driver_validates(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend=kernel_backend,
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend=kernel_backend, workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["candidate"] is True
@@ -1180,13 +1083,7 @@ def test_kb_warmstart_attempts_candidate_on_implementation_mismatch(
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["reference_reason"] == ""
@@ -1202,13 +1099,7 @@ def test_kb_warmstart_reference_only_when_pristine_baseline_unavailable(
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["reference_reason"] == "baseline_unavailable"
@@ -1229,11 +1120,10 @@ def test_kb_warmstart_applies_patch_to_undeclared_non_protected_source(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        source_files=[],
+        kernel=LoopKernel(
+            kernel_path=str(repo / "kernel.py"), kernel_backend="triton", source_files=[], workspace=str(repo)
+        ),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is True
@@ -1262,11 +1152,10 @@ def test_kb_warmstart_rejects_patch_to_protected_config(
 
     warm = integ.kb_warmstart(
         config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-        source_files=[],
+        kernel=LoopKernel(
+            kernel_path=str(repo / "kernel.py"), kernel_backend="triton", source_files=[], workspace=str(repo)
+        ),
+        harness=WarmStartHarness(driver="driver.py"),
     )
 
     assert warm["applied"] is False
@@ -1301,13 +1190,7 @@ def test_kb_warmstart_rejects_and_restores_on_commit_failure(
 
     monkeypatch.setattr(integ, "git", fail_commit)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=str(repo / "kernel.py"),
-        driver="driver.py",
-        workspace_dir=str(repo),
-        kernel_backend="triton",
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["reference_reason"] == "commit_failed"
@@ -1366,61 +1249,60 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     status = integ.write_experience_to_kb(
         config=object(),
         loop_runner=_FakeLoopRunner(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx942",
-        base_sha="base",
-        pristine_baseline_ms=12.0,
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
+        publication=ExperiencePublication(base_sha="base", gpu_target="gfx942", pristine_baseline_ms=12.0),
         usage=usage,
     )
 
     assert status == {"written": True, "solution": "solution", "speedup": 3.0}
-    assert captured["workspace"] == str(tmp_path)
-    assert captured["kernel_path"] == str(kernel)
-    assert captured["kernel_source"] == kernel.read_text()
-    assert captured["kernel_backend"] == "triton"
-    assert captured["gpu_target"] == "gfx942"
-    assert captured["experiment_id"] == "exp123"
-    assert captured["baseline_wall_ms"] == 12.0
-    assert captured["best_wall_ms"] == 4.0
-    assert captured["mean_case_speedup"] == 3.0
-    assert captured["cumulative_diff"] == "diff"
-    assert captured["digest"] == "archive digest"
-    assert captured["snr_db"] == 42.0
+    assert captured["kernel"].workspace == str(tmp_path)
+    assert captured["kernel"].kernel_path == str(kernel)
+    assert captured["kernel"].kernel_source == kernel.read_text()
+    assert captured["kernel"].kernel_backend == "triton"
+    assert captured["outcome"].gpu_target == "gfx942"
+    assert captured["outcome"].experiment_id == "exp123"
+    assert captured["outcome"].baseline_wall_ms == 12.0
+    assert captured["outcome"].best_wall_ms == 4.0
+    assert captured["outcome"].mean_case_speedup == 3.0
+    assert captured["outcome"].cumulative_diff == "diff"
+    assert captured["outcome"].digest == "archive digest"
+    assert captured["outcome"].snr_db == 42.0
     assert "workload_key" not in captured
     assert captured["usage"] is usage
 
 
-def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
+@pytest.mark.parametrize(
+    ("stage", "failure", "message"),
+    [
+        ("write_run_experience", RuntimeError("boom"), "boom"),
+        ("_git_cumulative_diff", ValueError("bad diff"), "bad diff"),
+    ],
+)
+def test_write_experience_to_kb_lets_a_pipeline_failure_reach_the_publication_boundary(
     monkeypatch,
     tmp_path,
+    stage,
+    failure,
+    message,
 ):
-    """The refusal is persisted, so it has to say which failure happened."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("def kernel(x):\n    return x\n")
 
-    def fail_write_run_experience(**_kwargs):
-        raise RuntimeError("boom")
+    def fail(*_args, **_kwargs):
+        raise failure
 
-    monkeypatch.setattr(
-        "kernelforge.knowledge.kb_store.writer.write_run_experience",
-        fail_write_run_experience,
-    )
+    if stage == "write_run_experience":
+        monkeypatch.setattr("kernelforge.knowledge.kb_store.writer.write_run_experience", fail)
+    else:
+        monkeypatch.setattr(integ, stage, fail)
 
-    status = integ.write_experience_to_kb(
-        config=object(),
-        loop_runner=_FakeLoopRunner(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx942",
-        base_sha="base",
-    )
-
-    assert status["written"] is False
-    assert "RuntimeError" in status["reason"]
-    assert "boom" in status["reason"]
+    with pytest.raises(type(failure), match=message):
+        integ.write_experience_to_kb(
+            config=object(),
+            loop_runner=_FakeLoopRunner(),
+            kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
+            publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
+        )
 
 
 def test_write_uses_pristine_campaign_signature_after_helper_is_added(
@@ -1475,17 +1357,18 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
     integ.write_experience_to_kb(
         config=object(),
         loop_runner=Runner(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx942",
-        base_sha="base",
-        target_functions=["different_caller_target"],
-        framework="vllm",
+        kernel=LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            target_functions=["different_caller_target"],
+            framework="vllm",
+            workspace=str(tmp_path),
+        ),
+        publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
     )
 
-    assert captured["implementation_signature_override"] == pristine_signature
-    assert captured["implementation_identity_override"] == pristine_identity
+    assert captured["outcome"].implementation_signature == pristine_signature
+    assert captured["outcome"].implementation_identity == pristine_identity
 
 
 # --- the rewrite warm start's persisted read error --------------------------- #
@@ -1532,14 +1415,13 @@ def test_rewrite_warm_start_failure_is_persisted_without_its_credential(
     monkeypatch.setattr(runner, "run_port_loop", port_never_runs)
 
     result = runner.run_rewrite(
-        op_name="softmax",
-        source_kernel=str(source),
-        driver=str(driver),
-        workspace=str(workspace),
-        experiments_dir=str(tmp_path / "experiments"),
-        target_functions=["softmax"],
-        config=_kb_store_config(tmp_path, token),
-        result_json=str(result_json),
+        RewriteRun(
+            RewriteSubject("softmax", str(source), ["softmax"]),
+            DriverSetup(str(driver)),
+            RewriteWorkspace(str(workspace), str(tmp_path / "experiments")),
+            result_json=str(result_json),
+        ),
+        _kb_store_config(tmp_path, token),
     )
 
     read = result["kb_experience"]["read"]
@@ -1584,20 +1466,19 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
     status = integ.write_experience_to_kb(
         config=_kb_store_config(tmp_path, token),
         loop_runner=_FakeLoopRunner(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        base_sha="base",
-        pristine_baseline_ms=12.0,
-        framework="vllm",
-        llm_summary=False,
-        incremental_summary={
-            "category": "",
-            "strategy": "vectorize loads",
-            "recipe": "",
-            "lessons": "",
-        },
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", framework="vllm", workspace=str(tmp_path)),
+        publication=ExperiencePublication(
+            base_sha="base",
+            gpu_target="gfx950",
+            pristine_baseline_ms=12.0,
+            llm_summary=False,
+            incremental_summary={
+                "category": "",
+                "strategy": "vectorize loads",
+                "recipe": "",
+                "lessons": "",
+            },
+        ),
     )
 
     assert status["written"] is False
@@ -1608,3 +1489,71 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
     # Still says which failure happened, and cannot grow past the cap.
     assert reason.startswith("KBStoreError: ")
     assert len(reason) == MAX_READ_ERROR_LENGTH
+
+
+def _experience_write_reason(monkeypatch, tmp_path, config, failure) -> str:
+    from kernelforge.knowledge.kb_store import writer
+
+    monkeypatch.setattr(writer, "_write_run_experience_impl", failure)
+    status = writer.write_run_experience(
+        config=config,
+        kernel=LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="triton", workspace=str(tmp_path)),
+        outcome=writer.RunOutcome(
+            experiment_id="exp",
+            gpu_target="gfx950",
+            baseline_wall_ms=None,
+            best_wall_ms=None,
+            cumulative_diff="",
+            digest="",
+        ),
+    )
+    return status["reason"]
+
+
+def _warm_start_reason(monkeypatch, tmp_path, config, failure) -> str:
+    monkeypatch.setattr(integ, "_WarmStartAttempt", failure)
+    warm = integ.kb_warmstart(
+        config=config,
+        kernel=LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="triton", workspace=str(tmp_path)),
+        harness=WarmStartHarness(driver="driver.py"),
+    )
+    return warm["read_error"]
+
+
+def _rewrite_read_reason(monkeypatch, tmp_path, config, failure) -> str:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(runner, "try_flydsl_kb_warmstart", failure)
+    target = SimpleNamespace(spec=SimpleNamespace(flydsl_kernel=str(tmp_path / "kernel.py")), config=config)
+    return runner._RewriteKb(target=target, enabled=True).read(source_case_ms={}, search_stop_unix=0.0).read_error
+
+
+@pytest.mark.parametrize(
+    ("site", "logger_name"),
+    [
+        (_experience_write_reason, "kernelforge.knowledge.kb_store.writer"),
+        (_warm_start_reason, "kernelforge.loop.knowledge_integration"),
+        (_rewrite_read_reason, "kernelforge.rewrite_by_flydsl.runner"),
+    ],
+    ids=["experience_write", "warm_start", "rewrite_read"],
+)
+def test_a_kb_failure_logs_its_sanitized_reason_and_stack(monkeypatch, tmp_path, caplog, site, logger_name):
+    """The log carries the sanitized reason, the type and the frames, and never the credential."""
+    import logging
+
+    from kernelforge.knowledge.kb_store.errors import sanitize_read_error
+
+    token = "kb-store-secret-9f3c"
+    message = f"https://forge:{token}@kb.example failed (sent Bearer {token})"
+
+    def failure(*_args, **_kwargs):
+        raise record_store.KBStoreError(message)
+
+    caplog.set_level(logging.DEBUG)
+    reason = site(monkeypatch, tmp_path, _kb_store_config(tmp_path, token), failure)
+
+    assert reason == sanitize_read_error(record_store.KBStoreError(message), secrets=(token,))
+    (record,) = [record for record in caplog.records if record.name == logger_name]
+    assert record.args[:2] == (reason, "KBStoreError")
+    assert "in failure\n    raise record_store.KBStoreError(message)" in record.getMessage()
+    assert [record.getMessage() for record in caplog.records if token in record.getMessage()] == []

@@ -8,14 +8,20 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Final, Mapping
+from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
+from hyperloom.common.coerce import to_float
+
+from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    dedupe_extra_server_args,
+    strip_benchmark_harness_flags,
+)
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -31,6 +37,7 @@ from .models import (
     PATCH_SECTION,
     RECIPE_SECTIONS,
     Artifact,
+    KBSelectionProfile,
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
@@ -44,6 +51,9 @@ from .sanitize import (
     sanitize_shared_knowledge,
 )
 from ...specialists.patch_safety import parse_patch_targets
+
+if TYPE_CHECKING:
+    from ..agent_kb import DraftArtifactSink
 
 log = logging.getLogger(__name__)
 
@@ -80,14 +90,6 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def _number(value: Any) -> float:
-    try:
-        number = float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
-
-
 def _patch_declared_targets(path: Any) -> tuple[str, ...]:
     """Return every safe target declared by a unified diff."""
     patch = Path(str(path or ""))
@@ -101,13 +103,12 @@ def _patch_declared_targets(path: Any) -> tuple[str, ...]:
         raise RemoteRecipeValidationError(str(exc)) from exc
 
 
-def _kernel_apply_root(patch_source: Any, target_file: Any, declared: Any = None) -> str:
+def _kernel_apply_root(target_file: Any, declared: Collection[str]) -> str:
     """Return the directory a kernel patch's declared paths are relative to."""
     target = Path(str(target_file or ""))
     if not target.is_absolute():
         return ""
-    targets = tuple(declared) if declared is not None else _patch_declared_targets(patch_source)
-    for relative in targets:
+    for relative in declared:
         parts = Path(str(relative)).parts
         if parts and len(parts) < len(target.parts) and target.parts[-len(parts) :] == parts:
             return str(Path(*target.parts[: -len(parts)]))
@@ -120,14 +121,6 @@ def _kernel_host_origin(apply_root: str) -> dict[str, Any]:
     return {HOST_ORIGIN_KEY: {"apply_root": root}} if root.startswith("/") else {}
 
 
-def _positive_int(value: Any) -> int | None:
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError):
-        return None
-    return resolved if resolved > 0 else None
-
-
 #: Every dimension either supported identity scheme may place in its scope.
 _SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 
@@ -136,7 +129,7 @@ _SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 SHAPE_KEYS: Final[tuple[str, ...]] = (*_SCOPE_SHAPE_KEYS, "ep", "partitions")
 
 
-def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str, int]:
+def workload_shape(state: Any, *, scope: RecipeScope) -> dict[str, int]:
     """Return the workload dimensions a row records about the machine it ran on.
 
     Identity-scoped dimensions come from the same validated ``RecipeScope`` the
@@ -146,16 +139,13 @@ def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str,
     1`` is dense and one partition is the whole card -- which keeps a row that merely took the CLI's ``--ep`` default
     from claiming a formation it never chose.
     """
-    resolved_scope = scope or RecipeScope.from_state(state)
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
     shape = {
-        key: value
-        for key, value in resolved_scope.as_dict().items()
-        if key != "kernel_optimizer" and isinstance(value, int)
+        key: value for key, value in scope.as_dict().items() if key != "kernel_optimizer" and isinstance(value, int)
     }
-    ep = _positive_int(getattr(state, "ep", None))
+    ep = optional_positive_int(getattr(state, "ep", None))
     if ep is None:
-        ep = _positive_int(extra.get("ep"))
+        ep = optional_positive_int(extra.get("ep"))
     if ep is not None and ep > 1:
         shape["ep"] = ep
     partitions = _partition_count(state)
@@ -173,7 +163,7 @@ def _partition_count(state: Any) -> int | None:
     was running on exactly that.
     """
     partition = _mapping(getattr(state, "compute_partition", {}))
-    count = _positive_int(partition.get("partitions"))
+    count = optional_positive_int(partition.get("partitions"))
     if count is None:
         from hyperloom.common.gpu_partition import MODE_PARTITION_COUNTS
 
@@ -187,39 +177,6 @@ class _Files:
         self.root = root
         self.artifacts: list[Artifact] = []
         self.refs: set[str] = set()
-        self._sources: dict[tuple[Path, str, str], str] = {}
-
-    def add(self, source: Any, *, category: str, kind: str, name: str = "") -> str:
-        raw = str(source or "").strip()
-        if not raw:
-            return ""
-        src = Path(raw)
-        if src.is_symlink():
-            raise RemoteRecipeValidationError(f"artifact source must not be a symlink: {src}")
-        if not src.is_file():
-            return ""
-        if src.stat().st_size > MAX_FILE_BYTES:
-            raise RemoteRecipeValidationError(f"artifact {src} exceeds the {MAX_FILE_BYTES}-byte KB Store limit")
-        resolved = src.resolve()
-        source_key = (resolved, category, kind)
-        if source_key in self._sources:
-            ref = self._sources[source_key]
-            self.refs.add(ref)
-            return ref
-        basename = Path(name or src.name).name or "artifact"
-        rel = f"{category}/{kind}/{basename}"
-        occupied = {item.path for item in self.artifacts}
-        if rel in occupied:
-            suffix = hashlib.sha256(str(resolved).encode()).hexdigest()[:10]
-            rel = f"{category}/{kind}/{src.stem}-{suffix}{src.suffix}"
-        destination = self.root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, destination)
-        artifact = Artifact(path=rel, source=destination, kind=kind, meta={"origin": category})
-        self.artifacts.append(artifact)
-        self.refs.add(rel)
-        self._sources[source_key] = rel
-        return rel
 
     def validate_adoption(self, source: Path, rel: str) -> None:
         """Fail before merge when a staged file cannot safely own ``rel``."""
@@ -247,16 +204,7 @@ class _Files:
         destination = self.root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
-        category = rel.split("/", 1)[0]
-        kind = rel.split("/")[1] if rel.count("/") >= 2 else "artifacts"
-        self.artifacts.append(
-            Artifact(
-                path=rel,
-                source=destination,
-                kind=kind,
-                meta={"origin": category, "staged": True},
-            )
-        )
+        self.artifacts.append(Artifact(path=rel, source=destination))
         self.refs.add(rel)
         return rel
 
@@ -293,35 +241,6 @@ class _Files:
             candidate = path.with_name(f"{path.stem}-{digest}-{index}{path.suffix}").as_posix()
             index += 1
         return self.adopt(source, candidate)
-
-    def write(self, text: str, *, rel: str, kind: str) -> str:
-        destination = self.root / rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(text, encoding="utf-8")
-        self.artifacts.append(Artifact(path=rel, source=destination, kind=kind))
-        self.refs.add(rel)
-        return rel
-
-    def prune_superseded(self, knowledge: Mapping[str, Any]) -> None:
-        """Drop scraped files superseded by staged columns; reject staged orphans."""
-        paths = {artifact.path for artifact in self.artifacts}
-        referenced = extract_knowledge_artifact_refs(knowledge, paths)
-        unreferenced = paths - referenced
-        staged_orphans = sorted(
-            artifact.path
-            for artifact in self.artifacts
-            if artifact.path in unreferenced and artifact.meta.get("staged")
-        )
-        if staged_orphans:
-            raise RemoteRecipeValidationError(f"staged artifacts absent from final knowledge: {staged_orphans!r}")
-        retained: list[Artifact] = []
-        for artifact in self.artifacts:
-            if artifact.path in unreferenced:
-                artifact.source.unlink(missing_ok=True)
-                self.refs.discard(artifact.path)
-                continue
-            retained.append(artifact)
-        self.artifacts = retained
 
 
 #: Levers that never belong to the kernel column. They are consulted before the
@@ -371,12 +290,15 @@ def _apply_recipe_delta(
     mode = str(delta.get("args_mode") or "append").strip().lower()
     if mode not in {"append", "replace"}:
         raise RemoteRecipeValidationError(f"unsupported recipe args_mode: {mode!r}")
-    args = compose_server_args(
-        inherited_args="",
-        base_extra_args=str(config.get("extra_server_args") or ""),
-        variant_extra_args=str(delta.get("extra_server_args") or ""),
-        remove_args=delta.get("remove_args"),
-        args_mode=mode,
+    # A persisted recipe never carries a harness flag; composition itself no longer strips them.
+    args = strip_benchmark_harness_flags(
+        compose_server_args(
+            inherited_args="",
+            base_extra_args=str(config.get("extra_server_args") or ""),
+            variant_extra_args=str(delta.get("extra_server_args") or ""),
+            remove_args=delta.get("remove_args"),
+            args_mode=mode,
+        )
     )
     envs = dict(_mapping(config.get("extra_envs")))
     for key in delta.get("unset_envs") or []:
@@ -405,9 +327,9 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
         entry = _mapping(raw)
         if not entry:
             continue
-        action = str(entry.get("action") or "").strip().lower()
+        action = first_text(entry.get("action")).lower()
         if action == "replay_warm_recipe":
-            if str(outcome.get("status") or "") != "reproduced":
+            if outcome.get("status") != "reproduced":
                 raise RemoteRecipeValidationError("replay_warm_recipe stack entry was not reproduced")
             raw_delta = entry.get("recipe_delta")
             if not isinstance(raw_delta, Mapping):
@@ -428,11 +350,11 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
             continue
         delta = _mapping(entry.get("recipe_delta"))
         config_signal = bool(
-            str(entry.get("candidate_extra_server_args") or "").strip()
+            first_text(entry.get("candidate_extra_server_args"))
             or _mapping(entry.get("candidate_extra_envs"))
             or entry.get("remove_args")
             or entry.get("unset_envs")
-            or str(entry.get("args_mode") or "").strip().lower() == "replace"
+            or first_text(entry.get("args_mode")).lower() == "replace"
         )
         if not delta:
             if config_signal:
@@ -443,14 +365,14 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
             continue
         config = _apply_recipe_delta(config, delta)
     return {
-        "extra_server_args": sanitize_publish_server_args(str(config.get("extra_server_args") or "")),
-        "extra_envs": sanitize_publish_env_mapping(_mapping(config.get("extra_envs"))),
+        "extra_server_args": sanitize_publish_server_args(config["extra_server_args"]),
+        "extra_envs": sanitize_publish_env_mapping(config["extra_envs"]),
     }
 
 
 def _externalize_record(
     record: Mapping[str, Any],
-    files: _Files,
+    files: DraftArtifactSink,
     category: str,
     *,
     required_keys: set[str] | None = None,
@@ -497,7 +419,7 @@ def _externalize_record(
     return out
 
 
-def build_kernel_gemm_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_gemm_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build only accepted GEMM optimizations from the final stack/result."""
     stack_rows = [
         dict(item)
@@ -521,7 +443,7 @@ def build_kernel_gemm_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"optimizations": optimizations}
 
 
-def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_fusion_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build only E2E-accepted fusion solution records."""
     stack_rows = [
         dict(item)
@@ -533,7 +455,7 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     if not stack_rows or str(integrated.get("decision") or "").upper() != "KEEP":
         return {"items": []}
     patch_source = stack_rows[-1].get("patch_path") or result.get("patch")
-    if not str(patch_source or "").strip():
+    if not first_text(patch_source):
         raise RemoteRecipeValidationError("accepted kernel/fusion is missing its patch")
     patch_ref = files.add(patch_source, category="kernel/fusion", kind="patches")
     if not patch_ref:
@@ -541,8 +463,7 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     declared = _patch_declared_targets(patch_source)
     # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
     # name it cannot be replayed.
-    apply_root = str(result.get("kernel_repo") or "").strip() or _kernel_apply_root(
-        patch_source,
+    apply_root = first_text(result.get("kernel_repo")) or _kernel_apply_root(
         stack_rows[-1].get("target_file") or result.get("source_file") or result.get("target_file"),
         declared,
     )
@@ -594,72 +515,45 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"items": [record]}
 
 
-def match_rewrite_attempt(
+def _match_queued_integration(
     integrate: Mapping[str, Any],
-    attempts: Mapping[str, Any],
+    queue: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Find micro evidence for an E2E-integrated stack row, strongest key first."""
-    candidates = [(str(key), raw) for key, raw in attempts.items() if isinstance(raw, Mapping)]
+    """Find the queued KEEP an E2E-integrated stack row landed, strongest key first."""
     criteria = (
-        (
-            str(integrate.get("integration_id") or ""),
-            lambda key, raw: str(raw.get("integration_id") or "") == str(integrate.get("integration_id") or ""),
-        ),
-        (
-            str(integrate.get("task_group_key") or ""),
-            lambda key, raw: str(raw.get("task_group_key") or "") == str(integrate.get("task_group_key") or ""),
-        ),
-        (
-            str(integrate.get("kernel_id") or ""),
-            lambda key, raw: (
-                str(raw.get("kernel_id") or raw.get("current_kernel_id") or key)
-                == str(integrate.get("kernel_id") or "")
-            ),
-        ),
-        (
-            str(integrate.get("patch_path") or ""),
-            lambda key, raw: (
-                str(raw.get("last_artifact_path") or raw.get("artifact_path") or "")
-                == str(integrate.get("patch_path") or "")
-            ),
-        ),
+        ("integration_id", "integration_id"),
+        ("task_group_key", "task_group_key"),
+        ("kernel_id", "kernel_id"),
+        ("patch_path", "artifact_path"),
     )
-    for expected, predicate in criteria:
+    for stack_field, queue_field in criteria:
+        expected = str(integrate.get(stack_field) or "")
         if not expected:
             continue
-        for key, raw in candidates:
-            if predicate(key, raw):
+        for raw in queue.values():
+            if str(raw.get(queue_field) or "") == expected:
                 return raw
     return {}
 
 
-def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
+def build_kernel_rewrite_value(state: Any, files: DraftArtifactSink) -> dict[str, Any]:
     """Build rewrite rows exclusively from E2E-integrated stack entries."""
-    attempts = getattr(state, "kernel_opt_task_attempts", {}) or getattr(state, "kernel_opt_attempts", {}) or {}
     rows: list[dict[str, Any]] = []
-    if not isinstance(attempts, Mapping):
-        attempts = {}
     integrated = [
         dict(entry)
         for entry in (getattr(state, "optimization_stack", []) or [])
         if isinstance(entry, Mapping) and str(entry.get("action") or "").lower() == "integrate"
     ]
     for entry in integrated:
-        raw = match_rewrite_attempt(entry, attempts)
-        kernel_name = str(
-            raw.get("kernel_name")
-            or raw.get("current_kernel_id")
-            or raw.get("kernel_id")
-            or entry.get("kernel_id")
-            or "unknown"
-        )
-        speedup = _number(raw.get("last_micro_speedup") or raw.get("speedup"))
+        raw = _match_queued_integration(entry, state.pending_kernel_integrations)
+        kernel_name = str(raw.get("kernel_id") or entry.get("kernel_id") or "unknown")
+        speedup = to_float(raw.get("micro_speedup"), 0.0)
         integration_id = str(entry.get("integration_id") or "")
         slug = hashlib.sha256(
             f"{integration_id}|{entry.get('kernel_id')}|{entry.get('patch_path')}".encode()
         ).hexdigest()[:10]
         # The integrated stack row is authoritative.
-        patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
+        patch_source = entry.get("patch_path") or raw.get("artifact_path")
         patch = files.add(
             patch_source,
             category="kernel/rewrite",
@@ -673,8 +567,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         declared = _patch_declared_targets(patch_source)
         # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
         # name it cannot be replayed.
-        apply_root = str(raw.get("last_deploy_repo_root") or "").strip() or _kernel_apply_root(
-            patch_source,
+        apply_root = str(raw.get("deploy_repo_root") or "").strip() or _kernel_apply_root(
             entry.get("target_file"),
             declared,
         )
@@ -688,24 +581,13 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
             )
             files.discard(patch)
             continue
-        e2e_gain = _number(entry.get("gain_pct"))
-        optimized_throughput = _number(entry.get("tput"))
+        e2e_gain = to_float(entry.get("gain_pct"), 0.0)
+        optimized_throughput = to_float(entry.get("tput"), 0.0)
         experience = files.write(
-            "\n".join(
-                (
-                    f"# Kernel rewrite: {kernel_name}",
-                    "",
-                    "- Phase: KERNEL_AGENT",
-                    "- Decision: KEEP",
-                    f"- Measured speedup: {speedup:g}x",
-                    f"- E2E gain: {e2e_gain:g}%",
-                    f"- Optimized throughput: {optimized_throughput:g}",
-                    f"- Patch: {patch or 'unavailable'}",
-                    "",
-                )
-            ),
+            f"# Kernel rewrite: {kernel_name}\n\n- Phase: KERNEL_AGENT\n- Decision: KEEP\n"
+            f"- Measured speedup: {speedup:g}x\n- E2E gain: {e2e_gain:g}%\n"
+            f"- Optimized throughput: {optimized_throughput:g}\n- Patch: {patch}\n",
             rel=f"kernel/rewrite/experience/{slug}.md",
-            kind="experience",
         )
         rows.append(
             {
@@ -760,6 +642,46 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
+def _prior_apply_roots(prior_patch: Mapping[str, Any]) -> dict[str, str]:
+    """Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it applies into."""
+    prior_roots: dict[str, str] = {}
+    for prov_row in prior_patch.get("provenance") or []:
+        if not isinstance(prov_row, Mapping):
+            continue
+        origin = prov_row.get(HOST_ORIGIN_KEY)
+        if not isinstance(origin, Mapping):
+            continue
+        for ref, root in (origin.get("apply_roots") or {}).items():
+            root_str = str(root or "").strip()
+            if str(ref) and root_str:
+                prior_roots[str(ref)] = root_str
+    return prior_roots
+
+
+def _provenance_with_apply_roots(
+    provenance: Any,
+    stack_index: int,
+    apply_roots: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Merge ``apply_roots`` into the provenance row at ``stack_index``, creating it, and order rows by stack index."""
+    rows = [dict(row) for row in (provenance or []) if isinstance(row, Mapping)]
+    row = next((r for r in rows if r.get("stack_index") == stack_index), None)
+    if row is None:
+        row = {
+            "stack_index": stack_index,
+            "base_sha": "",
+            "complete": True,
+            "artifacts_outside_root": 0,
+            "realized": True,
+        }
+        rows.append(row)
+    origin = dict(row.get(HOST_ORIGIN_KEY) or {})
+    origin["apply_roots"] = {**dict(origin.get("apply_roots") or {}), **apply_roots}
+    row[HOST_ORIGIN_KEY] = origin
+    rows.sort(key=lambda r: int(r.get("stack_index") or 0))
+    return rows
+
+
 def _adopt_replayed_prior(
     state: Any,
     sections: Any,
@@ -768,31 +690,15 @@ def _adopt_replayed_prior(
     stack: list[dict[str, Any]],
 ) -> None:
     """Carry forward the exact prior overlays only after replay reproduced."""
+    from ..agent_kb import PatchKB
+
     outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
-    if str(outcome.get("status") or "") != "reproduced":
+    if outcome.get("status") != "reproduced":
         return
     replayed_refs = {str(ref) for ref in (outcome.get("replayed_patch_refs") or []) if str(ref)}
     if not replayed_refs:
         return
-    warm_root = getattr(sections, "warm_start_dir", None)
-    if warm_root is None:
-        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
-    warm_root = Path(warm_root)
-    recipe_path = warm_root / "recipe.json"
-    if not recipe_path.is_file():
-        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
-    try:
-        import json
-
-        document = json.loads(recipe_path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
-    except (OSError, ValueError) as exc:
-        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
-    prior_value = _mapping(document.get("value"))
-    if not prior_value:
-        knowledge = _mapping(document.get("knowledge"))
-        prior_value = _mapping(knowledge.get("value"))
+    prior_patch = _prior_patch_column(sections)
 
     replay_index = next(
         (index for index, entry in enumerate(stack) if str(entry.get("action") or "").lower() == "replay_warm_recipe"),
@@ -802,61 +708,59 @@ def _adopt_replayed_prior(
         raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
     # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
     # they were replayed in.
-    candidates = [
-        str(ref) for ref in (_mapping(prior_value.get(PATCH_SECTION)).get("patches") or []) if str(ref) in replayed_refs
-    ]
+    candidates = list(
+        dict.fromkeys(str(ref) for ref in (prior_patch.get("patches") or []) if str(ref) in replayed_refs)
+    )
     missing_metadata = replayed_refs - set(candidates)
     if missing_metadata:
         raise RemoteRecipeValidationError(
             f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
         )
 
-    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it must be applied
-    # into.
-    prior_roots: dict[str, str] = {}
-    for prov_row in _mapping(prior_value.get(PATCH_SECTION)).get("provenance") or []:
-        if not isinstance(prov_row, Mapping):
-            continue
-        origin = prov_row.get("host_origin")
-        if not isinstance(origin, Mapping):
-            continue
-        for ref, root in (origin.get("apply_roots") or {}).items():
-            root_str = str(root or "").strip()
-            if str(ref) and root_str:
-                prior_roots[str(ref)] = root_str
+    adopted, adopted_roots = _adopt_prior_overlays(
+        PatchKB(sections), files, candidates, replay_index=replay_index, prior_roots=_prior_apply_roots(prior_patch)
+    )
 
+    node = _mapping(value.get(PATCH_SECTION))
+    refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
+    node["patches"] = sorted([*refs, *(ref for ref in adopted if ref not in refs)])
+    # Re-home the prior apply roots onto the new refs, under the replay stack index the adopted overlays now live at.
+    if adopted_roots:
+        node["provenance"] = _provenance_with_apply_roots(node.get("provenance"), replay_index, adopted_roots)
+    value[PATCH_SECTION] = node
+
+
+def _prior_patch_column(sections: Any) -> dict[str, Any]:
+    """The patch column of the warm-start recipe the session replayed."""
+    if sections.warm_start_dir is None:
+        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
+    recipe_path = sections.warm_start_dir / "recipe.json"
+    if not recipe_path.is_file():
+        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
+    try:
+        document = json.loads(recipe_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
+    except (OSError, ValueError) as exc:
+        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
+    return _mapping(_mapping(document.get("value")).get(PATCH_SECTION))
+
+
+def _adopt_prior_overlays(
+    patch_kb: Any,
+    files: _Files,
+    candidates: list[str],
+    *,
+    replay_index: int,
+    prior_roots: Mapping[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """Adopt each replayed prior overlay under the replay stack index; the new refs and their prior apply roots."""
+    adopted: list[str] = []
     adopted_roots: dict[str, str] = {}
-    member_index = 0
-    seen: set[str] = set()
-    files_root = warm_root / "files"
-    if files_root.is_symlink():
-        raise RemoteRecipeValidationError("replayed prior files root must not be a symlink")
-    resolved_root = files_root.resolve()
-    for old_ref in candidates:
-        if old_ref in seen:
-            continue
-        seen.add(old_ref)
-        normalized_ref = validate_relative_path(old_ref)
-        source = files_root / normalized_ref
-        cursor = files_root
-        for part in Path(normalized_ref).parts:
-            cursor = cursor / part
-            if cursor.is_symlink():
-                raise RemoteRecipeValidationError(
-                    f"successfully replayed prior overlay resolves through a symlink: {old_ref!r}"
-                )
-        try:
-            source.resolve().relative_to(resolved_root)
-        except ValueError as exc:
-            raise RemoteRecipeValidationError(f"replayed prior overlay escapes files root: {old_ref!r}") from exc
-        if not source.is_file():
+    for member_index, old_ref in enumerate(candidates):
+        source = patch_kb.prior_file(old_ref)
+        if source is None:
             raise RemoteRecipeValidationError(f"successfully replayed prior overlay is missing: {old_ref!r}")
-        try:
-            source.read_bytes()
-        except OSError as exc:
-            raise RemoteRecipeValidationError(
-                f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
-            ) from exc
         match = _OVERLAY_REF_RE.match(old_ref)
         old_name = match.group(3) if match else source.stem
         safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
@@ -867,38 +771,10 @@ def _adopt_replayed_prior(
             raise RemoteRecipeValidationError(
                 f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
             ) from exc
-        node = _mapping(value.get(PATCH_SECTION))
-        refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
-        if new_ref not in refs:
-            refs.append(new_ref)
-        node["patches"] = sorted(refs)
-        value[PATCH_SECTION] = node
+        adopted.append(new_ref)
         if prior_root := prior_roots.get(old_ref):
             adopted_roots[new_ref] = prior_root
-        member_index += 1
-
-    # Re-home the prior apply roots onto the new refs, under the replay stack index the adopted overlays now live at.
-    if adopted_roots:
-        node = _mapping(value.get(PATCH_SECTION))
-        rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
-        row = next((r for r in rows if r.get("stack_index") == replay_index), None)
-        if row is None:
-            row = {
-                "stack_index": replay_index,
-                "base_sha": "",
-                "complete": True,
-                "artifacts_outside_root": 0,
-                "realized": True,
-            }
-            rows.append(row)
-        origin = dict(row.get("host_origin") or {})
-        merged_roots = dict(origin.get("apply_roots") or {})
-        merged_roots.update(adopted_roots)
-        origin["apply_roots"] = merged_roots
-        row["host_origin"] = origin
-        rows.sort(key=lambda r: int(r.get("stack_index") or 0))
-        node["provenance"] = rows
-        value[PATCH_SECTION] = node
+    return adopted, adopted_roots
 
 
 def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
@@ -925,6 +801,14 @@ def _unique_rows(rows: list[Any]) -> list[Any]:
     return merged
 
 
+#: The row list each kernel column keeps its records under.
+_KERNEL_LIST_KEYS: Final[dict[str, str]] = {
+    "gemm": "optimizations",
+    "fusion": "items",
+    "rewrite": "items",
+}
+
+
 def _adopt_prior_kernel(
     state: Any,
     sections: Any,
@@ -935,22 +819,17 @@ def _adopt_prior_kernel(
     replay = _mapping(getattr(state, "warm_replay_outcome", {}))
     kernel_replay = _mapping(replay.get("kernel"))
     if (
-        str(replay.get("status") or "") != "reproduced"
-        or str(kernel_replay.get("status") or "") != "kept"
-        or (_positive_int(kernel_replay.get("kept")) or 0) <= 0
+        replay.get("status") != "reproduced"
+        or kernel_replay.get("status") != "kept"
+        or optional_positive_int(kernel_replay.get("kept")) is None
     ):
         return
-    list_keys = {
-        "gemm": "optimizations",
-        "fusion": "items",
-        "rewrite": "items",
-    }
     selected_kernel: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for raw in getattr(state, "warm_kernel_kb_plan", []) or []:
         if not isinstance(raw, Mapping) or str(raw.get("decision") or "").upper() != "KEEP":
             continue
         column = str(raw.get("column") or "").lower()
-        list_key = list_keys.get(column)
+        list_key = _KERNEL_LIST_KEYS.get(column)
         row = raw.get("recipe_row")
         if list_key is None or not isinstance(row, Mapping):
             continue
@@ -976,9 +855,14 @@ def _adopt_prior_kernel(
         source = files_root / validate_relative_path(ref)
         remapped[ref] = files.adopt_with_rename(source, ref)
 
-    kernel = _mapping(value.get("kernel"))
-    prior_kernel = _mapping(_remap_artifact_refs(prior_knowledge, remapped))
-    for column, list_key in list_keys.items():
+    value["kernel"] = _merge_prior_kernel(
+        _mapping(value.get("kernel")), _mapping(_remap_artifact_refs(prior_knowledge, remapped))
+    )
+
+
+def _merge_prior_kernel(kernel: dict[str, Any], prior_kernel: Mapping[str, Any]) -> dict[str, Any]:
+    """Union each prior kernel column's rows into the current column, prior rows first."""
+    for column, list_key in _KERNEL_LIST_KEYS.items():
         prior_column = _mapping(prior_kernel.get(column))
         if not prior_column:
             continue
@@ -995,7 +879,7 @@ def _adopt_prior_kernel(
                 ]
             ),
         }
-    value["kernel"] = kernel
+    return kernel
 
 
 def _validate_patch_column(value: Mapping[str, Any]) -> None:
@@ -1011,32 +895,23 @@ def _validate_patch_column(value: Mapping[str, Any]) -> None:
         seen.add(ref)
 
 
-def _is_ref_list(value: Any) -> bool:
-    """Whether ``value`` is a flat list of refs, so two producers can be unioned."""
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
 def merge_staged_sections(
-    value: dict[str, Any],
     sections: Any,
     files: "_Files",
     *,
-    only: Collection[str] | None = None,
-    required: Collection[str] | None = None,
-) -> list[str]:
-    """Merge each staged column into ``value``, adopting the files it names."""
-    merged: list[str] = []
-    required_names = set(required or ())
+    required: Collection[str],
+) -> dict[str, dict[str, Any]]:
+    """Return each staged column's knowledge in draft order, adopting the files it names."""
+    merged: dict[str, dict[str, Any]] = {}
     for name in sections.sections():
-        if only is not None and name not in only:
+        if name not in RECIPE_SECTIONS:
             continue
+        qualifier = "required " if name in required else ""
         try:
             staged = sections.staged(name)
             if staged is None:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} cannot be read")
             if not staged.knowledge:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is empty")
             staged_files = [
                 (
@@ -1058,21 +933,30 @@ def merge_staged_sections(
                 files.validate_adoption(source, rel)
             for source, rel in staged_files:
                 files.adopt(source, rel)
-            current = value.get(name) if isinstance(value.get(name), Mapping) else {}
-            combined = dict(staged.knowledge)
-            for ref_key, before in current.items():
-                after = combined.get(ref_key, [])
-                if not _is_ref_list(before) or not _is_ref_list(after):
-                    continue
-                combined[ref_key] = list(dict.fromkeys(str(ref) for ref in [*before, *after] if str(ref)))
-            value[name] = combined
-            merged.append(name)
+            merged[name] = dict(staged.knowledge)
+        except RemoteRecipeValidationError:
+            raise
         except Exception as exc:
-            if isinstance(exc, RemoteRecipeValidationError):
-                raise
-            qualifier = "required " if name in required_names else ""
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
+
+
+def _dropped_staged_sections(state: Any) -> list[Mapping[str, Any]]:
+    """Fail while section staging is still owed, else return the stagings dropped for missing patch sources."""
+    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
+    blocking_sections = [
+        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
+    ]
+    if blocking_sections:
+        raise RemoteRecipeValidationError(
+            "required section staging is incomplete: "
+            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
+        )
+    dead_letter = getattr(state, "kb_stage_dead_letter", []) or []
+    return [
+        *pending_sections,
+        *(row for row in dead_letter if isinstance(row, Mapping) and row.get("missing_patch_sources")),
+    ]
 
 
 def build_remote_knowledge(
@@ -1080,51 +964,27 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any,
-    metrics: Mapping[str, float] | None = None,
+    profile: KBSelectionProfile,
+    session_id: str,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     if sections is None:
         raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
-    scope = RecipeScope.from_state(state)
-    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
-    blocking_sections = [
-        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
-    ]
-    dropped_sections = [
-        row
-        for row in [
-            *pending_sections,
-            *(getattr(state, "kb_stage_dead_letter", []) or []),
-        ]
-        if isinstance(row, Mapping) and row.get("missing_patch_sources")
-    ]
-    if blocking_sections:
-        raise RemoteRecipeValidationError(
-            "required section staging is incomplete: "
-            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
-        )
+    scope = profile.scope
+    dropped_sections = _dropped_staged_sections(state)
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = _Files(root)
-    stack = [
-        {**dict(item), "__stack_index": index}
-        for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
-        if isinstance(item, Mapping)
-    ]
-    dropped_entries: set[tuple[str, int]] = set()
-    for row in dropped_sections:
-        try:
-            stack_index = int(row.get("stack_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        dropped_entries.add((str(row.get("owner") or "").upper(), stack_index))
+    stack = [dict(item) for item in (getattr(state, "optimization_stack", []) or []) if isinstance(item, Mapping)]
+    dropped_entries = {
+        (str(row.get("owner") or "").upper(), int(row.get("stack_index") or 0)) for row in dropped_sections
+    }
     # ``config`` and ``kernel`` are staged unconditionally just below, so only ``patch`` is conditional: a KEEP that
     # harvested overlays demands it, and a record published without them would replay a weaker stack than measured.
     required_columns = {CONFIG_SECTION, KERNEL_SECTION}
     if any(
-        (owner := str(item.get("kb_required_owner") or "").strip().upper())
-        and (owner, int(item["__stack_index"])) not in dropped_entries
-        for item in stack
+        (owner := first_text(item.get("kb_required_owner")).upper()) and (owner, index) not in dropped_entries
+        for index, item in enumerate(stack)
     ):
         required_columns.add(PATCH_SECTION)
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
@@ -1135,17 +995,11 @@ def build_remote_knowledge(
     ConfigKB(sections).stage(build_publishable_recipe_config(state))
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
-    value: dict[str, Any] = {name: {} for name in RECIPE_SECTIONS}
-    staged_sections = merge_staged_sections(
-        value,
-        sections,
-        files,
-        only=RECIPE_SECTIONS,
-        required=required_columns,
-    )
-    missing_columns = required_columns - set(staged_sections)
+    merged = merge_staged_sections(sections, files, required=required_columns)
+    missing_columns = required_columns - merged.keys()
     if missing_columns:
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
+    value: dict[str, Any] = {name: merged.get(name, {}) for name in RECIPE_SECTIONS}
     # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
     # what staging already contributed.
     _adopt_replayed_prior(state, sections, value, files, stack)
@@ -1156,7 +1010,7 @@ def build_remote_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            **dict(metrics or {}),
+            **profile.metrics,
             "workload_shape": workload_shape(state, scope=scope),
             "value": value,
             "what_worked": worked,
@@ -1168,17 +1022,16 @@ def build_remote_knowledge(
                 "producer": "hyperloom-inference-optimizer",
                 "kernel_optimizer": scope.kernel_optimizer,
                 "phase": "CLOSE",
-                "session_id": str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
+                "session_id": session_id,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
-                "staged_sections": staged_sections,
+                "staged_sections": list(merged),
                 "dropped_staged_sections": list(
-                    dict.fromkeys(str(row.get("id") or "") for row in dropped_sections if str(row.get("id") or ""))
+                    dict.fromkeys(str(row["id"]) for row in dropped_sections if row.get("id"))
                 ),
             },
         }
     )
-    files.prune_superseded(knowledge)
     bundle = KnowledgeBundle(knowledge=knowledge, artifacts=files.artifacts)
     bundle.validate()
     return bundle
@@ -1208,9 +1061,8 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
     return _nonempty(value.get(KERNEL_SECTION))
 
 
-def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and project the current Hyperloom Recipe contract for PRELUDE."""
-    knowledge = _mapping(document.get("knowledge")) or dict(document)
+def _validate_current_recipe(knowledge: Mapping[str, Any]) -> None:
+    """Refuse a record that is not the current Hyperloom Recipe contract."""
     version = knowledge.get("knowledge_schema_version")
     if not isinstance(version, int) or isinstance(version, bool) or version != CURRENT_KNOWLEDGE_SCHEMA_VERSION:
         raise RemoteRecipeValidationError(
@@ -1231,16 +1083,19 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         raise RemoteRecipeValidationError(f"current Recipe value.{PATCH_SECTION}.patches must be a flat string list")
     for ref in raw_patches:
         validate_relative_path(ref)
+
+
+def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project the current Hyperloom Recipe contract for PRELUDE."""
+    knowledge = _mapping(document.get("knowledge")) or dict(document)
+    _validate_current_recipe(knowledge)
     session_id = str(document.get("session_id") or "")
-    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
-    validated_gain = (
-        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
-    )
+    validated_gain = to_float(knowledge.get("interactivity_gain_pct", knowledge.get("validated_e2e_gain")), 0.0)
     view = _mapping(document.get("view"))
-    replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
+    replayable = view.get("replayable") is not False
     row = {
         "canonical_id": str(document.get("canonical_id") or ""),
-        "best_throughput": _number(knowledge.get("optimized_throughput")),
+        "best_throughput": to_float(knowledge.get("optimized_throughput"), 0.0),
         "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
         "what_failed": list(knowledge.get("what_failed") or []),
@@ -1261,7 +1116,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
         if key in SHAPE_KEYS:
-            resolved = _positive_int(value)
+            resolved = optional_positive_int(value)
             if resolved is not None:
                 row[key] = resolved
     return row
@@ -1278,7 +1133,5 @@ __all__ = [
     "has_replay_material",
     "knowledge_to_warm_recipe",
     "has_new_keep",
-    "match_rewrite_attempt",
-    "merge_staged_sections",
     "workload_shape",
 ]

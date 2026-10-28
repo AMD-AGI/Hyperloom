@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import DEFAULT_REACTOR_TURN_TIMEOUT_SEC, Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, DEFAULT_REACTOR_TURN_TIMEOUT_SEC, RunOptions
 from hyperloom.orchestrator.roles import ClaudeBackend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles import claude as claude_mod
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
@@ -107,7 +107,7 @@ def _backend(sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float 
     return ClaudeBackend(
         sdk_query_factory=sdk,
         sdk_options_cls=_Options,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         call_timeout_s=call_timeout_s,
         turn_timeout_s=turn_timeout_s,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
@@ -335,7 +335,7 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
 
     coord.bus.record_observation = _capture  # type: ignore[method-assign]
     try:
-        reason = await asyncio.wait_for(coord.run(max_ticks=2, tick_interval_sec=0.0), timeout=30.0)
+        reason = await asyncio.wait_for(coord.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=2)), timeout=30.0)
     finally:
         await coord.stop()
 

@@ -55,21 +55,6 @@ def normalize_operation_key(operation: str) -> str:
     return _strip_template_arguments(_strip_dispatch_decoration(operation))
 
 
-def logical_operator_name(candidate: dict[str, Any] | None) -> str:
-    """Return the stable logical operation for Forge, launch API stripped."""
-    candidate = candidate or {}
-    task_group = candidate.get("task_group")
-    identity = task_group.get("operator_identity") if isinstance(task_group, dict) else None
-    raw = (
-        (identity.get("operation") if isinstance(identity, dict) else "")
-        or candidate.get("operation")
-        or candidate.get("name")
-        or ""
-    )
-    normalized = native_operation_key(str(raw).strip())
-    return re.sub(r"\s*::\s*", "::", normalized)
-
-
 def native_operation_key(operation: str) -> str:
     """Return a stable native operator identity across template instances."""
     normalized = normalize_operation_key(operation)
@@ -252,37 +237,25 @@ def _moe_dimensions(shapes: list[list[int]]) -> dict[str, int]:
     two_dimensional = [shape for shape in shapes if len(shape) == 2]
     three_dimensional = [shape for shape in shapes if len(shape) == 3]
     dimensions: dict[str, int] = {}
-    hidden = max(two_dimensional, key=lambda shape: shape[1]) if two_dimensional else None
-    if hidden is not None:
-        dimensions["M"], dimensions["K"] = hidden[0], hidden[1]
+    if two_dimensional:
+        hidden = max(two_dimensional, key=lambda shape: shape[1])
+        dimensions["M"], dimensions["K"] = hidden
         topk = next(
             (
-                shape
+                shape[1]
                 for shape in two_dimensional
                 if shape is not hidden and shape[0] == hidden[0] and 0 < shape[1] <= 64
             ),
             None,
         )
         if topk is not None:
-            dimensions["TOPK"] = topk[1]
+            dimensions["TOPK"] = topk
     if three_dimensional:
         dimensions["E"] = three_dimensional[0][0]
         hidden_size = dimensions.get("K")
-        output_size = None
-        if hidden_size is not None:
-            second_weight = next(
-                (shape for shape in three_dimensional if shape[1] == hidden_size),
-                None,
-            )
-            if second_weight is not None:
-                output_size = second_weight[2]
-            else:
-                first_weight = next(
-                    (shape for shape in three_dimensional if shape[2] == hidden_size),
-                    None,
-                )
-                if first_weight is not None:
-                    output_size = first_weight[1] // 2
+        output_size = next((shape[2] for shape in three_dimensional if shape[1] == hidden_size), None)
+        if output_size is None:
+            output_size = next((shape[1] // 2 for shape in three_dimensional if shape[2] == hidden_size), None)
         if output_size is not None:
             dimensions["N"] = output_size
     return dimensions
@@ -405,6 +378,12 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             return 0.0
 
+    def _call_count(row: dict[str, Any]) -> int:
+        try:
+            return int(row.get("call_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     rows.sort(
         key=lambda row: (
             str(row.get("kernel_id") or "") != primary_kernel_id,
@@ -421,11 +400,7 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
         if existing is not None:
             if kernel_id and kernel_id not in existing["kernel_ids"]:
                 existing["kernel_ids"].append(kernel_id)
-            try:
-                additional_call_count = int(row.get("call_count") or 0)
-            except (TypeError, ValueError):
-                additional_call_count = 0
-            existing["call_count"] += additional_call_count
+            existing["call_count"] += _call_count(row)
             continue
 
         case: dict[str, Any] = {
@@ -436,11 +411,8 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
             "output_shapes": row.get("output_shapes") or [],
             "output_dtypes": row.get("output_dtypes") or [],
             "raw_arg_spec": row.get("raw_arg_spec") or {},
+            "call_count": _call_count(row),
         }
-        try:
-            case["call_count"] = int(row.get("call_count") or 0)
-        except (TypeError, ValueError):
-            case["call_count"] = 0
         case["_named_dimensions"] = named_dimensions(row)
         cases.append(case)
         by_signature[signature] = case
@@ -451,36 +423,3 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
         case["case_id"] = case_id
         case["selector"] = {CASE_SELECTOR_KEY: case_id, **dimensions}
     return cases
-
-
-def task_group_shape_cases(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return normalized cases from a candidate's task group."""
-    group = candidate.get("task_group")
-    if not isinstance(group, dict):
-        return []
-    existing = group.get("shape_cases")
-    if isinstance(existing, list) and all(
-        isinstance(case, dict) and isinstance(case.get("selector"), dict) for case in existing
-    ):
-        return existing
-    return build_task_group_shape_cases(group)
-
-
-def forge_shapes_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Build Forge primary/minimal/validation selectors for a candidate."""
-    cases = task_group_shape_cases(candidate)
-    if cases:
-        selectors = [dict(case["selector"]) for case in cases]
-        primary = selectors[0]
-        return {
-            "primary": primary,
-            "minimal": primary,
-            "validation": selectors,
-        }
-
-    primary = named_dimensions(candidate)
-    return {
-        "primary": primary,
-        "minimal": primary,
-        "validation": [primary] if primary else [],
-    }

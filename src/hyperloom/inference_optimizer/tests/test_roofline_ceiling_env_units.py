@@ -61,31 +61,40 @@ def test_server_args_env_override_and_payload():
         == "--first"
     )
 
-    # env override wins over payload.
-    entry = {"extra_envs": {"EXTRA_ATOM_ARGS": "--env"}, "extra_args": "--payload"}
-    assert rc._server_args_from(entry) == "--env"
-    assert rc._server_args_from({"extra_args": "--payload"}) == "--payload"
+    # On the current_best arm an env override wins over the payload overlay.
+    entry = {"tput": 1.0, "extra_envs": {"EXTRA_ATOM_ARGS": "--env"}, "extra_args": "--payload"}
+    assert rc._collect_runtime_server_args(SimpleNamespace(current_best=entry)) == "--env"
+    assert rc._collect_runtime_server_args(SimpleNamespace(current_best={"tput": 1.0, "extra_args": "--payload"})) == (
+        "--payload"
+    )
 
 
 def test_read_baseline_yaml_benchmark(tmp_path: Path):
-    # Non-dict / missing materialized_config short-circuits to {}.
-    assert rc._read_baseline_yaml_benchmark(SimpleNamespace(last_baseline=None)) == {}
-    # last_baseline is a non-dict truthy value → {}.
-    assert rc._read_baseline_yaml_benchmark(SimpleNamespace(last_baseline=[1])) == {}
-    assert (
-        rc._read_baseline_yaml_benchmark(
-            SimpleNamespace(last_baseline={"extras": {}}),
-        )
-        == {}
-    )
+    assert rc._read_baseline_yaml_benchmark(SimpleNamespace()) == {}
+    assert rc._read_baseline_yaml_benchmark(SimpleNamespace(baseline_config_path="")) == {}
 
     cfg = tmp_path / "materialized.yaml"
     cfg.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--tp 8'\n", encoding="utf-8")
-    state = SimpleNamespace(
-        last_baseline={"extras": {"materialized_config": str(cfg)}},
-    )
+    state = SimpleNamespace(baseline_config_path=str(cfg))
     bench = rc._read_baseline_yaml_benchmark(state)
     assert bench.get("envs", {}).get("EXTRA_SGLANG_ARGS") == "--tp 8"
 
     # Full chain: baseline yaml -> server args string.
-    assert rc._read_baseline_yaml_server_args(state) == "--tp 8"
+    assert rc.read_baseline_server_args(state) == "--tp 8"
+
+
+def test_baseline_server_args_follow_the_accepted_anchor_not_the_last_attempt(tmp_path: Path):
+    """Promotion enqueues the initial roofline before ``last_baseline`` records the anchor being promoted."""
+    failed = tmp_path / "failed.yaml"
+    failed.write_text("benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--context-length 6144'\n", encoding="utf-8")
+    anchor = tmp_path / "anchor.yaml"
+    anchor.write_text(
+        "benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--dsa-decode-backend tilelang --context-length 6144'\n",
+        encoding="utf-8",
+    )
+    state = SimpleNamespace(
+        baseline_config_path=str(anchor),
+        last_baseline={"status": "failed", "extras": {"materialized_config": str(failed)}},
+    )
+
+    assert rc.read_baseline_server_args(state) == "--dsa-decode-backend tilelang --context-length 6144"

@@ -5,10 +5,17 @@
 
 from __future__ import annotations
 
+import glob
+import http.client
+import json
+import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..bringup import recorded_verdict, session_root
@@ -183,6 +190,29 @@ def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
     }
 
 
+def _layers_by_family(names: Iterable[str]) -> dict[str, set[int]]:
+    """Group parameter names by family (layer indices folded to ``{N}``) with the layer indices each one carries."""
+    families: dict[str, set[int]] = {}
+    for name in names:
+        layers = families.setdefault(re.sub(r"\.\d+\.", ".{N}.", name), set())
+        index = re.search(r"\.(\d+)\.", name)
+        if index:
+            layers.add(int(index.group(1)))
+    return families
+
+
+def _checkpoint_weight_map(model_path: str) -> Any:
+    """Read the ``weight_map`` of the checkpoint's sharded index, or ``None`` when there is none.
+
+    ``model_path`` may be an HF repo id; resolve to the local
+    weights dir so the sharded-index read works for repo-id launches.
+    """
+    model_dir = resolve_local_model_dir(model_path)
+    idx_files = glob.glob(f"{model_dir}/*.index.json") if model_dir else []
+    data = json.loads(Path(idx_files[0]).read_text(errors="replace")) if idx_files else {}
+    return data.get("weight_map") if isinstance(data, dict) else None
+
+
 class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
@@ -353,110 +383,64 @@ class EnablementParams(CoordinatorCollaborator):
         """
         text = launch_log or ""
         low = text.lower()
+        # Offending parameter names in the traceback; parsed first so the
+        # trigger is robust to a head-truncated launch log.
+        offending = set(re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
+        weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
+        phrase_hit = (
+            "not initialized from checkpoint" in low
+            or "missing key" in low
+            or "unexpected key" in low
+            or "error(s) in loading state_dict" in low
+        )
+        # Fire when the log names weight-shaped offending params even if the
+        # explanatory phrase was truncated off.
+        if not offending or not (phrase_hit or weighty):
+            return ""
         try:
-            import glob as _glob
-            import json as _json
-            import re as _re
-            from pathlib import Path as _Path
-
-            # Offending parameter names in the traceback; parsed first so the
-            # trigger is robust to a head-truncated launch log.
-            offending = set(_re.findall(r"['\"]((?:model|language_model|transformer)\.[\w.]+)['\"]", text))
-            weighty = {o for o in offending if o.endswith((".weight", ".bias", "_scale"))}
-            phrase_hit = (
-                "not initialized from checkpoint" in low
-                or "missing key" in low
-                or "unexpected key" in low
-                or "error(s) in loading state_dict" in low
-            )
-            # Fire when the log names weight-shaped offending params even if the
-            # explanatory phrase was truncated off.
-            if not (phrase_hit or weighty):
-                return ""
-            if not offending:
-                return ""
-            model_path = str(getattr(self.shared_state, "model_path", "") or "").strip()
-            if model_path:
-                # ``model_path`` may be an HF repo id; resolve to the local
-                # weights dir so the sharded-index read works for repo-id launches.
-                from hyperloom.inference_optimizer.model_config_utils import (
-                    resolve_local_model_dir,
-                )
-
-                _resolved = resolve_local_model_dir(model_path)
-                if _resolved is not None:
-                    model_path = str(_resolved)
-            if not model_path or not _Path(model_path).is_dir():
-                return ""
-            # Load the checkpoint weight_map (sharded index) or list single-file keys.
-            weight_map: dict[str, Any] = {}
-            idx_files = _glob.glob(f"{model_path}/*.index.json")
-            if idx_files:
-                data = _json.loads(_Path(idx_files[0]).read_text(errors="replace"))
-                weight_map = data.get("weight_map", {}) if isinstance(data, dict) else {}
-            if not weight_map:
-                return ""
-            ckpt_keys = set(weight_map.keys())
-
-            # Group offending names by a layer-index-stripped "family".
-            def _family(name: str) -> str:
-                return _re.sub(r"\.\d+\.", ".{N}.", name)
-
-            def _layer_idx(name: str) -> int | None:
-                m = _re.search(r"\.(\d+)\.", name)
-                return int(m.group(1)) if m else None
-
-            fams: dict[str, dict[str, Any]] = {}
-            for nm in offending:
-                fam = _family(nm)
-                d = fams.setdefault(fam, {"missing_layers": set()})
-                li = _layer_idx(nm)
-                if li is not None:
-                    d["missing_layers"].add(li)
-            lines: list[str] = []
-            for fam in sorted(fams):
-                # Which layer indices for this family exist in the checkpoint?
-                fam_re = _re.compile("^" + _re.escape(fam).replace(r"\{N\}", r"\d+") + "$")
-                present_layers = sorted(
-                    {li for k in ckpt_keys if fam_re.match(k) for li in [_layer_idx(k)] if li is not None}
-                )
-                missing_layers = sorted(fams[fam]["missing_layers"])
-                if present_layers:
-                    lines.append(
-                        f"- '{fam}': PRESENT in checkpoint for layers {present_layers}; "
-                        f"MISSING (instantiated by model, absent from checkpoint) for layers "
-                        f"{missing_layers}. To satisfy the strict init check, the missing layers "
-                        f"must obtain this tensor from a present layer (copy/alias from the nearest "
-                        f"preceding present layer) OR the model must not instantiate it there."
-                    )
-                else:
-                    lines.append(
-                        f"- '{fam}': NOT present in the checkpoint for ANY layer "
-                        f"(missing for layers {missing_layers}). The checkpoint has no source for "
-                        f"this tensor — the model should not require it (guard/skip its "
-                        f"instantiation) rather than copy it."
-                    )
-            if not lines:
-                return ""
-            header = (
-                "CHECKPOINT WEIGHT FACTS (auto-derived from the model's "
-                "safetensors index — GROUND TRUTH, prefer over assumptions). The "
-                "boot failed on weight initialization; for each offending tensor "
-                "family, here is exactly which layers carry it in the checkpoint:"
-            )
-            footer = (
-                "IMPORTANT: verify the exact model class + its load_weights() entry "
-                "point actually used for this architecture (grep the framework "
-                "source for the architecture/model_type) and confirm the parameter-"
-                "dict key naming (with/without a 'model.' prefix) at that scope "
-                "BEFORE writing copy logic — a prior fix silently no-op'd because "
-                "it edited the wrong loader / used mismatched key names, so the copy "
-                "never executed and the SAME weights stayed uninitialized."
-            )
-            return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:
+            weight_map = _checkpoint_weight_map(self.shared_state.model_path)
+        except (OSError, ValueError):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
+        if not weight_map:
+            return ""
+        missing_by_family = _layers_by_family(offending)
+        present_by_family = _layers_by_family(weight_map.keys())
+        lines: list[str] = []
+        for fam in sorted(missing_by_family):
+            present_layers = sorted(present_by_family.get(fam, ()))
+            missing_layers = sorted(missing_by_family[fam])
+            if present_layers:
+                lines.append(
+                    f"- '{fam}': PRESENT in checkpoint for layers {present_layers}; "
+                    f"MISSING (instantiated by model, absent from checkpoint) for layers "
+                    f"{missing_layers}. To satisfy the strict init check, the missing layers "
+                    f"must obtain this tensor from a present layer (copy/alias from the nearest "
+                    f"preceding present layer) OR the model must not instantiate it there."
+                )
+            else:
+                lines.append(
+                    f"- '{fam}': NOT present in the checkpoint for ANY layer "
+                    f"(missing for layers {missing_layers}). The checkpoint has no source for "
+                    f"this tensor — the model should not require it (guard/skip its "
+                    f"instantiation) rather than copy it."
+                )
+        header = (
+            "CHECKPOINT WEIGHT FACTS (auto-derived from the model's "
+            "safetensors index — GROUND TRUTH, prefer over assumptions). The "
+            "boot failed on weight initialization; for each offending tensor "
+            "family, here is exactly which layers carry it in the checkpoint:"
+        )
+        footer = (
+            "IMPORTANT: verify the exact model class + its load_weights() entry "
+            "point actually used for this architecture (grep the framework "
+            "source for the architecture/model_type) and confirm the parameter-"
+            "dict key naming (with/without a 'model.' prefix) at that scope "
+            "BEFORE writing copy logic — a prior fix silently no-op'd because "
+            "it edited the wrong loader / used mismatched key names, so the copy "
+            "never executed and the SAME weights stayed uninitialized."
+        )
+        return header + "\n" + "\n".join(lines) + "\n" + footer
 
     def _discover_enablement_candidate_refs(
         self,
@@ -515,12 +499,11 @@ class EnablementParams(CoordinatorCollaborator):
                     repo_url=repo,
                     search_modes=search_modes,
                     keywords=tuple(plan.keywords),
-                    pr_states=("all",),
                     max_search_candidates=max_candidates,
                     pr_monitor=pr_monitor,
                 )
                 collected.extend(enumerate_candidates(search))
-            except Exception:
+            except (PRMonitorError, http.client.HTTPException):
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,

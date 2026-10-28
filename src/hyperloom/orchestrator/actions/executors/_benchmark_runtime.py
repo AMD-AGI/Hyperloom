@@ -6,15 +6,40 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping
+from typing import Any
 
-from hyperloom.common.agentx_workload import is_agentx_client_script
+from hyperloom.common.agentx_workload import is_agentx_client_script, pin_mlperf_round_concurrency
+from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
 from ._workload_envs import (
     apply_agentx_switch,
     apply_scriptable_runtime_defaults,
-    pin_mlperf_round_concurrency,
 )
+
+
+def _apply_sizing_env_overrides(envs: dict[str, Any]) -> None:
+    """Pull the round's shape (ISL/OSL/MAX_MODEL_LEN/TP/CONC) out of the ambient env into ``envs``."""
+    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
+        val = os.environ.get(env_key, "").strip()
+        if not val:
+            continue
+        # TP yaml-explicit wins: a stale state.tp must not downgrade a YAML-pinned TP.
+        if env_key == "TP" and envs.get("TP") not in (None, 0, "", "0"):
+            continue
+        envs[env_key] = int(val)
+
+
+def _pin_rocr_visible_devices(envs: dict[str, Any]) -> None:
+    """Give the round as many visible cards as its TP needs, unless the ambient env names them itself."""
+    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
+    if explicit_rocr:
+        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
+        return
+    tp_val = int(envs.get("TP", 1) or 1)
+    existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
+    existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
+    if tp_val > 1 and existing_count < tp_val:
+        envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
 
 
 def apply_runtime_benchmark_overrides(
@@ -24,12 +49,9 @@ def apply_runtime_benchmark_overrides(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     conc: Any = None,
-    agentx_mode: bool | None = None,
-    grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and is_agentx_client_script(str(bench.get("benchmark_script") or "")):
-        agentx_mode = True
+    agentx_mode = True if is_agentx_client_script(str(bench.get("benchmark_script") or "")) else None
 
     if model_path:
         bench["model"] = str(model_path)
@@ -39,12 +61,12 @@ def apply_runtime_benchmark_overrides(
         bench["precision"] = precision
 
     if gpu_type:
-        bench["runner_type"] = str(gpu_type)
-        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
+        bench["runner_type"] = gpu_runner_type(gpu_type)
+        # Force-pin the generic ``{framework}_{runner_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
         # native scripts that ignore ``EXTRA_*_ARGS``.
         framework = str(bench.get("framework") or "").lower()
         if framework:
-            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
         else:
             bench.pop("benchmark_script", None)
 
@@ -54,7 +76,7 @@ def apply_runtime_benchmark_overrides(
     # AgentX switch on the shared rebuild path: without this, the gpu_type block above re-pins the synthetic
     # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
     # rebuild via this function).
-    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode, grading=grading)
+    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs: dict[str, Any] = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the
@@ -65,27 +87,8 @@ def apply_runtime_benchmark_overrides(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    for env_key in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC"):
-        val = os.environ.get(env_key, "").strip()
-        if not val:
-            continue
-        # TP yaml-explicit wins: a stale state.tp must not downgrade a YAML-pinned TP.
-        if env_key == "TP":
-            yaml_tp = envs.get("TP")
-            if yaml_tp not in (None, 0, "", "0"):
-                continue
-        envs[env_key] = int(val)
-
+    _apply_sizing_env_overrides(envs)
     pin_mlperf_round_concurrency(envs)
-
-    explicit_rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if explicit_rocr:
-        envs["ROCR_VISIBLE_DEVICES"] = explicit_rocr
-    else:
-        tp_val = int(envs.get("TP", 1) or 1)
-        existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
-        existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
-        if tp_val > 1 and existing_count < tp_val:
-            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
+    _pin_rocr_visible_devices(envs)
 
     return envs

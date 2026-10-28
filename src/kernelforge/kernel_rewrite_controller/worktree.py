@@ -16,10 +16,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
-from kernelforge.llm.git import GitError, git
+from kernelforge.tools.git import GitError, git
+from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME, hide_forge_loop_output
 from kernelforge.loop.editable_repo import (
     RepoLock,
     acquire_repo_lock,
@@ -27,10 +28,6 @@ from kernelforge.loop.editable_repo import (
     release_repo_lock,
 )
 
-
-#: Directory ``forge-loop`` writes its campaign state, JIT caches and iteration
-#: archive into, relative to the workspace it optimizes.
-FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
 
 #: Prefix of the branch one campaign commits onto. Shared with the sweep that
 #: reclaims a repository from a run the host killed before it could restore.
@@ -430,13 +427,6 @@ def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> N
         git("branch", "-D", branch, cwd=repo_root, check=False)
 
 
-def _ignore_forge_loop_output(workspace: Path) -> None:
-    """Hide forge-loop's own output directory from Git inside one worktree."""
-    output_root = workspace / FORGE_LOOP_OUTPUT_DIRNAME
-    output_root.mkdir(parents=True, exist_ok=True)
-    (output_root / ".gitignore").write_text("*\n", encoding="utf-8")
-
-
 def operator_workspace(task: KernelRewriteTask, layout: ControllerLayout) -> Path:
     """Where this task's forge-loop works, private checkout or live repository.
 
@@ -472,7 +462,7 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
         git("checkout", "-b", branch, task.base_commit, cwd=repo_root)
         kernel_path, source_files = _validate_declared_sources(repo_root, task)
         _archive_stale_campaign_output(repo_root, layout.workspace_dir(task.operator_id))
-        _ignore_forge_loop_output(repo_root)
+        hide_forge_loop_output(repo_root)
         return OperatorWorktree(
             repo_root=repo_root,
             workspace=repo_root,
@@ -599,7 +589,7 @@ def create_operator_worktree(
         if actual_head != task.base_commit:
             raise WorktreeError(f"worktree HEAD mismatch: created {actual_head}, expected {task.base_commit}")
         kernel_path, source_files = _validate_declared_sources(workspace, task)
-        _ignore_forge_loop_output(workspace)
+        hide_forge_loop_output(workspace)
         return OperatorWorktree(
             repo_root=repo_root,
             workspace=workspace,

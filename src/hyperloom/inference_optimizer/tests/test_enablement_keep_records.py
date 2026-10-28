@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +21,6 @@ import yaml
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
-    patch_declared_ops,
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
@@ -41,6 +40,7 @@ from hyperloom.orchestrator.enablement.recipe.keep_records import (
     levers_without_readers,
 )
 from hyperloom.orchestrator.enablement.recipe.keep_probe import (
+    KeepEvidence,
     graded_framework,
     graded_launch_env,
     keep_assertion_packages,
@@ -222,15 +222,13 @@ def test_keep_records_project_launch_evidence_before_returning_it(repo: Path, tm
     }
     out = executor._enablement_keep_records(
         IntegrateAttempt(
-            task_id=PROBE_TASK, base_sha_by_root={}, shared_state=SimpleNamespace(enablement=EnablementRound())
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=SimpleNamespace(enablement=EnablementRound()),
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
         ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[],
-        done_payload={},
-        provision_result=None,
         bench_result={"launch_evidence": evidence},
     )
     durable = out["enablement_launch_evidence"]
@@ -258,21 +256,21 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
             argv_key: argv,
         }
         result = executor._enablement_keep_records(
-            IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+            IntegrateAttempt(
+                task_id=PROBE_TASK,
+                base_sha_by_root={},
+                shared_state=state,
+                specialist_task_id=PROBE_TASK,
+                framework_root=repo,
+            ),
             params={},
-            specialist_task_id=PROBE_TASK,
-            framework_root=repo,
-            applied=[],
-            applied_artifacts=[],
-            done_payload={},
-            provision_result=None,
             bench_result={"launch_evidence": evidence},
         )
         if refused:
             assert argv_key not in result["enablement_launch_evidence"]
         _rearm_on_kept(state, result)
         state.enablement = EnablementRound.from_dict(asdict(state.enablement))
-        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+        collected = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
         decision = collected["replay_sufficiency"]
         activation_reasons = [reason for reason in decision["reasons"] if reason["code"] == "activation_incomplete"]
         expected = {"code": "activation_incomplete", "scope": "observed_server_launch_flags", "blocks": "both"}
@@ -536,10 +534,10 @@ def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Pa
     }
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"}
     assert closure["distributions"]["demo"] == "2.0"
@@ -555,10 +553,12 @@ def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
     }
     _closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}),
+            specialist_task_id="some-other-round",
+            provision_result=None,
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id="some-other-round",
-        provision_result=None,
     )
     assert assertions == {}
 
@@ -584,10 +584,10 @@ def test_an_override_naming_no_interpreter_observes_under_the_backend(
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -609,10 +609,10 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"pytest": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert closure["distributions"], "the ambient interpreter has a non-empty closure"
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
@@ -627,10 +627,10 @@ def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path,
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -656,10 +656,10 @@ def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Pat
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"pytest": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     # The framework resolver named this interpreter, so its closure is the one
     # on record; reaching the backend's resolver at all fails the test above.
@@ -703,7 +703,7 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
     params = {"runtime_override": {"path_prefix": str(graded_bin)}, "framework": "vllm"}
     probe_keep_environment(
-        params, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     )
     assert seen["resolved"] == str(graded_bin / "python"), "the override's PATH, not the ambient one"
 
@@ -750,10 +750,8 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
     probe_keep_environment(
         {},
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None),
         framework=graded_framework({}, str(config)),
-        build_manifest=[],
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
         materialized_config=str(config),
     )
     assert seen["framework"] == "vllm", "the config's framework outranks $FRAMEWORK"
@@ -779,10 +777,10 @@ def test_a_dist_reachable_only_through_the_configs_pythonpath_is_in_the_closure(
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"configonly": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"configonly": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
         materialized_config=str(config),
     )
     assert closure["distributions"].get("configonly") == "3.1"
@@ -798,7 +796,7 @@ def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path, monkeypa
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: "")
     assert probe_keep_environment(
-        {}, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None
+        {}, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     ) == (
         {},
         {},
@@ -823,16 +821,15 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
         shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[Path("/p/1.patch")],
+            applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
+            done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        # In the accepted stack, not merely recorded beside it: a root binding
-        # is admitted for the patches this integration took.
-        applied=[Path("/p/1.patch")],
-        applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
-        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     records = {r["path"]: r for r in out["enablement_roots"]}
@@ -867,14 +864,13 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     root_id = out["enablement_roots"][0]["id"]
@@ -894,14 +890,13 @@ def test_a_first_keep_captures_its_own_targets(repo: Path, tmp_path: Path, monke
         shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     result = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     assert list(result["enablement_accepted_stack_targets"].values()) == [{TARGET: "upsert"}]
@@ -919,14 +914,15 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
         shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[Path("/p/1.patch")],
+            applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+            done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[Path("/p/1.patch")],
-        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
-        done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
@@ -946,10 +942,10 @@ def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Pa
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=provisioned
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=provisioned,
     )
     assert assertions == {}
     assert closure["distributions"]["demo"] == "2.0"
@@ -971,7 +967,9 @@ def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: 
         runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
     )
     _closure, assertions = probe_keep_environment(
-        {}, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=provisioned
+        {},
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=provisioned),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"}
 
@@ -1010,52 +1008,6 @@ def _patch(tmp_path: Path, name: str, body: str) -> Path:
     return path
 
 
-def test_a_deletion_is_declared_by_its_dev_null_post_image(repo: Path, tmp_path: Path):
-    patch = _patch(
-        tmp_path,
-        "del.patch",
-        f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}",
-    )
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete"}
-
-
-def test_a_creation_is_an_upsert_even_when_the_tree_does_not_hold_it(repo: Path, tmp_path: Path):
-    """The stripped-inputs case, stated as a unit.
-
-    A KEEP reached without its mutation inputs boots against the base tree, so
-    the created file is absent at capture time. A tree probe reads that absence
-    as a deletion and declares a target the snapshot then satisfies trivially;
-    the diff says the file must exist, and that is what a replay must produce.
-    """
-    rel = "srt/created.py"
-    assert not (repo / rel).exists()
-    patch = _patch(tmp_path, "new.patch", f"--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1 @@\n+x = 1\n")
-    assert patch_declared_ops(repo, [patch]) == {rel: "upsert"}
-
-
-def test_a_later_patch_recreating_a_deleted_file_wins(repo: Path, tmp_path: Path):
-    """Order, not set-merge: the accumulated upsert/delete lists put every
-    deletion last, so the recreation loses and the replay removes a file the
-    accepted stack requires."""
-    first = _patch(tmp_path, "1.patch", f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}")
-    second = _patch(tmp_path, "2.patch", f"--- /dev/null\n+++ b/{TARGET}\n@@ -0,0 +1 @@\n+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [first, second]) == {TARGET: "upsert"}
-    # ...and the other way round, so this is an ordering rule and not a
-    # preference for one operation.
-    assert patch_declared_ops(repo, [second, first]) == {TARGET: "delete"}
-
-
-def test_a_rename_declares_both_ends(repo: Path, tmp_path: Path):
-    moved = "srt/moved.py"
-    patch = _patch(tmp_path, "mv.patch", f"--- a/{TARGET}\n+++ b/{moved}\n@@ -1 +1 @@\n-{BASE_TEXT}+{BASE_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete", moved: "upsert"}
-
-
-def test_a_plain_modify_declares_no_deletion_of_the_file_it_writes(repo: Path, tmp_path: Path):
-    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-
-
 def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Path):
     """Pins the producer of ``enablement_patch_targets``.
 
@@ -1084,14 +1036,14 @@ def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Pa
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[second],
+            done_payload={"patch_roots": {str(second): str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[second],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(second): str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {
@@ -1122,14 +1074,13 @@ def test_the_base_sha_reported_is_this_roots_own(repo: Path, tmp_path: Path):
         ),
     )
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_base_sha"] == _git_head_sha(repo)
@@ -1176,7 +1127,7 @@ def test_an_advanced_round_carries_its_base_to_the_keep_that_follows(repo: Path,
     Pins the durable ``base_sha_by_root`` write: drop it from
     ``_note_pre_mutation_head`` and this goes red.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     true_base = _git_head_sha(repo)
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
@@ -1203,14 +1154,13 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
     """Run the KEEP capture for a round that installed one artifact."""
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     return executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[],
-        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
 
@@ -1218,7 +1168,7 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
 def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
     """The head before an unrelated patch is not the tree the enablement stack
     applies to, so a non-enablement round must not claim the base."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=False)
@@ -1226,7 +1176,7 @@ def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
 
 
 def test_the_recorded_base_is_never_replaced_by_a_later_reading(repo: Path):
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=True)
@@ -1260,9 +1210,7 @@ def test_a_modification_that_was_never_applied_declares_nothing(repo: Path, tmp_
     """
     base_sha = _git_head_sha(repo)
     patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    # The headers still say what the patch WOULD do...
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-    # ...but the replay produces bytes the captured tree does not have.
+    # The replay produces bytes the captured tree does not have.
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
     assert (repo / TARGET).read_text(encoding="utf-8") == BASE_TEXT
 
@@ -1394,9 +1342,7 @@ def test_a_mixed_diff_declares_its_metadata_only_block_too(repo: Path, tmp_path:
     )
     _git(repo, "apply", str(mixed))
     _commit_all(repo, "mixed applied")
-    # The header parse still sees only the text half...
-    assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
-    # ...while git reports both entries the apply actually touched.
+    # git reports both entries the apply actually touched.
     assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) == {
         str(mixed): {TARGET: "upsert", "srt/exec.sh": "upsert"}
     }
@@ -1414,9 +1360,6 @@ def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: P
     _git(repo, "apply", "-p0", str(patch))
     _commit_all(repo, "deleted")
 
-    # The header-only reader falls back to -p1 and names a path that was never
-    # in the tree.
-    assert patch_declared_ops(repo, [patch]) == {"gone.py": "delete"}
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone.py": "delete"}}
 
 
@@ -1431,14 +1374,14 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
     attempt = IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={str(repo): base_sha}, shared_state=state)
     out = executor._enablement_keep_records(
-        attempt,
+        replace(
+            attempt,
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[patch],
+            done_payload={"patch_roots": {str(patch): str(repo)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=repo,
-        applied=[patch],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(patch): str(repo)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {}
@@ -1446,7 +1389,7 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     state.enablement.patch_roots = {str(patch): str(repo)}
     for key, value in out.items():
         setattr(state.enablement, key.removeprefix("enablement_"), value)
-    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)})
     codes = [r["code"] for r in section["replay_sufficiency"]["reasons"]]
     assert section["replay_sufficiency"]["status"] == "insufficient"
     assert "patch_targets_unknown" in codes
@@ -1494,7 +1437,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
     next thing that happens. Left for the rearm, a round that commits its patch
     and then dies resumes with the entry absent and HEAD already moved -- the
     exact state this map exists to prevent."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     saved: list[Path] = []
     state = SimpleNamespace(
@@ -1512,7 +1455,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
 def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
     """A record that cannot be written is still on the in-memory state, and the
     rearm saves again; a failed write must not cost the round."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     def _boom(*_a, **_k):
         raise OSError("disk full")
@@ -1616,14 +1559,16 @@ def test_a_patch_on_a_root_with_no_base_commit_declares_its_overlay(tmp_path: Pa
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+        IntegrateAttempt(
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=state,
+            specialist_task_id=PROBE_TASK,
+            framework_root=plain,
+            applied=[patch],
+            done_payload={"patch_roots": {str(patch): str(plain)}},
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=plain,
-        applied=[patch],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(patch): str(plain)}},
-        provision_result=None,
         bench_result={},
     )
     assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
@@ -1776,14 +1721,15 @@ def test_an_artifact_on_a_root_with_no_base_commit_is_unaffected(tmp_path: Path)
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     state = SimpleNamespace(enablement=EnablementRound())
     out = executor._enablement_keep_records(
-        IntegrateAttempt(task_id=PROBE_TASK, base_sha_by_root={}, shared_state=state),
+        IntegrateAttempt(
+            task_id=PROBE_TASK,
+            base_sha_by_root={},
+            shared_state=state,
+            specialist_task_id=PROBE_TASK,
+            framework_root=plain,
+            applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+        ),
         params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=plain,
-        applied=[],
-        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
-        done_payload={},
-        provision_result=None,
         bench_result={},
     )
     record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
@@ -2776,10 +2722,6 @@ def test_an_in_place_patch_asserts_the_serving_framework_at_the_keep(tmp_path: P
         }
     }
     _closure, assertions = probe_keep_environment(
-        params,
-        framework="vllm",
-        build_manifest=[],
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     )
     assert assertions == {"vllm": "0.30.0"}

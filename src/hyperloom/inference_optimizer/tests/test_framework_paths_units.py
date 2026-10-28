@@ -18,6 +18,8 @@ from hyperloom.inference_optimizer.framework_paths import probe_framework_source
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
@@ -595,34 +597,26 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom" in r.lower() for r in fp.resolve_known_source_prefixes())
 
     def test_atom_present_in_tracelens_reusable_roots(self):
-        """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
-        from hyperloom.orchestrator import trace_analysis
+        """The kernel-agent's ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
+        from hyperloom.orchestrator.trace_analysis import _kernel_classification
 
-        ka_path = Path(trace_analysis.__file__).resolve().parent / "tracelens_analysis.py"
-        text = ka_path.read_text(encoding="utf-8")
+        text = Path(_kernel_classification.__file__).resolve().read_text(encoding="utf-8")
         assert "/app/atom/atom/" in text.lower(), (
-            "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py _REUSABLE_SOURCE_ROOTS "
+            "src/hyperloom/orchestrator/trace_analysis/_kernel_classification.py _REUSABLE_SOURCE_ROOTS "
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-        from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+        from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 
-        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
-        tracelens_analysis._framework_source_roots.cache_clear()
-        ka_atom = frozenset(r.lower() for r in tracelens_analysis._reusable_roots() if "/atom/" in r.lower())
+        orch_atom = frozenset(r.lower() for r in fp.resolve_known_source_prefixes() if "/atom/" in r.lower())
+        kernel_classification._framework_source_roots.cache_clear()
+        ka_atom = frozenset(r.lower() for r in kernel_classification._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
         assert ka_atom, "tracelens reusable roots carry no atom entry"
         assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
@@ -635,10 +629,8 @@ def test_prompt_renders_framework_source_roots(registry=None):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        max_minutes=60,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
-        framework_source_roots=custom,
+        session=SessionContext(framework="sglang", max_minutes=60, framework_source_roots=custom),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
     assert "framework_source_roots:" in text
     assert "/custom/sglang/" in text
@@ -738,6 +730,22 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert first["backup_path"] != second["backup_path"]
     assert Path(first["backup_path"]).is_dir()
     assert Path(second["backup_path"]).is_dir()
+
+
+class TestPointSessionFrameworkRoot:
+    def test_every_resolver_names_the_pointed_root_over_a_prior_pin(self, monkeypatch, tmp_path):
+        prior = tmp_path / "image"
+        prior.mkdir()
+        checkout = tmp_path / "attempt-src"
+        checkout.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "sglang")
+        monkeypatch.setenv("SGLANG_DIR", str(prior))
+        monkeypatch.setenv("SGLANG_REPO_PATH", "")
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+
+        fp.point_session_framework_root(str(checkout), "sglang")
+        assert fp.resolve_session_framework_root() == f"{checkout}/"
+        assert fp.resolve_framework_tree("sglang") == f"{checkout}/"
 
 
 class TestResolveFrameworkTree:

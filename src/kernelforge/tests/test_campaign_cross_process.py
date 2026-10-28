@@ -8,10 +8,12 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests._experiment_records import persisted_experiments
+from kernelforge.tests.conftest import SRC_ROOT, silence_jit_rebuild
 
 import kernelforge.loop.runner as runner_module
 from kernelforge.loop.archive import CandidateArchive
@@ -19,6 +21,7 @@ from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.run_state import LoopStateStore
 from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
 from kernelforge.tracker import ExperimentTracker
+from kernelforge.loop.iteration import campaign_runtime
 
 
 # The stand-in for "budget is not what this test is about"; it has to clear the
@@ -51,7 +54,7 @@ def _initialize_workspace(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
     return workspace, kernel, driver
 
 
@@ -98,7 +101,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         nonlocal attempt
         attempt += 1
         session_sink["plan"] = f"attempt {attempt}"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + f"\n# attempt {attempt}\n")
         return f"attempt {attempt}"
 
@@ -109,7 +112,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         tracker,
         session_count=2,
     )
-    first_results = asyncio.run(first.run(agent_fn=editing_agent))
+    first_results = asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
     second = _make_loop(
         workspace,
         kernel,
@@ -118,7 +121,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         session_count=2,
         resume=True,
     )
-    second_results = asyncio.run(second.run(agent_fn=editing_agent))
+    second_results = asyncio.run(second.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert [item.iteration for item in first_results] == [1, 2]
     assert [item.iteration for item in second_results] == [3, 4]
@@ -129,7 +132,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
     assert state.cumulative.iterations == 4
 
     experiments = sorted(
-        tracker.list_experiments(),
+        persisted_experiments(tracker.dir),
         key=lambda experiment: experiment.segment_index,
     )
     assert [experiment.segment_index for experiment in experiments] == [1, 2]
@@ -192,7 +195,7 @@ def test_runner_exposes_state_persistence_degradation(tmp_path, monkeypatch):
         return "No source change."
 
     monkeypatch.setattr(LoopStateStore, "save", fail_save)
-    asyncio.run(loop.run(agent_fn=no_change_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=no_change_agent)))
 
     assert loop.persistence_degraded is True
     assert any("simulated state write failure" in item for item in loop.persistence_errors)
@@ -212,7 +215,7 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
         session_sink["plan"] = f"candidate {attempt}"
         session_sink["end_reason"] = "candidate_submitted" if attempt == 1 else "turn_cap"
         session_sink["turns"] = 10 if attempt == 1 else 100
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + f"\n# candidate {attempt}\n")
         return f"candidate {attempt}"
 
@@ -251,8 +254,8 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             first.run(
-                agent_fn=editing_agent,
-                on_iteration=interrupt_after_keep,
+                runner_module.LoopAgents(agent_fn=editing_agent),
+                callbacks=runner_module.LoopCallbacks(on_iteration=interrupt_after_keep),
             )
         )
 
@@ -269,13 +272,13 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
         session_count=1,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=editing_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     final_manifest = json.loads((root / "best" / "manifest.json").read_text())
     final_report = (root / "optimization_report.md").read_text()
     history = (root / "optimization_history.md").read_text()
     experiments = sorted(
-        tracker.list_experiments(),
+        persisted_experiments(tracker.dir),
         key=lambda experiment: experiment.segment_index,
     )
 
@@ -297,7 +300,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "recover committed candidate"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# verified candidate\n")
         return "verified candidate"
 
@@ -318,7 +321,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     committed_head = subprocess.run(
@@ -347,7 +350,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=forbidden_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=forbidden_agent)))
 
     state = LoopStateStore(str(workspace)).load()
     events = LoopStateStore(str(workspace)).read_events()
@@ -373,7 +376,7 @@ def test_resume_clears_reconciled_pending_keep(
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "recover committed candidate"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# candidate\n")
         return "verified candidate"
 
@@ -394,7 +397,7 @@ def test_resume_clears_reconciled_pending_keep(
         interrupt_before_checkpoint,
     )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     assert (root / "pending_keep.json").is_file()
@@ -407,36 +410,72 @@ def test_resume_clears_reconciled_pending_keep(
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert not (root / "pending_keep.json").exists()
     archived = CandidateArchive(str(workspace), str(kernel)).load_meta(1)
     assert archived["decision"] == "KEEP"
 
 
+def test_resume_ends_the_relay_blockage_epoch_of_a_recovered_keep(tmp_path, monkeypatch):
+    """A KEEP adopted from its pending journal resets relay state exactly as a KEEP the loop decided would."""
+    workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
+    tracker = ExperimentTracker(workspace / "forge_experiments")
+    monkeypatch.setattr(IterationLoop, "run_one_iteration", _successful_iteration)
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        session_sink["plan"] = "recover committed candidate"
+        path = Path(kernel_path)
+        path.write_text(path.read_text() + "\n# candidate\n")
+        return "verified candidate"
+
+    first = _make_loop(workspace, kernel, driver, tracker, session_count=1)
+
+    def interrupt_before_checkpoint(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(first, "_finalize_keep_checkpoint", interrupt_before_checkpoint)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+    store = LoopStateStore(str(workspace))
+    interrupted = store.load()
+    interrupted.agent_relay.active_profile_id = "claude"
+    interrupted.agent_relay.active_no_improvement_streak = 2
+    interrupted.agent_relay.intervention_kind = "cross_harness"
+    store.save(interrupted)
+
+    resumed = _make_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
+
+    recovered = LoopStateStore(str(workspace)).load()
+    assert recovered.best.iteration == 1
+    assert recovered.agent_relay.active_no_improvement_streak == 0
+    assert recovered.agent_relay.intervention_kind == ""
+
+
 def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypatch):
     workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
     tracker = ExperimentTracker(workspace / "forge_experiments")
     monkeypatch.setattr(IterationLoop, "run_one_iteration", _successful_iteration)
-    original_publish = runner_module.BestResultPublisher.publish
+    original_publish = campaign_runtime.BestResultPublisher.publish
     publish_calls = 0
 
-    def interrupt_publication(self, **kwargs):
+    def interrupt_publication(self, *args, **kwargs):
         nonlocal publish_calls
         publish_calls += 1
         if publish_calls == 1:
             raise OSError("simulated publication interruption")
-        return original_publish(self, **kwargs)
+        return original_publish(self, *args, **kwargs)
 
     monkeypatch.setattr(
-        runner_module.BestResultPublisher,
+        campaign_runtime.BestResultPublisher,
         "publish",
         interrupt_publication,
     )
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "state advanced candidate"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# state advanced candidate\n")
         return "state advanced candidate"
 
@@ -447,7 +486,7 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
         tracker,
         session_count=1,
     )
-    asyncio.run(first.run(agent_fn=editing_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     interrupted_state = LoopStateStore(str(workspace)).load()
@@ -464,7 +503,7 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     recovered = LoopStateStore(str(workspace)).load()
     events = LoopStateStore(str(workspace)).read_events()
@@ -483,7 +522,7 @@ def test_resume_discards_pending_keep_when_commit_never_happened(tmp_path, monke
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "uncommitted verified candidate"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# uncommitted candidate\n")
         return "uncommitted candidate"
 
@@ -501,7 +540,7 @@ def test_resume_discards_pending_keep_when_commit_never_happened(tmp_path, monke
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     assert (root / "pending_keep.json").is_file()
@@ -521,7 +560,7 @@ def test_resume_discards_pending_keep_when_commit_never_happened(tmp_path, monke
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     state = LoopStateStore(str(workspace)).load()
     assert resumed._git("rev-parse", "HEAD").splitlines()[0] == base_head
@@ -541,7 +580,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "expected candidate"
-        runner_module.Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        campaign_runtime.Path(kernel_path).write_text("def kernel():\n    return 2\n")
         return "expected candidate"
 
     first = _make_loop(
@@ -557,7 +596,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     state_before = (root / "run_state.json").read_bytes()
@@ -580,7 +619,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
         resume=True,
     )
     with pytest.raises(ValueError, match="committed patch mismatch"):
-        asyncio.run(resumed.run(agent_fn=None))
+        asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert (root / "run_state.json").read_bytes() == state_before
     assert (root / "pending_keep.json").read_bytes() == pending_before
@@ -593,7 +632,7 @@ def test_resume_repairs_best_views_from_run_state_before_agent(tmp_path, monkeyp
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "durable state candidate"
-        path = runner_module.Path(kernel_path)
+        path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# durable state candidate\n")
         return "durable state candidate"
 
@@ -604,7 +643,7 @@ def test_resume_repairs_best_views_from_run_state_before_agent(tmp_path, monkeyp
         tracker,
         session_count=1,
     )
-    asyncio.run(first.run(agent_fn=editing_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     root = workspace / "forge_experiments"
     (root / "best" / "manifest.json").unlink()
@@ -625,7 +664,7 @@ def test_resume_repairs_best_views_from_run_state_before_agent(tmp_path, monkeyp
         session_count=0,
         resume=True,
     )
-    asyncio.run(resumed.run(agent_fn=forbidden_agent))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=forbidden_agent)))
 
     state = LoopStateStore(str(workspace)).load()
     manifest = json.loads((root / "best" / "manifest.json").read_text())
@@ -647,7 +686,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.runner import IterationConfig, IterationLoop, LoopAgents
 from kernelforge.tracker import ExperimentTracker
 
 
@@ -704,7 +743,7 @@ async def main():
         await asyncio.Event().wait()
 
     loop.run_one_iteration = blocked_validation
-    await loop.run(agent_fn=agent, usage=usage)
+    await loop.run(LoopAgents(agent_fn=agent), usage=usage)
 
 
 asyncio.run(main())

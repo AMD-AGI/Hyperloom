@@ -96,7 +96,7 @@ async def test_an_unknown_call_site_component_keeps_the_ambient_one(tmp_path):
     assert row["component"] == "coordinator"
 
 
-def test_a_streamed_completion_reads_id_and_usage_off_its_chunks(tmp_path):
+async def test_a_streamed_completion_reads_id_and_usage_off_its_chunks(tmp_path):
     def chunk(content=None, finish=None, usage=None):
         choices = []
         if content is not None or finish is not None:
@@ -108,9 +108,17 @@ def test_a_streamed_completion_reads_id_and_usage_off_its_chunks(tmp_path):
         chunk(content="llo", finish="stop"),
         chunk(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2)),
     ]
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: iter(chunks))))
+
+    async def stream():
+        for item in chunks:
+            yield item
+
+    async def create(**_):
+        return stream()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
-        text, _usage = llm_config.stream_chat_completion_text(client, component="proposal_scorer", model="gpt-s")
+        text, _usage = await llm_config.astream_chat_completion_text(client, component="proposal_scorer", model="gpt-s")
 
     assert text == "hello"
     (row,) = _requests(tmp_path)
@@ -145,16 +153,14 @@ def test_an_anthropic_messages_post_is_one_request(tmp_path):
     assert attributes["cache_creation_input_tokens"] == 0
 
 
-def test_an_observer_fault_never_reaches_the_request(tmp_path):
+def test_an_observer_fault_never_reaches_the_request(tmp_path, monkeypatch):
     def broken(_record):
         raise ValueError("observer bug")
 
+    monkeypatch.setattr(hooks, "_OBSERVERS", [])
     hooks.add_llm_request_observer(broken)
-    try:
-        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: _chat_response())))
-        assert llm_config.chat_completion(client, component="critic", model="m").text == "ok"
-    finally:
-        hooks.remove_llm_request_observer(broken)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: _chat_response())))
+    assert llm_config.chat_completion(client, component="critic", model="m").text == "ok"
 
 
 def test_requests_outside_a_session_write_nothing(tmp_path):
@@ -194,7 +200,7 @@ def test_specialist_log_requests_are_one_row_per_message_id(tmp_path):
         ],
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="specialist", task_id="t-1", parent_span_id="call-1"):
-        assert re_.record_stream_json_requests(log) == 2
+        re_.record_stream_json_requests(log)
 
     first, second = _requests(tmp_path)
     assert [r["attributes"]["message_id"] for r in (first, second)] == ["m1", "m2"]

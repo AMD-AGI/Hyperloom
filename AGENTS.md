@@ -25,6 +25,8 @@ handlers and integrating external components.
 | Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
 | PR checklist / AI review prompt | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 | Reviewing a PR: the shared procedure and the rules it checks | [`.claude/skills/review-pr/`](.claude/skills/review-pr/) |
+| Before building an optimization: whether it already exists in an open or merged upstream PR, and in your tree | [`.claude/skills/check-prior-art/`](.claude/skills/check-prior-art/) |
+| Before taking up an upstream PR: whether an AMD deployment runs the code it changes, whether your tree has it, and what to do with it | [`.claude/skills/analyze-upstream-pr/`](.claude/skills/analyze-upstream-pr/) |
 
 Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
 kernel backend). Both are exercised in CI.
@@ -59,8 +61,8 @@ doc is the authority on where that boundary lives.
   crosses a trigger in the style guide § *Size and complexity* — the authority on the
   numbers, how to measure them, and when a long unit is fine as it stands — needs a reason
   in the PR description or a split. Editing a unit that was already over is not a demand to
-  repay its debt; adding branches or a second responsibility to it is. The three numbers
-  are review triggers, not gates, and the tree carries a backlog above all three. Above
+  repay its debt; adding branches or a second responsibility to it is. The two numbers
+  are review triggers, not gates, and the tree carries a backlog above both. Above
   them sits one ceiling — **a function this change adds, or
   whose cyclomatic complexity this change raises, may not exceed 20**; the style guide §
   *Complexity ceiling* has the measurement and the two cases it covers. Maintainability,
@@ -104,9 +106,13 @@ doc is the authority on where that boundary lives.
 - **New framework or platform?** Work bring-up through the owning components before
   integration code lands — see [`CONTRIBUTING.md`](CONTRIBUTING.md) § *Proposing a new
   framework or platform*.
-- **Don't grow the debt.** No new broad `except Exception` / bare `except` — catch the
-  specific error or let it raise. No new feature flag or env toggle to route around a
-  design problem; a flag is a decision deferred.
+- **Don't grow the debt.** A new broad `except Exception` / bare `except` either re-raises,
+  or is the outermost handler on its path and logs the error with its traceback, or
+  isolates one item a loop must survive -- logging with the traceback, recording the
+  failure in a status the caller reads that a real result never carries, and naming what
+  it isolates in a comment on the `except` line. Otherwise catch the specific error or let
+  it raise (review-pr rule S8). No new feature flag or env toggle to route around a design
+  problem; a flag is a decision deferred.
 - **Trust the caller.** Validate at the system boundary, then trust internal callers. The
   agents driving this system are capable, so redundant re-checks, layered fallbacks, and
   belt-and-braces defaults buy nothing — they hide the failure they were added to survive

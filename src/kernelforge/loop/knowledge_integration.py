@@ -8,37 +8,45 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
+import subprocess
 import time
+import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.knowledge.kb_store import warmstart_policy
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
-from kernelforge.durable_io import atomic_write_text, fsync_directory
-from kernelforge.loop.scoring import (
+from kernelforge.loop.loop_log import kb_write_line
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     aggregate_regression_detail,
     keep_score,
     passes_keep_threshold,
 )
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     aggregate_benchmark_measurements,
     calculate_measurement_case_speedups,
 )
+from kernelforge.loop.jit_rebuild import JitRebuildUnavailable
+
+log = logging.getLogger(__name__)
 
 # How much of the speedup a candidate was ranked on its own measurement has to reproduce for that ranking to count as
 # honest. The regression this answers measured 32% below the claim that had won the ranking.
@@ -97,7 +105,7 @@ def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
     if not base_sha:
         return ""
     try:
-        r = git("diff", base_sha, "HEAD", cwd=workspace_dir, check=False, text=False)
+        r = git_bytes("diff", base_sha, "HEAD", cwd=workspace_dir, check=False)
     except OSError:
         return ""
     return "" if r.returncode != 0 else r.stdout.decode("utf-8", errors="replace")
@@ -248,14 +256,21 @@ def _rewrite_patch_to_consumer_paths(
     return "".join(lines)
 
 
+@dataclass(frozen=True)
+class _PatchTarget:
+    """Where a KB patch may land: the editable paths, and how its canonical paths map onto this workspace."""
+
+    allowed_paths: set[str]
+    canonical_source_paths: set[str] | None = None
+    consumer_source_map: dict[str, str] | None = None
+
+
 def _git_apply(
     workspace_dir: str,
     patch: str,
     check_only: bool = False,
     *,
-    allowed_paths: set[str] | None = None,
-    canonical_source_paths: set[str] | None = None,
-    consumer_source_map: dict[str, str] | None = None,
+    target: _PatchTarget | None = None,
 ) -> bool:
     """Apply (or --check) a unified diff from stdin, normalizing the strip depth."""
 
@@ -274,13 +289,14 @@ def _git_apply(
         )
 
     depths = _GIT_APPLY_STRIP_DEPTHS
-    if allowed_paths is not None:
+    if target is not None:
+        allowed_paths = target.allowed_paths
         safe_depth = None
-        if canonical_source_paths and consumer_source_map:
+        if target.canonical_source_paths and target.consumer_source_map:
             rewritten = _rewrite_patch_to_consumer_paths(
                 patch,
-                canonical_source_paths=canonical_source_paths,
-                consumer_source_map=consumer_source_map,
+                canonical_source_paths=target.canonical_source_paths,
+                consumer_source_map=target.consumer_source_map,
                 allowed_paths=allowed_paths,
             )
             if rewritten is not None:
@@ -307,15 +323,12 @@ def _git_commit_all(
     workspace_dir: str,
     message: str,
     *,
-    allowed_paths: set[str] | None = None,
+    allowed_paths: set[str],
 ) -> str:
     """Commit exactly the approved non-protected paths, raising on failure."""
     before = git_head(workspace_dir)
     if not before:
         raise RuntimeError("could not resolve HEAD before warm-start commit")
-    if allowed_paths is None:
-        changed = git("diff", "--name-only", "HEAD", cwd=workspace_dir)
-        allowed_paths = {line.strip() for line in changed.stdout.splitlines() if line.strip()}
     git("add", "-A", "-f", "--", *sorted(allowed_paths), cwd=workspace_dir)
     staged = git("diff", "--cached", "--name-only", cwd=workspace_dir)
     staged_paths = {line.strip() for line in staged.stdout.splitlines() if line.strip()}
@@ -360,7 +373,7 @@ def _untracked_files(workspace_dir: str) -> set[str]:
         ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
     )
     for command in commands:
-        result = git(*command, cwd=workspace_dir, check=False, text=False)
+        result = git_bytes(*command, cwd=workspace_dir, check=False)
         if result.returncode != 0:
             raise WarmStartRestoreError("failed to snapshot pre-existing untracked files")
         paths.update(item.decode(errors="surrogateescape") for item in result.stdout.split(b"\0") if item)
@@ -427,22 +440,21 @@ def _git_discard_worktree(
 
 def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
     """Run the driver's full benchmark suite once."""
-    from kernelforge.mcp_server.tools.bench import bench_wallclock
+    from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 
     try:
-        repeat_kwargs = {"repeat": bench_repeat} if bench_repeat > 1 else {}
-        res = asyncio.run(bench_wallclock(driver_script=driver, driver_args=[], **repeat_kwargs))
+        res = asyncio.run(bench_wallclock(BenchRun(driver, driver_args=[], repeat=bench_repeat)))
         if not isinstance(res, dict) or not res.get("success") or not res.get("case_times"):
             return None
         return res
-    except Exception as e:  # noqa: BLE001 - a failed probe just disables warm-start
+    except (OSError, ValueError) as e:  # a failed probe just disables warm-start
         print(f"  [kb] bench probe failed: {e}", flush=True)
         return None
 
 
 def _correctness_once(driver: str, snr_threshold: float) -> bool:
     """Run the driver's complete SNR parity probe once."""
-    from kernelforge.mcp_server.tools.test import test_correctness
+    from kernelforge.evaluation.correctness.driver import test_correctness
 
     try:
         res = asyncio.run(
@@ -453,7 +465,7 @@ def _correctness_once(driver: str, snr_threshold: float) -> bool:
             )
         )
         return bool(res.get("passed")) if isinstance(res, dict) else False
-    except Exception as e:  # noqa: BLE001 - a failed probe just rejects warm-start
+    except (OSError, ValueError) as e:  # a failed probe just rejects warm-start
         print(f"  [kb] correctness probe failed: {e}", flush=True)
         return False
 
@@ -652,22 +664,10 @@ def _apply_candidate_patch(
     )
     canonical_source_paths = {str(path) for path in implementation_identity.get("source_paths", []) if str(path)}
     consumer_source_map = sol.get("consumer_source_map") if isinstance(sol.get("consumer_source_map"), dict) else {}
-    if not _git_apply(
-        workspace_dir,
-        patch,
-        check_only=True,
-        allowed_paths=allowed_paths,
-        canonical_source_paths=canonical_source_paths,
-        consumer_source_map=consumer_source_map,
-    ):
+    target = _PatchTarget(allowed_paths, canonical_source_paths, consumer_source_map)
+    if not _git_apply(workspace_dir, patch, check_only=True, target=target):
         return "patch_touches_protected_path_or_not_applicable"
-    if not _git_apply(
-        workspace_dir,
-        patch,
-        allowed_paths=allowed_paths,
-        canonical_source_paths=canonical_source_paths,
-        consumer_source_map=consumer_source_map,
-    ):
+    if not _git_apply(workspace_dir, patch, target=target):
         _git_discard_worktree(
             workspace_dir,
             pre_untracked=pre_untracked,
@@ -710,9 +710,7 @@ def _adopt_measured_candidate(
         return "", reject_reason
     try:
         _force_jit_rebuild(workspace_dir, kernel, source_files)
-    except WarmStartRestoreError:
-        raise
-    except Exception as error:  # noqa: BLE001 - a stale artifact must not be kept
+    except (JitRebuildUnavailable, subprocess.TimeoutExpired) as error:
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
             f"  [kb] warm-start candidate rejected: rebuild failed ({error})",
@@ -732,7 +730,7 @@ def _adopt_measured_candidate(
         )
     except WarmStartRestoreError:
         raise
-    except Exception as error:  # noqa: BLE001 - reported as a rejected candidate
+    except (RuntimeError, subprocess.SubprocessError, OSError) as error:
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
             f"  [kb] warm-start candidate rejected: commit failed ({error})",
@@ -785,6 +783,7 @@ def _record_measured_speedup(
         sanitize_read_error,
     )
     from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
+    from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
 
     solution_slug = str(sol.get("solution_slug") or "")
     canonical_id = str(sol.get("kernel_slug") or "")
@@ -797,7 +796,7 @@ def _record_measured_speedup(
                 canonical_id,
                 config,
             ).record_measured_speedup(session_id, measured_mean_case_speedup)
-        except Exception as error:  # noqa: BLE001 - reported below, never fatal
+        except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
             outcome = {
                 "recorded": False,
                 "reason": sanitize_read_error(
@@ -861,24 +860,32 @@ class _CandidateTrial:
         return cls(applied_ms, mean_case_speedup, bench, "", mean_case_speedup)
 
 
-def _try_apply_candidate(
-    sol: dict,
-    *,
-    kernel,
-    driver,
-    workspace_dir,
-    snr_threshold,
-    source_files,
-    pristine_bench,
-    allowed_paths,
-    pre_untracked,
-    bench_repeat=1,
-) -> _CandidateTrial:
+@dataclass(frozen=True)
+class WarmStartHarness:
+    """How a warm-start candidate is judged on this machine: its driver, correctness threshold and bench repeats."""
+
+    driver: str
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    bench_repeat: int = 1
+
+
+@dataclass(frozen=True)
+class _CandidateField:
+    """What every candidate trial is judged against: the kernel, the harness, the pristine bench and editable paths."""
+
+    kernel: LoopKernel
+    harness: WarmStartHarness
+    pristine_bench: dict
+    allowed_paths: set[str]
+
+
+def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) -> _CandidateTrial:
     """Measure one candidate solution as a possible starting point."""
+    workspace_dir, harness, pristine_bench = trial.kernel.workspace, trial.harness, trial.pristine_bench
     reject_reason = _apply_candidate_patch(
         sol,
         workspace_dir=workspace_dir,
-        allowed_paths=allowed_paths,
+        allowed_paths=trial.allowed_paths,
         pre_untracked=pre_untracked,
     )
     if reject_reason:
@@ -887,8 +894,8 @@ def _try_apply_candidate(
             measured_mean_case_speedup=None,
         )
     try:
-        _force_jit_rebuild(workspace_dir, kernel, source_files)
-        passed = _correctness_once(driver, snr_threshold)
+        _force_jit_rebuild(workspace_dir, trial.kernel.kernel_path, trial.kernel.source_files)
+        passed = _correctness_once(harness.driver, harness.snr_threshold)
         if not passed:
             _git_discard_worktree(
                 workspace_dir,
@@ -898,7 +905,7 @@ def _try_apply_candidate(
                 "correctness_failed",
                 measured_mean_case_speedup=None,
             )
-        applied_runs = [_bench_once(driver, bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
+        applied_runs = [_bench_once(harness.driver, harness.bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
         applied_bench = aggregate_benchmark_measurements(applied_runs)
         try:
             measurement_scores = calculate_measurement_case_speedups(
@@ -922,7 +929,8 @@ def _try_apply_candidate(
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception:  # noqa: BLE001 - scoring is third-party; worktree is discarded
+    except Exception as exc:  # isolation boundary: one KB warm-start candidate; worktree is discarded
+        log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
         _git_discard_worktree(
             workspace_dir,
             pre_untracked=pre_untracked,
@@ -1000,65 +1008,139 @@ def _try_apply_candidate(
     )
 
 
-def kb_warmstart(
+def _resume_warmstart_result(workspace_dir) -> dict:
+    """The warm-start verdict for a resumed run, which re-reads nothing.
+
+    The field was measured and adopted in the run being resumed; all that is
+    owed is the pointer to the references it left behind.
+    """
+    result = {
+        "candidate": False,
+        "skipped": "resume",
+        "read_reason": "resume",
+        "read_error": "",
+    }
+    pointer = kb_reference_program_md(workspace_dir)
+    if pointer:
+        result["program_md_addition"] = pointer
+        result["reference_program_md_addition"] = pointer
+    return result
+
+
+@dataclass(frozen=True)
+class _MeasuredField:
+    """What measuring the warm-start field established, in rank order."""
+
+    measurements: list[dict]
+    writebacks: list[dict]
+    reject_reason: str
+
+
+def _measure_warmstart_field(
+    sols: list[dict],
+    statuses: list[str],
     *,
     config,
-    kernel,
-    driver,
-    workspace_dir,
-    kernel_backend,
-    target_functions=None,
-    framework="",
-    snr_threshold=DEFAULT_SNR_THRESHOLD_DB,
-    source_files=None,
-    operator_name="",
-    resume=False,
-    bench_repeat=1,
-) -> dict:
-    """Look up + apply the best prior solution as the loop's starting point.
+    trial: _CandidateField,
+) -> _MeasuredField:
+    """Measure candidates in rank order until one confirms its rank or the budget is spent.
 
-    Candidates are measured on this machine and the fastest is adopted, because the speedup a record claims is not
-    evidence this consumer can reproduce it. ``warmstart_policy`` bounds that search and is read at call time.
+    ``statuses`` is the per-candidate ledger and is filled in place. Every trial
+    starts from the pristine tree, so a measured candidate is put back before
+    the next one is tried; the winner is re-applied from its own patch later.
+
+    ``top_k()`` caps the field, but a count does not bound wall time: one
+    candidate is a compile plus a correctness suite plus a benchmark, minutes on
+    the heaviest kernels. On expiry the field closes and the best already
+    measured is adopted by the caller.
     """
-    if resume:
-        pointer = kb_reference_program_md(workspace_dir)
-        result = {
-            "candidate": False,
-            "skipped": "resume",
-            "read_reason": "resume",
-            "read_error": "",
-        }
-        if pointer:
-            result["program_md_addition"] = pointer
-            result["reference_program_md_addition"] = pointer
-        return result
-    try:
+    measurements: list[dict] = []
+    writebacks: list[dict] = []
+    reject_reason = ""
+    search_deadline = time.monotonic() + warmstart_policy.budget_sec()
+    for idx, sol in enumerate(sols):
+        if time.monotonic() >= search_deadline:
+            for later_index in range(idx, len(statuses)):
+                statuses[later_index] = "not_attempted_search_budget"
+            print(
+                f"  [kb] warm-start search budget spent after {len(measurements)} measured candidate(s); "
+                "adopting the best of them",
+                flush=True,
+            )
+            break
+        pre_untracked = _untracked_files(trial.kernel.workspace)
+        outcome = _try_apply_candidate(sol, trial, pre_untracked=pre_untracked)
+        # One write-back per measured candidate, adopted or not.
+        writeback = None
+        if outcome.measured_mean_case_speedup is not None:
+            writeback = _record_measured_speedup(config, sol, outcome.measured_mean_case_speedup, rank=idx + 1)
+            writebacks.append(writeback)
+        if outcome.reject_reason:
+            statuses[idx] = _rejected_reference_status(outcome.reject_reason, writeback)
+            reject_reason = outcome.reject_reason
+            continue
+        _git_discard_worktree(trial.kernel.workspace, pre_untracked=pre_untracked)
+        measurements.append(
+            {
+                "index": idx,
+                "ms": float(outcome.adoptable_ms),
+                "mean_case_speedup": float(outcome.adoptable_mean_case_speedup),
+                "bench": dict(outcome.adoptable_bench or {}),
+            }
+        )
+        ranked = _ranked_speedup(sol)
+        ranked_txt = f"{ranked:.6f}x" if ranked is not None else "unrecorded"
+        print(
+            f"  [kb] warm-start rank {idx + 1} {sol.get('solution_slug')} measured "
+            f"{float(outcome.adoptable_mean_case_speedup):.6f}x against a ranked {ranked_txt}",
+            flush=True,
+        )
+        measured_now = float(outcome.adoptable_mean_case_speedup)
+        if _measurement_confirms_rank(sol, measured_now) and _outranks_remaining(measured_now, sols[idx + 1 :]):
+            for later_index in range(idx + 1, len(statuses)):
+                statuses[later_index] = "not_attempted_after_apply"
+            break
+    return _MeasuredField(measurements, writebacks, reject_reason)
+
+
+@dataclass
+class _WarmStartAttempt:
+    """One warm-start search: the candidate field, statuses, and the measured winner if any."""
+
+    config: Any
+    kernel: LoopKernel
+    harness: WarmStartHarness
+    read_status: dict[str, str] = field(
+        default_factory=lambda: {"read_reason": "solution_pages_missing", "read_error": ""}
+    )
+    sols: list[dict] = field(default_factory=list)
+    statuses: list[str] = field(default_factory=list)
+    pristine_bench: dict = field(default_factory=dict)
+    pristine_ms: float | None = None
+    keep_baseline_ms: float | None = None
+    mean_case_speedup: float | None = None
+    applied_bench: dict = field(default_factory=dict)
+    reference_reason: str = ""
+    applied_commit: str = ""
+    applied_idx: int | None = None
+    measured_writebacks: list[dict] = field(default_factory=list)
+
+    def load_solutions(self) -> None:
+        """Read and filter the ranked field; clear references when the reader raises."""
         from kernelforge.knowledge.kb_store.reader import read_top_solutions
 
-        read_status = {
-            "read_reason": "solution_pages_missing",
-            "read_error": "",
-        }
         kernel_source = ""
         with contextlib.suppress(OSError):
-            kernel_source = Path(kernel).read_text(errors="replace")
-
+            kernel_source = Path(self.kernel.kernel_path).read_text(errors="replace")
         try:
             sols = read_top_solutions(
-                config=config,
-                kernel_path=kernel,
-                kernel_source=kernel_source,
-                kernel_backend=kernel_backend,
-                target_functions=target_functions,
-                framework=framework,
+                config=self.config,
+                kernel=replace(self.kernel, kernel_source=kernel_source),
                 top_k=warmstart_policy.top_k(),
-                source_files=source_files,
-                workspace=workspace_dir,
-                operator_name=operator_name,
-                read_status=read_status,
+                read_status=self.read_status,
             )
         except Exception:
-            _clear_kb_references(workspace_dir)
+            _clear_kb_references(self.kernel.workspace)
             raise
         # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
         # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
@@ -1070,31 +1152,160 @@ def kb_warmstart(
                 f"claiming under {warmstart_policy.min_claimed_speedup():.2f}x",
                 flush=True,
             )
-        sols = admissible
-        if not sols:
-            _clear_kb_references(workspace_dir)
+        self.sols = admissible
+
+    def measure_and_adopt(self) -> None:
+        """Bench the pristine tree, measure the field, and adopt the best surviving candidate."""
+        pristine_runs = [
+            _bench_once(self.harness.driver, self.harness.bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)
+        ]
+        self.pristine_bench = aggregate_benchmark_measurements(pristine_runs)
+        self.pristine_ms = self.pristine_bench.get("median_ms")
+        self.keep_baseline_ms = self.pristine_ms
+        if self.pristine_ms is None:
+            self.reference_reason = "baseline_unavailable"
+            self.statuses = [f"rejected:{self.reference_reason}" for _ in self.sols]
+            _persist_kb_references(self.kernel.workspace, self.sols, self.statuses)
+            print(
+                "  [kb] warm-start reference-only: baseline_unavailable; injecting top solutions as reference",
+                flush=True,
+            )
+            return
+        self.mean_case_speedup = 1.0
+        allowed_paths = _editable_workspace_paths(
+            self.kernel.workspace,
+            self.kernel.kernel_path,
+            self.kernel.source_files,
+            self.harness.driver,
+        )
+        field = _measure_warmstart_field(
+            self.sols,
+            self.statuses,
+            config=self.config,
+            trial=_CandidateField(self.kernel, self.harness, self.pristine_bench, allowed_paths),
+        )
+        self.measured_writebacks = field.writebacks
+        self.reference_reason = field.reject_reason
+        # One entry per candidate that reached a measurement, in rank order.
+        for measurement in sorted(
+            field.measurements,
+            key=lambda item: (-item["mean_case_speedup"], item["index"]),
+        ):
+            idx = measurement["index"]
+            sol = self.sols[idx]
+            self.applied_commit, reject_reason = _adopt_measured_candidate(
+                sol,
+                kernel=self.kernel.kernel_path,
+                workspace_dir=self.kernel.workspace,
+                source_files=self.kernel.source_files,
+                allowed_paths=allowed_paths,
+            )
+            if reject_reason:
+                self.statuses[idx] = f"rejected:{reject_reason}"
+                self.reference_reason = reject_reason
+                continue
+            self.applied_idx = idx
+            self.statuses[idx] = "applied"
+            self.keep_baseline_ms = measurement["ms"]
+            self.mean_case_speedup = measurement["mean_case_speedup"]
+            self.applied_bench = dict(measurement["bench"])
+            base_txt = f"{self.pristine_ms:.4f} ms" if self.pristine_ms is not None else "unmeasured"
+            print(
+                f"  [kb] warm-start applied: {sol.get('solution_slug')} "
+                f"(rank {idx + 1}, prior speedup {sol.get('speedup')}, "
+                f"measured mean case speedup "
+                f"{measurement['mean_case_speedup']:.6f}x, "
+                f"raw mean {measurement['ms']:.4f} ms vs baseline {base_txt})",
+                flush=True,
+            )
+            break
+        if self.applied_idx is not None:
+            for measurement in field.measurements:
+                other = measurement["index"]
+                if other != self.applied_idx and self.statuses[other] == "not_attempted":
+                    self.statuses[other] = f"rejected:outperformed_by_rank_{self.applied_idx + 1}"
+        else:
+            self.reference_reason = self.reference_reason or "no_candidate_applied"
+            print(
+                "  [kb] warm-start reference-only: no candidate applied "
+                "cleanly + faster; injecting top solutions as reference",
+                flush=True,
+            )
+
+    def final_result(self) -> dict:
+        _persist_kb_references(self.kernel.workspace, self.sols, self.statuses)
+        chosen = self.sols[self.applied_idx] if (self.applied_idx is not None) else self.sols[0]
+        prompt_pointer = kb_reference_program_md(
+            self.kernel.workspace,
+            applied_rank=(None if self.applied_idx is None else self.applied_idx + 1),
+            solution_slug=str(chosen.get("solution_slug") or "") if (self.applied_idx is not None) else "",
+        )
+        return {
+            "candidate": True,
+            **self.read_status,
+            "applied": (self.applied_idx is not None),
+            "match_mode": str(chosen.get("match_mode") or "reference"),
+            "reference_reason": "" if (self.applied_idx is not None) else self.reference_reason,
+            "pristine_ms": self.pristine_ms,
+            "baseline_case_times": dict(self.pristine_bench.get("case_times") or {}),
+            "baseline_unscored_cases": list(self.pristine_bench.get("unscored_cases") or []),
+            "keep_baseline_ms": self.keep_baseline_ms,
+            "mean_case_speedup": self.mean_case_speedup,
+            "case_times": dict(self.applied_bench.get("case_times") or {}),
+            "unscored_cases": list(self.applied_bench.get("unscored_cases") or []),
+            "applied_commit": self.applied_commit,
+            "program_md_addition": prompt_pointer,
+            "reference_program_md_addition": kb_reference_program_md(
+                self.kernel.workspace,
+                detect_applied=False,
+            ),
+            "solution_slug": str(chosen.get("solution_slug") or ""),
+            "speedup": chosen.get("speedup", 0.0),
+            "num_references": len(self.sols),
+            "applied_rank": (None if self.applied_idx is None else self.applied_idx + 1),
+            "measured_writebacks": self.measured_writebacks,
+        }
+
+
+def kb_warmstart(
+    *,
+    config,
+    kernel: LoopKernel,
+    harness: WarmStartHarness,
+    resume=False,
+) -> dict:
+    """Look up + apply the best prior solution as the loop's starting point.
+
+    Candidates are measured on this machine and the fastest is adopted, because the speedup a record claims is not
+    evidence this consumer can reproduce it. ``warmstart_policy`` bounds that search and is read at call time.
+    """
+    if resume:
+        return _resume_warmstart_result(kernel.workspace)
+    try:
+        attempt = _WarmStartAttempt(config, kernel, harness)
+        attempt.load_solutions()
+        if not attempt.sols:
+            _clear_kb_references(kernel.workspace)
             return {
                 "candidate": False,
-                "read_reason": read_status["read_reason"],
-                "read_error": read_status["read_error"],
+                "read_reason": attempt.read_status["read_reason"],
+                "read_error": attempt.read_status["read_error"],
             }
-
         # Keep identity-match metadata populated by the reader (for example a
         # fuzzy donor's requested/selected canonical ids) while normalizing the
         # final read verdict.
-        read_status.update(read_reason="hit", read_error="")
-
-        statuses = ["not_attempted" for _ in sols]
-        _persist_kb_references(workspace_dir, sols, statuses)
-        best = sols[0]
-        if not _tracked_workspace_clean(workspace_dir):
+        attempt.read_status.update(read_reason="hit", read_error="")
+        attempt.statuses = ["not_attempted" for _ in attempt.sols]
+        _persist_kb_references(kernel.workspace, attempt.sols, attempt.statuses)
+        if not _tracked_workspace_clean(kernel.workspace):
             reason = "workspace_dirty"
-            statuses = [f"rejected:{reason}" for _ in sols]
-            _persist_kb_references(workspace_dir, sols, statuses)
-            reference = kb_reference_program_md(workspace_dir)
+            attempt.statuses = [f"rejected:{reason}" for _ in attempt.sols]
+            _persist_kb_references(kernel.workspace, attempt.sols, attempt.statuses)
+            reference = kb_reference_program_md(kernel.workspace)
+            best = attempt.sols[0]
             return {
                 "candidate": True,
-                **read_status,
+                **attempt.read_status,
                 "applied": False,
                 "match_mode": str(best.get("match_mode") or "reference"),
                 "reference_reason": reason,
@@ -1105,215 +1316,24 @@ def kb_warmstart(
                 "reference_program_md_addition": reference,
                 "solution_slug": str(best.get("solution_slug") or ""),
                 "speedup": best.get("speedup", 0.0),
-                "num_references": len(sols),
+                "num_references": len(attempt.sols),
                 "applied_rank": None,
             }
-
-        applied = False
-        applied_idx: int | None = None
-        pristine_ms: float | None = None
-        keep_baseline_ms: float | None = None
-        mean_case_speedup: float | None = None
-        applied_bench: dict = {}
-        reference_reason = ""
-        applied_commit = ""
-        # One entry per candidate that reached a measurement, in rank order.
-        measurements: list[dict] = []
-        measured_writebacks: list[dict] = []
-        pristine_runs = [_bench_once(driver, bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
-        pristine_bench = aggregate_benchmark_measurements(pristine_runs)
-        pristine_ms = (
-            pristine_bench.get("median_ms")
-            if isinstance(pristine_bench, dict)
-            else pristine_bench
-            if isinstance(pristine_bench, (int, float))
-            else None
-        )
-        keep_baseline_ms = pristine_ms
-        mean_case_speedup = 1.0 if pristine_ms is not None else None
-        if pristine_ms is None:
-            reference_reason = "baseline_unavailable"
-            statuses = [f"rejected:{reference_reason}" for _ in sols]
-            _persist_kb_references(workspace_dir, sols, statuses)
-            print(
-                "  [kb] warm-start reference-only: baseline_unavailable; injecting top solutions as reference",
-                flush=True,
-            )
-        else:
-            allowed_paths = _editable_workspace_paths(
-                workspace_dir,
-                kernel,
-                source_files,
-                driver,
-            )
-            # ``top_k()`` caps the field, but a count does not bound wall time: one candidate is a compile plus a
-            # correctness suite plus a benchmark, minutes on the heaviest kernels. On expiry the field closes and the
-            # best already measured is adopted below.
-            search_deadline = time.monotonic() + warmstart_policy.budget_sec()
-            for idx, sol in enumerate(sols):
-                if time.monotonic() >= search_deadline:
-                    for later_index in range(idx, len(statuses)):
-                        statuses[later_index] = "not_attempted_search_budget"
-                    print(
-                        "  [kb] warm-start search budget spent after "
-                        f"{len(measurements)} measured candidate(s); "
-                        "adopting the best of them",
-                        flush=True,
-                    )
-                    break
-                pre_untracked = _untracked_files(workspace_dir)
-                trial = _try_apply_candidate(
-                    sol,
-                    kernel=kernel,
-                    driver=driver,
-                    workspace_dir=workspace_dir,
-                    snr_threshold=snr_threshold,
-                    source_files=source_files,
-                    pristine_bench=pristine_bench,
-                    allowed_paths=allowed_paths,
-                    pre_untracked=pre_untracked,
-                    bench_repeat=bench_repeat,
-                )
-                # One write-back per measured candidate, adopted or not.
-                writeback = None
-                if trial.measured_mean_case_speedup is not None:
-                    writeback = _record_measured_speedup(
-                        config,
-                        sol,
-                        trial.measured_mean_case_speedup,
-                        rank=idx + 1,
-                    )
-                    measured_writebacks.append(writeback)
-                if trial.reject_reason:
-                    statuses[idx] = _rejected_reference_status(
-                        trial.reject_reason,
-                        writeback,
-                    )
-                    reference_reason = trial.reject_reason
-                    continue
-                # Every trial starts from the pristine tree, so a measured candidate is put back before the next one
-                # is tried; the candidate that wins the field is re-applied from its own patch.
-                _git_discard_worktree(
-                    workspace_dir,
-                    pre_untracked=pre_untracked,
-                )
-                measurements.append(
-                    {
-                        "index": idx,
-                        "ms": float(trial.adoptable_ms),
-                        "mean_case_speedup": float(trial.adoptable_mean_case_speedup),
-                        "bench": dict(trial.adoptable_bench or {}),
-                    }
-                )
-                ranked = _ranked_speedup(sol)
-                ranked_txt = f"{ranked:.6f}x" if ranked is not None else "unrecorded"
-                print(
-                    f"  [kb] warm-start rank {idx + 1} "
-                    f"{sol.get('solution_slug')} measured "
-                    f"{float(trial.adoptable_mean_case_speedup):.6f}x "
-                    f"against a ranked {ranked_txt}",
-                    flush=True,
-                )
-                measured_now = float(trial.adoptable_mean_case_speedup)
-                if _measurement_confirms_rank(sol, measured_now) and (
-                    _outranks_remaining(measured_now, sols[idx + 1 :])
-                ):
-                    for later_index in range(idx + 1, len(statuses)):
-                        statuses[later_index] = "not_attempted_after_apply"
-                    break
-
-            for measurement in sorted(
-                measurements,
-                key=lambda item: (-item["mean_case_speedup"], item["index"]),
-            ):
-                idx = measurement["index"]
-                sol = sols[idx]
-                applied_commit, reject_reason = _adopt_measured_candidate(
-                    sol,
-                    kernel=kernel,
-                    workspace_dir=workspace_dir,
-                    source_files=source_files,
-                    allowed_paths=allowed_paths,
-                )
-                if reject_reason:
-                    statuses[idx] = f"rejected:{reject_reason}"
-                    reference_reason = reject_reason
-                    continue
-                applied = True
-                applied_idx = idx
-                statuses[idx] = "applied"
-                keep_baseline_ms = measurement["ms"]
-                mean_case_speedup = measurement["mean_case_speedup"]
-                applied_bench = dict(measurement["bench"])
-                base_txt = f"{pristine_ms:.4f} ms" if pristine_ms is not None else "unmeasured"
-                print(
-                    f"  [kb] warm-start applied: {sol.get('solution_slug')} "
-                    f"(rank {idx + 1}, prior speedup {sol.get('speedup')}, "
-                    f"measured mean case speedup "
-                    f"{measurement['mean_case_speedup']:.6f}x, "
-                    f"raw mean {measurement['ms']:.4f} ms vs baseline {base_txt})",
-                    flush=True,
-                )
-                break
-
-            if applied:
-                for measurement in measurements:
-                    other = measurement["index"]
-                    if other != applied_idx and statuses[other] == "not_attempted":
-                        statuses[other] = f"rejected:outperformed_by_rank_{applied_idx + 1}"
-            else:
-                reference_reason = reference_reason or "no_candidate_applied"
-                print(
-                    "  [kb] warm-start reference-only: no candidate applied "
-                    "cleanly + faster; injecting top solutions as reference",
-                    flush=True,
-                )
-
-        _persist_kb_references(workspace_dir, sols, statuses)
-        chosen = sols[applied_idx] if applied else best
-        prompt_pointer = kb_reference_program_md(
-            workspace_dir,
-            applied_rank=(applied_idx + 1) if applied_idx is not None else None,
-            solution_slug=str(chosen.get("solution_slug") or "") if applied else "",
-        )
-        return {
-            "candidate": True,
-            **read_status,
-            "applied": applied,
-            "match_mode": str(chosen.get("match_mode") or "reference"),
-            "reference_reason": "" if applied else reference_reason,
-            "pristine_ms": pristine_ms,
-            "baseline_case_times": (
-                dict(pristine_bench.get("case_times") or {}) if isinstance(pristine_bench, dict) else {}
-            ),
-            "baseline_unscored_cases": (
-                list(pristine_bench.get("unscored_cases") or []) if isinstance(pristine_bench, dict) else []
-            ),
-            "keep_baseline_ms": keep_baseline_ms,
-            "mean_case_speedup": mean_case_speedup,
-            "case_times": dict(applied_bench.get("case_times") or {}),
-            "unscored_cases": list(applied_bench.get("unscored_cases") or []),
-            "applied_commit": applied_commit,
-            "program_md_addition": prompt_pointer,
-            "reference_program_md_addition": kb_reference_program_md(
-                workspace_dir,
-                detect_applied=False,
-            ),
-            "solution_slug": str(chosen.get("solution_slug") or ""),
-            "speedup": chosen.get("speedup", 0.0),
-            "num_references": len(sols),
-            "applied_rank": (applied_idx + 1) if applied_idx is not None else None,
-            "measured_writebacks": measured_writebacks,
-        }
+        attempt.measure_and_adopt()
+        return attempt.final_result()
     except WarmStartRestoreError:
         raise
-    except Exception as e:  # noqa: BLE001 - warm-start must never break the run
+    except Exception as e:  # noqa: BLE001 - isolation boundary: the run's KB warm-start; it cold-starts instead
         from kernelforge.knowledge.kb_store.errors import (
             kb_store_secrets,
             sanitize_read_error,
         )
 
         error = sanitize_read_error(e, secrets=kb_store_secrets(config))
+        # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+        log.warning(
+            "KB warm-start failed: %s (%s)\n%s", error, type(e).__name__, "".join(traceback.format_tb(e.__traceback__))
+        )
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,
@@ -1336,103 +1356,88 @@ def _cheap_summary(archive: Any) -> dict:
     return {"category": "", "strategy": strategy, "recipe": "", "lessons": ""}
 
 
+@dataclass(frozen=True)
+class ExperiencePublication:
+    """What the caller adds to the loop's own record when publishing: diff base, target, ids, anchors and summary."""
+
+    base_sha: str
+    gpu_target: str
+    experience_id: str = ""
+    pristine_baseline_ms: float | None = None
+    reused_speedup: float | None = None
+    snr_db_override: float | None = None
+    llm_summary: bool = True
+    incremental_summary: dict | None = None
+
+
 def write_experience_to_kb(
     *,
     config,
     loop_runner: Any,
-    workspace_dir,
-    kernel,
-    kernel_backend,
-    gpu_target,
-    base_sha,
-    pristine_baseline_ms=None,
-    source_files=None,
-    target_functions=None,
-    framework="",
-    experience_id="",
-    operator_name="",
-    implementation_signature_value="",
-    implementation_identity_value=None,
-    llm_summary=True,
-    incremental_summary=None,
-    snr_db_override=None,
-    reused_speedup=None,
+    kernel: LoopKernel,
+    publication: ExperiencePublication,
     usage=None,
 ) -> dict:
     """Gather the run's outcome and mirror the best solution into the KB Store."""
-    try:
-        from kernelforge.knowledge.kb_store.writer import write_run_experience
+    from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
 
-        checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
-        kb_experience_id = experience_id or checkpoint_experiment_id
-        baseline_ms = (
-            pristine_baseline_ms
-            or getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
-            or getattr(loop_runner.ic, "baseline_wall_ms", None)
-        )
-        best_ms = getattr(loop_runner, "best_wall_ms", None)
-        mean_case_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
-        cumulative_diff = _git_cumulative_diff(workspace_dir, base_sha)
+    checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
+    kb_experience_id = publication.experience_id or checkpoint_experiment_id
+    baseline_ms = (
+        publication.pristine_baseline_ms
+        or getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
+        or getattr(loop_runner.ic, "baseline_wall_ms", None)
+    )
+    best_ms = getattr(loop_runner, "best_wall_ms", None)
+    mean_case_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
+    cumulative_diff = _git_cumulative_diff(kernel.workspace, publication.base_sha)
 
-        snr_db = None
-        digest = ""
-        archive = getattr(loop_runner, "archive", None)
-        if archive is not None:
-            with contextlib.suppress(OSError, ValueError, KeyError):
-                keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
-                scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
-                if scored_keeps:
-                    best_entry = max(
-                        scored_keeps,
-                        key=lambda entry: entry["mean_case_speedup"],
-                    )
-                    snr_db = best_entry.get("snr_db")
-                digest = archive.render_digest()
-        if snr_db_override is not None:
-            snr_db = snr_db_override
+    snr_db = None
+    digest = ""
+    archive = getattr(loop_runner, "archive", None)
+    if archive is not None:
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
+            scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
+            if scored_keeps:
+                best_entry = max(
+                    scored_keeps,
+                    key=lambda entry: entry["mean_case_speedup"],
+                )
+                snr_db = best_entry.get("snr_db")
+            digest = archive.render_digest()
+    if publication.snr_db_override is not None:
+        snr_db = publication.snr_db_override
 
-        kernel_source = ""
-        with contextlib.suppress(OSError):
-            kernel_source = Path(kernel).read_text(errors="replace")
+    kernel_source = ""
+    with contextlib.suppress(OSError):
+        kernel_source = Path(kernel.kernel_path).read_text(errors="replace")
 
-        summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
-        pristine_signature = implementation_signature_value or getattr(loop_runner.ic, "implementation_signature", "")
-        pristine_identity = implementation_identity_value or getattr(loop_runner.ic, "implementation_identity", None)
+    summary_override = None if publication.llm_summary else publication.incremental_summary or _cheap_summary(archive)
+    pristine_signature = getattr(loop_runner.ic, "implementation_signature", "")
+    pristine_identity = getattr(loop_runner.ic, "implementation_identity", None)
 
-        status = write_run_experience(
-            config=config,
-            workspace=workspace_dir,
-            kernel_path=kernel,
-            kernel_source=kernel_source,
-            kernel_backend=kernel_backend,
-            gpu_target=gpu_target,
+    status = write_run_experience(
+        config=config,
+        kernel=replace(kernel, kernel_source=kernel_source),
+        outcome=RunOutcome(
             experiment_id=kb_experience_id,
+            gpu_target=publication.gpu_target,
             baseline_wall_ms=baseline_ms,
             best_wall_ms=best_ms,
-            mean_case_speedup=mean_case_speedup,
             cumulative_diff=cumulative_diff,
             digest=digest,
+            mean_case_speedup=mean_case_speedup,
             snr_db=snr_db,
-            source_files=source_files,
-            target_functions=target_functions,
-            operator_name=operator_name,
-            implementation_signature_override=pristine_signature,
-            implementation_identity_override=pristine_identity,
-            framework=framework,
-            summary_override=summary_override,
-            reused_speedup=reused_speedup,
-            usage=usage,
-        )
-        if status.get("written"):
-            print(
-                f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True
-            )
-        else:
-            print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
-        return status
-    except Exception as e:  # noqa: BLE001 - never let KB write affect the run
-        print(f"  [kb] experience write skipped ({e})", flush=True)
-        return {"written": False, "reason": f"error:{e!r}"}
+            reused_speedup=publication.reused_speedup,
+            implementation_signature=pristine_signature,
+            implementation_identity=pristine_identity,
+        ),
+        summary_override=summary_override,
+        usage=usage,
+    )
+    print(kb_write_line(status), flush=True)
+    return status
 
 
 def kb_read_status(warm: dict) -> dict:

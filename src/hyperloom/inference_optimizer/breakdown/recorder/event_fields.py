@@ -10,7 +10,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
-from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.coerce import to_float, to_int, to_list, to_mapping
 from hyperloom.common.timeutil import now_iso
 
 __all__ = [
@@ -20,20 +20,16 @@ __all__ = [
     "STATUS_ORDER",
     "analysis_artifacts",
     "analysis_detail",
-    "as_dict",
-    "as_list",
     "bool_or_none",
     "bounded_block",
     "clip",
     "failure_row",
-    "float_or_none",
     "graded_axes",
-    "int_or_none",
     "now_iso_micros",
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
-    "text_or_none",
+    "text",
     "worst_status",
 ]
 
@@ -65,26 +61,6 @@ def clip(value: Any, limit: int = MAX_WARNING_MESSAGE_CHARS) -> str:
     return text[:limit] + f"... [+{len(text) - limit} chars]"
 
 
-def as_dict(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, else an empty dict."""
-    return value if isinstance(value, dict) else {}
-
-
-def as_list(value: Any) -> list[Any]:
-    """Return ``value`` when it is a list/tuple, else an empty list."""
-    return list(value) if isinstance(value, (list, tuple)) else []
-
-
-def int_or_none(value: Any) -> int | None:
-    """Finite-int coercion; rejects ``bool``, ``None``, non-finite floats."""
-    return to_int(value)
-
-
-def float_or_none(value: Any) -> float | None:
-    """Finite-float coercion; rejects ``bool``, ``None``, ``nan``/``inf``."""
-    return to_float(value)
-
-
 def bool_or_none(value: Any) -> bool | None:
     """``bool(value)`` when a value was recorded, else ``None``.
 
@@ -95,24 +71,18 @@ def bool_or_none(value: Any) -> bool | None:
     return None if value is None else bool(value)
 
 
-def text_or_none(value: Any) -> str | None:
-    """Distinguish "not recorded" from "recorded empty".
-
-    V6 reserves ``None`` for a field nothing produced; ``""`` means the producer
-    ran and had nothing to say, so a caller that does not know passes ``None``.
-    """
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+def text(value: Any) -> str:
+    """Coerce to a plain string, treating ``None`` as empty."""
+    return str(value or "")
 
 
 def graded_axes(source: Any) -> dict[str, Any]:
     """The graded axes a measurement carries, as explicit nulls where it carries none.
 
-    A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
-    reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
-    and it was zero", so every axis is always present.
+    A synthetic run measures none of the AgentX-only axes (``output_tput_per_gpu`` is set whenever TP is known) and
+    an AgentX round can be missing any one. Absent keys would leave a reader unable to tell an unmeasured axis from
+    one the framework failed to report, and zero reads as "measured, and it was zero", so every axis is always
+    present.
 
     Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
     median interactivity percentile with the slow tail and output throughput held as guards, and none of that is
@@ -122,12 +92,12 @@ def graded_axes(source: Any) -> dict[str, Any]:
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
 
     axes = graded_axes_of(source)
-    return {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
+    return {key: to_float(axes.get(key)) for key in GRADED_AXIS_KEYS}
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
     """Project the hot-kernel ranking head into the event."""
-    candidates = [row for row in as_list(rows) if isinstance(row, dict)]
+    candidates = [row for row in to_list(rows) if isinstance(row, dict)]
     top: list[dict[str, Any]] = []
     for row in candidates[:MAX_HOT_KERNELS]:
         top.append(
@@ -135,9 +105,9 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
                 "name": clip(row.get("name"), 200),
                 "op_name": clip(row.get("op_name"), 200),
                 "category": str(row.get("category") or ""),
-                "gpu_time_us": float_or_none(row.get("gpu_time_us")),
-                "gpu_pct": float_or_none(row.get("gpu_pct")),
-                "count": int_or_none(row.get("count")),
+                "gpu_time_us": to_float(row.get("gpu_time_us")),
+                "gpu_pct": to_float(row.get("gpu_pct")),
+                "count": to_int(row.get("count")),
             }
         )
     return {"count": len(candidates), "top": top}
@@ -151,7 +121,7 @@ def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
     remaining keys are parked under ``detail`` instead of widening the row.
     """
     out: list[dict[str, Any]] = []
-    for row in as_list(rows):
+    for row in to_list(rows):
         if not isinstance(row, dict):
             continue
         detail = {key: value for key, value in row.items() if key not in {"code", "severity", "message"}}
@@ -257,21 +227,21 @@ def analysis_detail(result: Any) -> dict[str, Any]:
     ``bypass`` / ``bypass`` -- so keeping both preserves routing policy and tool
     provenance. Tool-specific output stays in ``route_ext``.
     """
-    payload = as_dict(result)
-    meta = as_dict(payload.get("analysis_meta"))
+    payload = to_mapping(result)
+    meta = to_mapping(payload.get("analysis_meta"))
     return {
         "route": str(meta.get("route") or ""),
         "tool": str(meta.get("tool") or ""),
         "tool_run_id": str(payload.get("run_id") or ""),
-        "steady_state": bounded_block(as_dict(meta.get("steady_state")), label="steady_state"),
-        "preflight": bounded_block(as_dict(meta.get("preflight")), label="preflight"),
-        "split": bounded_block(as_dict(meta.get("split")), label="split"),
-        "selection": bounded_block(as_dict(meta.get("selection")), label="selection"),
+        "steady_state": bounded_block(to_mapping(meta.get("steady_state")), label="steady_state"),
+        "preflight": bounded_block(to_mapping(meta.get("preflight")), label="preflight"),
+        "split": bounded_block(to_mapping(meta.get("split")), label="split"),
+        "selection": bounded_block(to_mapping(meta.get("selection")), label="selection"),
         "steps": bounded_block(
-            [as_dict(row) for row in as_list(meta.get("steps")) if isinstance(row, dict)],
+            [to_mapping(row) for row in to_list(meta.get("steps")) if isinstance(row, dict)],
             label="steps",
         ),
-        "route_ext": bounded_block(as_dict(meta.get("route_ext")), label="route_ext"),
+        "route_ext": bounded_block(to_mapping(meta.get("route_ext")), label="route_ext"),
         "hot_kernels": summarize_hot_kernels(payload.get("hot_kernels_top15") or payload.get("hot_kernels")),
         "warnings": summarize_warnings(payload.get("trace_health_warnings")),
         "artifacts": analysis_artifacts(payload),

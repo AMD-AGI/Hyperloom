@@ -10,9 +10,14 @@ from unittest.mock import Mock
 
 import pytest
 
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+
+from .conftest import seed_kernel_keep
+from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload
+from hyperloom.orchestrator.kernel import request_handlers
 
 
 @pytest.fixture
@@ -52,7 +57,7 @@ class TestFillIntegrateDefaultsFromState:
             current_best_args="--page-size 16",
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -67,7 +72,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_payload_base_tput_wins(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 999.0},
             session_dir=session_dir,
         )
@@ -81,7 +86,7 @@ class TestFillIntegrateDefaultsFromState:
             baseline_config_path="/tmp/state.yaml",
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "config_path": "/tmp/explicit.yaml"},
             session_dir=session_dir,
         )
@@ -91,7 +96,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_payload_extra_args_wins(self, session_dir):
         _seed_state(session_dir, current_best_args="--from-state")
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "extra_server_args": "--from-payload"},
             session_dir=session_dir,
         )
@@ -107,7 +112,7 @@ class TestFillIntegrateDefaultsFromState:
             },
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {
                 "kernel_id": "k_abc",
                 "extra_envs": {
@@ -138,7 +143,7 @@ class TestFillIntegrateDefaultsFromState:
         state.save(session_dir)
         payload = {"kernel_id": "k_recipe"}
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out["remove_args"] == ["--disable-cuda-graph"]
         assert out["unset_envs"] == ["YAML_DROP"]
@@ -165,7 +170,7 @@ class TestFillIntegrateDefaultsFromState:
         state.save(session_dir)
         payload = {"kernel_id": "k_recipe", **requested}
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert {key: out[key] for key in requested} == requested
         assert payload == {"kernel_id": "k_recipe", **requested}
@@ -180,7 +185,7 @@ class TestFillIntegrateDefaultsFromState:
         if explicit_unset:
             payload["unset_envs"] = [" CURRENT_ONLY ", "REENABLE"]
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out["extra_envs"] == ({} if explicit_unset else {"REENABLE": "candidate"})
         assert out["unset_envs"] == (["CURRENT_ONLY", "REENABLE"] if explicit_unset else ["CURRENT_ONLY"])
@@ -203,13 +208,13 @@ class TestFillIntegrateDefaultsFromState:
             "args_mode": "",
         }
 
-        out = krh._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        out = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
 
         assert out == {**payload, "base_tput": 800.0}
 
     def test_fusion_record_activates_the_env_flag_and_keep_bar(self, session_dir):
         """A fusion sibling's env flag + keep bar are folded in from its record."""
-        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.kernel_decisions import enqueue_nominated_patch
         from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
 
         state = _seed_state(session_dir, current_best_envs={"KEEP_ME": "1"})
@@ -225,7 +230,7 @@ class TestFillIntegrateDefaultsFromState:
         )
         state.save(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a", "integration_id": record["integration_id"]},
             session_dir=session_dir,
         )
@@ -240,7 +245,7 @@ class TestFillIntegrateDefaultsFromState:
         """The fusion folding is opt-in on ``source='forge_fusion'``."""
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -251,7 +256,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -264,7 +269,7 @@ class TestFillIntegrateDefaultsFromState:
         _seed_state(session_dir, baseline_tput=800.0)
 
         payload = {"kernel_id": "k_abc"}
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             payload,
             session_dir=session_dir,
         )
@@ -275,7 +280,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_zero_base_tput_in_payload_triggers_fallback(self, session_dir):
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 0.0},
             session_dir=session_dir,
         )
@@ -285,7 +290,7 @@ class TestFillIntegrateDefaultsFromState:
     def test_zero_state_does_not_overwrite_explicit_payload(self, session_dir):
         _seed_state(session_dir, baseline_tput=0.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc", "base_tput": 750.0},
             session_dir=session_dir,
         )
@@ -300,7 +305,7 @@ class TestFillIntegrateDefaultsFromState:
             current_best_args="--page-size 16",  # _seed_state sets current_best.tput=900
         )
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -311,7 +316,7 @@ class TestFillIntegrateDefaultsFromState:
         # No current_best recorded yet (early kernel phase) -> baseline is the only reference available.
         _seed_state(session_dir, baseline_tput=800.0)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "k_abc"},
             session_dir=session_dir,
         )
@@ -324,7 +329,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
 
     @staticmethod
     def _enqueue(state, *, kernel_name: str, target_file: str, micro_speedup: float) -> dict:
-        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.kernel_decisions import enqueue_nominated_patch
         from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
 
         record = enqueue_nominated_patch(
@@ -346,20 +351,20 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         second = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/b.py", micro_speedup=1.2)
         state.save(session_dir)
 
-        pending = SharedState.load_or_init(session_dir).pending_kernel_integration_records()
+        pending = kd.pending_kernel_integration_records(SharedState.load_or_init(session_dir))
         assert [str(record.get("kernel_id")) for record in pending] == ["fuse_a", "fuse_a"]
         return [str(first["integration_id"]), str(second["integration_id"])]
 
     def test_ambiguous_bare_kernel_id_is_refused_by_name(self, session_dir):
         ids = self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
-            krh._fill_integrate_defaults_from_state(
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
+            integrate_payload._fill_integrate_defaults_from_state(
                 {"kernel_id": "fuse_a"},
                 session_dir=session_dir,
             )
 
-        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert type(excinfo.value) is integrate_payload.AmbiguousIntegrationTarget
         assert str(excinfo.value) == (
             "integrate refused: kernel_id='fuse_a' matches 2 pending integration "
             "records; an explicit integration_id is required to bind the "
@@ -370,8 +375,8 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         """A named id that matches nothing is not a licence to fall back."""
         ids = self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
-            krh._fill_integrate_defaults_from_state(
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
+            integrate_payload._fill_integrate_defaults_from_state(
                 {"kernel_id": "fuse_a", "integration_id": "kernel-integration:gone"},
                 session_dir=session_dir,
             )
@@ -381,7 +386,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     def test_an_explicit_integration_id_still_binds_its_own_sibling(self, session_dir):
         ids = self._seed_two_siblings(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a", "integration_id": ids[1]},
             session_dir=session_dir,
         )
@@ -394,7 +399,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         only = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/a.py", micro_speedup=1.9)
         state.save(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "fuse_a"},
             session_dir=session_dir,
         )
@@ -406,7 +411,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     def test_a_kernel_id_with_no_pending_record_is_unaffected(self, session_dir):
         self._seed_two_siblings(session_dir)
 
-        out = krh._fill_integrate_defaults_from_state(
+        out = integrate_payload._fill_integrate_defaults_from_state(
             {"kernel_id": "gemm_tune_fmoe_ck"},
             session_dir=session_dir,
         )
@@ -418,85 +423,14 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
     async def test_integrate_handler_refuses_before_applying_anything(self, session_dir):
         self._seed_two_siblings(session_dir)
 
-        with pytest.raises(krh.AmbiguousIntegrationTarget) as excinfo:
+        with pytest.raises(integrate_payload.AmbiguousIntegrationTarget) as excinfo:
             await krh.integrate_handler(
                 {"kernel_id": "fuse_a"},
                 session_dir=session_dir,
             )
 
-        assert type(excinfo.value) is krh.AmbiguousIntegrationTarget
+        assert type(excinfo.value) is integrate_payload.AmbiguousIntegrationTarget
         assert "an explicit integration_id is required" in str(excinfo.value)
-
-
-class TestVendorPlaybookDeployBlocked:
-    """A vendor-playbook KEEP (e.g. mori dispatch/combine) must never reach apply_kernel_patch: its best_artifact_path is a KernelForge task-bundle config copy, not a rewrite of the real installed operator source (PR #1191 review finding #1)."""
-
-    def test_backfilled_from_kernel_opt_attempts_ledger(self, session_dir):
-        state = SharedState.load_or_init(session_dir)
-        state.kernel_opt_attempts = {
-            "k010": {
-                "vendor_playbook_deploy_blocked": True,
-                "vendor_playbook_id": "mori_ep_dispatch_combine",
-            }
-        }
-        state.save(session_dir)
-
-        out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k010"},
-            session_dir=session_dir,
-        )
-
-        assert out["_vendor_playbook_deploy_blocked"] is True
-
-    def test_backfilled_from_last_kernel_opt_when_ledger_missing(self, session_dir):
-        """An LLM-initiated integrate can name a kernel_id that never made it into kernel_opt_attempts yet; last_kernel_opt must still catch it."""
-        state = SharedState.load_or_init(session_dir)
-        state.last_kernel_opt = {
-            "kernel_id": "k010",
-            "vendor_playbook_deploy_blocked": True,
-        }
-        state.save(session_dir)
-
-        out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k010"},
-            session_dir=session_dir,
-        )
-
-        assert out["_vendor_playbook_deploy_blocked"] is True
-
-    def test_normal_kernel_is_not_blocked(self, session_dir):
-        state = SharedState.load_or_init(session_dir)
-        state.kernel_opt_attempts = {"k001": {"vendor_playbook_deploy_blocked": False}}
-        state.save(session_dir)
-
-        out = krh._fill_integrate_defaults_from_state(
-            {"kernel_id": "k001"},
-            session_dir=session_dir,
-        )
-
-        assert "_vendor_playbook_deploy_blocked" not in out
-
-    @pytest.mark.asyncio
-    async def test_integrate_handler_refuses_before_touching_filesystem(self, session_dir):
-        _seed_state(session_dir, baseline_tput=800.0)
-        state = SharedState.load_or_init(session_dir)
-        state.kernel_opt_attempts = {
-            "k010": {
-                "vendor_playbook_deploy_blocked": True,
-                "vendor_playbook_id": "mori_ep_dispatch_combine",
-                "last_artifact_path": "/tmp/forge/session1/mori_ep_config.py",
-            }
-        }
-        state.save(session_dir)
-
-        result = await krh.integrate_handler(
-            {"kernel_id": "k010"},
-            session_dir=session_dir,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "vendor_playbook_not_deployable"
-        assert result["decision"] == "NEEDS_REVIEW"
 
 
 class TestIntegrateHandlerHonoursStateDefault:
@@ -563,7 +497,6 @@ class TestIntegrateHandlerHonoursStateDefault:
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
                 "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
-                "budget_minutes": 1,
             },
             session_dir=session_dir,
         )
@@ -590,15 +523,11 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
 
     monkeypatch.setenv("FRAMEWORK", "sglang")
     state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
-    state.last_kernel_opt = {
-        "kernel_id": "gemm_controls_only",
-        "best_artifact_path": "/tmp/unrelated.patch",
-        "source_file": "/tmp/unrelated.py",
-    }
+    seed_kernel_keep(state, "gemm_controls_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
     state.save(session_dir)
     captured = {}
-    resolve = Mock(wraps=krh._resolve_integrate_payload)
-    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+    resolve = Mock(wraps=integrate_payload._resolve_integrate_payload)
+    monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
         default_timeout_sec = 7800
@@ -645,15 +574,11 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
         "extra_envs": {},
         "remove_args": ["--disable-cuda-graph"],
     }
-    state.last_kernel_opt = {
-        "kernel_id": "k_patch",
-        "best_artifact_path": str(artifact),
-        "source_file": str(target),
-    }
+    seed_kernel_keep(state, "k_patch", source_file=str(target), artifact=str(artifact))
     state.save(session_dir)
     captured = {}
-    resolve = Mock(wraps=krh._resolve_integrate_payload)
-    monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
+    resolve = Mock(wraps=integrate_payload._resolve_integrate_payload)
+    monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
         default_timeout_sec = 7800
@@ -679,62 +604,37 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
     assert captured["params"]["remove_args"] == ["--disable-cuda-graph"]
 
 
-class TestApplybackProvenanceSurvivesTheLedgerFallbacks:
-    """An apply-back must arm the strict accuracy gate however it was resolved."""
+class TestApplybackProvenanceSurvivesAKernelIdOnlyIntegrate:
+    """An apply-back must arm the strict accuracy gate when the integrate names only its kernel_id."""
 
-    def _seed_attempt_ledger(self, session_dir: Path, *, kernel_id: str) -> None:
+    def _seed_queued_applyback(self, session_dir: Path) -> None:
         state = SharedState.load_or_init(session_dir)
-        state.kernel_opt_attempts = {
-            kernel_id: {
-                "last_artifact_path": "/tmp/deploy.patch",
-                "last_source_file": "/framework/vllm/attention.py",
-                "last_framework_applyback": {"artifact_kind": "framework_applyback"},
-                "last_integration_validation_status": "pending",
-            }
-        }
+        integration_id = seed_kernel_keep(
+            state, "k_applyback", source_file="/framework/vllm/attention.py", artifact="/tmp/deploy.patch"
+        )
+        state.pending_kernel_integrations[integration_id].update(
+            artifact_kind="framework_applyback", integration_validation_status="pending"
+        )
         state.save(session_dir)
 
-    def test_the_attempt_ledger_fallback_carries_provenance(self, session_dir):
-        self._seed_attempt_ledger(session_dir, kernel_id="k_applyback")
+    def _resolve(self, payload: dict, session_dir: Path) -> tuple[dict, dict | None]:
+        filled = integrate_payload._fill_integrate_defaults_from_state(payload, session_dir=session_dir)
+        return integrate_payload._resolve_integrate_payload(filled, session_dir=session_dir)
 
-        out, missing = krh._resolve_integrate_payload(
-            {"kernel_id": "k_applyback"},
-            session_dir=session_dir,
-        )
+    def test_the_queued_record_carries_provenance(self, session_dir):
+        self._seed_queued_applyback(session_dir)
 
-        assert missing is None, missing
-        assert out["artifact_kind"] == "framework_applyback"
-        assert out["integration_validation_status"] == "pending"
-
-    def test_the_last_kernel_opt_fallback_carries_provenance(self, session_dir):
-        state = SharedState.load_or_init(session_dir)
-        state.last_kernel_opt = {
-            "kernel_id": "k_applyback",
-            "best_artifact_path": "/tmp/deploy.patch",
-            "source_file": "/framework/vllm/attention.py",
-            "framework_applyback": {"artifact_kind": "framework_applyback"},
-            "integration_validation_status": "pending",
-        }
-        state.save(session_dir)
-
-        out, missing = krh._resolve_integrate_payload(
-            {"kernel_id": "k_applyback"},
-            session_dir=session_dir,
-        )
+        out, missing = self._resolve({"kernel_id": "k_applyback", "base_tput": 1.0}, session_dir)
 
         assert missing is None, missing
         assert out["artifact_kind"] == "framework_applyback"
         assert out["integration_validation_status"] == "pending"
 
     def test_an_explicit_payload_value_still_wins(self, session_dir):
-        self._seed_attempt_ledger(session_dir, kernel_id="k_applyback")
+        self._seed_queued_applyback(session_dir)
 
-        out, _missing = krh._resolve_integrate_payload(
-            {
-                "kernel_id": "k_applyback",
-                "integration_validation_status": "passed",
-            },
-            session_dir=session_dir,
+        out, _missing = self._resolve(
+            {"kernel_id": "k_applyback", "base_tput": 1.0, "integration_validation_status": "passed"}, session_dir
         )
 
         assert out["integration_validation_status"] == "passed"

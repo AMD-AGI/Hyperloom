@@ -11,14 +11,15 @@ import importlib
 import json
 import logging
 import os
-import shutil
 import signal
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
+from hyperloom.common.agent_cli import resolve_claude_executable
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.reasoning_effort import REASONING_EFFORT_RANK
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -29,6 +30,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_TOOLS
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
+from hyperloom.common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -36,10 +38,10 @@ from .base import (
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
-    safe_int,
 )
 from .claude_requests import ClaudeRequestTracker
 from .mcp_context_tools import (
+    CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_QUALIFIED_NAMES,
     MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
     ContextProvider,
@@ -49,10 +51,9 @@ from hyperloom.inference_optimizer.protocol.intent import IntentType
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
-    EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
-    coerce_emit_intent_input,
+    build_emit_intent_tool_input_schema,
     constraints_sentence,
     decode_emit_intent_input,
     is_unparsed_tool_wrapper,
@@ -66,9 +67,9 @@ log = logging.getLogger(__name__)
 def _input_side_total(usage: dict[str, Any]) -> int:
     """Total input-side tokens (fresh + cache read + cache creation) of a usage dict."""
     return (
-        safe_int(usage.get("input_tokens"))
-        + safe_int(usage.get("cache_read_input_tokens"))
-        + safe_int(usage.get("cache_creation_input_tokens"))
+        to_int(usage.get("input_tokens"), 0)
+        + to_int(usage.get("cache_read_input_tokens"), 0)
+        + to_int(usage.get("cache_creation_input_tokens"), 0)
     )
 
 
@@ -105,9 +106,9 @@ what changed. Match length to substance.
 """.strip()
 
 
-# Global floor, applied by ``run()`` to every mode: Claude Code counts the
-# model's own text message as a turn, so a low max_turns trips before any output.
-_RAW_COMPLETION_MIN_MAX_TURNS: int = 8
+# Floor applied by ``run()``: Claude Code counts the model's own text message as a turn, so a low max_turns trips
+# before any output.
+_MIN_MAX_TURNS: int = 8
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
 # wall.
@@ -201,55 +202,78 @@ def _intent_fingerprint(intent: Intent) -> str:
     )
 
 
-# Built-in tools disallowed in raw_completion mode so the model produces exactly one text turn (no agentic tool loop).
-_RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "Bash",
-    "BashOutput",
-    "KillShell",
-    "Read",
-    "Write",
-    "Edit",
-    "NotebookEdit",
-    "Glob",
-    "Grep",
-    "Task",
-    "WebFetch",
-    "WebSearch",
-    "TodoWrite",
-    "ExitPlanMode",
-    "SlashCommand",
-)
+def _is_sdk_boundary_error(exc: Exception) -> bool:
+    """Whether the SDK raised this to end a turn whose collected output is still usable.
+
+    It raises on a terminal ``ResultMessage`` with ``is_error=True``, which is also how it reports a turn that merely
+    ran out of turns or carried an error-shaped success envelope.
+    """
+    err_str = str(exc)
+    return "error result: success" in err_str or "maximum number of turns" in err_str
+
+
+@dataclass
+class _StreamedTurn:
+    """What one SDK stream produced: the turn's intents and text, and the telemetry the call reported alongside them.
+
+    ``usages`` holds every usage dict the stream reported, in order: the last is cumulative over the call, the ones
+    before it describe single requests.
+    """
+
+    intents: list[Intent] = field(default_factory=list)
+    text_chunks: list[str] = field(default_factory=list)
+    result_chunks: list[str] = field(default_factory=list)
+    num_turns: int = 0
+    stop_reason: str | None = None
+    usages: list[dict[str, Any]] = field(default_factory=list)
+    # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
+    seen_fallback_intents: set[str] = field(default_factory=set)
+
+    @property
+    def result_text(self) -> str:
+        """The call's consolidated ``ResultMessage`` text."""
+        return "".join(self.result_chunks)
+
+    @property
+    def raw_text(self) -> str:
+        """The turn's text: the consolidated ``ResultMessage`` text, falling back to the streamed text blocks."""
+        return self.result_text or "".join(self.text_chunks)
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        """The call-cumulative usage, carrying the largest single request's input-side total as the context peak."""
+        if not self.usages:
+            return {}
+        cumulative = dict(self.usages[-1])
+        peak = max((_input_side_total(u) for u in self.usages[:-1]), default=0)
+        cumulative["context_tokens_peak"] = peak or _context_tokens_estimate(cumulative, num_turns=self.num_turns)
+        return cumulative
+
+    def absorb(self, message: Any) -> None:
+        """Take the fields one streamed message reports about the call as a whole; the last non-empty value wins.
+
+        ``ResultMessage.result`` duplicates the streamed text blocks, so it is kept apart from them to avoid
+        double-counting. Both ``AssistantMessage`` and the terminal ``ResultMessage`` carry ``stop_reason``, so the
+        call's own reason is the one that ends up reported.
+        """
+        result_text = getattr(message, "result", None)
+        if isinstance(result_text, str) and result_text:
+            self.result_chunks.append(result_text)
+        num_turns = getattr(message, "num_turns", None)
+        if isinstance(num_turns, int) and num_turns > 0:
+            self.num_turns = num_turns
+        stop_reason = getattr(message, "stop_reason", None)
+        if isinstance(stop_reason, str) and stop_reason:
+            self.stop_reason = stop_reason
+        usage = getattr(message, "usage", None)
+        if isinstance(usage, dict) and usage:
+            self.usages.append(dict(usage))
+
 
 # Env-driven reasoning effort / extended thinking.
 _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
-_EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
-_CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
-# The kernel-agent installer records the Claude CLI it resolved here (``kernel-agent.env.sh``).
-_INSTALLER_CLI_ENV: str = "GEAK_CLAUDE_BIN"
-
-# Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
-_EFFORT_ROLES: dict[str, tuple[str, str]] = {
-    "orchestration": (_EFFORT_ENV_ORCH, "medium"),
-    "kernel": (_EFFORT_ENV_KERNEL, "low"),
-}
-
-
-def resolve_claude_executable() -> str:
-    """Resolve the Claude CLI Hyperloom's agents run, in-process and as subprocesses.
-
-    Order: ``$HYPERLOOM_CLAUDE_CLI_PATH`` (the operator pin), then the installer's record in ``$GEAK_CLAUDE_BIN``,
-    then ``claude`` on ``$PATH``. The installer may place the CLI outside ``$PATH`` (``~/.local/bin``).
-
-    Returns:
-        The resolved executable path, or ``""`` when none is executable.
-    """
-    for env_name in (_CLI_PATH_ENV, _INSTALLER_CLI_ENV):
-        candidate = os.environ.get(env_name, "").strip()
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return shutil.which("claude") or ""
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -268,17 +292,8 @@ class ClaudeBackend:
     """Production Claude backend. Implements :class:`Backend`."""
 
     model: str | None = None
-    api_key_env: str = "ANTHROPIC_API_KEY"
-    # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
-    # (8), so values below 8 have no effect.
     max_turns_default: int = 12
-    effort_role: str = "kernel"
-    enable_mcp_emit_intent: bool = True
-    capture_turn_diagnostics: bool = False
-    # Raw single-shot completion mode: skips the emit_intent server + suffix, disallows all tools, and returns
-    # ``raw_text`` without an emitted intent.
-    raw_completion: bool = False
-    # Role's allowed intent set for the output-format suffix. None = all IntentType values.
+    # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
     # aborted.
@@ -305,16 +320,15 @@ class ClaudeBackend:
     name: str = "claude"
     # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
-    calls: list[dict[str, Any]] = field(default_factory=list)
+    # The system prompt is cached across turns, so the stable session context is sent in it.
+    system_prompt_cached = True
     mcp_server_config: Any | None = field(default=None, init=False)
-    mcp_tool_name: str | None = field(default=None, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
     _mcp_setup_error: str | None = field(default=None, init=False)
-    _active_turn_diagnostic: dict[str, Any] | None = field(default=None, init=False)
-    _last_turn_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
-    _active_stderr: list[str] = field(default_factory=list, init=False)
+    # The tool palette (``allowed_tools``, ``mcp_servers``) of the latest turn's options, for the MCP setup snapshot.
+    _palette_kwargs: dict[str, Any] = field(default_factory=dict, init=False)
     # The CLI's own account from its latest init message: its version, the MCP tools it offered the model, and each
     # MCP server's connection status.
     _cli_init: dict[str, Any] = field(default_factory=dict, init=False)
@@ -322,40 +336,29 @@ class ClaudeBackend:
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
     _turn_stoppers: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
+    # System prompt files: the CLI's command-line arguments are capped at 128 KiB.
+    _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Resolve the SDK and optionally register the ``emit_intent`` tool."""
+        """Resolve the SDK and register the ``emit_intent`` tool."""
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
-            try:
-                query, opts_cls, mod = _import_sdk()
-            except BackendError:
-                if self.sdk_query_factory is None or self.sdk_options_cls is None:
-                    raise
-            else:
-                if self.sdk_query_factory is None:
-                    self.sdk_query_factory = query
-                if self.sdk_options_cls is None:
-                    self.sdk_options_cls = opts_cls
-                if self.sdk_module is None:
-                    self.sdk_module = mod
-        if not os.environ.get(self.api_key_env):
-            self.calls.append({"warn": f"{self.api_key_env} not set in env"})
-        if self.raw_completion:
-            self.enable_mcp_emit_intent = False
-        if self.enable_mcp_emit_intent:
-            try:
-                cfg = build_emit_intent_server(
-                    sdk_module=self.sdk_module,
-                    tool_factory=self.mcp_tool_factory,
-                    server_factory=self.mcp_server_factory,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
-                self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
-                cfg = None
-            if cfg is not None:
-                self.mcp_server_config = cfg
-                self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
+            query, opts_cls, mod = _import_sdk()
+            if self.sdk_query_factory is None:
+                self.sdk_query_factory = query
+            if self.sdk_options_cls is None:
+                self.sdk_options_cls = opts_cls
+            if self.sdk_module is None:
+                self.sdk_module = mod
+        try:
+            self.mcp_server_config = build_emit_intent_server(
+                sdk_module=self.sdk_module,
+                tool_factory=self.mcp_tool_factory,
+                server_factory=self.mcp_server_factory,
+                allowed_intents=self._offered_intents,
+            )
+        except Exception as exc:  # isolation boundary: the emit_intent MCP server, recorded as setup_error
+            log.warning("emit_intent MCP setup failed: %s", exc, exc_info=True)
+            self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
 
     # Backend protocol
     async def run(
@@ -364,44 +367,25 @@ class ClaudeBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        disallowed_tools: list[str] | None = None,
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
-        full_prompt = self._compose_prompt(prompt)
-        self._begin_turn_diagnostic(
-            prompt=full_prompt,
-            system_prompt=system_prompt,
-            tools=tools or [],
-        )
-        max_turns_use = max_turns or self.max_turns_default
-        # Claude Code counts the model's own text/tool messages as turns, so a literal max_turns=1 trips ("Reached
-        # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
-        # raise this as an error rather than returning a partial result.
-        max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
+        full_prompt = f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
+        max_turns_use = max(max_turns or self.max_turns_default, _MIN_MAX_TURNS)
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
-        try:
-            options = self._build_options(
-                tools=tools or [],
-                disallowed_tools=disallowed_tools or [],
-                max_turns=max_turns_use,
-                system_prompt=system_prompt,
-                turn_marker=turn_marker,
-            )
-        except BaseException as exc:
-            self._finish_turn_diagnostic(outcome="backend_error", error=exc)
-            raise
-        self._update_turn_options(
-            options,
+        options = self._build_options(
+            tools=tools or [],
             max_turns=max_turns_use,
+            system_prompt=system_prompt,
+            turn_marker=turn_marker,
         )
 
         # Each attempt bounds the gap BETWEEN streamed SDK messages (silence budget), not the total turn; each retry
         # amplifies the idle budget.
         attempt_state = {"n": 0}
 
-        async def _one_attempt() -> tuple[Any, ...]:
+        async def _one_attempt() -> _StreamedTurn:
             """Run one SDK invocation under an amplified per-attempt idle timeout."""
             # The turn is being stopped: never start another CLI for it.
             turn_stop.raise_if_requested()
@@ -415,23 +399,8 @@ class ClaudeBackend:
                 turn_stop=turn_stop,
             )
 
-        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
-            """Record a transient-failure retry warning into the call log."""
-            self.calls.append(
-                {
-                    "warn": (f"claude SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"),
-                }
-            )
-
         try:
-            (
-                intents,
-                raw_text,
-                tool_block_count,
-                usage,
-                session_id,
-                stop_reason,
-            ) = await self._within_turn_bound(
+            collected = await self._within_turn_bound(
                 retry_with_backoff(
                     _one_attempt,
                     policy=self.retry_policy,
@@ -441,7 +410,6 @@ class ClaudeBackend:
                         ConnectionError,
                         OSError,
                     ),
-                    on_retry=_note_retry,
                 ),
                 turn_marker=turn_marker,
                 turn_stop=turn_stop,
@@ -452,71 +420,39 @@ class ClaudeBackend:
                 "treating as a failed turn",
                 self.call_timeout_s,
             )
-            self.calls.append(
-                {
-                    "warn": (
-                        f"claude SDK stream idle / timed out (no new message for "
-                        f">{self.call_timeout_s:.0f}s, retries exhausted); treating "
-                        "as no-intent so the reactor pass can proceed"
-                    ),
-                }
-            )
             error = LLMCallFailed(
                 f"Claude backend timed out: stream idle for >{self.call_timeout_s:.0f}s (likely upstream proxy stall)"
             )
-            self._finish_turn_diagnostic(outcome="backend_error", error=error)
             raise error from exc
-        except BaseException as exc:
-            self._finish_turn_diagnostic(outcome="backend_error", error=exc)
+        except LLMCallFailed:
+            raise
+        except Exception as exc:
             # Once retries are exhausted, anything the SDK stream raised is a provider call that produced nothing
             # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
             # exists to count.
-            if isinstance(exc, Exception) and not isinstance(exc, LLMCallFailed):
-                raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
-            raise
-        if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
-        cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
-        cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
-        input_tokens = safe_int(usage.get("input_tokens") if usage else None)
-        output_tokens = safe_int(usage.get("output_tokens") if usage else None)
-        if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["usage"] = {
-                "cache_creation_input_tokens": cache_creation,
-                "cache_read_input_tokens": cache_read,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-        self.calls.append(
-            {
-                "prompt_chars": len(full_prompt),
-                "tool_blocks": tool_block_count,
-                "intents": len(intents),
-                "max_turns": max_turns_use,
-                "cache_creation_input_tokens": cache_creation,
-                "cache_read_input_tokens": cache_read,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-        )
-        self._finish_turn_diagnostic(outcome="succeeded" if intents or self.raw_completion else "no_intent")
+            raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
+        raw_text = collected.raw_text
+        usage = collected.usage
+        cache_creation = to_int(usage.get("cache_creation_input_tokens") if usage else None, 0)
+        cache_read = to_int(usage.get("cache_read_input_tokens") if usage else None, 0)
+        input_tokens = to_int(usage.get("input_tokens") if usage else None, 0)
+        output_tokens = to_int(usage.get("output_tokens") if usage else None, 0)
         return BackendTurnResult(
-            intents=intents,
+            intents=collected.intents,
             raw_text=raw_text,
             metadata={
-                "tool_blocks": tool_block_count,
                 "model": self.model,
                 # Pairs this turn's token row with its conversation row; both halves are written from this one
                 # metadata dict. A caller that opened an ``llm.call`` trajectory span owns the id.
                 "call_id": current_context().call_id or new_call_id(),
                 # Why the model stopped ("end_turn" / "max_tokens" / ...).
-                "stop_reason": stop_reason,
+                "stop_reason": collected.stop_reason,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 # Per-request context size; the counters above sum the call's internal turns and are spend, not size.
-                "context_tokens_peak": safe_int(usage.get("context_tokens_peak") if usage else None),
+                "context_tokens_peak": to_int(usage.get("context_tokens_peak") if usage else None, 0),
                 # Full conversation text so the caller (which holds the session_dir / component / tick context the
                 # stateless backend lacks) can persist it to conversations.jsonl.
                 "prompt": full_prompt,
@@ -525,12 +461,10 @@ class ClaudeBackend:
         )
 
     # Internals
-    def _compose_prompt(self, prompt: str) -> str:
-        """Append the emit_intent output-format suffix unless in raw mode."""
-        if self.raw_completion:
-            return prompt
-        intents = self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
-        return f"{prompt}\n\n{_build_output_instructions(intents)}"
+    @property
+    def _offered_intents(self) -> frozenset[IntentType]:
+        """The intent types the agent is offered: the role's set, or every type when none is given."""
+        return self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server."""
@@ -544,18 +478,15 @@ class ClaudeBackend:
                 tool_factory=self.mcp_tool_factory,
                 server_factory=self.mcp_server_factory,
             )
-        except Exception as exc:  # noqa: BLE001
-            self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
+        except Exception as exc:  # isolation boundary: the context-tools MCP server, absent from the MCP setup snapshot
+            log.warning("context tools MCP setup failed: %s", exc, exc_info=True)
             self._context_server_config = None
-
-    def get_turn_diagnostic(self) -> dict[str, Any]:
-        """Return the most recently completed turn diagnostic."""
-        return dict(self._last_turn_diagnostic)
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
         """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
-        schema = json.dumps(EMIT_INTENT_TOOL_INPUT_SCHEMA, sort_keys=True, separators=(",", ":"))
-        diag = self.get_turn_diagnostic()
+        schema = json.dumps(
+            build_emit_intent_tool_input_schema(self._offered_intents), sort_keys=True, separators=(",", ":")
+        )
         mcp_tools = self._cli_init.get("mcp_tools")
         return {
             "backend": type(self).__name__,
@@ -564,100 +495,18 @@ class ClaudeBackend:
             "sdk_version": getattr(self.sdk_module, "__version__", None),
             "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
-            "mcp_servers": diag.get("mcp_servers", []),
+            "mcp_servers": sorted(self._palette_kwargs.get("mcp_servers", {})),
             "mcp_server_status": self._cli_init.get("mcp_server_status"),
             "mcp_tools": mcp_tools,
             "emit_intent": {
                 "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
-                "registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
+                "registered": self.mcp_server_config is not None,
                 "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
                 "setup_error": self._mcp_setup_error,
             },
-            "allowed_tools": diag.get("allowed_tools", []),
+            "allowed_tools": list(self._palette_kwargs.get("allowed_tools", [])),
         }
-
-    def _begin_turn_diagnostic(
-        self,
-        *,
-        prompt: str,
-        system_prompt: str | None,
-        tools: list[str],
-    ) -> None:
-        if not self.capture_turn_diagnostics:
-            return
-        self._active_stderr = []
-        self._active_turn_diagnostic = {
-            "backend": type(self).__name__,
-            "model": self.model,
-            "sdk_name": getattr(self.sdk_module, "__name__", None),
-            "sdk_version": getattr(self.sdk_module, "__version__", None),
-            "cli_version": self._cli_init.get("cli_version"),
-            "gateway_endpoint": self._gateway_endpoint_identifier(),
-            "session_id_hash": None,
-            "max_turns": None,
-            "timeout_sec": self.call_timeout_s,
-            "reasoning_effort": None,
-            "thinking": None,
-            "prompt": prompt,
-            "system_prompt": system_prompt or "",
-            "allowed_tools": list(tools),
-            "mcp_servers": [],
-            "emit_intent_registered": bool(self.mcp_server_config is not None and self.mcp_tool_name),
-            "messages": [],
-            "result": "",
-            "raw_text": "",
-            "tool_blocks": [],
-            "parse_errors": [],
-            "deduped_fallback_intents": 0,
-            "usage": {},
-            "stderr_tail": [],
-        }
-
-    def _update_turn_options(self, options: Any, *, max_turns: int) -> None:
-        diag = self._active_turn_diagnostic
-        if diag is None:
-            return
-        kwargs = getattr(options, "kwargs", None)
-        if not isinstance(kwargs, dict):
-            kwargs = {}
-        allowed = kwargs.get("allowed_tools", getattr(options, "allowed_tools", diag["allowed_tools"]))
-        servers = kwargs.get("mcp_servers", getattr(options, "mcp_servers", {}))
-        if not kwargs:
-            if self.raw_completion:
-                allowed = []
-                servers = {}
-            else:
-                allowed = [tool for tool in diag["allowed_tools"] if tool != EMIT_INTENT_TOOL_NAME]
-                if self.mcp_tool_name and self.mcp_tool_name not in allowed:
-                    allowed.append(self.mcp_tool_name)
-                if self._context_server_config is not None:
-                    allowed.extend(tool for tool in CONTEXT_TOOL_QUALIFIED_NAMES if tool not in allowed)
-                servers = {}
-                if self.mcp_server_config is not None:
-                    servers[MCP_SERVER_NAME] = self.mcp_server_config
-                if self._context_server_config is not None:
-                    servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
-        diag["max_turns"] = max_turns
-        diag["allowed_tools"] = [str(tool) for tool in allowed or []]
-        diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
-        diag["reasoning_effort"] = kwargs.get("effort", getattr(options, "effort", self._resolve_effort()))
-        diag["thinking"] = kwargs.get(
-            "thinking",
-            getattr(options, "thinking", {"type": (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()}),
-        )
-
-    def _finish_turn_diagnostic(self, *, outcome: str, error: BaseException | None = None) -> None:
-        diag = self._active_turn_diagnostic
-        if diag is None:
-            return
-        diag["outcome"] = outcome
-        diag["stderr_tail"] = self._active_stderr[-50:]
-        if error is not None:
-            diag["error_type"] = type(error).__name__
-            diag["error_message"] = str(error)
-        self._last_turn_diagnostic = diag
-        self._active_turn_diagnostic = None
 
     def _gateway_endpoint_identifier(self) -> str | None:
         raw = (os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip()
@@ -667,22 +516,34 @@ class ClaudeBackend:
         # hostname, not netloc: netloc carries any ``user:secret@`` userinfo.
         return parts.hostname or "configured"
 
-    @staticmethod
-    def _session_hash(session_id: str | None) -> str | None:
-        if not session_id:
-            return None
-        return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-
     def _build_options(
         self,
         *,
         tools: list[str],
-        disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
         turn_marker: str | None = None,
     ) -> Any:
         """Build the SDK options object for one turn; ``turn_marker`` tags the CLI's processes for cleanup."""
+        kwargs = self._turn_option_kwargs(
+            max_turns=max_turns,
+            system_prompt=system_prompt,
+            turn_marker=turn_marker,
+        )
+        self._palette_kwargs = self._tool_palette_option_kwargs(tools)
+        kwargs.update(self._palette_kwargs)
+        # A stderr callback makes the SDK pipe the CLI's stderr instead of letting it reach the operator console.
+        kwargs["stderr"] = self._stderr_sink
+        return self._instantiate_options(kwargs)
+
+    def _turn_option_kwargs(
+        self,
+        *,
+        max_turns: int,
+        system_prompt: str | None,
+        turn_marker: str | None,
+    ) -> dict[str, Any]:
+        """The SDK options every turn carries, whatever it is allowed to do: model, CLI, prompt, environment, effort."""
         # Stream events are what time each model request inside the call (see ``claude_requests``).
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
@@ -691,34 +552,38 @@ class ClaudeBackend:
         if cli_path:
             kwargs["cli_path"] = cli_path
         if system_prompt:
-            kwargs["system_prompt"] = system_prompt
+            kwargs["system_prompt"] = self._system_prompt_file(system_prompt)
         self._apply_sdk_env_options(kwargs)
         if turn_marker:
             # options.env is merged over the inherited environment, so a marker-only dict changes nothing else.
             kwargs["env"] = {**dict(kwargs.get("env") or {}), _TURN_MARKER_ENV: turn_marker}
         self._apply_effort_options(kwargs)
-        if self.raw_completion:
-            # Single text turn: no MCP tools, all built-ins disallowed.
-            kwargs["allowed_tools"] = []
-            deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
-            if disallowed_tools:
-                deny = list(dict.fromkeys(deny + disallowed_tools))
-            kwargs["disallowed_tools"] = deny
-            kwargs["stderr"] = self._stderr_sink
-            return self._instantiate_options(kwargs)
+        return kwargs
+
+    def _system_prompt_file(self, system_prompt: str) -> dict[str, str]:
+        """The SDK option that hands the CLI ``system_prompt`` as a file, written once per distinct text."""
+        if self._system_prompt_dir is None:
+            self._system_prompt_dir = tempfile.TemporaryDirectory(prefix="hyperloom-system-prompt-")
+        path = Path(self._system_prompt_dir.name) / f"{hashlib.sha256(system_prompt.encode()).hexdigest()}.md"
+        if not path.exists():
+            path.write_text(system_prompt, encoding="utf-8")
+        return {"type": "file", "path": str(path)}
+
+    def _tool_palette_option_kwargs(self, tools: list[str]) -> dict[str, Any]:
+        """The options naming this turn's tool palette and the MCP servers that serve it."""
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
-        if self.mcp_tool_name and self.mcp_tool_name not in allowed:
-            allowed.append(self.mcp_tool_name)
+        if self.mcp_server_config is not None and EMIT_INTENT_TOOL_QUALIFIED not in allowed:
+            allowed.append(EMIT_INTENT_TOOL_QUALIFIED)
         # Allow-list the context-pull tools' qualified names.
         if self._context_server_config is not None:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
                 if qname not in allowed:
                     allowed.append(qname)
+        kwargs: dict[str, Any] = {}
         if allowed:
             kwargs["allowed_tools"] = allowed
-        if disallowed_tools:
-            kwargs["disallowed_tools"] = disallowed_tools
+        kwargs["tools"] = [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")]
         mcp_servers: dict[str, Any] = {}
         if self.mcp_server_config is not None:
             mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
@@ -726,9 +591,7 @@ class ClaudeBackend:
             mcp_servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         if mcp_servers:
             kwargs["mcp_servers"] = mcp_servers
-        # Capture CLI stderr so failures are diagnosable.
-        kwargs["stderr"] = self._stderr_sink
-        return self._instantiate_options(kwargs)
+        return kwargs
 
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
         """Pin Claude Code subprocess auth to the current Hyperloom env."""
@@ -741,14 +604,8 @@ class ClaudeBackend:
         )
 
     def _resolve_effort(self) -> str:
-        """Reasoning-effort tier for this backend's role.
-
-        Returns:
-            The role's env override, else the shared override, else the role
-            default from :data:`_EFFORT_ROLES`.
-        """
-        role_env, default = _EFFORT_ROLES.get(self.effort_role, _EFFORT_ROLES["kernel"])
-        return (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        """Reasoning-effort tier: the orchestration override, else the shared override, else ``medium``."""
+        return (os.environ.get(_EFFORT_ENV_ORCH) or os.environ.get(_EFFORT_ENV) or "medium").strip().lower()
 
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options."""
@@ -764,16 +621,12 @@ class ClaudeBackend:
         return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
-        """Default stderr handler — append to ``self.calls`` for postmortems."""
+        """Log one line of the CLI's stderr at debug level."""
         text = line.strip()
         if text:
-            self.calls.append({"stderr": text})
-            if self._active_turn_diagnostic is not None:
-                self._active_stderr.append(text)
+            log.debug("claude CLI stderr: %s", text)
 
-    async def _within_turn_bound(
-        self, coro: Awaitable[Any], *, turn_marker: str, turn_stop: _TurnStop | None = None
-    ) -> Any:
+    async def _within_turn_bound(self, coro: Awaitable[Any], *, turn_marker: str, turn_stop: _TurnStop) -> Any:
         """Await ``coro`` for at most :attr:`turn_timeout_s`; past it, stop the call and kill its CLI.
 
         The SDK call runs in its own task so that a close which never finishes cannot hold the caller: the task is
@@ -784,13 +637,12 @@ class ClaudeBackend:
         Raises:
             LLMCallFailed: The bound elapsed before ``coro`` finished.
         """
-        stop = turn_stop if turn_stop is not None else _TurnStop()
         task = asyncio.ensure_future(coro)
         try:
             done, _ = await asyncio.wait({task}, timeout=self.turn_timeout_s)
         except BaseException:
             # The caller itself was cancelled: take the SDK call and its CLI down without holding the caller.
-            stopper = asyncio.ensure_future(self._stop_turn(task, stop, turn_marker))
+            stopper = asyncio.ensure_future(self._stop_turn(task, turn_stop, turn_marker))
             self._turn_stoppers.add(stopper)
             stopper.add_done_callback(self._turn_stoppers.discard)
             stopper.add_done_callback(lambda t: t.cancelled() or t.exception())
@@ -804,7 +656,7 @@ class ClaudeBackend:
                 if killed:
                     log.warning("claude SDK call failed; killed %d leftover CLI process(es)", len(killed))
                 raise
-        closed, elapsed, killed = await self._stop_turn(task, stop, turn_marker)
+        closed, elapsed, killed = await self._stop_turn(task, turn_stop, turn_marker)
         if closed:
             cleanup = f"SDK closed the CLI in {elapsed:.1f}s"
         else:
@@ -814,7 +666,6 @@ class ClaudeBackend:
             f"{cleanup}; killed {len(killed)} leftover CLI process(es)"
         )
         log.warning("claude SDK %s; treating as a failed turn", message)
-        self.calls.append({"warn": message})
         raise LLMCallFailed(f"Claude backend timed out: {message}")
 
     async def _stop_turn(
@@ -852,28 +703,17 @@ class ClaudeBackend:
         prompt: str,
         options: Any,
         *,
-        idle_timeout_s: float | None = None,
-        attempt: int = 1,
-        turn_stop: _TurnStop | None = None,
-    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
-        """Stream SDK messages, collecting intents, raw text, tool counts, the latest `ResultMessage.usage` dict, the
-        SDK ``session_id`` and the model's ``stop_reason``. Each model request of the attempt, finished or cut off,
-        lands on the trajectory ledger as an ``llm.request`` row.
+        idle_timeout_s: float,
+        attempt: int,
+        turn_stop: _TurnStop,
+    ) -> _StreamedTurn:
+        """Stream the SDK's messages for one attempt and collect what they carry.
+
+        Each model request of the attempt, finished or cut off, lands on the trajectory ledger as an ``llm.request``
+        row.
         """
         requests = ClaudeRequestTracker()
-        intents: list[Intent] = []
-        text_chunks: list[str] = []
-        result_chunks: list[str] = []
-        tool_block_count = 0
-        # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
-        seen_fallback_intents: set[str] = set()
-        # Every usage dict the stream reports, in order: the last is cumulative over the call, the ones before it
-        # describe single requests.
-        usages: list[dict[str, Any]] = []
-        num_turns = 0
-        session_id: str | None = None
-        stop_reason: str | None = None
-        turn_stop = turn_stop or _TurnStop()
+        collected = _StreamedTurn()
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
@@ -881,113 +721,87 @@ class ClaudeBackend:
                 # Idle timeout: bound only the wait for the NEXT message; a fully silent gateway trips
                 # ``asyncio.TimeoutError``.
                 try:
-                    if idle_timeout_s is not None:
-                        message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
-                    else:
-                        message = await stream_iter.__anext__()
+                    message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
                 except StopAsyncIteration:
                     break
                 # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.
                 turn_stop.raise_if_requested()
                 requests.observe(message)
-                if getattr(message, "subtype", None) == "init":
-                    self._record_cli_init(getattr(message, "data", None) or {})
-                if getattr(message, "subtype", None) == "api_retry":
-                    # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
-                    retry = getattr(message, "data", None) or {}
-                    log.warning(
-                        "claude CLI retrying its API request (attempt %s/%s, status=%s, error=%s)",
-                        retry.get("attempt"),
-                        retry.get("max_retries"),
-                        retry.get("error_status"),
-                        retry.get("error"),
-                    )
-                # Capture the session token from any message; last seen wins.
-                msg_session = getattr(message, "session_id", None)
-                if isinstance(msg_session, str) and msg_session:
-                    session_id = msg_session
-                self._record_message_diagnostic(message)
-                for block in self._iter_blocks(message):
-                    self._record_tool_block_diagnostic(block)
-                    if self._is_tool_use_for_emit_intent(block):
-                        tool_block_count += 1
-                        intent = self._parse_tool_use_block(block)
-                        if intent is not None:
-                            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
-                                fingerprint = _intent_fingerprint(intent)
-                                if fingerprint in seen_fallback_intents:
-                                    if self._active_turn_diagnostic is not None:
-                                        self._active_turn_diagnostic["deduped_fallback_intents"] += 1
-                                    log.info(
-                                        "claude fallback intent deduped (fingerprint=%s)",
-                                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
-                                    )
-                                    continue
-                                seen_fallback_intents.add(fingerprint)
-                            intents.append(intent)
-                    else:
-                        txt = self._extract_text(block)
-                        if txt:
-                            text_chunks.append(txt)
-                # ResultMessage.result duplicates the streamed TextBlocks; keep it separate to avoid double-counting.
-                result_text = getattr(message, "result", None)
-                if isinstance(result_text, str) and result_text:
-                    result_chunks.append(result_text)
-                msg_turns = getattr(message, "num_turns", None)
-                if isinstance(msg_turns, int) and msg_turns > 0:
-                    num_turns = msg_turns
-                # Both AssistantMessage and the terminal ResultMessage carry it; last seen wins, so the call's own
-                # reason ends up reported.
-                msg_stop = getattr(message, "stop_reason", None)
-                if isinstance(msg_stop, str) and msg_stop:
-                    stop_reason = msg_stop
-                msg_usage = getattr(message, "usage", None)
-                if isinstance(msg_usage, dict) and msg_usage:
-                    usages.append(dict(msg_usage))
+                self._record_cli_status(message)
+                self._collect_message_blocks(message, collected)
+                collected.absorb(message)
         except Exception as exc:
-            # The SDK raises on a terminal ResultMessage with is_error=True.
-            err_str = str(exc)
-            _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
-            if _non_fatal:
-                if self._active_turn_diagnostic is not None:
-                    self._active_turn_diagnostic["sdk_boundary_error"] = err_str
-                if intents:
-                    log.warning(
-                        "claude SDK raised '%s' but %d intents already collected; returning partial results",
-                        err_str,
-                        len(intents),
-                    )
-                else:
-                    log.warning(
-                        "claude SDK raised '%s' with no intents collected; "
-                        "treating as no-intent turn (will retry next tick)",
-                        err_str,
-                    )
-            else:
+            if not _is_sdk_boundary_error(exc):
                 raise
+            self._record_sdk_boundary_error(exc, collected)
         finally:
             requests.record_trajectory(attempt=attempt, fallback_model=self.model)
-            # Best-effort: close the (async-gen) stream so an idle-timeout abort doesn't leak a half-consumed
-            # generator.
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                try:
-                    await aclose()
-                except Exception:  # noqa: BLE001 — cleanup must not mask the turn result
-                    pass
-        # Prefer the consolidated ResultMessage text; fall back to TextBlocks.
-        raw_text = "".join(result_chunks) or "".join(text_chunks)
-        if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["result"] = "".join(result_chunks)
-            self._active_turn_diagnostic["raw_text"] = raw_text
-        last_usage: dict[str, Any] = dict(usages[-1]) if usages else {}
-        if last_usage:
-            peak = max((_input_side_total(u) for u in usages[:-1]), default=0)
-            last_usage["context_tokens_peak"] = peak or _context_tokens_estimate(
-                last_usage,
-                num_turns=num_turns,
+            await self._close_stream(stream)
+        return collected
+
+    def _record_cli_status(self, message: Any) -> None:
+        """Record what a streamed message says about the CLI itself: its session banner and the API retries it makes."""
+        subtype = getattr(message, "subtype", None)
+        if subtype == "init":
+            self._record_cli_init(getattr(message, "data", None) or {})
+        if subtype == "api_retry":
+            # Each of these resets the stream's idle timer; only the turn's wall-clock bound ends a retry loop.
+            retry = getattr(message, "data", None) or {}
+            log.warning(
+                "claude CLI retrying its API request (attempt %s/%s, status=%s, error=%s)",
+                retry.get("attempt"),
+                retry.get("max_retries"),
+                retry.get("error_status"),
+                retry.get("error"),
             )
-        return intents, raw_text, tool_block_count, last_usage, session_id, stop_reason
+
+    def _collect_message_blocks(self, message: Any, collected: _StreamedTurn) -> None:
+        """Add one message's content blocks to the turn: emit_intent calls as intents, everything else as text."""
+        for block in self._iter_blocks(message):
+            if not self._is_tool_use_for_emit_intent(block):
+                txt = self._extract_text(block)
+                if txt:
+                    collected.text_chunks.append(txt)
+                continue
+            intent = self._parse_tool_use_block(block)
+            if intent is None:
+                continue
+            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
+                fingerprint = _intent_fingerprint(intent)
+                if fingerprint in collected.seen_fallback_intents:
+                    log.info(
+                        "claude fallback intent deduped (fingerprint=%s)",
+                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
+                    )
+                    continue
+                collected.seen_fallback_intents.add(fingerprint)
+            collected.intents.append(intent)
+
+    def _record_sdk_boundary_error(self, exc: Exception, collected: _StreamedTurn) -> None:
+        """Log that the SDK ended the stream by raising, and what survived it."""
+        err_str = str(exc)
+        if collected.intents:
+            log.warning(
+                "claude SDK raised '%s' but %d intents already collected; returning partial results",
+                err_str,
+                len(collected.intents),
+            )
+        else:
+            log.warning(
+                "claude SDK raised '%s' with no intents collected; treating as no-intent turn (will retry next tick)",
+                err_str,
+            )
+
+    @staticmethod
+    async def _close_stream(stream: Any) -> None:
+        """Close the SDK's stream so an aborted turn does not leak a half-consumed async generator."""
+        aclose = getattr(stream, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:  # outermost finalizer: stream cleanup, which must not mask the turn result
+            log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod
     def _iter_blocks(message: Any):
@@ -1014,8 +828,6 @@ class ClaudeBackend:
         raw_input, decode_error = decode_emit_intent_input(getattr(block, "input", None))
         if decode_error is not None:
             log.info("claude tool_use decode failed: %s", decode_error)
-            if self._active_turn_diagnostic is not None:
-                self._active_turn_diagnostic["parse_errors"].append(decode_error)
             return None
         try:
             envelope = {
@@ -1029,8 +841,6 @@ class ClaudeBackend:
             validated = validate_envelope(envelope)
         except IntentValidationError as exc:
             log.info("claude tool_use validation failed: %s", exc)
-            if self._active_turn_diagnostic is not None:
-                self._active_turn_diagnostic["parse_errors"].append(str(exc))
             return None
         return validated[0] if validated else None
 
@@ -1055,42 +865,6 @@ class ClaudeBackend:
             "mcp_tools": mcp_tools,
             "mcp_server_status": {server.get("name"): server.get("status") for server in data.get("mcp_servers") or []},
         }
-        if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["cli_version"] = self._cli_init["cli_version"]
-
-    def _record_message_diagnostic(self, message: Any) -> None:
-        diag = self._active_turn_diagnostic
-        if diag is None or type(message).__name__ == "StreamEvent":
-            return
-        summary: dict[str, Any] = {"type": type(message).__name__}
-        for name in ("is_error", "subtype", "request_id"):
-            value = getattr(message, name, None)
-            if value is not None:
-                summary[name] = value
-                if name == "request_id" and not diag.get("request_id"):
-                    diag["request_id"] = str(value)
-        result = getattr(message, "result", None)
-        if isinstance(result, str):
-            summary["result"] = result
-        diag["messages"].append(summary)
-
-    def _record_tool_block_diagnostic(self, block: Any) -> None:
-        diag = self._active_turn_diagnostic
-        if diag is None:
-            return
-        summary: dict[str, Any] = {"type": type(block).__name__}
-        name = getattr(block, "name", None)
-        if isinstance(name, str) and name:
-            summary["name"] = name
-        raw_input = getattr(block, "input", None)
-        if isinstance(raw_input, dict):
-            summary["input_keys"] = sorted(str(key) for key in raw_input)
-            intent_type = raw_input.get("intent_type")
-            if not isinstance(intent_type, str) and is_unparsed_tool_wrapper(raw_input):
-                intent_type = coerce_emit_intent_input(raw_input).get("intent_type")
-            if isinstance(intent_type, str):
-                summary["intent_type"] = intent_type
-        diag["tool_blocks"].append(summary)
 
     @staticmethod
     def _extract_text(block: Any) -> str:
@@ -1103,4 +877,4 @@ class ClaudeBackend:
         return t if isinstance(t, str) else ""
 
 
-__all__ = ["ClaudeBackend", "resolve_claude_executable"]
+__all__ = ["ClaudeBackend"]

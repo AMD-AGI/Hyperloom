@@ -6,16 +6,19 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import logging as _logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
 from ..measurement.runtime_findings import render_runtime_findings
+from ..state.shared_state import KbInjection
+from ..state.task_registry import TaskSpec
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     PolicyDenied,
@@ -33,7 +36,53 @@ log = _logging.getLogger(__name__)
 
 __all__ = ["SpecialistDispatchCollaborator"]
 
-_SOURCE_PATCH_FAMILY = "source_patch"
+#: ``(specialist_done key, failure class)`` for what the patch-safety gate dropped at admission: each reaches the
+#: durable failure log, which every SEED turn renders.
+_ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
+    ("patches_ungrounded", "patch_targets_ungrounded"),
+    ("proposals_env_ungrounded", "proposal_env_file_missing"),
+)
+
+#: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
+_MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
+
+#: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
+#: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
+#: specialist reads "this session has none".
+_STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("model_name", "model_name", str),
+    ("model_path", "model_path", str),
+    ("warm_start_recipe", "warm_start_recipe", dict),
+    ("warm_start_pitfalls", "warm_start_pitfalls", list),
+    ("warm_start_lessons", "warm_start_lessons", list),
+    ("framework", "framework", str.strip),
+    ("tp", "tp", int),
+    ("precision", "precision", str),
+    ("conc", "conc", int),
+    ("isl", "isl", int),
+    ("osl", "osl", int),
+    ("max_model_len", "max_model_len", int),
+    # The mode selects the specialist's workload block; the corpus shape supplies its numbers.
+    ("benchmark_mode", "benchmark_mode", str),
+    ("agentx_corpus_shape", "agentx_corpus_shape", dict),
+    ("grading", "agentx_grading", dict),
+    ("agentx_backend", "agentx_backend", str),
+    ("baseline_tput", "baseline_tput", float),
+    ("cumulative_gain_validated", "cumulative_gain_validated", float),
+)
+
+#: Optional round-row fields, taken from the done payload or else the dispatch params; an empty value is not carried.
+_ROUND_CARRIED_KEYS: tuple[str, ...] = (
+    "task_kind",
+    "scope",
+    "proposal_msg_id",
+    "framework_agent_candidate_id",
+    "framework_batch_id",
+    "reauthor_attempt",
+    "apply_retry_attempt",
+    "kb_read_id",
+    "kb_rendered_refs",
+)
 
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
@@ -43,8 +92,47 @@ SPECIALIST_AUTO_RETRY_MAX: int = 2
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
 
-# Gap id for the guaranteed custom dispatch when the ledger has no gap yet.
+# Gap id for the custom dispatch when the ledger has no gap yet.
 CUSTOM_SESSION_GAP_ID: str = "gap.custom.session"
+
+
+class ClassifiedFailure(NamedTuple):
+    """A specialist attempt's classified failure type and the reason it carried."""
+
+    ftype: SpecialistFailureType
+    error: str
+
+
+def _round_entry_extras(
+    done_payload: dict[str, Any], task_params: dict[str, Any], *, run_error: str, source_phase: str
+) -> dict[str, Any]:
+    """The optional specialist-round fields: carried keys, lane flags, status, phase, GPUs and notes."""
+    extras: dict[str, Any] = {}
+    for key in _ROUND_CARRIED_KEYS:
+        value = done_payload.get(key)
+        if value in (None, "", [], {}):
+            value = task_params.get(key)
+        if value not in (None, "", [], {}):
+            extras[key] = value
+    for key in ("candidate_discovery", "framework_agent_authoring"):
+        if done_payload.get(key) or task_params.get(key):
+            extras[key] = True
+    if run_error:
+        extras["status"] = "failed"
+        extras["error"] = extras["run_error"] = str(run_error)[:1000]
+    elif done_payload.get("status") not in (None, ""):
+        extras["status"] = str(done_payload.get("status"))
+    if source_phase:
+        extras["source_phase"] = source_phase
+    gpu_ids = done_payload.get("allocated_gpu_ids")
+    if isinstance(gpu_ids, list) and gpu_ids:
+        extras["allocated_gpu_ids"] = [
+            int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+        ]
+    specialist_notes = done_payload.get("_specialist_notes")
+    if isinstance(specialist_notes, list) and specialist_notes:
+        extras["notes"] = list(map(str, specialist_notes))
+    return extras
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
@@ -54,8 +142,26 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # Advisory only: scores proposals, never gates them.
         self._proposal_scorer = proposal_scorer
-        # Macro-cycle suffix of the last custom-specialist guarantee attempt, admitted or denied.
-        self._custom_guarantee_cycle: str | None = None
+        # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
+        self.refused_custom_key = ""
+
+    def refuse_patch_without_source(self, params: dict[str, Any], *, task_id: str) -> bool:
+        """Whether a warmed patch specialist must be refused because no git source tree backs it.
+
+        A refusal ``last_action_failures`` already lists is not recorded again: the force dispatch retries every tick.
+        """
+        state = self.shared_state
+        error = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
+        if not error:
+            return False
+        if not any(
+            row.get("action") == "specialist" and row.get("error_class") == error for row in state.last_action_failures
+        ):
+            state.record_action_failure(
+                action="specialist", task_id=task_id, result={"error_class": error, "error": error}
+            )
+            log.error("specialist: refused a source-patch dispatch: %s", error)
+        return True
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -67,7 +173,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import normalize_dispatch_tags
+        from .domains import dispatch_domain, gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -75,7 +181,11 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
-        domain = str(params.get("domain") or "").strip()
+        if backfilled := gap_backfilled_domain(params, state.find_gap):
+            params["domain"] = backfilled
+        # Resolve as the runner does, so a tags-only or gap-backfilled dispatch is warmed for the domain it runs as.
+        resolved_domain = dispatch_domain(params)
+        domain = resolved_domain.key if resolved_domain is not None else ""
         normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
@@ -83,22 +193,60 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         params.setdefault("kb_subgraph", {})
 
-        # Warm-start recipe + pitfalls + lessons from T0 anchor.
-        if state.warm_start_recipe and "warm_start_recipe" not in params:
-            params["warm_start_recipe"] = dict(state.warm_start_recipe)
-        if state.warm_start_pitfalls and "warm_start_pitfalls" not in params:
-            params["warm_start_pitfalls"] = list(state.warm_start_pitfalls)
-        if state.warm_start_lessons and "warm_start_lessons" not in params:
-            params["warm_start_lessons"] = list(state.warm_start_lessons)
-        # runtime framework/version for version-mismatch annotation.
-        if "framework" not in params:
-            fw = str(getattr(state, "framework", "") or "").strip()
-            if fw:
-                params["framework"] = fw
+        for attr, key, convert in _STATE_PARAMS:
+            value = convert(getattr(state, attr))
+            if value:
+                params.setdefault(key, value)
+        self._warm_framework_context(params)
+        self._warm_prompt_hints(params, domain)
+        self._warm_gap_anchors(params)
+        self._warm_progress(params)
+
+        # Pack bottleneck signals into roofline_evidence for the specialist.
+        # Hot kernels alone are enough: a trace whose quality gate withheld
+        # analysis.md still names where device time goes.
+        last_ta = getattr(state, "last_trace_analyze", None) or {}
+        has_evidence = isinstance(last_ta, dict) and bool(
+            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
+        )
+        if has_evidence and "roofline_evidence" not in params:
+            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
+
+            analysis_path = str(last_ta.get("analysis_md_path") or "")
+            executive_summary: dict[str, Any] = {}
+            if analysis_path:
+                try:
+                    executive_summary = extract_workload_summary(analysis_path)
+                except (ValueError, csv.Error) as exc:
+                    log.warning(
+                        "specialist warmup: extract_workload_summary(%s) failed: %r",
+                        analysis_path,
+                        exc,
+                    )
+                    executive_summary = {}
+            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
+            params["roofline_evidence"] = {
+                "analysis_md_path": analysis_path,
+                "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
+                "executive_summary": executive_summary,
+                "hot_kernels_top15": hot_kernels,
+            }
+
+        measurement = getattr(state, "current_best_measurement", None)
+        if measurement and "runtime_findings" not in params:
+            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
+
+        await self._warm_experience_kb(params)
+
+    def _warm_framework_context(self, params: dict[str, Any]) -> None:
+        """Warm the runtime framework version and the local framework source roots."""
+        state = self.shared_state
+        # Runs after the ``_STATE_PARAMS`` warmup, whose ``str.strip`` requires ``state.framework`` to be a str.
+        # runtime framework version for version-mismatch annotation.
         if "framework_version" not in params:
             fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
             if isinstance(fp_meta, dict):
-                fw = str(params.get("framework") or getattr(state, "framework", "") or "").lower()
+                fw = str(params.get("framework") or state.framework).lower()
                 if fw in ("sglang", "vllm"):
                     v = str(fp_meta.get(fw) or "").strip()
                     if v and v != "unknown":
@@ -115,42 +263,20 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 roots = resolve_kernel_search_roots()
                 if roots:
                     params["framework_source_roots"] = list(roots)
-                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
+                tree = resolve_framework_tree(state.framework)
                 if tree:
                     params["session_framework_tree"] = tree
-            except Exception as exc:  # noqa: BLE001
+            except (KeyError, OSError) as exc:
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
                     exc,
                 )
 
+    def _warm_prompt_hints(self, params: dict[str, Any], domain: str) -> None:
+        """Warm the hardware, model-architecture and advisory prompt hints ``domain`` reads."""
+        state = self.shared_state
         # Hardware + workload hints from SharedState; else dataclass defaults win.
         params.setdefault("gpu_type", state.gpu_type or "")
-        # Active server framework name.
-        if getattr(state, "framework", "") or "":
-            params.setdefault("framework", str(state.framework))
-        if int(getattr(state, "tp", 0) or 0) > 0:
-            params.setdefault("tp", int(state.tp))
-        if getattr(state, "precision", "") or "":
-            params.setdefault("precision", str(state.precision))
-        if int(getattr(state, "conc", 0) or 0) > 0:
-            params.setdefault("conc", int(state.conc))
-        if int(getattr(state, "isl", 0) or 0) > 0:
-            params.setdefault("isl", int(state.isl))
-        if int(getattr(state, "osl", 0) or 0) > 0:
-            params.setdefault("osl", int(state.osl))
-        if int(getattr(state, "max_model_len", 0) or 0) > 0:
-            params.setdefault("max_model_len", int(state.max_model_len))
-        # The mode selects the specialist's workload block; the corpus shape
-        # supplies its numbers.
-        if getattr(state, "benchmark_mode", "") or "":
-            params.setdefault("benchmark_mode", str(state.benchmark_mode))
-        if getattr(state, "agentx_corpus_shape", None):
-            params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
-        if isinstance(getattr(state, "grading", None), dict) and state.grading:
-            params.setdefault("agentx_grading", dict(state.grading))
-        if getattr(state, "agentx_backend", ""):
-            params.setdefault("agentx_backend", str(state.agentx_backend))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
@@ -160,7 +286,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        if domain == "static_recon_specialist" and "model_info" not in params:
+        if domain in _MODEL_INFO_DOMAINS and "model_info" not in params:
             _minfo = getattr(state, "model_info", None)
             if isinstance(_minfo, dict) and _minfo:
                 params["model_info"] = dict(_minfo)
@@ -183,18 +309,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 params["target_gap_notes"] = _gap_notes
 
         if "research_hints" not in params:
-            try:
-                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-                _hints_block = _research_hints.summarise_for_prompt(
-                    self.session_dir,
-                )
-            except Exception:
-                log.exception("Coordinator: specialist research hints failed")
-                _hints_block = ""
+            _hints_block = _research_hints.summarise_for_prompt(self.session_dir)
             if _hints_block:
                 params["research_hints"] = _hints_block
 
+    def _warm_gap_anchors(self, params: dict[str, Any]) -> None:
+        """Warm the targeted gap's symptom, layer and recent attempts from the gaps[] ledger."""
+        state = self.shared_state
         # Fill gap-specific anchors from the gaps[] ledger.
         gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
         if gap_cid:
@@ -204,11 +327,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     params["gap_symptom"] = str(gap.get("symptom") or "")
                 if not params.get("gap_layer"):
                     params["gap_layer"] = str(gap.get("layer") or "")
-                if not params.get("domain"):
-                    # LLM omitted domain → gap's domain_hint wins.
-                    hint = str(gap.get("domain_hint") or "")
-                    if hint:
-                        params["domain"] = hint
                 evidence = params.get("gap_evidence")
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
@@ -218,19 +336,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                             "severity": str(gap.get("severity") or ""),
                         }
 
-        if "baseline_tput" not in params:
-            _bt = float(getattr(state, "baseline_tput", 0.0) or 0.0)
-            if _bt > 0:
-                params["baseline_tput"] = _bt
+    def _warm_progress(self, params: dict[str, Any]) -> None:
+        """Warm the session's current throughput, keep threshold and applied stack."""
+        state = self.shared_state
         if "current_tput" not in params:
-            cb = getattr(state, "current_best", None)
-            _ct = float((cb.get("tput") if isinstance(cb, dict) else 0) or 0.0)
+            _ct = float(state.current_best.get("tput") or 0.0)
             if _ct > 0:
                 params["current_tput"] = _ct
-        if "cumulative_gain_validated" not in params:
-            _cgv = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
-            if _cgv != 0:
-                params["cumulative_gain_validated"] = _cgv
         if "keep_threshold_pct" not in params:
             params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
         if "applied_stack" not in params:
@@ -241,42 +353,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     for e in _stack
                     if isinstance(e, dict)
                 ]
-
-        # Pack bottleneck signals into roofline_evidence for the specialist.
-        # Hot kernels alone are enough: a trace whose quality gate withheld
-        # analysis.md still names where device time goes.
-        last_ta = getattr(state, "last_trace_analyze", None) or {}
-        has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
-        )
-        if has_evidence and "roofline_evidence" not in params:
-            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
-
-            analysis_path = str(last_ta.get("analysis_md_path") or "")
-            executive_summary: dict[str, Any] = {}
-            if analysis_path:
-                try:
-                    executive_summary = extract_workload_summary(analysis_path)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning(
-                        "specialist warmup: extract_workload_summary(%s) failed: %r",
-                        analysis_path,
-                        exc,
-                    )
-                    executive_summary = {}
-            hot_kernels = list(last_ta.get("hot_kernels_top15") or [])[:8]
-            params["roofline_evidence"] = {
-                "analysis_md_path": analysis_path,
-                "roofline_snapshot_id": last_ta.get("roofline_snapshot_id"),
-                "executive_summary": executive_summary,
-                "hot_kernels_top15": hot_kernels,
-            }
-
-        measurement = getattr(state, "current_best_measurement", None)
-        if measurement and "runtime_findings" not in params:
-            params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
-
-        await self._warm_experience_kb(params)
 
     async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
         """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
@@ -298,13 +374,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         params["experience_kb_block"] = evidence.prompt_block
         state.record_experience_kb_injection(
-            consumer="specialist",
-            domain=str(params.get("domain") or ""),
-            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
-            read_id=evidence.read_id,
-            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
-            experiences=[dict(item) for item in evidence.experiences],
-            prompt_block=evidence.prompt_block,
+            KbInjection(
+                consumer="specialist",
+                domain=str(params.get("domain") or ""),
+                gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+                read_id=evidence.read_id,
+                experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+                experiences=[dict(item) for item in evidence.experiences],
+                prompt_block=evidence.prompt_block,
+            )
         )
 
     async def maybe_auto_retry_specialist(
@@ -358,8 +436,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if attempt >= cap:
             await self._record_specialist_retry_exhausted(
                 task=task,
-                ftype=ftype,
-                error=error,
+                failure=ClassifiedFailure(ftype=ftype, error=error),
                 attempts_used=attempt,
                 cap=cap,
                 detail="retry cap reached",
@@ -390,19 +467,20 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         with trajectory_scope(parent_span_id=task.task_id):
             new_task, was_existing = await self.tasks.create_or_return_existing(
-                kind="specialist",
-                params=retry_params,
-                idempotency_key=retry_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="specialist",
+                    params=retry_params,
+                    idempotency_key=retry_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="coordinator",
+                )
             )
         if was_existing:
             # Retry slot already taken: let normal bookkeeping record this attempt.
             await self._record_specialist_retry_exhausted(
                 task=task,
-                ftype=ftype,
-                error=error,
+                failure=ClassifiedFailure(ftype=ftype, error=error),
                 attempts_used=attempt,
                 cap=cap,
                 detail="retry slot already taken",
@@ -448,8 +526,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         self,
         *,
         task: "Task",
-        ftype: SpecialistFailureType,
-        error: str,
+        failure: ClassifiedFailure,
         attempts_used: int,
         cap: int,
         detail: str,
@@ -458,8 +535,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         Args:
             task: The specialist task whose final attempt failed.
-            ftype: The classified failure type.
-            error: The failure reason carried by the attempt.
+            failure: The classified failure type and the reason the attempt carried.
             attempts_used: Retry attempts already spent.
             cap: Configured retry ceiling.
             detail: Why no further retry was scheduled.
@@ -475,15 +551,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
                 "attempts_used": attempts_used,
                 "max_attempts": cap,
-                "failure_type": ftype.value,
-                "reason": error[:200],
+                "failure_type": failure.ftype.value,
+                "reason": failure.error[:200],
                 "detail": detail,
             },
         )
         log.warning(
             "specialist auto-retry exhausted: task=%s failure=%s attempts=%d/%d (%s)",
             task.task_id,
-            ftype.value,
+            failure.ftype.value,
             attempts_used,
             cap,
             detail,
@@ -548,14 +624,15 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
     async def maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
-        config-arm rounds that still has an open gap in the gaps[] ledger.
+        specialist rounds that still has an open gap in the gaps[] ledger.
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per
         ``(anchor, round, macro_cycle)``; a domain with a specialist already
-        queued or running is skipped, and the dispatcher zeroes the per-anchor
-        counter when the forced specialist spawns. At most one forced dispatch
-        per tick.
+        queued or running is skipped. The dispatcher zeroes the anchor's
+        dispatch counter when the forced specialist spawns; its keep counter
+        clears only on a KEEP from that domain's specialist. At most one forced
+        dispatch per tick.
 
         Note:
             Side-effecting: may dispatch a domain specialist via
@@ -564,24 +641,17 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if not bool(getattr(state, "force_stalled_specialist_enabled", True)):
-            return
-        spec_thr = max(1, int(getattr(state, "force_stalled_specialist_rounds", 0) or FORCE_STALLED_SPECIALIST_ROUNDS))
-        keep_thr = max(1, int(getattr(state, "force_stalled_keep_rounds", 0) or FORCE_STALLED_KEEP_ROUNDS))
         stalled = state.stalled_domains(
-            specialist_threshold=spec_thr,
-            keep_threshold=keep_thr,
+            specialist_threshold=FORCE_STALLED_SPECIALIST_ROUNDS,
+            keep_threshold=FORCE_STALLED_KEEP_ROUNDS,
         )
         if not stalled:
             return
 
         from .domains import domain_for_tag
+        from .in_flight import in_flight_domains
 
-        busy_domains = {
-            str((t.params or {}).get("domain") or "")
-            for t in (*await self.tasks.queued(), *await self.tasks.running())
-            if t.kind == "specialist"
-        }
+        busy_domains = in_flight_domains([*await self.tasks.queued(), *await self.tasks.running()])
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
@@ -598,43 +668,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "source": "coordinator_internal",
                 "reason": f"stalled_domain_force:{anchor}",
             }
-            from .profile import MODE_PATCH, resolve_specialist_profile
-
-            is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
-            if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
-                continue
             idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
-            lookup = getattr(self.tasks, "find_by_idempotency_key", None)
-            if callable(lookup):
-                existing = await lookup(idempotency_key)
-                if existing is not None:
-                    continue
+            if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
+                continue
             await self.warm_specialist_params(params)
-            if is_source_patch:
-                preflight_error = specialist_patch_preflight_error(
-                    params,
-                    framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
-                )
-                if preflight_error:
-                    if state.add_pruned_family(_SOURCE_PATCH_FAMILY):
-                        state.record_action_failure(
-                            action="specialist",
-                            task_id=idempotency_key,
-                            result={
-                                "error_class": preflight_error,
-                                "error": preflight_error,
-                            },
-                        )
-                        try:
-                            state.save(self.session_dir)
-                        except Exception:
-                            log.exception("stalled-domain force: source-patch prune save failed")
-                        log.error(
-                            "stalled-domain force: pruned %s after deterministic failure: %s",
-                            _SOURCE_PATCH_FAMILY,
-                            preflight_error,
-                        )
-                    continue
+            if self.refuse_patch_without_source(params, task_id=idempotency_key):
+                continue
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={
@@ -646,52 +685,44 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             await self._coord.router.handle_intent("orchestration", intent)
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("stalled-domain force: state save failed")
             log.info(
-                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",
+                "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d",
                 dom.key,
                 anchor,
                 gap_cid,
                 round_id,
-                spec_thr,
-                keep_thr,
             )
             # One forced dispatch per tick.
             return
         return
 
-    async def maybe_ensure_custom_specialist(self) -> None:
-        """Dispatch the operator-defined specialist when no custom task has started this session.
+    async def ensure_custom_specialist(self) -> None:
+        """Dispatch the operator-defined specialist once per macro cycle in FRAMEWORK_AGENT.
 
-        At most one attempt per macro cycle, counting attempts the router
-        denies before creating a task; a custom task already queued or running
-        is left alone. Falls back to research mode when source patches cannot
-        be authored, so the guarantee does not stall on a deterministic denial.
+        Coordinator-owned: it bypasses the policy gate, which denies every custom delegate from Orchestration.
         """
         state = self.shared_state
-        if str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+        prompt = str(state.custom_specialist_prompt or "").strip()
+        if not prompt or str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        if not str(state.custom_specialist_prompt or "").strip() or state.custom_specialist_dispatched:
-            return
-        from .domains import CUSTOM_SPECIALIST_KEY, is_custom_specialist_dispatch
-        from .profile import MODE_RESEARCH
-        from ..state._shared_state.phase_state import gap_actionability_key
+        from .domains import CUSTOM_SPECIALIST_KEY, custom_specialist_key
+        from .profile import MODE_RESEARCH, NO_LEASE_EXTENSION
 
-        for t in (*await self.tasks.queued(), *await self.tasks.running()):
-            if t.kind == "specialist" and is_custom_specialist_dispatch(t.params or {}):
-                return
-        cycle = self._coord.dispatcher.cycle_idem_suffix()
-        if self._custom_guarantee_cycle == cycle:
+        key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
+        if key == self.refused_custom_key or await self.tasks.find_by_idempotency_key(key) is not None:
             return
-        self._custom_guarantee_cycle = cycle
+        from ..state._shared_state.phase_state import gap_actionability_key
 
         params: dict[str, Any] = {
             "domain": CUSTOM_SPECIALIST_KEY,
             "scope": "domain",
             "source": "coordinator_internal",
-            "reason": "custom_specialist_guarantee",
+            "reason": "custom_specialist",
         }
+        if state.custom_specialist_only:
+            params[NO_LEASE_EXTENSION] = True
         gaps = [g for g in state.gaps if isinstance(g, dict) and str(g.get("canonical_id") or "").strip()]
         if gaps:
             params["gap_canonical_id"] = str(min(gaps, key=gap_actionability_key)["canonical_id"]).strip()
@@ -701,32 +732,26 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params["gap_layer"] = "operator-defined"
         await self.warm_specialist_params(params)
 
-        research_reason = (
-            _SOURCE_PATCH_FAMILY + "_pruned"
-            if state.is_pruned(_SOURCE_PATCH_FAMILY)
-            else specialist_patch_preflight_error(
-                params,
-                framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
-            )
-        )
+        research_reason = specialist_patch_preflight_error(params, framework_repo_path=state.framework_repo_path)
         if research_reason:
             params["mode"] = MODE_RESEARCH
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
-                {"kind": "custom_specialist_guarantee_research_only", "reason": research_reason},
+                {"kind": "custom_specialist_research_only", "reason": research_reason},
             )
         intent = Intent(
             type=IntentType.DELEGATE,
-            payload={
-                "action_name": "specialist",
-                "params": params,
-                "idempotency_key": f"custom-guarantee{cycle}",
-            },
+            payload={"action_name": "specialist", "params": params, "idempotency_key": key},
         )
-        await self._coord.router.handle_intent("orchestration", intent)
+        await self._coord.router.handle_delegate("orchestration", intent)
+        if await self.tasks.find_by_idempotency_key(key) is None:
+            self.refused_custom_key = key
+            log.warning("custom specialist: dispatch %s refused (see the policy denial); not retried this cycle", key)
+            return
         log.info(
-            "custom specialist guarantee: requested gap=%s mode=%s",
+            "custom specialist: requested key=%s gap=%s mode=%s",
+            key,
             params["gap_canonical_id"],
             params.get("mode") or "default",
         )
@@ -752,34 +777,25 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             A specialist-round row dict suitable for
             ``SharedState.record_specialist_round``.
         """
-        proposals = done_payload.get("proposal_set") or []
+        proposals = done_payload.get("proposal_set")
         if not isinstance(proposals, list):
             proposals = []
         task_params = task.params or {}
-        round_id = str(task_params.get("round_id") or task.task_id)
         source_phase = (
-            str(
-                task_params.get("source_phase")
-                or done_payload.get("source_phase")
-                or getattr(getattr(self, "shared_state", None), "phase", "")
-                or ""
-            )
+            str(task_params.get("source_phase") or done_payload.get("source_phase") or self.shared_state.phase or "")
             .strip()
             .upper()
         )
         from .domains import normalize_dispatch_tags
 
-        # Knowledge-domain tags; reported tags win over dispatch params.
-        tags = normalize_dispatch_tags(done_payload)
-        if not tags:
-            tags = normalize_dispatch_tags(task.params or {})
         entry: dict[str, Any] = {
-            "round_id": round_id,
+            "round_id": str(task_params.get("round_id") or task.task_id),
             "task_id": task.task_id,
-            "source": source or "coordinator",
+            "source": source,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
-            "tags": list(tags),
+            # Knowledge-domain tags; reported tags win over dispatch params.
+            "tags": normalize_dispatch_tags(done_payload) or normalize_dispatch_tags(task_params),
             "gap_canonical_id": str(done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""),
             "proposals_total": len(proposals),
             "proposal_set": list(proposals),
@@ -789,41 +805,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
-        for key in (
-            "task_kind",
-            "scope",
-            "proposal_msg_id",
-            "framework_agent_candidate_id",
-            "framework_batch_id",
-            "reauthor_attempt",
-            "apply_retry_attempt",
-            "kb_read_id",
-            "kb_rendered_refs",
-        ):
-            value = done_payload.get(key)
-            if value in (None, "", [], {}):
-                value = task_params.get(key)
-            if value not in (None, "", [], {}):
-                entry[key] = value
-        for key in ("candidate_discovery", "framework_agent_authoring"):
-            if bool(done_payload.get(key) or task_params.get(key)):
-                entry[key] = True
-        if run_error:
-            entry["status"] = "failed"
-            entry["error"] = str(run_error)[:1000]
-            entry["run_error"] = str(run_error)[:1000]
-        elif done_payload.get("status") not in (None, ""):
-            entry["status"] = str(done_payload.get("status"))
-        if source_phase:
-            entry["source_phase"] = source_phase
-        gpu_ids = done_payload.get("allocated_gpu_ids") or []
-        if isinstance(gpu_ids, list) and gpu_ids:
-            entry["allocated_gpu_ids"] = [
-                int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
-            ]
-        specialist_notes = done_payload.get("_specialist_notes") or []
-        if isinstance(specialist_notes, list) and specialist_notes:
-            entry["notes"] = [str(n) for n in specialist_notes]
+        entry.update(_round_entry_extras(done_payload, task_params, run_error=run_error, source_phase=source_phase))
         return entry
 
     def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:
@@ -848,13 +830,12 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if recorder is not None and source_phase == _phase_state.PHASE_FRAMEWORK_AGENT:
             recorder.record_run(str(task.task_id or ""), **product)
             return
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import SpecialistRound
 
-            phase_event.record_specialist_round(
+        phase_event.record_specialist_round(
+            SpecialistRound(
                 task_id=str(task.task_id or ""),
-                phase=source_phase or str(self.shared_state.phase or ""),
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
                 round_id=str(round_entry.get("round_id") or ""),
                 domain=round_entry.get("domain") or "",
                 gap_canonical_id=round_entry.get("gap_canonical_id") or "",
@@ -863,8 +844,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 tags=round_entry.get("tags") or [],
                 **product,
             )
-        except Exception:
-            log.debug("specialist bookkeeping: phase round product record failed", exc_info=True)
+        )
 
     async def record_specialist_result(
         self,
@@ -885,12 +865,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 usable payload.
         """
         task_params = task.params or {}
-        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
-        proposals = done_payload.get("proposal_set") or []
-        if not isinstance(proposals, list):
-            proposals = []
-        is_empty = len(proposals) == 0
-
         round_entry = self.build_specialist_round_entry(
             task=task,
             done_payload=done_payload,
@@ -899,32 +873,30 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         )
         # Specialist notes reach the prompt only through this task's one inbox
         # line; ``last_action_failures`` is rendered every SEED turn.
-        ungrounded = done_payload.get("patches_ungrounded")
-        if isinstance(ungrounded, list) and ungrounded:
-            self.shared_state.record_action_failure(
-                action="specialist",
-                task_id=task.task_id,
-                result={
-                    "error_class": "patch_targets_ungrounded",
-                    "error": "; ".join(str(d) for d in ungrounded[:4]),
-                },
-            )
+        for dropped_key, error_class in _ADMISSION_DROPS:
+            dropped = done_payload.get(dropped_key)
+            if isinstance(dropped, list) and dropped:
+                self.shared_state.record_action_failure(
+                    action="specialist",
+                    task_id=task.task_id,
+                    result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
+                )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._proposal_scorer is not None and proposals:
+        if self._proposal_scorer is not None and round_entry["proposal_set"]:
             scores = await self._proposal_scorer.score(
                 gap={
-                    "domain": domain,
+                    "domain": round_entry["domain"].strip(),
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
                     "gap_symptom": task_params.get("gap_symptom"),
                     "gap_evidence": task_params.get("gap_evidence"),
                     "summary": done_payload.get("summary", ""),
                 },
-                proposals=proposals,
+                proposals=round_entry["proposal_set"],
                 task_id=task.task_id,
                 tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
+                phase=self.shared_state.phase or None,
             )
-            if scores and (scores.get("models") or scores.get("errors")):
+            if scores.get("models") or scores.get("errors"):
                 round_entry["ensemble_scores"] = scores
                 input_err = (scores.get("errors") or {}).get("input")
                 if input_err and not scores.get("models"):
@@ -943,12 +915,18 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,
             )
+        await self._follow_up_specialist_round(task, done_payload, round_entry)
 
+    async def _follow_up_specialist_round(
+        self, task: Task, done_payload: dict[str, Any], round_entry: dict[str, Any]
+    ) -> None:
+        """Hand a recorded specialist round to the gap ledger and the phases that consume what it produced."""
+        domain = round_entry["domain"].strip()
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)
@@ -972,8 +950,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 {
                     "action": "specialist",
                     "variant_name": domain,
-                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                    "proposals_total": len(proposals),
+                    "outcome": "EMPTY" if not round_entry["proposals_total"] else "PROPOSALS",
+                    "proposals_total": round_entry["proposals_total"],
                 },
             )
         await self._coord.gap_refresh.refresh_gaps(

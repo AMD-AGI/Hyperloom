@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors._framework_switch_manifest import KNOWN_CATEGORIES
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _DOMAIN_FOCUS_TEMPLATES,
@@ -62,21 +63,10 @@ def _focus_text(framework: str = "custom") -> str:
     return "\n".join(_focus_framework_rewrite_specialist(inputs))
 
 
-@pytest.mark.parametrize(
-    "category",
-    [
-        "memoize",
-        "hoist",
-        "host round-trip",
-        "fuse",
-        "vendor kernel",
-        "resident",
-        "no-op glue",
-    ],
-)
+@pytest.mark.parametrize("category", sorted(KNOWN_CATEGORIES))
 def test_prompt_carries_every_taxonomy_category(category):
-    """All seven rewrite patterns land, because the taxonomy is the prior."""
-    assert category in _focus_text()
+    """Every id the manifest validator accepts is spelled out; given only the letters, a specialist wrote ``d``."""
+    assert f"`{category}`" in _focus_text()
 
 
 def test_prompt_states_the_switch_manifest_contract():
@@ -300,9 +290,9 @@ class _Tasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):
+    async def create_or_return_existing(self, spec):
         """Record the dispatch and return a fresh-task sentinel."""
-        self.created.append(kwargs)
+        self.created.append(vars(spec))
         from types import SimpleNamespace
 
         return SimpleNamespace(task_id=f"t-{len(self.created)}", state="queued"), False
@@ -346,6 +336,8 @@ class _DispatchStub:
             "_render_rewrite_evidence_for_prompt",
             "_rewrite_evidence_absence_note",
             "_enqueue_framework_agent_local_explore_specialist",
+            "_record_local_explore_proposal",
+            "_claim_local_explore_specialist",
             "_map_authoring_specialist",
         ):
             setattr(self, name, getattr(FrameworkPhase, name).__get__(self))

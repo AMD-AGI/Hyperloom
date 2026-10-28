@@ -158,8 +158,8 @@ class TestUsage:
         hz = Harness(tmp_path)
         seen: dict = {}
 
-        def spy(**kwargs):
-            seen.update(kwargs)
+        def spy(target, report, **kwargs):
+            seen.update(kwargs, target=target, report=report)
             return []
 
         monkeypatch.setattr(cli_module, "discover_anchored_recipes", spy)
@@ -188,7 +188,7 @@ class TestDiscovery:
         )
         captured: dict = {}
 
-        def fake_agent(_backend, **_kwargs):
+        def fake_agent(_backend, *_args):
             def _fn(prompt):
                 captured["prompt"] = prompt
                 return payload
@@ -233,8 +233,8 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
     hz = Harness(tmp_path)
     seen: dict = {}
 
-    def spy(*_args, **kwargs):
-        seen.update(kwargs)
+    def spy(recipes, run, plan, campaign, publish=None):
+        seen["campaign"] = campaign
         raise cli_module.FusionAbort("stop after the call is made")
 
     monkeypatch.setattr(
@@ -252,7 +252,7 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
 
     hz.run("--discover", "patterns")
 
-    assert seen.get("agent_backend") == "claude", "the campaign must be handed a provider forge-loop accepts"
+    assert seen["campaign"].agent_backend == "claude", "the campaign must be handed a provider forge-loop accepts"
 
 
 def _recipe(hz):

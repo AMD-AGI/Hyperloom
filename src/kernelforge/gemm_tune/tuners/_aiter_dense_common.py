@@ -8,48 +8,30 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import math
 import os
 import re
 import shutil
-from collections import defaultdict
+import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
+from ..aiter_graph_retime import RetimeTarget
+from ._graph_retime import retime_table
+from ._row_accuracy import RelNormFn, drop_inaccurate_rows, dropped_row_record
+from ._serve_safe import _SPLITK_FORWARDING_LIBTYPES, _fastest_serve_safe, _serve_safe_candidates, _SplitKLimit
 from ..script_probe import filter_args, probe_script
 from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
 from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
 
-# The only op whose production dispatch the per-shape split-K trial validates:
-# aiter_splitk_validate can only build a trial for ops it has a registered
-# production callable for, so the trial is correct only for this script_key.
+# The a8w8_blockscale tuner's script_key, which must match the op key
+# aiter_splitk_validate registers its trial under; a mismatch silently falls
+# back to the static cap.
 SPLITK_TRIAL_SCRIPT_KEY = "a8w8_blockscale"
-
-# Which (op, libtype) pairs reach a production wrapper that actually forwards
-# the tuned row's ``splitK``. A tuned row is a measurement plus a set of kernel
-# parameters, and the measurement is only honoured if every parameter survives
-# the trip to the serving call -- a dropped ``splitK`` deploys a config that was
-# benchmarked with split-K and runs without it, i.e. slower than measured while
-# every engagement gate still reports the artifact as served. Read off
-# ``aiter/ops/gemm_op_a8w8.py``:
-#
-#   gemm_a8w8_blockscale               ck -> splitK=splitK   cktile -> splitK=splitK
-#   gemm_a8w8_blockscale_bpreshuffle   ck -> kernelName only  cktile -> kernelName only
-#                                      asm -> splitK=splitK   opus/flydsl -> no splitK
-#
-# Fail closed: an op absent from this table is treated as forwarding nothing, so
-# adding a tuner (or a new libtype) can only under-claim, never silently ship a
-# row whose splitK the runtime discards. Verified against aiter
-# d9e5ef7ce08ee7045d583aed768cff41aa9210fe; re-check on an aiter bump.
-_SPLITK_FORWARDING_LIBTYPES: dict[str, frozenset[str]] = {
-    "a8w8_blockscale": frozenset({"ck", "cktile"}),
-    "a8w8_blockscale_bpreshuffle": frozenset({"asm"}),
-}
 
 
 class AiterDtypeUnavailable(RuntimeError):
@@ -124,103 +106,6 @@ _DEMAND_RESERVE_S = 120
 _DEMAND_MAX_SHAPES_ENV = "FORGE_DEMAND_MAX_SHAPES"
 
 
-# Fraction of output elements aiter's own accuracy check found wrong.
-_MAX_ERR_RATIO = 0.01
-_ERR_RATIO_COLUMNS = ("err_ratio", "errRatio")
-
-
-def _row_err_ratio(row: dict[str, str]) -> float | None:
-    """The accuracy figure aiter recorded for a row, or None if it recorded none."""
-    for col in _ERR_RATIO_COLUMNS:
-        if col in row:
-            try:
-                ratio = float(row[col])
-            except (TypeError, ValueError):
-                return None
-            # NaN compares false against the limit, so an unrecorded figure would read as an accurate row.
-            return ratio if math.isfinite(ratio) else None
-    return None
-
-
-@dataclass(frozen=True)
-class AccuracyFilter:
-    """Whether aiter's accuracy figures were applied to the artifact, and which rows they removed."""
-
-    completed: bool
-    dropped: list[dict[str, str]] = field(default_factory=list)
-    reason: str = ""
-
-
-def drop_inaccurate_rows(tuned_csv: Path) -> AccuracyFilter:
-    """Remove rows aiter measured as numerically wrong, in place."""
-    try:
-        if not tuned_csv.is_file():
-            return AccuracyFilter(completed=False, reason=f"{tuned_csv} does not exist")
-        with tuned_csv.open("r", encoding="utf-8", errors="replace", newline="") as fh:
-            rows = [r for r in csv.DictReader(fh) if r]
-    except (OSError, csv.Error) as exc:
-        return AccuracyFilter(completed=False, reason=f"{tuned_csv} could not be read: {exc}")
-    if not rows:
-        return AccuracyFilter(completed=True)
-    if not any(c in rows[0] for c in _ERR_RATIO_COLUMNS):
-        return AccuracyFilter(
-            completed=False,
-            reason=f"{tuned_csv} carries no accuracy column (aiter schema drift?)",
-        )
-
-    keep: list[dict[str, str]] = []
-    dropped: list[dict[str, str]] = []
-    unmeasured: list[dict[str, str]] = []
-    for row in rows:
-        er = _row_err_ratio(row)
-        if er is None:
-            unmeasured.append(row)
-        (dropped if er is not None and er > _MAX_ERR_RATIO else keep).append(row)
-    if unmeasured:
-        return AccuracyFilter(
-            completed=False,
-            dropped=dropped,
-            reason=f"{len(unmeasured)} row(s) in {tuned_csv} carry no readable accuracy figure",
-        )
-    if not dropped:
-        return AccuracyFilter(completed=True)
-
-    # Write beside the artifact and rename over it.
-    tmp = tuned_csv.with_name(tuned_csv.name + ".filtered.tmp")
-    try:
-        with tmp.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(keep)
-        os.replace(tmp, tuned_csv)
-    except (OSError, csv.Error) as exc:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            log.warning("could not remove the partial file %s", tmp)
-        return AccuracyFilter(
-            completed=False,
-            dropped=dropped,
-            reason=f"{len(dropped)} inaccurate row(s) could not be removed from {tuned_csv}: {exc}",
-        )
-
-    for row in dropped:
-        log.error(
-            "dropping M=%s N=%s K=%s (%s, splitK=%s, %sus) from %s -- aiter "
-            "measured err_ratio=%s, above the %.2f limit",
-            row.get("M"),
-            row.get("N"),
-            row.get("K"),
-            row.get("libtype"),
-            row.get("splitK"),
-            row.get("us"),
-            tuned_csv.name,
-            _row_err_ratio(row),
-            _MAX_ERR_RATIO,
-        )
-    return AccuracyFilter(completed=True, dropped=dropped)
-
-
 def _demand_budget(ctx: TuneContext) -> int:
     """Total shapes the time budget affords, decode band included.
 
@@ -260,7 +145,7 @@ def _demand_input_csv(
     path = getattr(ctx, "demand_json", None)
     if not path:
         return None
-    from ..dense_shapes import compute_decode_m_values
+    from ..dense_shapes import MGrid, compute_decode_m_values
     from ..evidence import demand_for_tuner, demand_shapes, load_demand
 
     report = load_demand(path)
@@ -269,13 +154,11 @@ def _demand_input_csv(
     entry = demand_for_tuner(report, tuner_name)
     if entry is None:
         return None
-    # The a8w8 blockscale, a8w8 quant-type, and a4w4 lookup paths all retry the exact M followed by get_padded_m(...,
-    # gl=0) and gl=1, using the same gemm_op_common implementation as a16w16.
-    ranked = demand_shapes(entry)
+    ranked = demand_shapes(entry, bucket=ctx.m_grid is MGrid.BUCKET)
     if not ranked:
         return None
     budget = _demand_budget(ctx)
-    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc), budget)
+    shapes = _demand_shapes_within_budget(ranked, compute_decode_m_values(ctx.conc, ctx.m_grid), budget)
 
     out = work_dir / f"untuned_{tuner_name}_demand.csv"
     header = "M,N,K,q_dtype_w" if needs_q_dtype_w else "M,N,K"
@@ -324,7 +207,7 @@ def _demand_shapes_within_budget(
         key = (int(shape["N"]), int(shape["K"]))
         trial = dict(group_m)
         trial[key] = group_m.get(key, set()) | {int(shape["M"])}
-        band = sum(len(b) for b in _decode_band_buckets([(n, ms) for (n, _k), ms in trial.items()], decode_m))
+        band = sum(len(b) for b in _decode_band_buckets(list(trial.values()), decode_m))
         if len(taken) + 1 + band <= budget:
             group_m = trial
             taken.append(shape)
@@ -364,61 +247,16 @@ def _resolve_input_csv(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool =
     return csv
 
 
-def _padded_m_gl0(m: int) -> int:
-    """aiter's ``get_padded_m(..., gl=0)``: round up to a tile multiple."""
-    m = max(1, int(m))
-    if m <= 256:
-        step = 16
-    elif m <= 1024:
-        step = 32
-    elif m <= 4096:
-        step = 64
-    else:
-        step = 128
-    return -(-m // step) * step
+def _decode_band_buckets(groups: Sequence[set[int]], decode_m: Sequence[int]) -> list[list[int]]:
+    """Per group, the decode-band M it has no row for.
 
-
-def _next_pow2(m: int) -> int:
-    """Round up to a power of two (aiter's ``nextPow2``)."""
-    m = max(1, int(m))
-    return 1 << (m - 1).bit_length()
-
-
-def _padded_m_gl1(m: int, n: int) -> int:
-    """aiter's ``get_padded_m(..., gl=1)``, which is not a plain power of two."""
-    if int(m) > 8192 and int(n) > 4096:
-        return 8192
-    return _next_pow2(m)
-
-
-def _dispatch_lookup_ms(m: int, n: int) -> set[int]:
-    """The tuned-M values aiter will accept when serving runtime batch ``m``."""
-    return {int(m), _padded_m_gl0(m), _padded_m_gl1(m, n)}
-
-
-def _decode_band_buckets(
-    groups: Sequence[tuple[int, set[int]]],
-    decode_m: Sequence[int],
-) -> list[list[int]]:
-    """Per group, the padded-M buckets it still needs to cover the decode band.
-
-    ``groups`` is ``(N, tuned M)`` per dispatch group; N alone decides which
-    tuned M a runtime batch can reach, through ``get_padded_m(..., gl=1)``.
-    Sizing the reservation and appending the rows both read this, so the two
-    cannot drift.
+    ``groups`` is the tuned M per dispatch group. ``decode_m`` already
+    holds the M a row is tuned at, so a group needs exactly those rows: a row
+    reached only through a later aiter lookup serves the batch with another
+    batch size's kernel. Sizing the reservation and appending the rows both
+    read this, so the two cannot drift.
     """
-    plan: list[list[int]] = []
-    for n, tuned in groups:
-        reachable = set(tuned)
-        buckets: list[int] = []
-        for m in decode_m:
-            if reachable & _dispatch_lookup_ms(m, n):
-                continue
-            bucket = _padded_m_gl0(m)
-            reachable.add(bucket)  # also serves the other grid M padding into it
-            buckets.append(bucket)
-        plan.append(buckets)
-    return plan
+    return [[m for m in decode_m if m not in tuned] for tuned in groups]
 
 
 def _ensure_decode_m_coverage(
@@ -467,8 +305,8 @@ def _ensure_decode_m_coverage(
     if not group_order:
         return csv
 
-    decode_m = compute_decode_m_values(ctx.conc)
-    plan = _decode_band_buckets([(key[0], group_m[key]) for key in group_order], decode_m)
+    decode_m = compute_decode_m_values(ctx.conc, ctx.m_grid)
+    plan = _decode_band_buckets([group_m[key] for key in group_order], decode_m)
     additions: list[str] = []
     uncovered = 0
     for (n, k, q), buckets in zip(group_order, plan):
@@ -501,12 +339,7 @@ def _ensure_decode_m_coverage(
     return out
 
 
-def _augment_with_config_m_values(
-    csv: Path,
-    ctx: TuneContext,
-    work_dir: Path,
-    needs_q_dtype_w: bool = False,
-) -> Path:
+def _augment_with_config_m_values(csv: Path, ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool) -> Path:
     """Augment profile-derived shapes with config-derived M values."""
     try:
         lines = csv.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -529,7 +362,7 @@ def _augment_with_config_m_values(
             n, k = int(parts[idx["N"]]), int(parts[idx["K"]])
             if n > 0 and k > 0:
                 profile_nk.add((n, k))
-            if m_idx is not None and m_idx < len(parts):
+            if m_idx is not None:
                 profile_m.add(int(parts[m_idx]))
         except (ValueError, IndexError):
             pass
@@ -546,28 +379,19 @@ def _augment_with_config_m_values(
     if set(all_m) == profile_m:
         return csv
 
-    q_dtype = ""
-    if needs_q_dtype_w:
-        q_dtype = _aiter_fp8_dtype_str()
-
+    q_dtype = f",{_aiter_fp8_dtype_str()}" if needs_q_dtype_w else ""
     out = work_dir / "augmented_dense.csv"
-    seen: set[tuple[int, int, int]] = set()
     with out.open("w", encoding="utf-8") as f:
         f.write("M,N,K,q_dtype_w\n" if needs_q_dtype_w else "M,N,K\n")
         for m in all_m:
             for n, k in sorted(profile_nk):
-                if (m, n, k) not in seen:
-                    seen.add((m, n, k))
-                    if needs_q_dtype_w:
-                        f.write(f"{m},{n},{k},{q_dtype}\n")
-                    else:
-                        f.write(f"{m},{n},{k}\n")
+                f.write(f"{m},{n},{k}{q_dtype}\n")
 
     log.info(
         "Augmented shapes: %d M values × %d NK pairs = %d shapes (profile had %d M values)",
         len(all_m),
         len(profile_nk),
-        len(seen),
+        len(all_m) * len(profile_nk),
         len(profile_m),
     )
     return out
@@ -620,6 +444,7 @@ def _conform_csv_columns(
 def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
     """Synthesize an untuned CSV from the model config when none was supplied."""
     from ..dense_shapes import (
+        DenseGeometry,
         compute_dense_m_values,
         compute_dense_nk_shapes,
         write_mnk_untuned_csv,
@@ -637,21 +462,21 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
     if intermediate_size < 1 and not (q_lora_rank and not kv_lora_rank):
         return None
     num_heads = int(getattr(profile, "num_attention_heads", 0) or 0)
-    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads or 0)
+    num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads)
     nk_shapes = compute_dense_nk_shapes(
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        tp=ctx.tp,
-        head_dim=int(getattr(profile, "head_dim", 0) or 0),
-        v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-        q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-        kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
-        qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
-        qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
-        o_lora_rank=int(getattr(profile, "o_lora_rank", 0) or 0),
-        o_groups=int(getattr(profile, "o_groups", 0) or 0),
+        DenseGeometry(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=int(getattr(profile, "head_dim", 0) or 0),
+            v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
+            qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
+        ),
+        ctx.tp,
     )
     if not nk_shapes:
         return None
@@ -765,16 +590,16 @@ def _parse_tuner_stdout(stdout: str, stderr: str) -> list[dict[str, Any]]:
                     }
                 )
                 continue
-            pre = float(pre_tok)
             results.append(
                 {
                     "M": int(t.group(1)),
                     "N": int(t.group(2)),
                     "K": int(t.group(3)),
-                    "default_us": pre,
+                    "default_us": float(pre_tok),
                     "tuned_us": post,
-                    "speedup": round(pre / post, 4) if post > 0 else 1.0,
+                    "speedup": round(float(pre_tok) / post, 4) if post > 0 else 1.0,
                     "improved": action == "UPDATE" or in_would_update,
+                    "below_update_bar": action == "<",  # "< 3.0% improve"; not post-mismatch or post-error
                 }
             )
     return results
@@ -854,16 +679,175 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
     }
 
 
-def run_aiter_dense_tuner(
+def _invoke_tuner(
+    invocation: _tr.TunerInvocation,
+    ctx: TuneContext,
+    tuner_name: str,
+) -> tuple[int, str, str, Path | None]:
+    """Run the aiter tuner, per shape under isolation or once for the whole file.
+
+    Either way ``--timeout`` is injected so a faulting candidate is isolated by
+    aiter instead of hanging the run.
+    """
+    if not _tr.is_isolation_enabled():
+        rc, stdout, stderr = run_subprocess(
+            invocation.command(),
+            cwd=invocation.aiter_root,
+            timeout_s=ctx.timeout_s,
+            log_file=invocation.work_dir / "tune.log",
+            env_override=_tr.compare_temp_env(),
+        )
+        return rc, stdout, stderr, None
+    # Per-shape process isolation + provenance-keyed fault blocklist.
+    blocklist = _tr.FaultBlocklist(
+        getattr(ctx, "faulted_blocklist_path", None),
+        {
+            "gpu_type": ctx.gpu_type,
+            "quant_type": getattr(ctx, "quant_type", ""),
+            "tp": getattr(ctx, "tp", 1),
+            "tuner": tuner_name,
+        },
+    )
+    return _tr.run_isolated(
+        invocation,
+        _tr.IsolationGuard(
+            outer_timeout_s=ctx.timeout_s,
+            gpu_ids=_gpu_ids(ctx),
+            blocklist=blocklist,
+        ),
+    )
+
+
+def _gpu_ids(ctx: TuneContext) -> str:
+    """The cards a trial may run on; a context built without them leaves the choice to the trial."""
+    return getattr(ctx, "gpu_ids", "") or ""
+
+
+def _splitk_support_fn(script_key: str, ctx: TuneContext):
+    """The per-shape production split-K limit for this op, or None to use the static cap.
+
+    The trial dispatch keeps splitK above ``FORGE_MAX_SPLITK`` where the kernel
+    actually supports it and tightens below it where it does not. An op with no
+    registered production callable falls back to the static cap -- validating
+    against the wrong kernel is worse than not validating.
+    """
+    if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
+        return None
+    from ..aiter_splitk_validate import make_support_fn
+
+    # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+    # may not be device 0.
+    return make_support_fn(op=script_key, gpu_ids=_gpu_ids(ctx))
+
+
+def _splitk_rel_norm_fn(script_key: str, ctx: TuneContext) -> RelNormFn | None:
+    """The relative-norm check for this op's asm split-K rows, or None to let errRatio decide them.
+
+    It dispatches in process like the split-K trial, so the same switch turns both off.
+    """
+    if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
+        return None
+    from ..aiter_splitk_validate import make_rel_norm_fn
+
+    return make_rel_norm_fn(op=script_key, gpu_ids=_gpu_ids(ctx))
+
+
+def _serve_safe_limit(script_key: str, ctx: TuneContext) -> _SplitKLimit:
+    """The split-K each shape may ship and the accuracy check a replacement passes, for cap, filter and re-time."""
+    support_fn, rel_norm = _splitk_support_fn(script_key, ctx), _splitk_rel_norm_fn(script_key, ctx)
+    return _SplitKLimit(int(os.environ.get("FORGE_MAX_SPLITK", "2")), support_fn, rel_norm)
+
+
+def _apply_splitk_cap(artifact: str, profile_csv: Path, limit: _SplitKLimit, *, script_key: str) -> bool:
+    """Hold the deployed table to split-K values production can serve; say whether it changed.
+
+    The aiter *tuner* can pick a splitK the production dispatch cannot run
+    (serving it raises "This GEMM is not supported!" and crashes engine init),
+    and some (op, libtype) pairs reach a wrapper that takes no splitK at all,
+    which deploys a config benchmarked with split-K and serves it without. Run
+    unconditionally rather than only when this tuner asked for ``--splitK``: the
+    cap also enforces that forwarding contract, and a caller-supplied CSV can
+    carry splitK>0 on its own. Rows at splitK=0 take a fast path inside the cap,
+    so a table without split-K pays nothing. ``limit.rel_norm`` is the check
+    :func:`drop_inaccurate_rows` applies afterwards, so a replacement is one
+    that survives it.
+    """
+    n_capped, force_candidate = _cap_splitk_to_serve_safe(
+        Path(artifact),
+        profile_csv,
+        limit,
+        forwarding_libtypes=_SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset()),
+    )
+    if n_capped:
+        log.info("serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support", n_capped)
+    return force_candidate
+
+
+def _shape_results_from_compare_report(tuner_name: str, run_start_time: float, work_dir: Path) -> list[dict]:
+    """Per-shape rows from the compare table aiter writes to disk instead of stdout.
+
+    aiter writes the ``--compare`` table to ``<tempdir>/aiter_compare/`` when there
+    are more than 30 shapes; stdout then carries only a "Successfully tuned N
+    shapes" summary.
+    """
+    compare_report = _find_latest_compare_report(tuner_name, run_start_time)
+    if compare_report is None or not compare_report.is_file():
+        log.info("no compare report for %s under %s after run start", tuner_name, _compare_dir())
+        return []
+    log.info("compare report found for %s: %s", tuner_name, compare_report)
+    dest = work_dir / f"compare_{tuner_name}.txt"
+    try:
+        shutil.copy2(compare_report, dest)
+    except OSError as exc:
+        log.warning(
+            "failed to archive compare report for %s (%s -> %s): %s",
+            tuner_name,
+            compare_report,
+            dest,
+            exc,
+        )
+    else:
+        log.info("archived compare report for %s to %s", tuner_name, dest)
+    try:
+        return _parse_tuner_stdout(compare_report.read_text(encoding="utf-8", errors="replace"), "")
+    except OSError:
+        return []
+
+
+def _shape_results_for_run(
+    stdout: str,
+    stderr: str,
     *,
     tuner_name: str,
-    script_key: str,
-    env_var: str,
-    ctx: TuneContext,
+    run_start_time: float,
     work_dir: Path,
-    extra_args: list[str] | None = None,
-) -> TuneResult:
+) -> list[dict]:
+    """What this run tuned per shape, from stdout or from whichever artifact still says.
+
+    Some aiter versions print only a "Successfully tuned shapes" summary (no
+    per-shape Pre/Post table) while still writing a valid tuned candidate CSV.
+    """
+    shape_results = _parse_tuner_stdout(stdout, stderr)
+    if not shape_results:
+        shape_results = _shape_results_from_compare_report(tuner_name, run_start_time, work_dir)
+    if not shape_results:
+        shape_results = _parse_candidate_csv(work_dir / f"candidate_{tuner_name}.csv")
+    return shape_results
+
+
+@dataclass(frozen=True)
+class DenseTunerSpec:
+    """One aiter dense tuner: its name, tuning script, deployment env var and extra script flags."""
+
+    tuner_name: str
+    script_key: str
+    env_var: str
+    extra_args: tuple[str, ...] = ()
+
+
+def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
+    tuner_name, script_key = spec.tuner_name, spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
         return TuneResult(
@@ -906,8 +890,8 @@ def run_aiter_dense_tuner(
         str(ctx.min_improvement_pct),
         "-v",
     ]
-    if extra_args:
-        base_args.extend(extra_args)
+    if spec.extra_args:
+        base_args.extend(spec.extra_args)
 
     # Check the script's argparse surface before spending minutes on it.
     filtered = filter_args(base_args, probe_script(script))
@@ -924,45 +908,14 @@ def run_aiter_dense_tuner(
     base_args = filtered.args
 
     aiter_root = resolve_aiter_root()
-
-    import time
-
     run_start_time = time.time()
+    deadline = run_start_time + ctx.timeout_s
 
-    iso_candidate: Path | None = None
-    if _tr.is_isolation_enabled():
-        # Per-shape process isolation + provenance-keyed fault blocklist.
-        blocklist = _tr.FaultBlocklist(
-            getattr(ctx, "faulted_blocklist_path", None),
-            {
-                "gpu_type": ctx.gpu_type,
-                "quant_type": getattr(ctx, "quant_type", ""),
-                "tp": getattr(ctx, "tp", 1),
-                "tuner": tuner_name,
-            },
-        )
-        rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-            script=str(script),
-            base_args=base_args,
-            input_csv=input_csv,
-            tuned_stem=tuned_csv.stem,
-            work_dir=work_dir,
-            aiter_root=aiter_root,
-            outer_timeout_s=ctx.timeout_s,
-            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-            gpu_ids=getattr(ctx, "gpu_ids", "") or "",
-            blocklist=blocklist,
-        )
-    else:
-        # Default single invocation, now with --timeout so a faulting candidate is isolated by aiter instead of
-        # hanging the whole run.
-        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
-        rc, stdout, stderr = run_subprocess(
-            cmd,
-            cwd=aiter_root,
-            timeout_s=ctx.timeout_s,
-            log_file=work_dir / "tune.log",
-        )
+    rc, stdout, stderr, iso_candidate = _invoke_tuner(
+        _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
+        ctx,
+        tuner_name,
+    )
 
     if rc == 124:
         return TuneResult(
@@ -980,7 +933,6 @@ def run_aiter_dense_tuner(
             error_class="subprocess_error",
         )
 
-    # Find candidate CSV.
     candidate = iso_candidate if iso_candidate is not None else _find_latest_candidate(tuner_name, run_start_time)
     artifact = str(candidate) if candidate else str(tuned_csv)
 
@@ -989,84 +941,20 @@ def run_aiter_dense_tuner(
         shutil.copy2(candidate, dest)
         artifact = str(dest)
 
-    # The aiter *tuner* can pick a splitK the production dispatch cannot run (serving it raises "This GEMM is not
-    # supported!" and crashes engine init), and some (op, libtype) pairs reach a wrapper that takes no splitK at all,
-    # which deploys a config benchmarked with split-K and serves it without. Run unconditionally rather than only when
-    # this tuner asked for --splitK: the cap also enforces that forwarding contract, and a caller-supplied CSV can
-    # carry splitK>0 on its own. Rows at splitK=0 take a fast path inside the cap, so a table without split-K pays
-    # nothing.
-    max_splitk = int(os.environ.get("FORGE_MAX_SPLITK", "2"))
-    # Prefer the REAL per-shape production split-K limit (trial-dispatch) over the static FORGE_MAX_SPLITK: it
-    # keeps splitK>cap where the kernel actually supports it and tightens below cap where it does not. Falls back to
-    # the static cap for any op the trial has no registered production callable for -- validating against the wrong
-    # kernel is worse than not validating.
-    support_fn = None
-    if os.environ.get("FORGE_SPLITK_TRIAL", "1") != "0":
-        try:
-            from ..aiter_splitk_validate import make_support_fn
+    limit = _serve_safe_limit(script_key, ctx)
+    force_candidate = _apply_splitk_cap(artifact, profile_csv, limit, script_key=script_key)
 
-            # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-            # may not be device 0.
-            support_fn = make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-        except Exception:  # noqa: BLE001 — fall back to the static cap
-            support_fn = None
-    n_capped, force_candidate = _cap_splitk_to_serve_safe(
-        Path(artifact),
-        profile_csv,
-        max_splitk,
-        support_fn=support_fn,
-        forwarding_libtypes=_SPLITK_FORWARDING_LIBTYPES.get(script_key, frozenset()),
+    shape_results = _shape_results_for_run(
+        stdout,
+        stderr,
+        tuner_name=tuner_name,
+        run_start_time=run_start_time,
+        work_dir=work_dir,
     )
-    if n_capped:
-        log.info(
-            "serve-safe splitK cap: rewrote/dropped %d row(s) beyond production support",
-            n_capped,
-        )
-
-    shape_results = _parse_tuner_stdout(stdout, stderr)
-    if not shape_results:
-        # aiter writes the --compare table to /tmp/aiter_compare/ when >30 shapes (stdout carries only a "Successfully
-        # tuned N shapes" summary).
-        compare_report = _find_latest_compare_report(tuner_name, run_start_time)
-        if compare_report is not None and compare_report.is_file():
-            log.info(
-                "compare report found for %s: %s",
-                tuner_name,
-                compare_report,
-            )
-            dest = work_dir / f"compare_{tuner_name}.txt"
-            try:
-                shutil.copy2(compare_report, dest)
-            except OSError as exc:
-                log.warning(
-                    "failed to archive compare report for %s (%s -> %s): %s",
-                    tuner_name,
-                    compare_report,
-                    dest,
-                    exc,
-                )
-            else:
-                log.info("archived compare report for %s to %s", tuner_name, dest)
-            try:
-                shape_results = _parse_tuner_stdout(compare_report.read_text(encoding="utf-8", errors="replace"), "")
-            except OSError:
-                shape_results = []
-        else:
-            log.info(
-                "no compare report for %s under /tmp/aiter_compare after run start",
-                tuner_name,
-            )
-    if not shape_results:
-        # Some aiter versions print only a "Successfully tuned shapes" summary (no per-shape Pre/Post table) while
-        # still writing a valid tuned candidate CSV.
-        candidate_csv_path = work_dir / f"candidate_{tuner_name}.csv"
-        fallback_rows = _parse_candidate_csv(candidate_csv_path)
-        if fallback_rows:
-            shape_results = fallback_rows
 
     # improved=False carries two different meanings: "compared against a baseline and did not win", and "never had a
     # baseline to compare against".
-    accuracy = drop_inaccurate_rows(Path(artifact))
+    accuracy = drop_inaccurate_rows(Path(artifact), limit.rel_norm)
     if not accuracy.completed:
         # An unfiltered table is a table whose wrong rows are still in it, and this artifact is what gets deployed.
         return TuneResult(
@@ -1075,9 +963,8 @@ def run_aiter_dense_tuner(
             error=f"aiter's accuracy figures were not applied to {artifact}: {accuracy.reason}",
             error_class="accuracy_filter_incomplete",
         )
-    dropped_inaccurate = accuracy.dropped
-    if dropped_inaccurate:
-        shape_results = _forget_shapes_that_lost_their_row(shape_results, dropped_inaccurate)
+    if accuracy.dropped:
+        shape_results = _forget_shapes_that_lost_their_row(shape_results, accuracy.dropped)
 
     if any(r.get("is_new") or r.get("tuned_unverified") for r in shape_results):
         force_candidate = True
@@ -1086,11 +973,7 @@ def run_aiter_dense_tuner(
     # deployed artifact.
     n_dropped, n_kept = _filter_unimproved_rows(Path(artifact), shape_results)
     if n_dropped:
-        log.info(
-            "deployed artifact: dropped %d row(s) that were compared and did not win, %d kept",
-            n_dropped,
-            n_kept,
-        )
+        log.info("deployed artifact: dropped %d row(s) that lost their comparison, %d kept", n_dropped, n_kept)
 
     summary = _summarize_shape_results(shape_results)
 
@@ -1098,7 +981,7 @@ def run_aiter_dense_tuner(
         tuner_name=tuner_name,
         status=summary["status"],
         artifact_path=artifact,
-        env_var=env_var,
+        env_var=spec.env_var,
         env_value=artifact,
         total_shapes=summary["total"],
         improved_shapes=summary["n_improved"],
@@ -1107,18 +990,8 @@ def run_aiter_dense_tuner(
         avg_micro_speedup=summary["avg"],
         candidate=force_candidate,
         shape_results=shape_results,
-        dropped_inaccurate=[
-            {
-                "M": r.get("M"),
-                "N": r.get("N"),
-                "K": r.get("K"),
-                "libtype": r.get("libtype"),
-                "splitK": r.get("splitK"),
-                "us": r.get("us"),
-                "err_ratio": _row_err_ratio(r),
-            }
-            for r in dropped_inaccurate
-        ],
+        dropped_inaccurate=[dropped_row_record(r) for r in accuracy.dropped],
+        graph_retime=retime_table(artifact, profile_csv, limit, RetimeTarget(script_key, _gpu_ids(ctx), deadline)),
     )
 
 
@@ -1143,20 +1016,14 @@ def _filter_unimproved_rows(
     artifact_csv: Path,
     shape_results: list[dict[str, Any]],
 ) -> tuple[int, int]:
-    """Drop deployed rows for shapes that were compared and lost."""
+    """Drop rows that lost to the pre-run config; unmeasured rows, and faster ones below aiter's update bar, stay."""
     losers: set[tuple[int, int, int]] = set()
     for r in shape_results:
         if r.get("improved"):
             continue
-        if r.get("is_new") or r.get("tuned_unverified"):
+        if r.get("is_new") or r.get("tuned_unverified") or r.get("below_update_bar") and r["speedup"] > 1.0:
             continue
-        if r.get("speedup") is None and r.get("default_us") is None:
-            # No baseline recorded at all -> not a loss, just unmeasured.
-            continue
-        try:
-            losers.add((int(r["M"]), int(r["N"]), int(r["K"])))
-        except (KeyError, TypeError, ValueError):
-            continue
+        losers.add((r["M"], r["N"], r["K"]))
     if not losers:
         return 0, 0
 
@@ -1200,13 +1067,50 @@ def _filter_unimproved_rows(
     return dropped, len(kept_lines) - 1
 
 
+@dataclass(frozen=True)
+class _DeployedColumns:
+    """Where the deployed CSV keeps the columns the splitK cap reads."""
+
+    m: int
+    n: int
+    k: int
+    splitk: int
+    libtype: int | None
+
+    def shape_key(self, row: list[str]) -> tuple[str, str, str]:
+        """The ``(M, N, K)`` this row describes, as the profile index is keyed."""
+        return row[self.m], row[self.n], row[self.k]
+
+
+def _deployed_columns(header: list[str]) -> _DeployedColumns | None:
+    """Locate the columns the cap reads, or None when the header lacks one.
+
+    Case-insensitive: were the deployed header's case ever to stop matching
+    exactly, the cap would return early and pass unsafe splitK rows through
+    unchanged -> serve crash.
+    """
+    index = {str(name).strip().lower(): position for position, name in enumerate(header)}
+    try:
+        return _DeployedColumns(index["m"], index["n"], index["k"], index["splitk"], index.get("libtype"))
+    except KeyError:
+        return None
+
+
+def _forwards_splitk(row: list[str], libtype: int | None, forwarding_libtypes: frozenset[str]) -> bool:
+    """Whether this row's libtype has a production wrapper that forwards splitK."""
+    if libtype is None or libtype >= len(row):
+        # No libtype column to check against a contract that is keyed on it;
+        # treat as non-forwarding, matching the fail-closed default.
+        return False
+    return str(row[libtype]).strip().lower() in forwarding_libtypes
+
+
 def _cap_splitk_to_serve_safe(
     artifact_csv: Path,
     profile_csv: Path,
-    max_splitk: int,
+    limit: _SplitKLimit,
     *,
     forwarding_libtypes: frozenset[str],
-    support_fn=None,
 ) -> tuple[int, bool]:
     """Rewrite deployed rows whose splitK production cannot dispatch or forward.
 
@@ -1214,81 +1118,31 @@ def _cap_splitk_to_serve_safe(
     (crashes engine init), and a splitK on a libtype whose wrapper takes no such
     argument (no crash, just a kernel slower than the one that won the
     benchmark, with every engagement gate still green). Either way the row is
-    replaced by the fastest serve-safe candidate from the profile, and a shape
-    with no safe candidate is dropped.
+    replaced by the fastest serve-safe candidate from the profile that would
+    pass the accuracy gate, and a shape with no such candidate is dropped.
 
     ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
     for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
     libtype is capped at 0 regardless of dispatch support.
     """
     try:
-        with artifact_csv.open() as f:
-            rows = list(csv.reader(f))
+        with artifact_csv.open() as handle:
+            rows = list(csv.reader(handle))
     except OSError:
         return 0, False
     if len(rows) < 2:
         return 0, False
     hdr = rows[0]
-    # Case-insensitive column lookup: if the deployed-header case ever fails an exact match the cap would return early
-    # (0, False) and pass unsafe splitK rows through unchanged -> serve crash.
-    _col = {str(h).strip().lower(): i for i, h in enumerate(hdr)}
-    try:
-        mi, ni, ki, ski = (_col[c] for c in ("m", "n", "k", "splitk"))
-    except KeyError:
+    columns = _deployed_columns(hdr)
+    if columns is None:
         return 0, False
-
-    # Index every valid candidate per shape; the cap is applied per-shape at selection so support_fn can keep
-    # splitK>max_splitk where the kernel supports.
-    by_shape: dict[tuple[str, str, str], list[tuple[float, int, list[str]]]] = defaultdict(list)
-    schema_ok = True
-    try:
-        with profile_csv.open() as f:
-            for r in csv.DictReader(f):
-                # A candidate must carry every column the deployed CSV has, or the rewritten row would get empty cells
-                # and a renamed/absent errRatio would silently disable the correctness filter.
-                if any(c not in r for c in hdr):
-                    schema_ok = False
-                    continue
-                try:
-                    us, sk = float(r["us"]), int(r["splitK"])
-                    er = float(r.get("errRatio") or 0)  # absent -> 0 (no KeyError)
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if us <= 0 or er > 0.01:
-                    continue
-                by_shape[(r["M"], r["N"], r["K"])].append((us, sk, [r[c] for c in hdr]))
-    except OSError:
-        by_shape = defaultdict(list)
-    if not schema_ok:
-        log.warning(
-            "splitK cap: profile %s lacks columns present in the tuned CSV; some "
-            "serve-safe candidates were skipped (possible aiter schema drift)",
-            profile_csv,
-        )
-
-    lti = _col.get("libtype")
-
-    def _forwards(row: list[str]) -> bool:
-        if lti is None or lti >= len(row):
-            # No libtype column to check against a contract that is keyed on it;
-            # treat as non-forwarding, matching the fail-closed default.
-            return False
-        return str(row[lti]).strip().lower() in forwarding_libtypes
-
-    def _shape_max(m: int, n: int, k: int) -> int:
-        if support_fn is None:
-            return max_splitk
-        try:
-            v = support_fn(m, n, k)
-        except Exception:  # noqa: BLE001 — trial failure must not abort the cap
-            return max_splitk  # degrade to the static cap, never crash the tuner
-        return max_splitk if v is None else int(v)
+    by_shape = _serve_safe_candidates(profile_csv, hdr)
 
     out, changed, has_splitk = [hdr], 0, False
     dropped_unforwarded = 0
     for row in rows[1:]:
         try:
-            sk = int(row[ski])
+            sk = int(row[columns.splitk])
         except (ValueError, IndexError):
             out.append(row)
             continue
@@ -1297,45 +1151,37 @@ def _cap_splitk_to_serve_safe(
             # per-shape max, so skip the (GPU-dispatching) trial entirely for these rows.
             out.append(row)
             continue
-        if not _forwards(row):
+        if not _forwards_splitk(row, columns.libtype, forwarding_libtypes):
             # The wrapper for this libtype takes no splitK, so the only
             # honourable value is 0 -- fall through to candidate replacement
             # with maxsk=0 rather than shipping a measurement production cannot
             # reproduce.
-            maxsk = 0
             dropped_unforwarded += 1
             try:
-                key = (row[mi], row[ni], row[ki])
+                key = columns.shape_key(row)
             except IndexError:
                 out.append(row)
                 continue
-            safe = min(
-                (c for c in by_shape.get(key, ()) if c[1] <= maxsk),
-                key=lambda c: c[0],
-                default=None,
-            )
+            safe = _fastest_serve_safe(by_shape.get(key, ()), 0, limit)
             if safe is not None:
-                out.append(safe[2])
+                out.append(safe.row)
             changed += 1
             continue
         try:
-            key = (row[mi], row[ni], row[ki])
-            maxsk = _shape_max(int(row[mi]), int(row[ni]), int(row[ki]))
+            key = columns.shape_key(row)
+            shape = (int(row[columns.m]), int(row[columns.n]), int(row[columns.k]))
         except (ValueError, IndexError):
             out.append(row)
             continue
+        maxsk = limit.ceiling(shape)
         if sk <= maxsk:
             out.append(row)
             has_splitk = has_splitk or sk > 0
             continue
-        safe = min(
-            (c for c in by_shape.get(key, ()) if c[1] <= maxsk),
-            key=lambda c: c[0],
-            default=None,
-        )
+        safe = _fastest_serve_safe(by_shape.get(key, ()), maxsk, limit)
         if safe is not None:
-            out.append(safe[2])
-            has_splitk = has_splitk or safe[1] > 0
+            out.append(safe.row)
+            has_splitk = has_splitk or safe.splitk > 0
         # else: drop the row -> serve falls back to the aiter default
         changed += 1
     if changed:
@@ -1363,37 +1209,27 @@ def _find_latest_compare_report_impl(
     tuner_name: str,
     start_time: float,
     compare_dir: Path,
+    pattern: str = "*.compare.txt",
 ) -> Path | None:
-    """Find the most recent compare report from ``compare_dir`` for THIS run."""
+    """Find the most recent ``pattern`` file in ``compare_dir`` written by THIS run."""
     if not compare_dir.is_dir():
         return None
-    reports = [
-        p
-        for p in compare_dir.glob("*.compare.txt")
-        if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
+    found = [
+        p for p in compare_dir.glob(pattern) if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
     ]
-    if not reports:
-        return None
-    reports.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return reports[0]
+    return max(found, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def _compare_dir() -> Path:
+    """aiter's compare dir: under ``tempfile.gettempdir()``, which the tuner is pinned to."""
+    return Path(_tr.compare_temp_env()["TMPDIR"]) / "aiter_compare"
 
 
 def _find_latest_compare_report(tuner_name: str, start_time: float) -> Path | None:
-    """Find the most recent compare report from /tmp/aiter_compare/ for THIS run."""
-    return _find_latest_compare_report_impl(tuner_name, start_time, Path("/tmp/aiter_compare"))
+    """Find the most recent compare report from the aiter compare dir for THIS run."""
+    return _find_latest_compare_report_impl(tuner_name, start_time, _compare_dir())
 
 
 def _find_latest_candidate(tuner_name: str, start_time: float) -> Path | None:
-    """Find the most recent candidate CSV from /tmp/aiter_compare/ for THIS run."""
-    compare_dir = Path("/tmp/aiter_compare")
-    if not compare_dir.is_dir():
-        return None
-    candidates = [
-        p
-        for p in compare_dir.glob("*.candidate.csv")
-        if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
-    ]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
+    """Find the most recent candidate CSV from the aiter compare dir for THIS run."""
+    return _find_latest_compare_report_impl(tuner_name, start_time, _compare_dir(), "*.candidate.csv")

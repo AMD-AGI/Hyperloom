@@ -10,20 +10,15 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import init_git_repo
 
-from hyperloom.common.failure_signature import (
-    MISSING_MODEL_ARCH,
-    RESOURCE_CONSTRAINT,
-    CapabilityGap,
-    FailureSignature,
-)
+from hyperloom.common.failure_signature import MISSING_MODEL_ARCH, FailureSignature
 from hyperloom.orchestrator.enablement.runtime import localization as loc
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 from hyperloom.orchestrator.actions.executors._git import _run_git_cp
 
 
-def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
-    return CapabilityGap.from_signature(FailureSignature(kind=kind, confidence=0.9))
+def _gap(kind: str = MISSING_MODEL_ARCH) -> FailureSignature:
+    return FailureSignature(kind=kind, confidence=0.9)
 
 
 # classify_closure — compiled-closure gate
@@ -44,7 +39,7 @@ def test_closure_compiled_or_build_defers_rung5(path):
     v = loc.classify_closure(["vllm/model.py", path])
     assert v.kind == loc.NEEDS_RUNG5
     assert not v.is_localizable
-    assert path in v.compiled_paths or "cap" in v.reason
+    assert path in v.reason
 
 
 def test_a_large_python_closure_is_localizable():
@@ -186,20 +181,13 @@ def test_the_import_root_is_the_directory_above_the_package(tmp_path, framework,
     assert adapter.source_import_root(str(tmp_path)) == import_root
 
 
-def test_vllm_localization_action(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
+def test_vllm_localization_action():
     a = get_adapter("vllm")
     act = a.build_localization_action(_gap(), candidate_ref="PR:1234", repo_url="https://github.com/ROCm/vllm.git")
     assert act is not None and act.kind == "pr_backport" and act.pr_number == 1234
 
 
-def test_vllm_localization_resource_constraint_none():
-    a = get_adapter("vllm")
-    assert a.build_localization_action(_gap(RESOURCE_CONSTRAINT), candidate_ref="PR:1", repo_url="https://x") is None
-
-
-def test_atom_localizes(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
+def test_atom_localizes():
     at = get_adapter("atom")
     act = at.build_localization_action(_gap(), candidate_ref="PR:55", repo_url="https://github.com/ROCm/ATOM.git")
     assert act is not None and act.pr_number == 55
@@ -208,9 +196,3 @@ def test_atom_localizes(monkeypatch):
 def test_xdit_and_unknown_localization_none():
     assert get_adapter("xdit").build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://x") is None
     assert get_adapter("nope").build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://x") is None
-
-
-def test_origin_allowlist_blocks_unlisted(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", "https://github.com/ROCm")
-    a = get_adapter("vllm")
-    assert a.build_localization_action(_gap(), candidate_ref="PR:1", repo_url="https://evil.example/x.git") is None

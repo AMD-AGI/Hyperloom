@@ -14,10 +14,10 @@ from hyperloom.orchestrator.trace_analysis import tracelens_arch_benchmark as ta
 
 @pytest.fixture(scope="module")
 def tla():
-    """Import tracelens_analysis as a module without executing main()."""
-    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+    """Import the TraceLens-checkout module without executing ``main()``."""
+    from hyperloom.orchestrator.trace_analysis import _tracelens_checkout
 
-    return tracelens_analysis
+    return _tracelens_checkout
 
 
 _VISIBLE_DEVICE_VARS = (
@@ -111,7 +111,6 @@ def test_populate_gpu_arch_json_uses_bundled_spec(tmp_path: Path) -> None:
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI300X",
-            internal_extension_enabled=False,
             log=lambda _msg: None,
             run_command=lambda *_a, **_k: 0,
         )
@@ -159,7 +158,6 @@ def test_populate_gpu_arch_json_runs_microbench_when_missing(
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
-            internal_extension_enabled=False,
             log=lambda _msg: None,
             run_command=_run_command,
             timeout_s=60,
@@ -184,26 +182,13 @@ def test_populate_skips_microbench_when_internal_extension_enabled(
     tmp_path: Path,
 ) -> None:
     """Internal extension backfills MAF, so no microbenchmark runs even when the bundled arch spec is missing."""
-    calls: list[list[str]] = []
-
-    def _run_command(cmd, *, cwd, timeout_s, env=None):
-        calls.append(cmd)
-        return 0
-
     with (
         patch.object(tab, "resolve_arch_json_path", return_value=None),
         patch.object(tab, "select_idle_gpu") as select_idle,
     ):
-        path = tab.populate_gpu_arch_json(
-            tracelens_root=tmp_path,
-            platform="MI355X",
-            internal_extension_enabled=True,
-            log=lambda _msg: None,
-            run_command=_run_command,
-        )
+        path = tab.internal_extension_arch_json("MI355X", log=lambda _msg: None)
 
     assert path is None
-    assert calls == []
     select_idle.assert_not_called()
 
 
@@ -213,23 +198,15 @@ def test_populate_internal_extension_returns_bundled_spec_without_benchmark(
     """When the internal extension is enabled and a bundled spec exists, it is returned as an artifact without running the microbenchmark."""
     bundled = tmp_path / "MI300X.json"
     bundled.write_text("{}", encoding="utf-8")
-    calls: list[list[str]] = []
 
-    def _run_command(cmd, *, cwd, timeout_s, env=None):
-        calls.append(cmd)
-        return 0
-
-    with patch.object(tab, "resolve_arch_json_path", return_value=bundled):
-        path = tab.populate_gpu_arch_json(
-            tracelens_root=tmp_path,
-            platform="MI300X",
-            internal_extension_enabled=True,
-            log=lambda _msg: None,
-            run_command=_run_command,
-        )
+    with (
+        patch.object(tab, "resolve_arch_json_path", return_value=bundled),
+        patch.object(tab, "select_idle_gpu") as select_idle,
+    ):
+        path = tab.internal_extension_arch_json("MI300X", log=lambda _msg: None)
 
     assert path == bundled
-    assert calls == []
+    select_idle.assert_not_called()
 
 
 def test_populate_external_raises_on_microbench_failure(
@@ -245,7 +222,6 @@ def test_populate_external_raises_on_microbench_failure(
             tab.populate_gpu_arch_json(
                 tracelens_root=tmp_path,
                 platform="MI355X",
-                internal_extension_enabled=False,
                 log=lambda _msg: None,
                 run_command=lambda *_a, **_k: 7,
             )
@@ -265,7 +241,6 @@ def test_populate_falls_back_to_hyperloom_when_microbench_unavailable(
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
-            internal_extension_enabled=False,
             log=lambda _msg: None,
             run_command=lambda *_a, **_k: 0,
         )
@@ -302,7 +277,6 @@ def test_populate_falls_back_to_hyperloom_on_zeroed_measured_spec(
         path = tab.populate_gpu_arch_json(
             tracelens_root=tmp_path,
             platform="MI355X",
-            internal_extension_enabled=False,
             log=lambda _msg: None,
             run_command=_run_command,
         )

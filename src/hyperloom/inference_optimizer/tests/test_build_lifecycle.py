@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 def _action(cmd, **kw):
@@ -57,7 +58,7 @@ def _fake_action(**kw):
 
 async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tuple:
     """Run one build through SubAgentRunner; return (task_row, runner_result)."""
-    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
 
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
@@ -66,9 +67,9 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
         tasks=build_coord.tasks,
         executor_registry={"targeted_build": executor},
         session_dir=Path(session_dir),
-        shared_state=build_coord.shared_state,
+        links=RunnerLinks(shared_state=build_coord.shared_state),
     )
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -104,7 +105,7 @@ async def test_build_lane_serializes_two_builds(build_coord):
     )
     assert a1 != a2
     t1 = await build_coord.tasks.get(a1)
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=a1,
         task_id=a1,
@@ -127,7 +128,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord):
         _action([sys.executable, "-c", "import time; time.sleep(2)"])
     )
     t = await build_coord.tasks.get(tid)
-    build_lease = await build_coord.locks.try_acquire_many(
+    build_lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -135,7 +136,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord):
         ttl_sec=t.lease_ttl_sec or 60,
     )
     assert build_lease is not None
-    bench_lease = await build_coord.locks.try_acquire_many(
+    bench_lease = await build_coord.locks.acquire_many(
         ["benchmark_lane"], holder_id="bench", task_id="bench", action="bench", ttl_sec=60
     )
     assert bench_lease is not None
@@ -530,16 +531,13 @@ def test_targeted_build_in_coordinator_internal_actions():
 def test_targeted_build_params_pass_policy_gate(tmp_path):
     """Build params must not be misidentified as path-like fields."""
     from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import AgentRole, BackendType
+    from hyperloom.orchestrator.roles.agent_role import AgentRole
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     orch_role = AgentRole(
         name="orchestration",
-        backend_type=BackendType.CLAUDE,
-        model="claude-3-5-sonnet",
-        api_key_env="ANTHROPIC_API_KEY",
         allowed_intents=frozenset(IntentType),
     )
     gate = PolicyGate(
@@ -567,7 +565,7 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
 async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
     """spawn failure via sub_agent_runner writes failed terminal state and releases lane."""
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
-    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
 
     action = _action(["/nonexistent_compiler_xyz_P1_12"])
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
@@ -578,9 +576,9 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path):
         tasks=build_coord.tasks,
         executor_registry={"targeted_build": executor},
         session_dir=tmp_path,
-        shared_state=build_coord.shared_state,
+        links=RunnerLinks(shared_state=build_coord.shared_state),
     )
-    lease = await build_coord.locks.try_acquire_many(
+    lease = await build_coord.locks.acquire_many(
         ["build_lane"],
         holder_id=tid,
         task_id=tid,
@@ -646,10 +644,12 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
 
     action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe")
     task, _ = await resume_coord.tasks.create_or_return_existing(
-        kind="targeted_build",
-        params=action.to_state(),
-        idempotency_key="k-orphan",
-        requires_lanes=["build_lane"],
+        TaskSpec(
+            kind="targeted_build",
+            params=action.to_state(),
+            idempotency_key="k-orphan",
+            requires_lanes=["build_lane"],
+        ),
     )
     await resume_coord.tasks.transition(task.task_id, "running")
     resume_coord.shared_state.pending_targeted_build = {
@@ -674,6 +674,47 @@ async def test_resume_kills_orphan_and_clears_sentinel(resume_coord):
         time.sleep(0.05)
     with pytest.raises(ProcessLookupError):
         os.killpg(pgid, 0)
+
+
+def _jit_sweep_bug(coord, monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    def _bug(**_kwargs):
+        raise KeyError("lock table")
+
+    monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", _bug)
+    coord.shared_state.pending_targeted_build = {"task_id": "", "aiter_jit_dir": str(tmp_path / "aiter_jit")}
+    return coord.writeback._resume_recover_pending_targeted_build, KeyError, "lock table"
+
+
+def _revalidation_row_unreadable(coord, monkeypatch, tmp_path):
+    import sqlite3
+
+    async def _locked(_task_id):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(coord.tasks, "get", _locked)
+    coord.shared_state.enablement.validation_pending = True
+    coord.shared_state.enablement.revalidation_task_id = "t-reval"
+    return coord.writeback._resume_recover_pending_revalidation, sqlite3.OperationalError, "database is locked"
+
+
+def _keep_log_unreadable(coord, monkeypatch, tmp_path):
+    import sqlite3
+
+    async def _locked(**_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(coord.bus, "tail", _locked)
+    return coord.writeback._resume_recover_orphaned_keeps, sqlite3.OperationalError, "database is locked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _keep_log_unreadable])
+async def test_a_failed_resume_recovery_step_is_not_skipped_silently(resume_coord, monkeypatch, tmp_path, broken):
+    recover, error_type, message = broken(resume_coord, monkeypatch, tmp_path)
+    with pytest.raises(error_type, match=message):
+        await recover({"fixes": [], "warnings": []})
 
 
 @pytest.mark.asyncio

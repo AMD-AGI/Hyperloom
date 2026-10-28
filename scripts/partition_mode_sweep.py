@@ -88,7 +88,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -619,34 +619,35 @@ def read_measurement(output_dir: Path) -> dict[str, Any]:
     return extract_benchmark_measurement(payload if isinstance(payload, dict) else None, workspace=output_dir)
 
 
-def run_mode(
-    layout: PartitionLayout,
-    devices: Sequence[int],
-    *,
-    template: Sequence[str],
-    output_root: Path,
-    streams_per_partition: int,
-    timeout_s: float,
-    base_env: dict[str, str] | None = None,
-) -> list[PartitionRun]:
+@dataclass(frozen=True)
+class BenchmarkWorkload:
+    """The benchmark every partition of every mode runs, where its output goes and how long it may take."""
+
+    template: Sequence[str]
+    output_root: Path
+    streams_per_partition: int
+    timeout_s: float
+
+
+def run_mode(layout: PartitionLayout, devices: Sequence[int], *, workload: BenchmarkWorkload) -> list[PartitionRun]:
     """Run the benchmark on every partition at once and collect each result."""
-    base = dict(os.environ if base_env is None else base_env)
+    base = dict(os.environ)
     runs: list[PartitionRun] = []
     procs: list[tuple[PartitionRun, subprocess.Popen[str] | None, Any]] = []
 
     for position, device in enumerate(devices):
-        out_dir = output_root / layout.mode.lower() / f"partition{position}"
+        out_dir = workload.output_root / layout.mode.lower() / f"partition{position}"
         out_dir.mkdir(parents=True, exist_ok=True)
         run = PartitionRun(partition_index=position, hsa_device=device, output_dir=out_dir)
         runs.append(run)
         cmd = build_partition_command(
-            template,
+            workload.template,
             device=device,
             output_dir=out_dir,
             layout=layout,
             partition_index=position,
         )
-        env = partition_env(base, layout, device=device, streams_per_partition=streams_per_partition)
+        env = partition_env(base, layout, device=device, streams_per_partition=workload.streams_per_partition)
         log = None
         try:
             log = (out_dir / "benchmark.log").open("w", encoding="utf-8")
@@ -665,7 +666,7 @@ def run_mode(
             continue
         procs.append((run, proc, log))
 
-    deadline = time.monotonic() + max(1.0, timeout_s)
+    deadline = time.monotonic() + max(1.0, workload.timeout_s)
     for run, proc, log in procs:
         if proc is None:
             continue
@@ -675,7 +676,7 @@ def run_mode(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=30)
-            run.error = f"exceeded the {timeout_s:.0f}s budget"
+            run.error = f"exceeded the {workload.timeout_s:.0f}s budget"
             run.returncode = -1
         finally:
             if log is not None:
@@ -699,7 +700,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
     lines = ["", "=" * 78, "Compute-partition sweep", "=" * 78, ""]
     measured = [r for r in results if r.measured and r.total() is not None]
     baseline = next((r for r in measured if r.mode == entry_mode), None)
-    best = max(measured, key=lambda r: r.total() or 0.0, default=None)
+    best = max(measured, key=lambda r: r.total(), default=None)
 
     lines.append(f"{'mode':<6} {'parts':>5} {'CU':>5} {'throughput':>13} {'vs entry':>9} {'worst lat':>11}")
     lines.append("-" * 78)
@@ -709,14 +710,14 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
             lines.append(f"{result.mode:<6} {'-':>5} {'-':>5} {'-':>13} {'-':>9} {'-':>11}   {why}")
             continue
         layout = result.layout
-        total = result.total() or 0.0
+        total = result.total()
         rel = ""
-        if baseline is not None and (baseline.total() or 0.0) > 0:
-            rel = f"{total / (baseline.total() or 1.0):.2f}x"
+        if baseline is not None and baseline.total() > 0:
+            rel = f"{total / baseline.total():.2f}x"
         latency = result.worst_latency_ms()
         lines.append(
-            f"{result.mode:<6} {layout.partitions if layout else '-':>5} "
-            f"{layout.cu_per_partition if layout else '-':>5} "
+            f"{result.mode:<6} {layout.partitions:>5} "
+            f"{layout.cu_per_partition:>5} "
             f"{total:>13.1f} {rel:>9} {(f'{latency:.1f} ms' if latency else '-'):>11}"
         )
     lines.append("")
@@ -728,7 +729,7 @@ def render(results: Sequence[ModeResult], *, entry_mode: str) -> list[str]:
 
     lines.append(f"Fastest measured mode: {best.mode} at {best.total():.1f} aggregate throughput.")
     if baseline is not None and best.mode != baseline.mode:
-        gain = (best.total() or 0.0) / (baseline.total() or 1.0)
+        gain = best.total() / (baseline.total() or 1.0)
         best_lat = best.worst_latency_ms()
         base_lat = baseline.worst_latency_ms()
         lines.append(
@@ -824,12 +825,13 @@ def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
     try:
         if read_mode(gpu_id) == entry_mode:
             return False
-    except Exception as exc:  # noqa: BLE001 - operator script barrier
+    except (SweepError, OSError, ValueError) as exc:
         print(f"note: could not read GPU {gpu_id}'s mode ({exc}); attempting the restore anyway")
     try:
         print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
         set_mode(gpu_id, entry_mode, sudo=sudo)
-    except Exception as exc:  # noqa: BLE001 - operator script barrier
+    except Exception as exc:  # noqa: BLE001 - isolation boundary: the entry-mode restore; main exits 3
+        traceback.print_exc()
         print(
             f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
             f"The card is NOT in the mode it started in. Anything that runs on it now "
@@ -892,6 +894,149 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+class _Card(NamedTuple):
+    """What the sweep has to know about the card before it changes anything."""
+
+    entry_mode: str
+    bus: int
+    total_gib: float | None
+    modes: tuple[str, ...]
+
+
+class _Sweep(NamedTuple):
+    """What the sweep produced, and what it could not put back."""
+
+    results: list[ModeResult]
+    unexpected: str | None
+    restore_failed: bool
+
+
+def _inspect_card(args: argparse.Namespace) -> _Card:
+    """Read the card's current shape and the modes this sweep may set.
+
+    Refuses a card that is in use, and equally one whose use cannot be
+    established: repartitioning evicts every context on it, so "unknown" is
+    not "idle".
+    """
+    entry_mode = read_mode(args.gpu)
+    bus = card_bus(_amd_smi_json(["list"]), args.gpu)
+    card_gib = card_total_gib(read_device_gib(args.gpu), entry_mode)
+    try:
+        available = supported_modes(_amd_smi_json(["partition", "-a", "-g", str(args.gpu)], sudo=args.sudo))
+    except SweepError as exc:
+        print(f"note: could not read partition profiles ({exc}); not restricting the mode list")
+        available = ()
+    modes = resolve_modes(args.modes, available)
+    # Scoped to the swept card because that is the only card a set touches.
+    if not (args.allow_busy or args.dry_run):
+        busy = resident_processes(_amd_smi_json(["process"]))
+        if args.gpu not in busy:
+            raise SweepError(
+                f"amd-smi process listed no GPU {args.gpu}, so whether the card is in use "
+                f"is unknown. Repartitioning evicts every context on it, so this refuses "
+                f"rather than assume it is idle. Pass --allow-busy to sweep anyway."
+            )
+        if busy[args.gpu]:
+            raise SweepError(
+                f"{busy[args.gpu]} process(es) still hold a context on GPU {args.gpu}. "
+                f"Repartitioning evicts them, so this refuses rather than killing "
+                f"someone's work. Stop them, or pass --allow-busy if they are yours."
+            )
+    return _Card(entry_mode=entry_mode, bus=bus, total_gib=card_gib, modes=tuple(modes))
+
+
+def _sweep_modes(args: argparse.Namespace, card: _Card, *, workload: BenchmarkWorkload) -> _Sweep:
+    """Set each mode in turn and benchmark it, then put the card back.
+
+    A signal finishes the mode in flight rather than abandoning the card
+    mid-sweep, because the restore is what the next job on this node depends
+    on. The restore runs whatever ended the sweep.
+    """
+    results: list[ModeResult] = []
+    unexpected: str | None = None
+    interrupted = {"flag": False}
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        interrupted["flag"] = True
+        print(f"\nsignal {signum} received; finishing the current mode, then restoring {card.entry_mode}.")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _on_signal)
+
+    try:
+        for mode in card.modes:
+            if interrupted["flag"]:
+                results.append(ModeResult(mode=mode, skipped="interrupted before this mode ran"))
+                continue
+            result = ModeResult(mode=mode)
+            results.append(result)
+            print(f"\n--- {mode} ---")
+            try:
+                _benchmark_mode(args, card, result, workload=workload)
+            except (SweepError, PartitionError) as exc:
+                result.error = str(exc)
+                print(f"  failed: {exc}")
+            except Exception as exc:  # noqa: BLE001 - isolation boundary: the mode in flight; restore and report still run
+                # Everything this script anticipates arrives as a SweepError or a PartitionError.
+                unexpected = f"{type(exc).__name__}: {exc}"
+                result.error = f"unexpected error: {unexpected}"
+                print(f"  aborted: {result.error}", file=sys.stderr)
+                traceback.print_exc()
+                break
+    finally:
+        restore_failed = _restore_entry_mode(args.gpu, card.entry_mode, sudo=args.sudo)
+
+    return _Sweep(results=results, unexpected=unexpected, restore_failed=restore_failed)
+
+
+def _benchmark_mode(args: argparse.Namespace, card: _Card, result: ModeResult, *, workload: BenchmarkWorkload) -> None:
+    """Set one mode and run the workload once per partition, recording both."""
+    set_mode(args.gpu, result.mode, sudo=args.sudo)
+    agents = read_hsa_agents()
+    cu = partition_cu_on_bus(agents, card.bus)
+    gib = None if card.total_gib is None else card.total_gib / MODE_PARTITION_COUNTS[result.mode]
+    layout = layout_for(result.mode, cu_per_partition=cu, gib_per_partition=gib)
+    result.layout = layout
+    if args.per_stream_gib > 0 and not fits_in_partition(args.per_stream_gib, layout, args.streams_per_partition):
+        result.skipped = (
+            f"{args.streams_per_partition} x {args.per_stream_gib:.1f} GiB will not fit a "
+            f"{layout.gib_per_partition:.1f} GiB partition"
+        )
+        print(f"  skipped: {result.skipped}")
+        return
+    devices = select_partition_devices(agents, layout, bus=card.bus)
+    print(f"  {layout.partitions} partition(s) of {layout.cu_per_partition} CU at HIP devices {list(devices)}")
+    result.runs = run_mode(layout, devices, workload=workload)
+    ok = sum(1 for r in result.runs if r.ok)
+    print(f"  {ok}/{len(result.runs)} partition(s) reported")
+    for run in result.runs:
+        if run.error:
+            print(f"    partition {run.partition_index} (HIP {run.hsa_device}): {run.error}")
+
+
+def _write_report(sweep: _Sweep, *, entry_mode: str, gpu_id: int, output_root: Path) -> str | None:
+    """Render and persist the sweep, and say what went wrong writing it.
+
+    A full disk or an unrenderable result must not cost the caller the exit
+    code, which is the one thing it cannot reconstruct for itself -- least of
+    all the code saying the card was left in the wrong mode.
+    """
+    summary = output_root / "sweep_summary.json"
+    try:
+        print("\n".join(render(sweep.results, entry_mode=entry_mode)))
+        summary.write_text(
+            json.dumps(summary_json(sweep.results, entry_mode=entry_mode, gpu_id=gpu_id), indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {summary}")
+    except OSError as exc:
+        traceback.print_exc()
+        print(f"ERROR: could not write the report to {summary}: {exc}", file=sys.stderr)
+        return sweep.unexpected or f"{type(exc).__name__}: {exc}"
+    return sweep.unexpected
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -907,34 +1052,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        entry_mode = read_mode(args.gpu)
-        bus = card_bus(_amd_smi_json(["list"]), args.gpu)
-        card_gib = card_total_gib(read_device_gib(args.gpu), entry_mode)
-        try:
-            available = supported_modes(_amd_smi_json(["partition", "-a", "-g", str(args.gpu)], sudo=args.sudo))
-        except SweepError as exc:
-            print(f"note: could not read partition profiles ({exc}); not restricting the mode list")
-            available = ()
-        modes = resolve_modes(args.modes, available)
-        # Scoped to the swept card because that is the only card a set touches.
-        if not (args.allow_busy or args.dry_run):
-            busy = resident_processes(_amd_smi_json(["process"]))
-            if args.gpu not in busy:
-                raise SweepError(
-                    f"amd-smi process listed no GPU {args.gpu}, so whether the card is in use "
-                    f"is unknown. Repartitioning evicts every context on it, so this refuses "
-                    f"rather than assume it is idle. Pass --allow-busy to sweep anyway."
-                )
-            if busy[args.gpu]:
-                raise SweepError(
-                    f"{busy[args.gpu]} process(es) still hold a context on GPU {args.gpu}. "
-                    f"Repartitioning evicts them, so this refuses rather than killing "
-                    f"someone's work. Stop them, or pass --allow-busy if they are yours."
-                )
+        card = _inspect_card(args)
     except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - outermost CLI main: card inspection before any change
         # Nothing has been set at this point, so there is no card to restore -- but the exit code still has to mean
         # something. 2 is for a refusal this script decided on, so an unmodelled failure gets its own code rather than
         # borrowing that one.
@@ -942,106 +1064,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("ERROR: unexpected error while reading the card; nothing was changed.", file=sys.stderr)
         return 4
 
-    print(f"GPU {args.gpu} on PCI bus {bus:02x} is in {entry_mode}; sweeping {', '.join(modes)}.")
+    print(f"GPU {args.gpu} on PCI bus {card.bus:02x} is in {card.entry_mode}; sweeping {', '.join(card.modes)}.")
     if args.dry_run:
         print("\n--dry-run: nothing will be set. Planned per mode:")
-        for mode in modes:
+        for mode in card.modes:
             partitions = MODE_PARTITION_COUNTS[mode]
             print(f"  {mode:<4} set GPU {args.gpu}, then {partitions} concurrent benchmark(s), one per partition")
         print(f"\nCommand template: {' '.join(template)}")
-        print(f"Would restore {entry_mode} on exit.")
+        print(f"Would restore {card.entry_mode} on exit.")
         return 0
 
     output_root = args.output_dir.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    results: list[ModeResult] = []
-    unexpected: str | None = None
-    interrupted = {"flag": False}
-
-    def _on_signal(signum: int, _frame: Any) -> None:
-        interrupted["flag"] = True
-        print(f"\nsignal {signum} received; finishing the current mode, then restoring {entry_mode}.")
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _on_signal)
-
-    try:
-        for mode in modes:
-            if interrupted["flag"]:
-                results.append(ModeResult(mode=mode, skipped="interrupted before this mode ran"))
-                continue
-            result = ModeResult(mode=mode)
-            results.append(result)
-            print(f"\n--- {mode} ---")
-            try:
-                set_mode(args.gpu, mode, sudo=args.sudo)
-                agents = read_hsa_agents()
-                cu = partition_cu_on_bus(agents, bus)
-                gib = None if card_gib is None else card_gib / MODE_PARTITION_COUNTS[mode]
-                layout = layout_for(mode, cu_per_partition=cu, gib_per_partition=gib)
-                result.layout = layout
-                if args.per_stream_gib > 0 and not fits_in_partition(
-                    args.per_stream_gib, layout, args.streams_per_partition
-                ):
-                    result.skipped = (
-                        f"{args.streams_per_partition} x {args.per_stream_gib:.1f} GiB will not fit a "
-                        f"{layout.gib_per_partition:.1f} GiB partition"
-                    )
-                    print(f"  skipped: {result.skipped}")
-                    continue
-                devices = select_partition_devices(agents, layout, bus=bus)
-                print(
-                    f"  {layout.partitions} partition(s) of {layout.cu_per_partition} CU at HIP devices {list(devices)}"
-                )
-                result.runs = run_mode(
-                    layout,
-                    devices,
-                    template=template,
-                    output_root=output_root,
-                    streams_per_partition=args.streams_per_partition,
-                    timeout_s=args.timeout,
-                )
-                ok = sum(1 for r in result.runs if r.ok)
-                print(f"  {ok}/{len(result.runs)} partition(s) reported")
-                for run in result.runs:
-                    if run.error:
-                        print(f"    partition {run.partition_index} (HIP {run.hsa_device}): {run.error}")
-            except (SweepError, PartitionError) as exc:
-                result.error = str(exc)
-                print(f"  failed: {exc}")
-            except Exception as exc:  # noqa: BLE001
-                # Everything this script anticipates arrives as a SweepError or a PartitionError.
-                unexpected = f"{type(exc).__name__}: {exc}"
-                result.error = f"unexpected error: {unexpected}"
-                print(f"  aborted: {result.error}", file=sys.stderr)
-                traceback.print_exc()
-                break
-    finally:
-        restore_failed = _restore_entry_mode(args.gpu, entry_mode, sudo=args.sudo)
-
-    summary = output_root / "sweep_summary.json"
-    try:
-        print("\n".join(render(results, entry_mode=entry_mode)))
-        summary.write_text(
-            json.dumps(summary_json(results, entry_mode=entry_mode, gpu_id=args.gpu), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        print(f"wrote {summary}")
-    except OSError as exc:
-        # A full disk or an unrenderable result must not cost the caller the exit code, which is the one thing it
-        # cannot reconstruct for itself -- least of all the code saying the card was left in the wrong mode.
-        traceback.print_exc()
-        print(f"ERROR: could not write the report to {summary}: {exc}", file=sys.stderr)
-        unexpected = unexpected or f"{type(exc).__name__}: {exc}"
+    workload = BenchmarkWorkload(
+        template=template,
+        output_root=output_root,
+        streams_per_partition=args.streams_per_partition,
+        timeout_s=args.timeout,
+    )
+    sweep = _sweep_modes(args, card, workload=workload)
+    unexpected = _write_report(sweep, entry_mode=card.entry_mode, gpu_id=args.gpu, output_root=output_root)
 
     # A card left in the wrong shape outranks everything else: it mislabels whatever runs on the node next, not just
     # this sweep.
-    if restore_failed:
+    if sweep.restore_failed:
         return 3
     if unexpected:
         print(f"ERROR: sweep stopped on an unexpected error ({unexpected}).", file=sys.stderr)
         return 4
-    return 0 if any(r.measured for r in results) else 1
+    return 0 if any(r.measured for r in sweep.results) else 1
 
 
 if __name__ == "__main__":

@@ -5,10 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.knowledge import static_recon_checklist as src
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.internal import InternalTasksPhase
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
@@ -207,6 +212,41 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
     assert " " not in cids[0] and "/" not in cids[0]
 
 
+_SEED_PAYLOAD = {"recon": {"bridge_candidates": [{"id": "g1", "predicate_file": "a.py", "why_disabled_here": "w"}]}}
+
+
+def _consume_site(session_dir):
+    stub = _stub_coord(session_dir)
+    return stub.shared_state, lambda: InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+
+
+def test_static_recon_save_os_error_is_logged_and_the_bookkeeping_stays(tmp_path, monkeypatch, caplog):
+    state, run = _consume_site(tmp_path)
+    err = OSError("disk full")
+    monkeypatch.setattr(state, "save", _raiser(err))
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
+        run()
+
+    assert [g["canonical_id"] for g in state.gaps] == ["gap.static_recon.g1"]
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_static_recon_save_serialization_defect_propagates(tmp_path, monkeypatch):
+    state, run = _consume_site(tmp_path)
+    monkeypatch.setattr(state, "save", _raiser(TypeError("not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        run()
+
+
+def _raiser(exc: BaseException):
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    return _save
+
+
 # -- workload precision -----------------------------------------------------
 class _PrecisionState:
     """Minimal SharedState stand-in carrying the two precision sources."""
@@ -233,3 +273,49 @@ def test_mxfp8_checkpoint_gets_the_mxfp8_focus_directories():
     assert "vllm/model_executor/kernels/linear/mxfp8/" in dirs
     assert "vllm/model_executor/layers/fused_moe/experts/" in dirs
     assert "vllm/model_executor/layers/quantization/" not in dirs
+
+
+# --- config-arm plateau re-dispatch -----------------------------------------
+def _recon_recorder(*, phase: str, plateaued: bool, monkeypatch):
+    """Stub whose ``_enqueue_internal_static_recon_task`` records its kwargs."""
+    calls: list[dict] = []
+
+    async def _enqueue(**kwargs):
+        calls.append(kwargs)
+
+    state = SharedState(session_id="t", model_name="m")
+    state.phase = phase
+    state.macro_cycle = 2
+    monkeypatch.setattr(
+        machine_state,
+        "per_lever_dryness",
+        lambda _state: (False, {"config_arm_plateaued": plateaued}),
+    )
+    stub = SimpleNamespace(shared_state=state, _enqueue_internal_static_recon_task=_enqueue)
+    return stub, calls
+
+
+def test_config_plateau_recon_dispatches_under_its_own_idempotency_key(monkeypatch):
+    """The plateau pass must not be deduplicated against the PRELUDE one."""
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=True, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == [{"reason": "config_arm_plateau", "slug": "cycle2"}]
+
+
+def test_config_plateau_recon_silent_while_the_config_arm_still_pays(monkeypatch):
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=False, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []
+
+
+def test_config_plateau_recon_is_scoped_to_the_optimisation_phase(monkeypatch):
+    stub, calls = _recon_recorder(phase="SWEEP", plateaued=True, monkeypatch=monkeypatch)
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []
+
+
+def test_config_plateau_recon_respects_the_disable_switch(monkeypatch):
+    stub, calls = _recon_recorder(phase="FRAMEWORK_AGENT", plateaued=True, monkeypatch=monkeypatch)
+    stub.shared_state.static_recon_enabled = False
+    asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
+    assert calls == []

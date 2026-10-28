@@ -58,21 +58,8 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Request kinds an LLM may address to the kernel agent.
-LLM_REQUESTABLE_KERNEL_REQUEST_KINDS: frozenset[str] = (
-    frozenset(KERNEL_ACTION_REQUEST_KINDS.values())
-    | {
-        "trace_analyze",
-        "apply_patch",
-    }
-) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
-
-# The two sets answer the same question and must never both claim a kind.
-assert not (LLM_REQUESTABLE_KERNEL_REQUEST_KINDS & COORDINATOR_OWNED_KERNEL_REQUEST_KINDS)
-
-
 # Coordinator-managed actions that agents should not directly propose.
-INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
+COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = frozenset(
     {
         "conc_sweep",
         "roofline",
@@ -84,9 +71,6 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
         "kernel_agent",
     }
 )
-
-
-COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
@@ -127,7 +111,6 @@ class ActionMetadata:
     crash_risk: float
     typical_runtime_min: float
     lease_ttl_sec: int
-    side_effects: tuple[str, ...]
     description: str
     requires_lanes: tuple[str, ...] = ()
 
@@ -145,7 +128,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=5.0,
             lease_ttl_sec=4200,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "reads_server", "writes_results"),
             description="Launch a fresh server with NO accepted modifications, run Magpie benchmark, and set baseline_tput.",
         ),
         "conc_sweep": ActionMetadata(
@@ -159,7 +141,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=30.0,
             lease_ttl_sec=9000,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "writes_results"),
             description=(
                 "Post-sweep concurrency comparison: benchmark baseline vs current_best across a CONC ladder. "
                 "On by default, off under AgentX; force with --enable-conc-sweep / --no-enable-conc-sweep; "
@@ -178,7 +159,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=12.0,
             lease_ttl_sec=7200,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply a batch of N candidate variants serially; KEEP/REVERT each, stack onto optimization_stack. "
                 "Each variant is benched on the stack (replaces backends/params/validate_stack)."
@@ -195,7 +175,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=20.0,
             lease_ttl_sec=5400,
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "writes_config"),
             description=(
                 "GEMM dispatch tuning request. Current GEAK owns the default KERNEL phase and decides applicability "
                 "internally. Private forge tuning is available only when the operator set exactly "
@@ -213,7 +192,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=25.0,
             lease_ttl_sec=3600,
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "patches_inductor_cache"),
             description=(
                 "REQUEST kernel: apply a KEEP'd kernel patch, re-baseline E2E, and emit KEEP / REVERT / NEEDS_REVIEW."
             ),
@@ -229,7 +207,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=10.0,
             lease_ttl_sec=3600,
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + "
                 "accuracy gate, KEEP or REVERT. Deterministic executor for FRAMEWORK_AGENT; also serves "
@@ -249,7 +226,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=1.0,
             lease_ttl_sec=21600,
             requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "writes_config"),
             description=(
                 "Coordinator-internal: the KERNEL_AGENT phase's work as one lane-holding task. Runs the GEAK e2e "
                 "delegation or the Forge pipeline (GEMM tuning, fusion, kernel rewrite controller) per "
@@ -267,7 +243,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=3.0,
             lease_ttl_sec=2700,
             requires_lanes=("profile_lane",),
-            side_effects=("reads_server", "writes_results"),
             description=(
                 "Coordinator-internal: lightweight roofline alternative — torch_profiler trace only, no analysis.md. "
                 "Enqueued when ``--no-enable-roofline``; LLM-proposed delegate is denied."
@@ -284,7 +259,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=5.0,
             lease_ttl_sec=4200,
             requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
                 "Coordinator-internal one-shot replay of T0 warm_start_recipe.best_config; "
                 "a measured gain clearing the keep threshold pushes the warm config onto optimization_stack."
@@ -300,10 +274,10 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             crash_risk=0.0,
             typical_runtime_min=2.0,
             lease_ttl_sec=300,
-            side_effects=("writes_results",),
             description=(
                 "Write final.md / final.json under reports/. Coordinator auto-flushes deterministic report at the "
-                "deadline (invariant); LLM may propose earlier on stop_reason or low remaining."
+                "deadline (invariant); the LLM may propose it only in CLOSE, where the Coordinator routes a stopped "
+                "or out-of-time run."
             ),
         ),
         "roofline": ActionMetadata(
@@ -317,7 +291,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=10.0,
             lease_ttl_sec=2700,
             requires_lanes=("profile_lane",),
-            side_effects=("reads_server", "writes_results"),
             description=(
                 "Composite action: runs profile + trace_analyze atomically to produce a fresh TraceLens analysis.md "
                 "snapshot. Required prerequisite for explore."
@@ -333,7 +306,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             crash_risk=0.0,
             typical_runtime_min=0.2,
             lease_ttl_sec=90,
-            side_effects=("writes_results",),
             description=(
                 "Refresh $SESSION_DIR/session_breakdown.json for downstream dashboards (cheap, idempotent). "
                 "End-of-session export already runs from cli.py finally; only dispatch mid-run for live consumers."
@@ -350,7 +322,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             typical_runtime_min=6.0,
             lease_ttl_sec=1800,
             requires_lanes=("research_lane",),
-            side_effects=("workspace_write",),
             description=(
                 "Dispatch an LLM specialist on research_lane; reads KB / PR feed for knowledge-domain tags, may write "
                 "worktree patches, emits one specialist_done intent."
@@ -366,7 +337,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             crash_risk=0.0,
             typical_runtime_min=0.1,
             lease_ttl_sec=60,
-            side_effects=("reads_model_files", "writes_state"),
             description=(
                 "Runs first in PRELUDE, before baseline; always writes target_analysis/target_baseline.json. With "
                 "--compare-against-gpu set, fetches InferenceX reference; otherwise writes a "
@@ -382,12 +352,10 @@ __all__ = [
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
     "FULL_ENABLED_ACTIONS",
-    "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",
     "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "KERNEL_REQUEST_KIND_ALIASES",
-    "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
 ]

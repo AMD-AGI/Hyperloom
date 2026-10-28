@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections import Counter
 
-from code_metrics_collect import METRICS, MODULE, MODULE_LINES, Finding, Key
+from code_metrics_collect import METRICS, MODULE, MODULE_LINES, PENDING, Finding, Key
 
 MARKER = "<!-- code-metrics-report -->"
 UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
@@ -31,6 +31,16 @@ CHECKS = {
         "Comments",
         "a comment block of at most 8 lines that says what the code does and why; the history (PR, issue, "
         "incident) goes in the commit message and the PR description",
+    ),
+    "broad-noqa": (
+        "Broad catch without a reason",
+        "say on the `# noqa: BLE001` line why the handler may catch every exception (an outermost boundary "
+        "that logs it); otherwise catch the exceptions the block can raise",
+    ),
+    "broad-unrecorded": (
+        "Broad catch that records nothing",
+        "re-raise, or log the error with its traceback at the outermost boundary or the one-item isolation "
+        "boundary that owns it; otherwise catch the exceptions the block can raise or let them propagate",
     ),
     "english": ("English only", "English text only (no CJK characters) in files, PR title, body and commits"),
     "test-imports": (
@@ -117,7 +127,10 @@ class Outcome:
     notes: list[str] = dataclasses.field(default_factory=list)
 
     def judged(self, path: str) -> bool:
-        return self.touched is None or path in self.touched
+        """A file is judged when the change touches it, a directory when it touches a file under it."""
+        if self.touched is None or path in self.touched:
+            return True
+        return any(touched.startswith(path + "/") for touched in self.touched)
 
     @property
     def waivable_failed(self) -> bool:
@@ -169,6 +182,8 @@ def _summary(outcome: Outcome) -> str:
     rows = ["| Dimension | Limit | New | Worse | Baseline out of date | Baseline entries | vs base |"]
     rows.append("|---|---:|---:|---:|---:|---:|---:|")
     for name, metric in METRICS.items():
+        if name in PENDING and name not in outcome.thresholds:
+            continue
         delta = "n/a" if outcome.base_baseline is None else f"{counts['head'][name] - counts['base'][name]:+d}"
         cells = [counts[c][name] for c in ("new", "worse", "stale", "head")]
         rows.append(
@@ -339,7 +354,7 @@ def _now(key: Key, finding: Finding | None, link_base: str) -> str:
 
 def _how_to_fix(outcome: Outcome) -> str:
     pins = outcome.versions
-    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "vulture") if name in pins)
+    pip = " ".join(f"{name}=={pins[name]}" for name in ("ruff", "complexipy", "radon", "vulture") if name in pins)
     lines = [
         "### How to fix\n",
         (

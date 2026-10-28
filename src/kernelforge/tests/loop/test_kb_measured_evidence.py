@@ -10,7 +10,7 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     knowledge_config_from_runtime,
@@ -24,7 +24,9 @@ from kernelforge.knowledge.kb_store.record_store import (
 )
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
-from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import WarmStartHarness
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")
@@ -154,17 +156,18 @@ def _publish_candidate(
     assert patch
     status = sink.write_run_experience(
         config=_run_config(),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=optimized_source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=f"producer-{name}",
-        baseline_wall_ms=10.0,
-        best_wall_ms=10.0 / claimed_speedup,
-        mean_case_speedup=claimed_speedup,
-        cumulative_diff=patch,
-        digest="deterministic producer result",
+        kernel=sink.LoopKernel(
+            kernel_path=str(kernel), kernel_backend="triton", kernel_source=optimized_source, workspace=str(workspace)
+        ),
+        outcome=sink.RunOutcome(
+            experiment_id=f"producer-{name}",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=10.0 / claimed_speedup,
+            cumulative_diff=patch,
+            digest="deterministic producer result",
+            mean_case_speedup=claimed_speedup,
+        ),
         summary_override=SUMMARY,
     )
     assert status["written"] is True
@@ -237,10 +240,8 @@ class _StubClock:
 def _warm_start(workspace: Path, kernel: Path) -> dict:
     return integration.kb_warmstart(
         config=_run_config(),
-        kernel=str(kernel),
-        driver="unused-driver.py",
-        workspace_dir=str(workspace),
-        kernel_backend="triton",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(workspace)),
+        harness=WarmStartHarness(driver="unused-driver.py"),
     )
 
 
@@ -408,19 +409,49 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
         )
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
-    kb = KernelRecipeKB.open_canonical_id(
-        CANONICAL_ID,
+    writeback = integration._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
+        {
+            "solution_slug": f"{CANONICAL_ID}/kda-attn-session",
+            "kernel_slug": CANONICAL_ID,
+            "session_id": "kda-attn-session",
+        },
+        5.106,
+        rank=1,
     )
 
-    outcome = kb.record_measured_speedup("kda-attn-session", 5.106)
+    assert writeback["recorded"] is False
+    assert token not in writeback["reason"]
+    assert writeback["reason"].startswith("KBStoreError: PUT https://[REDACTED]@")
+    assert "Bearer [REDACTED]" in writeback["reason"]
+    assert "the store said [REDACTED] expired" in writeback["reason"]
+    assert len(writeback["reason"]) == 240
 
-    assert outcome["recorded"] is False
-    assert token not in outcome["reason"]
-    assert outcome["reason"].startswith("KBStoreError: PUT https://[REDACTED]@")
-    assert "Bearer [REDACTED]" in outcome["reason"]
-    assert "the store said [REDACTED] expired" in outcome["reason"]
-    assert len(outcome["reason"]) == 240
+
+def _refusing_write_back_store(monkeypatch, failure: Exception) -> None:
+    store = MergingKBStore()
+    monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
+
+    def refuse(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(store, "put_knowledge", refuse)
+
+
+def test_a_refused_measured_write_back_raises_the_store_error_from_the_facade(tmp_path, monkeypatch):
+    _refusing_write_back_store(monkeypatch, record_store.KBStoreError("PUT knowledge failed: HTTP 503"))
+    kb = KernelRecipeKB.open_canonical_id(CANONICAL_ID, _remote_config(tmp_path))
+
+    with pytest.raises(record_store.KBStoreError, match="^PUT knowledge failed: HTTP 503$"):
+        kb.record_measured_speedup("kda-attn-session", 5.106)
+
+
+def test_an_unexpected_write_back_error_propagates(tmp_path, monkeypatch):
+    _refusing_write_back_store(monkeypatch, TypeError("put_knowledge signature drifted"))
+    sol = {"solution_slug": f"{CANONICAL_ID}/s", "kernel_slug": CANONICAL_ID, "session_id": "s"}
+
+    with pytest.raises(TypeError, match="^put_knowledge signature drifted$"):
+        integration._record_measured_speedup(_remote_config(tmp_path), sol, 5.106, rank=1)
 
 
 def test_warm_start_adopts_the_best_measured_candidate_not_the_first_applied(

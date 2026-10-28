@@ -11,8 +11,10 @@ from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
+from hyperloom.common.coerce import first_text
 from hyperloom.common.timeutil import now_iso
 
+from ._shared_state import gap_rows
 from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
 if TYPE_CHECKING:
@@ -25,6 +27,25 @@ __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
 # gap ledger caps; both enforced in upsert_gap.
 _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
+
+# Free-text gap fields an incoming row may restate; ``severity`` defaults to "medium" rather than "".
+_GAP_TEXT_FIELDS: tuple[str, ...] = ("symptom", "layer", "severity", "domain_hint", "source", "provenance")
+
+
+def _merge_gap_attempts(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    """Merge ``incoming`` attempts into ``existing`` once each, newest-last, capped at the history limit.
+
+    ``refresh_gaps`` re-derives every attempt from the whole failure log on each call, so an equal attempt (same
+    failure: action, error class, variant and ts) is the same one, not a new one. Equal rows take the incoming
+    position so a re-derived log keeps its newest-last order under the cap.
+    """
+    older = [a for a in existing if a not in incoming]
+    merged: list[Any] = []
+    for attempt in older + incoming:
+        if attempt not in merged:
+            merged.append(attempt)
+    # Capped tail; callers supply newest-last lists (convention).
+    return merged[-_GAPS_ATTEMPTS_HISTORY:]
 
 
 class GapsStateMixin:
@@ -52,23 +73,17 @@ class GapsStateMixin:
         if existing is None:
             merged: dict[str, Any] = {
                 "canonical_id": cid,
-                "symptom": str(entry.get("symptom") or ""),
-                "layer": str(entry.get("layer") or ""),
+                # ``provenance`` is an optional origin reference (PR/blog URL).
+                **{key: str(entry.get(key) or "") for key in _GAP_TEXT_FIELDS},
                 "severity": str(entry.get("severity") or "medium"),
-                "domain_hint": str(entry.get("domain_hint") or ""),
-                "source": str(entry.get("source") or ""),
-                # Optional origin reference (PR/blog URL).
-                "provenance": str(entry.get("provenance") or ""),
                 "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
-                "attempts": list(entry.get("attempts") or []),
+                "attempts": list(entry.get("attempts") or [])[-_GAPS_ATTEMPTS_HISTORY:],
             }
-            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
-            for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
+            for key in _GAP_TEXT_FIELDS:
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)
@@ -76,24 +91,12 @@ class GapsStateMixin:
             existing["last_updated_ts"] = now
             incoming_attempts = list(entry.get("attempts") or [])
             if incoming_attempts:
-                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
-                # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
-                existing["attempts"] = merged_attempts
+                existing["attempts"] = _merge_gap_attempts(list(existing.get("attempts") or []), incoming_attempts)
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
-            others = [g for g in self.gaps if g is not merged]
-
-            def _sort_key(g: dict[str, Any]) -> str:
-                """Sort key for gap trimming: newest-updated timestamp."""
-                return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
-
-            others.sort(key=_sort_key)
-            keep_count = _GAPS_MAX_ENTRIES - 1
-            others = others[-keep_count:] if keep_count > 0 else []
-            self.gaps = others + [merged]
+            others = sorted((g for g in self.gaps if g is not merged), key=gap_rows.recency_key)
+            self.gaps = others[-(_GAPS_MAX_ENTRIES - 1) :] + [merged]
         return merged
 
     def append_gap_attempt(
@@ -139,27 +142,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
-
-        plane = self.knowledge_plane
-        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
-            try:
-                traverse = getattr(plane, "recipe_kb_traverse_issues")
-                rows = traverse(
-                    model_class=getattr(state, "model_class", "") or "",
-                    gpu_type=getattr(state, "gpu_type", "") or "",
-                )
-                if isinstance(rows, list):
-                    for entry in rows:
-                        if isinstance(entry, dict):
-                            entry = dict(entry)
-                            entry.setdefault("source", "recipe_kb")
-                            state.upsert_gap(entry)
-            except Exception:
-                log.warning(
-                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
-                    reason,
-                    exc_info=True,
-                )
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,
@@ -218,15 +200,21 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         for row in state.last_action_failures or []:
             if not isinstance(row, dict):
                 continue
-            action = str(row.get("action") or "").strip() or "unknown"
-            err = str(row.get("error_class") or "").strip() or "unknown_error"
-            variant = str(row.get("variant_name") or "").strip()
-            # Variant discriminator keeps distinct crash causes in distinct gaps.
-            key = f"{action}::{err}::{variant}" if variant else f"{action}::{err}"
+            action = first_text(row.get("action")) or "unknown"
+            err = first_text(row.get("error_class")) or "unknown_error"
+            variant = first_text(row.get("variant_name"))
             layer, domain = self._gap_layer_for_action(action, str(getattr(self.shared_state, "framework", "") or ""))
             excerpt = str(row.get("error_excerpt") or "")
             detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
-            symptom = f"{action}/{variant} fails: {detail}" if variant else f"{action} repeatedly fails with {detail}"
+            # Variant discriminator keeps distinct crash causes in distinct gaps.
+            if variant:
+                key = f"{action}::{err}::{variant}"
+                symptom = f"{action}/{variant} fails: {detail}"
+                cid_variant = f":{variant}"
+            else:
+                key = f"{action}::{err}"
+                symptom = f"{action} repeatedly fails with {detail}"
+                cid_variant = ""
             attempt = {
                 "action": action,
                 "variant_name": variant,
@@ -237,7 +225,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             if key in seen_failures:
                 seen_failures[key]["attempts"].append(attempt)
             else:
-                cid_variant = f":{variant}" if variant else ""
                 seen_failures[key] = {
                     "canonical_id": f"{workload_id}#fail:{action}:{err}{cid_variant}",
                     "symptom": symptom,
@@ -248,27 +235,30 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     "attempts": [attempt],
                 }
         gaps.extend(seen_failures.values())
+        gaps.extend(self._explore_plateau_gaps(workload_id))
+        return gaps
 
+    def _explore_plateau_gaps(self, workload_id: str) -> list[dict[str, Any]]:
+        """The explore-plateau gap when grid rounds stopped promoting, else none."""
+        state = self.shared_state
         no_promote = int(state.params_no_promote_streak or 0)
-        explore_search = state.explore_search or {}
-        winners_hist = []
-        if isinstance(explore_search, dict):
-            winners_hist = list(explore_search.get("winners_history") or [])
+        # Every writer of explore_search stores a dict, and a loaded state rebuilds it as one.
+        winners_hist = list(state.explore_search.get("winners_history") or [])
         recent_promotions = sum(
             1 for w in winners_hist[-5:] if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
         )
-        if no_promote >= 3 and recent_promotions == 0:
-            gaps.append(
-                {
-                    "canonical_id": f"{workload_id}#explore_plateau",
-                    "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
-                    "layer": "framework",
-                    "severity": "high" if no_promote >= 6 else "medium",
-                    "domain_hint": self._framework_authoring_domain(),
-                    "source": "attempts",
-                }
-            )
-        return gaps
+        if no_promote < 3 or recent_promotions != 0:
+            return []
+        return [
+            {
+                "canonical_id": f"{workload_id}#explore_plateau",
+                "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
+                "layer": "framework",
+                "severity": "high" if no_promote >= 6 else "medium",
+                "domain_hint": self._framework_authoring_domain(),
+                "source": "attempts",
+            }
+        ]
 
     def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""

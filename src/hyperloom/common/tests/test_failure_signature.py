@@ -16,6 +16,7 @@ from hyperloom.common.failure_signature import (
     EVAL_GENERATION_PATHOLOGY,
     EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
+    HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
     MISSING_MODEL_ARCH,
     MISSING_WEIGHT,
@@ -26,8 +27,6 @@ from hyperloom.common.failure_signature import (
     TOKENIZER_ERROR,
     UNKNOWN,
     UNSUPPORTED_DTYPE,
-    CapabilityGap,
-    EnablementRequest,
     FailureSignature,
     _extract_offending_file,
     classify_failure,
@@ -99,6 +98,12 @@ def test_hip_kernel_missing_no_binary() -> None:
     sig = classify_failure("RuntimeError: hipErrorNoBinaryForGpu: no kernel image is available")
     assert sig.kind == HIP_KERNEL_MISSING
     assert sig.bridge_layer == "rocm_hip"
+
+
+def test_a_bare_no_binary_error_is_a_missing_kernel() -> None:
+    """hipErrorNoBinaryForGpu alone names an absent binary, not a call that failed while running."""
+    sig = classify_failure("RuntimeError: hipErrorNoBinaryForGpu")
+    assert sig.kind == HIP_KERNEL_MISSING
 
 
 def test_hip_undefined_symbol_captured() -> None:
@@ -287,35 +292,6 @@ def test_a_payload_without_a_verdict_is_rejected() -> None:
         FailureSignature.from_dict({})
 
 
-# --- EnablementRequest -----------------------------------------------------
-
-
-def test_request_from_dict_minimal() -> None:
-    """Minimal payload parses; the framework is normalized to lower case."""
-    req = EnablementRequest.from_dict(
-        {
-            "framework": "SGLang",
-            "model": "zai-org/GLM-5",
-            "repo_url": "https://github.com/sgl-project/sglang.git",
-        }
-    )
-    assert req.framework == "sglang"
-    assert req.model == "zai-org/GLM-5"
-
-
-@pytest.mark.parametrize("missing", ["framework", "model", "repo_url"])
-def test_request_requires_core_fields(missing: str) -> None:
-    """Each of framework/model/repo_url is mandatory."""
-    payload = {
-        "framework": "sglang",
-        "model": "m",
-        "repo_url": "https://x/y.git",
-    }
-    del payload[missing]
-    with pytest.raises(ValueError, match=missing):
-        EnablementRequest.from_dict(payload)
-
-
 # --- runnable_decision (the enablement gate) -------------------------------
 
 
@@ -412,7 +388,7 @@ def test_kernel_over_the_device_register_budget() -> None:
 
 
 def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel() -> None:
-    """Rules are evaluated in list order, which FAILURE_KINDS does not govern.
+    """Rules are evaluated in list order.
 
     The HIP rule matches any ``hipError`` token, and this diagnostic carries one
     alongside the resource wording -- so ordering it after that rule would have
@@ -428,11 +404,40 @@ def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel()
     assert sig.kind != HIP_KERNEL_MISSING
 
 
-def test_a_plain_hip_error_is_still_a_missing_kernel() -> None:
-    """The counterpart: the HIP rule keeps everything it had."""
+def test_a_missing_binary_is_still_a_missing_kernel() -> None:
+    """The counterpart: what says a kernel is absent keeps its kind."""
     from hyperloom.common.failure_signature import HIP_KERNEL_MISSING
 
     assert classify_failure("hipErrorNoBinaryForGpu: no kernel image is available").kind == HIP_KERNEL_MISSING
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+        "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html\n",
+        "Exception: Capture cuda graph failed: HIP error: operation failed due to a previous error during capture\n"
+        "Search for `hipErrorStreamCaptureInvalidated' in https://docs.nvidia.com/cuda/\n",
+    ],
+)
+def test_a_hip_call_that_failed_while_running_is_not_a_missing_kernel(log: str) -> None:
+    """The kernel was there and ran; a hipError from a failed call is a runtime error, not a missing kernel."""
+    sig = classify_failure(log)
+
+    assert sig.kind == HIP_RUNTIME_ERROR
+    assert sig.kind != HIP_KERNEL_MISSING
+    assert sig.bridge_layer == "rocm_hip"
+    # the enablement ladder still routes it as a compiled-layer gap, as it did when it shared the kind above
+    assert is_targeted_build_candidate(sig) is True
+
+
+def test_an_absent_symbol_beside_a_runtime_error_stays_a_missing_kernel() -> None:
+    sig = classify_failure(
+        "hipErrorIllegalAddress\nImportError: /opt/sglang/_C.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"
+    )
+
+    assert sig.kind == HIP_KERNEL_MISSING
+    assert HIP_RUNTIME_ERROR in sig.secondary_kinds
 
 
 def test_a_host_out_of_memory_is_still_not_a_kernel_budget() -> None:
@@ -468,46 +473,6 @@ def test_resource_constraint_tp() -> None:
 def test_resource_constraint_no_kv_cache() -> None:
     sig = classify_failure("No GPU memory left for the KV cache. Please try enabling quantization")
     assert sig.kind == RESOURCE_CONSTRAINT
-
-
-# --- CapabilityGap projection -----------------------------------------------
-
-
-def test_capability_gap_from_resource_constraint() -> None:
-    """resource_constraint -> requires_code_acquisition=False."""
-    sig = FailureSignature(kind=RESOURCE_CONSTRAINT, confidence=0.88)
-    gap = CapabilityGap.from_signature(sig)
-    assert gap.kind == RESOURCE_CONSTRAINT
-    assert gap.requires_code_acquisition is False
-
-
-def test_capability_gap_from_import_error() -> None:
-    """import_error -> requires_code_acquisition=True."""
-    sig = FailureSignature(kind=IMPORT_ERROR, confidence=0.7, bridge_layer="build")
-    gap = CapabilityGap.from_signature(sig)
-    assert gap.requires_code_acquisition is True
-    assert gap.bridge_layer == "build"
-
-
-def test_capability_gap_from_tokenizer_error() -> None:
-    sig = FailureSignature(kind=TOKENIZER_ERROR, confidence=0.75, bridge_layer="framework")
-    gap = CapabilityGap.from_signature(sig)
-    assert gap.requires_code_acquisition is True
-
-
-def test_capability_gap_to_dict() -> None:
-    gap = CapabilityGap(kind=RESOURCE_CONSTRAINT, requires_code_acquisition=False)
-    d = gap.to_dict()
-    assert d["kind"] == RESOURCE_CONSTRAINT
-    assert d["requires_code_acquisition"] is False
-
-
-def test_oom_classify_and_gap_no_code_acquisition() -> None:
-    """End-to-end: OOM log -> classify -> CapabilityGap.requires_code_acquisition is False."""
-    sig = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
-    assert sig.kind == RESOURCE_CONSTRAINT
-    gap = CapabilityGap.from_signature(sig)
-    assert gap.requires_code_acquisition is False
 
 
 # --- is_targeted_build_candidate (Rung 5 eligibility) ----------------------
@@ -552,10 +517,6 @@ def test_targeted_build_candidate_native_dtype_from_log() -> None:
 def test_targeted_build_candidate_framework_python_gap_rejected() -> None:
     sig = FailureSignature(kind=MISSING_MODEL_ARCH, bridge_layer="framework")
     assert is_targeted_build_candidate(sig) is False
-
-
-def test_targeted_build_candidate_none_signature() -> None:
-    assert is_targeted_build_candidate(None) is False  # type: ignore[arg-type]
 
 
 # --- _extract_offending_file -----------------------------------------------

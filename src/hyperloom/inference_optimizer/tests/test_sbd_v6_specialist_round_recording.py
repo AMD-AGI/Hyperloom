@@ -18,7 +18,9 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle, SpecialistRound
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_SOURCE,
     ROLE_DISCOVERY,
@@ -38,7 +40,7 @@ def _bound_session(tmp_path):
 
 def _actions(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext["actions"]
@@ -51,17 +53,19 @@ def _runs(session_dir) -> list[dict[str, Any]]:
 
 
 def test_a_prelude_round_lands_on_the_action_that_dispatched_it(tmp_path) -> None:
-    phase_event.record_dispatch(action="specialist", task_id="t-1", phase="PRELUDE", macro_cycle=0, dispatched_unix=4.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("PRELUDE", 0), action="specialist", task_id="t-1", dispatched_unix=4.0)
+    )
     phase_event.record_specialist_round(
-        task_id="t-1",
-        phase="PRELUDE",
-        macro_cycle=0,
-        domain="attention",
-        summary="two kernels worth attacking",
-        proposals_total=2,
-        empty=False,
-        confidence=0.75,
-        new_findings=["fa2 is the hot path"],
+        SpecialistRound(
+            task_id="t-1",
+            domain="attention",
+            summary="two kernels worth attacking",
+            proposals_total=2,
+            empty=False,
+            confidence=0.75,
+            new_findings=["fa2 is the hot path"],
+        )
     )
 
     actions = _actions("PRELUDE")
@@ -78,14 +82,13 @@ def test_a_prelude_round_lands_on_the_action_that_dispatched_it(tmp_path) -> Non
 
 
 def test_an_empty_round_says_so_rather_than_going_missing(tmp_path) -> None:
-    phase_event.record_dispatch(action="specialist", task_id="t-2", phase="EXPLORE", macro_cycle=2, dispatched_unix=9.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("EXPLORE", 2), action="specialist", task_id="t-2", dispatched_unix=9.0)
+    )
     phase_event.record_specialist_round(
-        task_id="t-2",
-        phase="EXPLORE",
-        macro_cycle=2,
-        proposals_total=0,
-        empty=True,
-        residual_questions=["is the tokenizer the bound?"],
+        SpecialistRound(
+            task_id="t-2", proposals_total=0, empty=True, residual_questions=["is the tokenizer the bound?"]
+        )
     )
 
     (row,) = _actions("EXPLORE", 2)["rows"]
@@ -95,13 +98,7 @@ def test_an_empty_round_says_so_rather_than_going_missing(tmp_path) -> None:
 
 
 def test_a_round_without_dispatch_evidence_does_not_get_a_guessed_row(tmp_path) -> None:
-    phase_event.record_specialist_round(
-        task_id="t-3",
-        phase="PLATEAU",
-        macro_cycle=1,
-        summary="trajectory review",
-        proposals_total=1,
-    )
+    phase_event.record_specialist_round(SpecialistRound(task_id="t-3", summary="trajectory review", proposals_total=1))
 
     actions = _actions("PLATEAU", 1)
     assert actions["count"] == 0
@@ -109,9 +106,11 @@ def test_a_round_without_dispatch_evidence_does_not_get_a_guessed_row(tmp_path) 
 
 
 def test_re_recording_the_same_round_does_not_duplicate_it(tmp_path) -> None:
-    phase_event.record_dispatch(action="specialist", task_id="t-4", phase="EXPLORE", macro_cycle=0, dispatched_unix=1.0)
-    phase_event.record_specialist_round(task_id="t-4", phase="EXPLORE", macro_cycle=0, proposals_total=1)
-    phase_event.record_specialist_round(task_id="t-4", phase="EXPLORE", macro_cycle=0, proposals_total=3)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("EXPLORE", 0), action="specialist", task_id="t-4", dispatched_unix=1.0)
+    )
+    phase_event.record_specialist_round(SpecialistRound(task_id="t-4", proposals_total=1))
+    phase_event.record_specialist_round(SpecialistRound(task_id="t-4", proposals_total=3))
 
     actions = _actions("EXPLORE")
     assert actions["count"] == 1
@@ -119,20 +118,9 @@ def test_re_recording_the_same_round_does_not_duplicate_it(tmp_path) -> None:
 
 
 def test_an_unapproved_field_cannot_smuggle_itself_into_the_row(tmp_path) -> None:
-    phase_event.record_dispatch(action="specialist", task_id="t-5", phase="EXPLORE", macro_cycle=0, dispatched_unix=1.0)
-    phase_event.record_specialist_round(
-        task_id="t-5",
-        phase="EXPLORE",
-        macro_cycle=0,
-        summary="kept",
-        parallelism=4,
-        task_domains={"t-5": "gemm"},
-    )
-
-    (row,) = _actions("EXPLORE")["rows"]
-    assert row["summary"] == "kept"
-    assert "parallelism" not in row
-    assert "task_domains" not in row
+    with pytest.raises(TypeError):
+        SpecialistRound(task_id="t-5", summary="kept", parallelism=4)
+    assert SpecialistRound(task_id="t-5", summary="kept").row() == {"task_id": "t-5", "summary": "kept"}
 
 
 class _StubTask:
@@ -213,3 +201,19 @@ def test_a_framework_round_lands_on_the_run_that_dispatched_it(tmp_path) -> None
     assert run["new_findings"] == ["m=8192 falls off the tile"]
     assert run["notes"] == ["ran short of budget"]
     assert run["ensemble_scores"] == {"agree": 0.8}
+
+
+def test_a_failing_round_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    def _boom(_round) -> None:
+        raise RuntimeError("round record bug")
+
+    monkeypatch.setattr(phase_event, "record_specialist_round", _boom)
+    seam = _Seam(phase="KERNEL_AGENT")
+
+    with pytest.raises(RuntimeError, match="round record bug"):
+        seam._record_specialist_round_product(
+            task=_StubTask("t-10"),
+            round_entry={"round_id": "r-10", "domain": "gemm", "proposals_total": 1},
+        )

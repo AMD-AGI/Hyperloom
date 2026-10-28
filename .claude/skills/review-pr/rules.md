@@ -38,7 +38,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | moves a call, an export or an assignment relative to another, or adds one that has to run after an existing one: a re-ordered projection, a guard that must see a restored value, a seed that must follow a resolver | T5 P5 D8 V8 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
-| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
+| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
 | touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
@@ -50,7 +50,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds a new module, or adds methods, fields or imports to a module or class already over a size trigger | A5 |
 | extracts a function from a long one, or cites the complexity or size trigger as the reason for a split | A6 |
 | branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 A10 |
-| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | A8 A9 A11 |
+| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | D14 A8 A9 A11 |
 | adds a `Protocol`, `ABC`, base class, factory, registry, or a function whose body is one forwarding call | A12 |
 | adds an `isinstance`/`is None`/`or {}` guard on an internal value, a renaming local, or an `except ...: raise` | A13 |
 | adds or renames a function, parameter, module binding or import alias | A14 |
@@ -122,7 +122,7 @@ file-shaped row would miss.
 
 **Severity:** blocking
 **Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch.
-**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. `AGENTS.md` already bans new broad catches; this rule is about the narrow ones that still swallow.
+**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. S8 covers the broad ones; this rule is about the narrow ones that still swallow.
 **Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success.
 **Not a finding when:** the suppressed call is genuinely advisory (best-effort telemetry, cache warm) and the caller has an independent signal for the same condition, or the handler logs and re-raises.
 **Evidence:** `$WORK/diff.txt` -- the guarded region, the position of the log, and the caller's use of the return value.
@@ -188,6 +188,16 @@ file-shaped row would miss.
 **Evidence:** `$WORK/diff.txt` -- the inserted guard, the fallback below it, and the producer sites in the same diff.
 **Report as:** `S7 <file>:<line> -- new guard makes <fallback> unreachable for <value>`
 
+### S8 -- A broad except must re-raise, or sit at the boundary that owns the failure and record it
+
+**Severity:** blocking
+**Fires when:** the diff adds an `except Exception`, `except BaseException` or bare `except`, or changes what an existing one does with the error.
+**The rule:** a broad handler has one of three shapes. It re-raises -- directly, through a helper that always raises, or by keeping the error and raising it after cleanup. Or it is the outermost handler on its path (a task, thread or process entry, a CLI `main`, a dispatcher tick, an atexit or signal handler, a telemetry sink that must never break its caller) and logs the error with its traceback. Or it isolates one item a loop or tick must survive (one candidate, sweep point, pod, profile) and does all three: logs the error with its traceback, puts the failure in a status or field the caller reads and a legitimate result never carries, and names what it isolates in a comment on the `except` line (`# isolation boundary: one sweep point`; as the `# noqa: BLE001` reason where Ruff still flags the line, which it does not once the handler logs with `exc_info`). Anything else -- a mid-path handler that logs and returns a fallback, a fallback a caller cannot tell from a real result, a handler that records nothing -- is narrowed to what the body raises or removed so the error reaches the boundary that owns it. The `code-metrics` gate refuses an added broad handler that records nothing; whether it sits at the right boundary is this rule's question.
+**Seen in:** PR #2168 -- broad handlers in the KERNEL fusion path swallowed failed `state.json` saves, and others turned errors into plausible return values; 49 of them were narrowed, removed or left to the boundary that records them.
+**Not a finding when:** the handler is only moved or re-indented; it is in a test; it re-raises; or the boundary is named and verified -- nothing above it records the failure, or the caller reads the per-item failure status.
+**Evidence:** `$WORK/diff.txt` -- the try body and the handler, the callers (`rg` the function name), and the status or field the caller reads.
+**Report as:** `S8 <file>:<line> -- broad except <is mid-path | records nothing | falls back to a value indistinguishable from <real result>>; <narrow to <types> | remove so <boundary> records it>`
+
 ---
 
 ## X -- Cross-artifact sync
@@ -245,7 +255,7 @@ file-shaped row would miss.
 ### X6 -- A persisted schema change needs a version bump and a migration
 
 **Severity:** blocking
-**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/durable_io.py`, or the diff contains `CREATE TABLE`.
+**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/tools/durable_io.py`, or the diff contains `CREATE TABLE`.
 **The rule:** Any added, removed or renamed field in a persisted record -- run state, session state, sqlite schema, SBD document -- comes with a schema-version bump and a migration step following the file's existing convention. The check is to load a payload written at the previous version: strict field-set validation in `from_dict` and `CREATE TABLE IF NOT EXISTS` both fail to save you, and the symptom is that every existing workspace dies at startup, `--resume` included.
 **Seen in:** PR #1497 -- `search_start_mean_case_speedup` was added to `RunState` with `SCHEMA_VERSION` left at 19 and no migration, killing every campaign with an existing workspace at startup.
 **Not a finding when:** the field is optional with a default and the loader tolerates unknown or missing keys on the old-version path -- verify by reading the loader, not by assuming `total=False` is enough.
@@ -255,7 +265,7 @@ file-shaped row would miss.
 ### X7 -- An external-component pin moves in all four places at once
 
 **Severity:** blocking
-**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_deps.py`, `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
+**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
 **The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
@@ -775,7 +785,7 @@ backend registration outside `agent_backends/registry.py`; tier, path or schema 
 the code that reads them; a private re-implementation of a `hyperloom.common` helper --
 `common/io.py` (`atomic_write_*`, `safe_mtime`, `append_jsonl`), `common/jsonio.py`
 (`read_json`, `read_jsonl`), `common/timeutil.py` (`now_iso`), `common/proctree.py`
-(`group_alive`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
+(`group_members`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
 second `def` whose body matches an exported one.
 **The rule:** a second home for a concern means two answers to the same question, and the one
 the reader is looking at is not necessarily the one that runs. Import from the owner. If the
@@ -846,17 +856,16 @@ function that reads long is not the same claim. Run the ceiling against the chan
 head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
+  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/' -e 'kb_store/remote_client.py')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise "$WORK/base-<name>.py"
+radon cc -s -n D "$WORK/base-<name>.py"
 ```
 
-`--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
-out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
-outside the tree. Present at head and absent at base, or a higher number at head than at base,
+radon (6.0.1, as the gate pins) counts every `and` / `or`, ternary, comprehension and `assert` as a
+branch, as the gate and the code-health report do; `-n D` lists the functions above 20, and the
+`grep -v` keeps Ruff's `extend-exclude` trees (vendored SDK copies, `src/kernelforge/examples`) out. Present at head and absent at base, or a higher number at head than at base,
 fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
 the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
 question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design
@@ -868,7 +877,7 @@ above 20 when it was introduced, which is the backlog the comparison exists to k
 finding.
 **Not a finding when:** the base number equals the head number (the unit was already over and
 this diff did not grow it); the file is a test, or sits in `extend-exclude`, which
-`--force-exclude` already settles; the added branches are a flat dispatch or validation table
+the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
 **Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
@@ -906,6 +915,51 @@ serve this case.
 existing resolver, ladder or owner of the same shape.
 **Report as:** `D13 -- <N> mechanisms added to keep <A> from colliding with <B>; <existing form>:<line> already
 resolves this shape -- reuse it`
+
+### D14 -- A function this diff adds, or whose signature it widens, may not exceed five parameters
+
+**Severity:** blocking
+**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or
+adds a parameter to an existing one, and the measurement below puts that function above five
+parameters at the head while the merge base had it at five or fewer, absent, or with fewer.
+**The rule:** measure, do not estimate. `self`/`cls` and `*args`/`**kwargs` do not count,
+keyword-only parameters do. Run the limit against the changed files at the head, then against the
+same paths at `base.txt`, and match per function name:
+
+```bash
+ruff check --select PLR0913 --config "lint.pylint.max-args=5" --force-exclude \
+  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+
+git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
+ruff check --select PLR0913 --config "lint.pylint.max-args=5" --isolated \
+  --output-format concise "$WORK/base-<name>.py"
+```
+
+Present at head and absent at base, or a higher number at head than at base, fires; the same number
+on both sides is backlog and is silent (the two switches do what D12's paragraph says they do). The
+fix is not a shorter name: the values that travel together become one frozen keyword-only dataclass
+built where they are resolved, or the callee takes the object its callers unpack -- A8's clump, and
+A6 when the long list is a caller's local variable table threaded into an extracted slice. The
+`code-metrics` CI job measures the same two cases, but its `baseline-raise` label waives them, so
+the rule stays for the one question CI cannot answer: whether a labelled PR gives the reason.
+**Seen in:** no single PR -- this is the gate written into the style guide's *Size and complexity*
+table rather than a shape clustered from review history. The tree held 563 units above five when it
+was introduced, which is the backlog the comparison exists to keep out of the finding; PR #1366's
+26-keyword `_run_multi_patch_nomination` and PR #1660's 28-parameter
+`_sweep_one_arm_single_server` are what that backlog looks like.
+**Not a finding when:** the base number equals the head number (the signature was already over and
+this diff did not widen it); the file is a test, or sits in `extend-exclude`, which
+`--force-exclude` already settles; the parameters are a typed parameter object; the function is a
+CLI entry point whose parameters are the operator's flags, or its signature is fixed by a
+`Protocol`, a callback or a sibling implementation of one interface -- A8's exemptions, which this
+rule counts but does not overrule.
+**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+for the parameters the diff added.
+**Report as:** `D14 <file>:<line> -- <fn> takes <head> parameters (base: <base|absent>), over the
+limit of 5; pass <object> or group <names> into <Type>`
+**CI:** the `code-metrics` job fails this limit on the files a PR touches (style guide § *Size and
+complexity*). The `baseline-raise` label waives that CI check; D14 then accepts the override only
+when the PR description gives the reason the signature stays above five, and fires otherwise.
 
 ## A -- Abstraction, boundaries and shape
 
@@ -1002,7 +1056,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 
 **Severity:** blocking for (a): no fire in a 30-PR replay, 2026-10-11, so it keeps its first-landing severity (`AGENTS.md` *Code shape*: "no flag argument that selects between two bodies"; *Simplify by removing a mechanism*: "rather than become one function with modes"). Blocking for (d), and for (c)'s parameter only tests set to a non-default value: blocking by owner decision 2026-10-12 on a 1/1 replay; demote back to advisory on the first confirmed false-positive block (*Code shape*: "no parameter that is derivable, unread or set only by tests"). (b) and (c)'s derivable parameter are advisory: 1/1 real (a parameter no caller sets), below the two real findings promotion needs (no `AGENTS.md` sentence names a clump).
 **Fires when:** the diff adds a parameter to, or adds a `def` under `src/` with: (a) a `bool` (or two-value `Literal`) that selects between two bodies -- its first use is `if <param>:` ending in `return` -- and a production caller passing one value also passes dummies (`""`, `0`, `None`) for parameters only the other body reads; a flag with no such dummy-passing caller is advisory; (b) a group of three or more names passed together in the same order to more than one function, or unpacked from one object at every call site; (c) a parameter every production caller derives from another argument, or that only tests set to a non-default value; (d) a parameter the body never reads.
-**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. Values that always travel together become one frozen, keyword-only dataclass built once where they are resolved (`_SweepRun`, `_Round` are the house pattern). When every caller unpacks the same object to feed the callee, pass the object -- unless taking it would make the callee import a type from a layer above it, in which case pass the fields. A parameter that is derivable, unread or varied only by tests is plumbing the change introduced. Parameter count alone is not this rule's finding.
+**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. Values that always travel together become one frozen, keyword-only dataclass built once where they are resolved (`_SweepRun`, `_Round` are the house pattern). When every caller unpacks the same object to feed the callee, pass the object -- unless taking it would make the callee import a type from a layer above it, in which case pass the fields. A parameter that is derivable, unread or varied only by tests is plumbing the change introduced. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameters go.
 **Seen in:** PR #1660 -- "_sweep_one_arm_single_server took 28 parameters ... and 18 of them were the same sweep-wide values threaded through every call" (clump -> `_SweepRun`); "has_budget was always total_budget_sec is not None" (derivable); "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests" (test-only). PR #1707 -- "_reject took eleven positional parameters, four consecutive str among them"; the callers in `enablement/lane.py` now pass `round_row` instead of unpacking it. `inference_optimizer/multi_node/_internal/infera_support.py::build_node_launch_args(..., kill_only=False)` (the flag dates from PR #548, in what was then `dynamo_support.py`; PR #893 renamed the module) branches on `if kill_only: ... return`, and `inference_optimizer/multi_node/commands/infera.py::_infera_kill_inference` passes `model=""`, `tp=0`, `kill_only=True` to satisfy the other branch's signature.
 **Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); passing the owning object would invert a layer; the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface (a no-op or null-object alternate in a union, a subclass override) that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; a static gate in CI already reports the unread parameter.
 **Evidence:** `$WORK/diff.txt` for the signature; `git grep` for the production call sites and what they pass.
@@ -1043,7 +1097,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Severity:** blocking for the pure forwarding `def` (the third shape below): 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Simplify by removing a mechanism*: "a forwarding layer with no job of its own"). The single-implementation abstraction and the memberless base class are advisory: no fire, so no evidence either way (*Code shape*: "An abstraction — Protocol, ABC, base class, factory, registry — arrives with its second implementation, not before"; *Simplify by removing a mechanism* for the memberless base). A config knob with one value is C3's. A forwarder or single-caller helper that exists only to keep another part of the same fix from colliding is one of D13's counted mechanisms: report the set once under D13, not each part here.
 **Fires when:** the diff adds a `Protocol`, `ABC`, factory whose job is to choose an implementation (`select_*`, or a `make_*`/`build_*` typed to return an abstraction), registry or strategy dict with fewer than two production implementations or entries in the head tree; or adds a base class that declares no members of its own, whatever its subclass count; or adds a `def` whose body after the docstring is one `return`/`await` of another callable with the same arguments in the same order -- an `_impl` twin, a private alias of an imported function, a method forwarding to one collaborator method.
 **The rule:** an abstraction is paid for by its second user. A Protocol, base class, factory or registry with one production implementation gives the reader an extra hop that decides nothing, and agents copying the file add more of the same seam. Use the concrete class, and introduce the seam in the PR that adds the second implementation. A function that only renames and forwards its arguments is a forwarding layer: call the target by its own name. The finding names the abstraction or forwarder, the single implementation or target, and the call sites that would bind to it directly.
-**Seen in:** PR #1665 deleted `phases/base.py`'s `class PhaseHandler(CoordinatorCollaborator)`, which declared no members, so "every phase that named it reached its collaborator through one hop that decided nothing". PR #1642 -- "`_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature", and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. `orchestrator/bringup/reap.py::ReapBackend` (PR #1409): `class ReapBackend(Protocol)` with one implementation, `reap.py::ProcessGroupReaper`, and `reap.py::select_reaper() -> ReapBackend` that returns it; nothing under `src/` outside its tests uses either. `orchestrator/actions/executors/profile.py::_is_capture_trace(path, root=None)` (PR #1249) only returns `_shared_is_capture_fragment(path, root)`, with the same private wrapper at `orchestrator/trace_analysis/_bypass_trace_reader.py::_is_capture_fragment` and `orchestrator/trace_analysis/tracelens_analysis.py::_is_capture_fragment`.
+**Seen in:** PR #1665 deleted `phases/base.py`'s `class PhaseHandler(CoordinatorCollaborator)`, which declared no members, so "every phase that named it reached its collaborator through one hop that decided nothing". PR #1642 -- "`_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature", and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. `orchestrator/actions/executors/profile.py::_is_capture_trace(path, root=None)` (PR #1249) only returns `_shared_is_capture_fragment(path, root)`, with the same private wrapper at `orchestrator/trace_analysis/_bypass_trace_reader.py::_is_capture_fragment` and `orchestrator/trace_analysis/tracelens_analysis.py::_is_capture_fragment`.
 **Not a finding when:** the memberless base is an exception family that callers catch to handle its subclasses together; a builder does real construction work (assembles a parser, a config, an argv) rather than choosing an implementation; the seam is an exported contract consumed out of tree or by plugins (`agent_backends/registry.py`, a client interface with HTTP and in-memory implementations); the second implementation lands in the same PR; the Protocol is declared by a lower layer so a higher layer can implement it without an upward import (dependency inversion, A2); the forwarder adapts something (adds a default, converts or checks a type at runtime, binds `self` state, converts units, computes an argument) -- narrowing only the annotation is not adapting; it is a staged-migration adapter that names its remaining consumer (*Finish the replacement*); it is a documented test monkeypatch point.
 **Evidence:** `$WORK/diff.txt` for the new class or def; `git grep` over the head tree, excluding tests, for implementations and callers.
 **Report as:** `A12 <file>:<line> -- <abstraction> has one implementation <impl>|<fn> only forwards to <target>; use <impl|target> directly at <call sites>`
@@ -1150,9 +1204,13 @@ rewrote the `record_kernel_discovery` call contract, so landing this one first w
 #1397's premise.
 **Not a finding when:** the overlapping files are only lockfiles or test
 fixtures, or the other PR is a draft the author has already stacked on this one.
-**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share.
+**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share. A `# PARTIAL:` line
+names what was never compared: the open PRs past the list limit, or a PR's files past its first
+100. Overlap there is unchecked, not absent: each such line goes into `verdicts.txt` and onto the
+card under SKILL.md's SKIPPED protocol, and a `FIRE` or `CLEAR` covers only the rows compared.
 **Report as:** `V4: #<N> touches <K> of the same files and <how the premises conflict> --
-land <which> first`
+land <which> first`; for each `# PARTIAL:` line, also `SKIPPED: V4 -- <that line, quoted>, overlap
+there unchecked`
 
 ### V5 -- CI must be green at the current head, proportional to the diff, and free of base conflicts
 
@@ -1170,8 +1228,9 @@ reviewed around the markers.
 **Seen in:** PR #703 -- at head `7881d481` only `Analyze (python)` passed and ReadTheDocs
 failed, while the `Tests with Coverage` and `Lint` successes belonged to older heads and did
 not cover the later `apply_and_bench` rewrite.
-**Not a finding when:** the unreported workflows are path-filtered out by the doc-only
-`paths-ignore` contract and the diff is genuinely doc-only.
+**Not a finding when:** the diff is genuinely doc-only and the missing runs are the ones the
+doc-only contract in CONTRIBUTING.md skips (CodeQL does not start; the test shards and the
+non-ruff lint jobs are skipped while `coverage (Python 3.x)` and `ruff` still report).
 **Evidence:** `$WORK/ci.txt` for the check runs and their head, `$WORK/meta.txt` for
 `mergeable`, `$WORK/commits.txt` for what landed after the last green run.
 **Report as:** `V5: <check> passed at <old sha>, current head is <sha>; <what landed since>

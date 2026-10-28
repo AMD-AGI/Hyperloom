@@ -27,21 +27,30 @@ from kernelforge.orchestrator.agent_response import (
     validated_agent_text,
 )
 from kernelforge.orchestrator.contracts import (
+    CaseEvidence,
     DispatchIntent,
     DispatchPlan,
     EvidenceRef,
     LaneGround,
     OrchestrationContext,
     OrchestrationRunResult,
+    PlanCriticOutcome,
     SynthesizedPlan,
     SpecialistAssignment,
     SpecialistDefinition,
     SpecialistOutcome,
+    SpecialistRound,
 )
+from kernelforge.orchestrator.critic_fallback import render_critic_fallback
 from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
+)
+from kernelforge.orchestrator.plan_prompts import (
+    LANE_SYNTHESIS_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
 )
 from kernelforge.orchestrator.plan_critic import (
     PLAN_CRITIC_MAX_TURNS,
@@ -93,6 +102,46 @@ def _as_bool(value: object) -> tuple[bool, bool]:
     return False, False
 
 
+_GLOBAL_EVIDENCE_KINDS = {
+    "analysis_artifact_catalog",
+    "analysis_bundle",
+    "analysis_cumulative_diff",
+    "analysis_summary",
+    "analysis_source_map",
+    "analysis_workflow",
+    "latest_lesson",
+    "supervisor_guidance",
+}
+_PROFILED_CASE_FLAGS = {
+    "analysis_profiled",
+    "analysis_profile_incremental",
+    "analysis_checkpoint_profile_interpretation",
+    "analysis_checkpoint_normalized_only",
+    "analysis_checkpoint_raw_profile_only",
+}
+
+
+def _case_evidence_refs(case: CaseEvidence) -> dict[str, EvidenceRef]:
+    """The evidence one scored case hands every specialist assigned to it, keyed by path."""
+    measurement = EvidenceRef(
+        kind="measurement",
+        path=f"case:{case.case_id}",
+        summary=(f"Canonical timing and Analysis flags for {case.case_id}."),
+    )
+    refs = {measurement.path: measurement}
+    if case.profile_summary_path:
+        if _PROFILED_CASE_FLAGS.isdisjoint(case.flags):
+            kind, label = "analysis_interpretation", "Analysis interpretation"
+        else:
+            kind, label = "profile", "Measured profile"
+        refs[case.profile_summary_path] = EvidenceRef(
+            kind=kind,
+            path=case.profile_summary_path,
+            summary=label + f" for {case.case_id}. Flags: " + f"{', '.join(case.flags) or '(none)'}.",
+        )
+    return refs
+
+
 @dataclass(frozen=True)
 class _RevisedPlan:
     """One critic-directed revision plus how its session was obtained."""
@@ -102,6 +151,19 @@ class _RevisedPlan:
     duration_sec: float
 
 
+@dataclass(frozen=True)
+class _Turn:
+    """One read-only orchestration turn: its prompts, its role, and the turn, time and tool limits it runs under."""
+
+    system_prompt: str
+    user_prompt: str
+    role: str = "orchestration"
+    max_turns: int | None = None
+    timeout_sec: int | None = None
+    tools: bool = True
+    max_reasoning_effort: str = ""
+
+
 _DISPATCH_SYSTEM_PROMPT = """\
 You are the read-only orchestration planner for an autonomous GPU-kernel search.
 
@@ -109,22 +171,6 @@ Use only the supplied evidence. Do not edit files, run shell commands, alter
 measurement inputs, or present an inference as a profiler fact. Return one JSON
 object containing the specialist assignments. Do not use Markdown fences or add
 text outside the JSON object.
-"""
-
-_SYNTHESIS_SYSTEM_PROMPT = """\
-You are the read-only lead planner for an autonomous GPU-kernel optimization
-search. Multiple specialists have independently analyzed the current kernel.
-
-Synthesize their work into one coherent, implementer-ready optimization plan. Judge
-the recommendations rather than copying them: compare expected value, evidence,
-feasibility, correctness risk, implementation cost, dependencies, and conflicts.
-Combine compatible ideas, reject weak or contradictory ideas, and choose a clear
-implementation sequence. The result must be an integrated plan, not a catalog of
-specialist suggestions.
-
-Use only supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return ordinary
-Markdown with no fixed schema.
 """
 
 _PARTITION_SYSTEM_PROMPT = """\
@@ -218,55 +264,6 @@ correctness and KEEP gates like any other lane, and one lane is what the round
 is willing to spend to find out.
 """
 
-_LANE_SYNTHESIS_SYSTEM_PROMPT = """\
-You are the read-only lead planner for one lane of an autonomous GPU-kernel
-optimization search. Several lanes are implemented concurrently this round from
-the same analysis, each by its own Implementer in its own workspace.
-
-Plan only the ground your lane owns. Every lane's patch is measured on its own
-and adopted on its own, so work that overlaps another lane's ground spends two
-Implementer sessions on one change and returns one answer for the price of two.
-
-Your ground and every other lane's are stated in the payload, in the terms an
-edit lands in. They are the boundary, not a hint: when your strongest idea needs
-code another lane owns, plan the strongest idea that fits inside your own ground
-and say plainly what you had to leave out.
-
-When the payload marks your lane `joint`, your ground deliberately spans more
-than one region -- a change and the launch configuration it invalidates, or a
-move no single region contains -- and its result cannot be attributed to either
-part alone. Plan it time-boxed: name what is measured first, name the point at
-which the joint step is abandoned, and sequence the lane's `fallback` behind
-that point, so the session lands a measured candidate either way.
-
-You are given the whole round's evidence, not a slice of it. Every analysis may
-have something to say about your ground; read all of them and use whatever bears
-on the code you own.
-
-Within your own ground, judge the recommendations rather than copying them:
-compare expected value, evidence, feasibility, correctness risk, cost and
-dependencies, and choose a clear implementation sequence.
-
-Use only supplied evidence. Do not edit files, run shell commands, alter
-measurement inputs, or present an inference as a profiler fact. Return ordinary
-Markdown with no fixed schema.
-"""
-
-_REVISION_SYSTEM_PROMPT = """\
-You are the read-only lead planner revising one GPU-kernel optimization plan
-after an independent critic review.
-
-Produce one final, implementer-ready Markdown plan. Address every substantive
-critic concern using the supplied evidence. For REVISE, correct evidence,
-scope, sequencing, feasibility, and risk gaps while preserving worthwhile
-parts. For REPLACE, discard the dominated implementation route and formulate a
-concrete validation plan for the critic's alternative.
-
-Do not dispatch specialists again, edit files, run shell commands, alter
-measurement inputs, or present inference as profiler fact. Return only the
-final ordinary Markdown plan.
-"""
-
 
 class OrchestrationInfrastructureError(RuntimeError):
     """Report an orchestration backend outage that produced no model answer."""
@@ -353,8 +350,7 @@ class OrchestrationAgent:
         intents: tuple[DispatchIntent, ...] = ()
         first = await self._run(
             context,
-            system_prompt=_DISPATCH_SYSTEM_PROMPT,
-            user_prompt=json.dumps(payload, indent=2, sort_keys=True),
+            _Turn(_DISPATCH_SYSTEM_PROMPT, json.dumps(payload, indent=2, sort_keys=True)),
             usage=usage,
             allow_incomplete=True,
         )
@@ -362,17 +358,14 @@ class OrchestrationAgent:
         intents, parse_notes = self._parse_dispatch_intents(first)
         notes.extend(parse_notes)
         if not intents:
+            repair_prompt = build_repair_prompt(
+                label="dispatch intent",
+                original_response=first,
+                validation_error="no usable role/case intent",
+                output_schema=payload["output_schema"],
+            )
             repaired = await self._run(
-                context,
-                system_prompt=_DISPATCH_SYSTEM_PROMPT,
-                user_prompt=build_repair_prompt(
-                    label="dispatch intent",
-                    original_response=first,
-                    validation_error="no usable role/case intent",
-                    output_schema=payload["output_schema"],
-                ),
-                usage=usage,
-                allow_incomplete=True,
+                context, _Turn(_DISPATCH_SYSTEM_PROMPT, repair_prompt), usage=usage, allow_incomplete=True
             )
             raw_responses.append(repaired)
             intents, parse_notes = self._parse_dispatch_intents(repaired)
@@ -433,14 +426,14 @@ class OrchestrationAgent:
         intents: Sequence[DispatchIntent],
         notes: list[str],
     ) -> DispatchPlan:
-        case_ids = tuple(case.case_id for case in context.cases)
-        allowed_cases = set(case_ids)
+        case_evidence = {case.case_id: _case_evidence_refs(case) for case in context.cases}
+        case_ids = tuple(case_evidence)
         merged: dict[str, dict[str, object]] = {}
         for intent in intents:
             if intent.role_id not in definitions:
                 notes.append(f"dropped unknown role {intent.role_id!r}")
                 continue
-            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in allowed_cases]
+            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in case_evidence]
             if not selected_cases:
                 selected_cases = list(case_ids)
                 notes.append(f"bound role {intent.role_id!r} to all scored cases")
@@ -453,22 +446,18 @@ class OrchestrationAgent:
                 "reason": (intent.reason or f"Framework-assigned {intent.role_id} analysis"),
             }
 
-        required_roles = (
-            len(definitions) if context.search_mode == "DIVERSIFY" else min(self.min_assignments, len(definitions))
-        )
-        for role_id in sorted(definitions):
-            if len(merged) >= required_roles:
-                break
-            if role_id not in merged:
-                merged[role_id] = {
-                    "case_ids": list(case_ids),
-                    "reason": "Framework-completed dispatch coverage",
-                }
-                notes.append(f"added default role {role_id!r}")
+        required_roles = len(definitions) if context.search_mode == "DIVERSIFY" else self.min_assignments
+        for role_id in sorted(definitions.keys() - merged.keys())[: max(required_roles - len(merged), 0)]:
+            merged[role_id] = {
+                "case_ids": list(case_ids),
+                "reason": "Framework-completed dispatch coverage",
+            }
+            notes.append(f"added default role {role_id!r}")
 
+        # merged is never empty: plan_dispatch rejects empty definitions and at least one role is required.
         covered = {case_id for item in merged.values() for case_id in item["case_ids"]}
         missing = [case_id for case_id in case_ids if case_id not in covered]
-        if missing and merged:
+        if missing:
             first_role = next(iter(merged))
             merged[first_role]["case_ids"] = [
                 *merged[first_role]["case_ids"],
@@ -476,56 +465,20 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        global_kinds = {
-            "analysis_artifact_catalog",
-            "analysis_bundle",
-            "analysis_cumulative_diff",
-            "analysis_summary",
-            "analysis_source_map",
-            "analysis_workflow",
-            "latest_lesson",
-            "supervisor_guidance",
+        global_refs = {
+            reference.path: reference for reference in context.evidence_refs if reference.kind in _GLOBAL_EVIDENCE_KINDS
         }
-        global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
         source_ref = EvidenceRef(
             kind="source_map",
             path=context.source_map_path,
             summary="Current source map or anchor source.",
         )
-        case_by_id = {case.case_id: case for case in context.cases}
         assignments = []
         for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {reference.path: reference for reference in global_refs}
-            refs[source_ref.path] = source_ref
+            refs = {**global_refs, source_ref.path: source_ref}
             target_cases = tuple(item["case_ids"])
             for case_id in target_cases:
-                case = case_by_id[case_id]
-                measurement = EvidenceRef(
-                    kind="measurement",
-                    path=f"case:{case_id}",
-                    summary=(f"Canonical timing and Analysis flags for {case_id}."),
-                )
-                refs[measurement.path] = measurement
-                if case.profile_summary_path:
-                    profiled = any(
-                        flag
-                        in {
-                            "analysis_profiled",
-                            "analysis_profile_incremental",
-                            "analysis_checkpoint_profile_interpretation",
-                            "analysis_checkpoint_normalized_only",
-                            "analysis_checkpoint_raw_profile_only",
-                        }
-                        for flag in case.flags
-                    )
-                    reference = EvidenceRef(
-                        kind=("profile" if profiled else "analysis_interpretation"),
-                        path=case.profile_summary_path,
-                        summary=("Measured profile" if profiled else "Analysis interpretation")
-                        + f" for {case_id}. Flags: "
-                        + f"{', '.join(case.flags) or '(none)'}.",
-                    )
-                    refs[reference.path] = reference
+                refs.update(case_evidence[case_id])
             assignments.append(
                 SpecialistAssignment(
                     assignment_id=f"{role_id}-{index}",
@@ -541,31 +494,10 @@ class OrchestrationAgent:
             normalization_notes=tuple(notes),
         )
 
-    async def synthesize_optimization_plan(
-        self,
-        context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
-        *,
-        usage=None,
-    ) -> str:
-        """Fuse all successful specialist analyses into one Markdown plan."""
-        result = await self._synthesize_optimization_plan_result(
-            context,
-            specialist_outcomes,
-            dispatch_plan,
-            coverage,
-            usage=usage,
-        )
-        return result.text
-
     async def _synthesize_optimization_plan_result(
         self,
         context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
+        specialists: SpecialistRound,
         *,
         usage=None,
     ) -> SynthesizedPlan:
@@ -576,12 +508,11 @@ class OrchestrationAgent:
                 "role_id": outcome.role_id,
                 "analysis": outcome.content,
             }
-            for outcome in specialist_outcomes
-            if outcome.content is not None
+            for outcome in specialists.analyses
         ]
         if not analyses:
             raise ValueError("no specialist analysis is available for synthesis")
-        failures = [outcome.to_dict() for outcome in specialist_outcomes if outcome.failure is not None]
+        failures = [outcome.to_dict() for outcome in specialists.outcomes if outcome.failure is not None]
         search_guidance = (
             "Use the latest Supervisor Ruling to choose whether immediate gain "
             "or mechanism diversity is appropriate for this planning cycle."
@@ -613,17 +544,19 @@ class OrchestrationAgent:
                 "specialist in turn."
             ),
             "context": context.to_prompt_dict(),
-            "dispatch_plan": dispatch_plan.to_dict(),
-            "specialist_coverage": dict(coverage),
+            "dispatch_plan": specialists.dispatch_plan.to_dict(),
+            "specialist_coverage": dict(specialists.coverage),
             "specialist_analyses": analyses,
             "specialist_failures": failures,
         }
         result = await self._run_result(
             context,
-            system_prompt=_SYNTHESIS_SYSTEM_PROMPT,
-            user_prompt=json.dumps(payload, indent=2, sort_keys=True),
+            _Turn(
+                SYNTHESIS_SYSTEM_PROMPT,
+                json.dumps(payload, indent=2, sort_keys=True),
+                role="orchestration synthesis",
+            ),
             usage=usage,
-            role="orchestration synthesis",
         )
         return SynthesizedPlan(
             text=self._validated_text(
@@ -633,74 +566,28 @@ class OrchestrationAgent:
             session_id=str(result.session_id or "").strip(),
         )
 
-    async def synthesize_lane_plans(
-        self,
-        context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
-        *,
-        lanes: int,
-        usage=None,
-    ) -> list[str]:
-        """Return lane plan text while keeping session details internal."""
-        results = await self.synthesize_lane_plan_results(
-            context,
-            specialist_outcomes,
-            dispatch_plan,
-            coverage,
-            lanes=lanes,
-            usage=usage,
-        )
-        return [result.text for result in results]
-
     async def synthesize_lane_plan_results(
         self,
         context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
+        specialists: SpecialistRound,
         *,
         lanes: int,
         usage=None,
     ) -> list[SynthesizedPlan]:
         """Partition the round into plans that do not compete for one another's ground."""
-        analyses = [outcome for outcome in specialist_outcomes if outcome.content is not None]
+        analyses = specialists.analyses
         width = max(1, min(int(lanes), len(analyses)))
         if width <= 1:
             with _phase_timer(self.phase_durations_sec, "synthesis"):
-                return [
-                    await self._synthesize_optimization_plan_result(
-                        context,
-                        specialist_outcomes,
-                        dispatch_plan,
-                        coverage,
-                        usage=usage,
-                    )
-                ]
+                return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
 
-        grounds = await self._partition_round(
-            context,
-            analyses,
-            dispatch_plan,
-            coverage,
-            lanes=width,
-            usage=usage,
-        )
+        grounds = await self._partition_round(context, specialists, lanes=width, usage=usage)
         challenged = context.last_critic_verdict == "REPLACE"
         if len(grounds) <= 1 and not (challenged and grounds):
             # One real direction is a single-lane round, planned the way one has always been planned rather than as a
             # fan-out of width one.
             with _phase_timer(self.phase_durations_sec, "synthesis"):
-                return [
-                    await self._synthesize_optimization_plan_result(
-                        context,
-                        specialist_outcomes,
-                        dispatch_plan,
-                        coverage,
-                        usage=usage,
-                    )
-                ]
+                return [await self._synthesize_optimization_plan_result(context, specialists, usage=usage)]
         width = len(grounds)
 
         async def _lane(index: int) -> SynthesizedPlan | None:
@@ -712,8 +599,8 @@ class OrchestrationAgent:
                     "implementation sequence."
                 ),
                 "context": context.to_prompt_dict(),
-                "dispatch_plan": dispatch_plan.to_dict(),
-                "specialist_coverage": dict(coverage),
+                "dispatch_plan": specialists.dispatch_plan.to_dict(),
+                "specialist_coverage": dict(specialists.coverage),
                 "lane": {
                     "ground": grounds[index].ground,
                     "joint": grounds[index].joint,
@@ -733,10 +620,12 @@ class OrchestrationAgent:
             }
             result = await self._run_result(
                 context,
-                system_prompt=_LANE_SYNTHESIS_SYSTEM_PROMPT,
-                user_prompt=json.dumps(payload, indent=2, sort_keys=True),
+                _Turn(
+                    LANE_SYNTHESIS_SYSTEM_PROMPT,
+                    json.dumps(payload, indent=2, sort_keys=True),
+                    role=f"orchestration lane {index + 1} synthesis",
+                ),
                 usage=usage,
-                role=f"orchestration lane {index + 1} synthesis",
             )
             text = self._validated_text(
                 result,
@@ -945,9 +834,7 @@ class OrchestrationAgent:
     async def _partition_round(
         self,
         context: OrchestrationContext,
-        analyses: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
+        specialists: SpecialistRound,
         *,
         lanes: int,
         usage=None,
@@ -965,15 +852,15 @@ class OrchestrationAgent:
                 + (" One lane validates the alternative the previous round's critic asked for." if challenged else "")
             ),
             "context": context.to_prompt_dict(),
-            "dispatch_plan": dispatch_plan.to_dict(),
-            "specialist_coverage": dict(coverage),
+            "dispatch_plan": specialists.dispatch_plan.to_dict(),
+            "specialist_coverage": dict(specialists.coverage),
             "specialist_analyses": [
                 {
                     "assignment_id": outcome.assignment_id,
                     "role_id": outcome.role_id,
                     "analysis": outcome.content,
                 }
-                for outcome in analyses
+                for outcome in specialists.analyses
             ],
             "output_schema": {
                 "lanes": [
@@ -1002,14 +889,16 @@ class OrchestrationAgent:
             try:
                 response = await self._run(
                     context,
-                    system_prompt=system_prompt,
-                    user_prompt=json.dumps(payload, indent=2, sort_keys=True),
+                    _Turn(
+                        system_prompt,
+                        json.dumps(payload, indent=2, sort_keys=True),
+                        max_turns=ROUND_PARTITION_MAX_TURNS,
+                        timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
+                        tools=False,
+                        max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
+                    ),
                     usage=usage,
                     allow_incomplete=True,
-                    max_turns=ROUND_PARTITION_MAX_TURNS,
-                    timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
-                    tools=False,
-                    max_reasoning_effort=ROUND_PARTITION_EFFORT_CEILING,
                 )
                 grounds, move, notes = self._parse_lane_grounds(response, lanes=lanes)
             except (
@@ -1023,7 +912,7 @@ class OrchestrationAgent:
                 )
         status = "planned"
         if not grounds:
-            grounds = self._collapsed_grounds(analyses, challenged=challenged)
+            grounds = self._collapsed_grounds(specialists.analyses, challenged=challenged)
             status = "fallback"
             log.warning(
                 "round partition unavailable; collapsing the round to a single "
@@ -1060,14 +949,10 @@ class OrchestrationAgent:
     async def revise_optimization_plan(
         self,
         context: OrchestrationContext,
+        specialists: SpecialistRound,
         *,
-        synthesis_session_id: str,
-        draft_plan: str,
-        critic_review: str,
-        critic_verdict: str,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
+        draft: SynthesizedPlan,
+        critic: PlanCriticOutcome,
         usage=None,
     ) -> _RevisedPlan:
         """Revise one draft exactly once without rerunning specialists."""
@@ -1078,33 +963,36 @@ class OrchestrationAgent:
         # analysis and the whole synthesis conversation.
         resumed_payload = {
             "task": revision_task,
-            "draft_plan": draft_plan,
-            "critic_verdict": critic_verdict,
-            "critic_review": critic_review,
+            "draft_plan": draft.text,
+            "critic_verdict": critic.verdict,
+            "critic_review": critic.review,
         }
         # The fresh-session fallback holds no prior context, so it genuinely needs the whole planning bundle to revise
         # from.
         fresh_payload = {
             **resumed_payload,
-            "revision_instructions": _REVISION_SYSTEM_PROMPT.strip(),
+            "revision_instructions": REVISION_SYSTEM_PROMPT.strip(),
             "context": context.to_prompt_dict(),
-            "dispatch_plan": dispatch_plan.to_dict(),
-            "specialist_coverage": dict(coverage),
-            "specialist_outcomes": [outcome.to_dict() for outcome in specialist_outcomes],
+            "dispatch_plan": specialists.dispatch_plan.to_dict(),
+            "specialist_coverage": dict(specialists.coverage),
+            "specialist_outcomes": [outcome.to_dict() for outcome in specialists.outcomes],
         }
-        session_id = str(synthesis_session_id or "").strip()
+        session_id = str(draft.session_id or "").strip()
         timeout_sec = min(self.timeout_sec, PLAN_REVISION_TIMEOUT_SEC)
         started_at = time.monotonic()
         if session_id and self._backend_supports_resume():
             result = await self._resume_result(
                 context,
+                _Turn(
+                    REVISION_SYSTEM_PROMPT,
+                    "",
+                    role="orchestration revision",
+                    max_turns=PLAN_REVISION_MAX_TURNS,
+                    timeout_sec=timeout_sec,
+                ),
                 session_id=session_id,
                 feedback=json.dumps(resumed_payload, indent=2, sort_keys=True),
-                system_prompt=_REVISION_SYSTEM_PROMPT,
                 usage=usage,
-                max_turns=PLAN_REVISION_MAX_TURNS,
-                timeout_sec=timeout_sec,
-                role="orchestration revision",
             )
             mode = "resumed"
         else:
@@ -1117,12 +1005,14 @@ class OrchestrationAgent:
                 log.warning("orchestration synthesis returned no session ID; starting a fresh revision session")
             result = await self._run_result(
                 context,
-                system_prompt=_REVISION_SYSTEM_PROMPT,
-                user_prompt=json.dumps(fresh_payload, indent=2, sort_keys=True),
+                _Turn(
+                    REVISION_SYSTEM_PROMPT,
+                    json.dumps(fresh_payload, indent=2, sort_keys=True),
+                    role="orchestration revision",
+                    max_turns=PLAN_REVISION_MAX_TURNS,
+                    timeout_sec=timeout_sec,
+                ),
                 usage=usage,
-                max_turns=PLAN_REVISION_MAX_TURNS,
-                timeout_sec=timeout_sec,
-                role="orchestration revision",
             )
             mode = "fresh"
         plan = self._validated_text(result, role="orchestration revision")
@@ -1135,27 +1025,12 @@ class OrchestrationAgent:
     async def _run(
         self,
         context: OrchestrationContext,
+        turn: _Turn,
         *,
-        system_prompt: str,
-        user_prompt: str,
         usage,
-        max_turns: int | None = None,
         allow_incomplete: bool = False,
-        timeout_sec: int | None = None,
-        tools: bool = True,
-        max_reasoning_effort: str = "",
     ) -> str:
-        result = await self._run_result(
-            context,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            usage=usage,
-            max_turns=max_turns,
-            timeout_sec=timeout_sec,
-            tools=tools,
-            max_reasoning_effort=max_reasoning_effort,
-            role="orchestration",
-        )
+        result = await self._run_result(context, turn, usage=usage)
         text = str(result.text or "")
         if allow_incomplete and (
             str(result.end_reason or "").strip() in {"turn_cap", "timeout"}
@@ -1164,69 +1039,41 @@ class OrchestrationAgent:
             log.warning("orchestration dispatch returned an incomplete response; continuing through JSON repair")
         return self._validated_text(
             result,
-            role="orchestration",
+            role=turn.role,
             allow_empty=True,
             allow_incomplete=allow_incomplete,
         )
 
-    async def _run_result(
-        self,
-        context: OrchestrationContext,
-        *,
-        system_prompt: str,
-        user_prompt: str,
-        usage,
-        role: str,
-        max_turns: int | None = None,
-        timeout_sec: int | None = None,
-        tools: bool = True,
-        max_reasoning_effort: str = "",
-    ) -> AgentRunResult:
-        effective_timeout = self.timeout_sec if timeout_sec is None else timeout_sec
+    async def _run_result(self, context: OrchestrationContext, turn: _Turn, *, usage) -> AgentRunResult:
+        effective_timeout = self.timeout_sec if turn.timeout_sec is None else turn.timeout_sec
         try:
             return await asyncio.wait_for(
                 self.backend.run(
-                    self._run_spec(
-                        context,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        max_turns=max_turns,
-                        timeout_sec=effective_timeout,
-                        role=role,
-                        tools=tools,
-                        max_reasoning_effort=max_reasoning_effort,
-                    ),
+                    self._run_spec(context, turn, timeout_sec=effective_timeout),
                     usage=usage,
                 ),
                 timeout=watchdog_timeout_sec(effective_timeout),
             )
         except asyncio.TimeoutError as error:
-            raise OrchestrationInfrastructureError(f"{role} backend exceeded {effective_timeout}s timeout") from error
+            raise OrchestrationInfrastructureError(
+                f"{turn.role} backend exceeded {effective_timeout}s timeout"
+            ) from error
         except AgentProviderError as error:
             raise OrchestrationInfrastructureError(f"{type(error).__name__}: {error}") from error
 
     async def _resume_result(
         self,
         context: OrchestrationContext,
+        turn: _Turn,
         *,
         session_id: str,
         feedback: str,
-        system_prompt: str,
         usage,
-        role: str,
-        max_turns: int,
-        timeout_sec: int,
     ) -> AgentRunResult:
+        timeout_sec = turn.timeout_sec
+        role = turn.role
         resume = getattr(self.backend, "resume")
-        spec = self._run_spec(
-            context,
-            system_prompt=system_prompt,
-            user_prompt="",
-            max_turns=max_turns,
-            timeout_sec=timeout_sec,
-            role=role,
-            read_only_resume=True,
-        )
+        spec = self._run_spec(context, turn, timeout_sec=timeout_sec, read_only_resume=True)
         try:
             return await asyncio.wait_for(
                 resume(
@@ -1245,25 +1092,21 @@ class OrchestrationAgent:
     def _run_spec(
         self,
         context: OrchestrationContext,
+        turn: _Turn,
         *,
-        system_prompt: str,
-        user_prompt: str,
-        max_turns: int | None,
         timeout_sec: int,
-        role: str = "orchestration",
         read_only_resume: bool = False,
-        tools: bool = True,
-        max_reasoning_effort: str = "",
     ) -> AgentRunSpec:
         """One read-only orchestration turn."""
+        tools = turn.tools
         return AgentRunSpec(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            system_prompt=turn.system_prompt,
+            user_prompt=turn.user_prompt,
             cwd=context.workspace,
             writable=False,
             timeout_sec=timeout_sec,
-            role=role,
-            max_reasoning_effort=max_reasoning_effort,
+            role=turn.role,
+            max_reasoning_effort=turn.max_reasoning_effort,
             read_only_resume=read_only_resume,
             allow_dirty_targets=read_only_resume,
             allow_untracked=read_only_resume,
@@ -1272,7 +1115,7 @@ class OrchestrationAgent:
                 search=tools,
                 write=False,
                 shell=False,
-                max_turns=(self.max_turns if max_turns is None else max_turns),
+                max_turns=(self.max_turns if turn.max_turns is None else turn.max_turns),
             ),
             protected_globs=["*"],
         )
@@ -1356,42 +1199,21 @@ class OrchestrationService:
                 "describe": specialist_run.reaped.describe(),
                 "pids": list(specialist_run.reaped.blockers),
             }
-        if (
-            specialist_outcomes
-            and not any(outcome.succeeded for outcome in specialist_outcomes)
-            and any(
-                outcome.failure is not None and outcome.failure.kind in {"backend_failure", "timeout"}
-                for outcome in specialist_outcomes
-            )
+        any_succeeded = any(outcome.succeeded for outcome in specialist_outcomes)
+        if not any_succeeded and any(
+            outcome.failure is not None and outcome.failure.kind in {"backend_failure", "timeout"}
+            for outcome in specialist_outcomes
         ):
             raise OrchestrationInfrastructureError("specialist infrastructure failed before any analysis was produced")
-        assignment_by_id = {assignment.assignment_id: assignment for assignment in dispatch_plan.assignments}
-        successful_assignments = [
-            assignment_by_id[outcome.assignment_id]
-            for outcome in specialist_outcomes
-            if outcome.succeeded and outcome.assignment_id in assignment_by_id
-        ]
-        covered_cases = sorted(
-            {case_id for assignment in successful_assignments for case_id in assignment.target_case_ids}
-        )
-        coverage = {
-            "successful_roles": sorted({assignment.role_id for assignment in successful_assignments}),
-            "covered_cases": covered_cases,
-            "missing_cases": sorted(context.case_ids - set(covered_cases)),
-            "failed_roles": sorted(outcome.role_id for outcome in specialist_outcomes if not outcome.succeeded),
-        }
+        coverage = self._round_coverage(context.case_ids, dispatch_plan, specialist_outcomes)
         diagnostics["coverage"] = coverage
+        specialists = SpecialistRound(dispatch_plan, specialist_outcomes, coverage)
 
         synthesized_plans: list[SynthesizedPlan] = []
-        if any(outcome.succeeded for outcome in specialist_outcomes):
+        if any_succeeded:
             try:
                 synthesized_plans = await self._agent.synthesize_lane_plan_results(
-                    context,
-                    specialist_outcomes,
-                    dispatch_plan,
-                    coverage,
-                    lanes=lanes,
-                    usage=usage,
+                    context, specialists, lanes=lanes, usage=usage
                 )
             except OrchestrationOutputError as error:
                 diagnostics["synthesis"] = {
@@ -1404,27 +1226,17 @@ class OrchestrationService:
         if synthesized_plans:
             plans = [plan.text for plan in synthesized_plans]
         else:
-            plans = [
-                self._render_framework_plan(
-                    context=context,
-                    dispatch_plan=dispatch_plan,
-                    specialist_outcomes=specialist_outcomes,
-                    coverage=coverage,
-                )
-            ]
+            plans = [self._render_framework_plan(context, specialists)]
         planned_lanes = len(plans)
-        # Every round a synthesis produced is reviewed, at any width.
-        critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable)
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        if critic_eligible:
+        # Every round a synthesis produced is reviewed, at any width.
+        if self._plan_critic is not None and optimization_plan_executable:
             critic_outcome = await self._plan_critic.review(
                 context=context,
                 drafts=synthesized_plans,
-                dispatch_plan=dispatch_plan,
-                specialist_outcomes=specialist_outcomes,
-                coverage=coverage,
+                specialists=specialists,
                 usage=usage,
             )
             diagnostics["plan_critic"] = critic_outcome.to_dict()
@@ -1444,10 +1256,8 @@ class OrchestrationService:
                 revised, revision_diagnostics = await self._revise_round(
                     context,
                     synthesized_plans,
+                    specialists,
                     critic_outcome=critic_outcome,
-                    specialist_outcomes=specialist_outcomes,
-                    dispatch_plan=dispatch_plan,
-                    coverage=coverage,
                     usage=usage,
                 )
                 plans = [plan.text for plan in revised]
@@ -1486,6 +1296,23 @@ class OrchestrationService:
             plan_critic=critic_outcome,
             plan_revised=plan_revised,
         )
+
+    @staticmethod
+    def _round_coverage(
+        case_ids: frozenset[str], dispatch_plan: DispatchPlan, outcomes: Sequence[SpecialistOutcome]
+    ) -> dict[str, list[str]]:
+        """The roles that succeeded or failed this round and the scored cases their analyses cover."""
+        assignment_by_id = {assignment.assignment_id: assignment for assignment in dispatch_plan.assignments}
+        successful_assignments = [assignment_by_id[outcome.assignment_id] for outcome in outcomes if outcome.succeeded]
+        covered_cases = sorted(
+            {case_id for assignment in successful_assignments for case_id in assignment.target_case_ids}
+        )
+        return {
+            "successful_roles": sorted({assignment.role_id for assignment in successful_assignments}),
+            "covered_cases": covered_cases,
+            "missing_cases": sorted(case_ids - set(covered_cases)),
+            "failed_roles": sorted(outcome.role_id for outcome in outcomes if not outcome.succeeded),
+        }
 
     @staticmethod
     def _narrow_round(
@@ -1614,11 +1441,9 @@ class OrchestrationService:
         self,
         context: OrchestrationContext,
         drafts: Sequence[SynthesizedPlan],
+        specialists: SpecialistRound,
         *,
         critic_outcome,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
         usage=None,
     ) -> tuple[list[SynthesizedPlan], dict]:
         """Apply one round-level verdict to every lane it covers."""
@@ -1626,15 +1451,7 @@ class OrchestrationService:
 
         async def _revise(draft: SynthesizedPlan) -> tuple[SynthesizedPlan, str]:
             revision = await self._agent.revise_optimization_plan(
-                context,
-                synthesis_session_id=draft.session_id,
-                draft_plan=draft.text,
-                critic_review=critic_outcome.review,
-                critic_verdict=critic_outcome.verdict,
-                specialist_outcomes=specialist_outcomes,
-                dispatch_plan=dispatch_plan,
-                coverage=coverage,
-                usage=usage,
+                context, specialists, draft=draft, critic=critic_outcome, usage=usage
             )
             return replace(draft, text=revision.text), revision.mode
 
@@ -1685,7 +1502,7 @@ class OrchestrationService:
             return [
                 replace(
                     drafts[0],
-                    text=self._render_critic_revision_fallback(
+                    text=render_critic_fallback(
                         draft_plan=drafts[0].text,
                         critic_review=critic_outcome.review,
                         critic_verdict=critic_outcome.verdict,
@@ -1709,42 +1526,9 @@ class OrchestrationService:
         }
 
     @staticmethod
-    def _render_critic_revision_fallback(
-        *,
-        draft_plan: str,
-        critic_review: str,
-        critic_verdict: str,
-    ) -> str:
-        """Preserve critic corrections when the model revision is unavailable."""
-        return "\n".join(
-            (
-                "# Optimization plan",
-                "",
-                (
-                    "The Orchestration revision was unavailable. Treat the "
-                    "Critic review below as mandatory planning guidance before "
-                    "editing; use the draft only as historical context."
-                ),
-                "",
-                f"## Critic verdict: {critic_verdict}",
-                "",
-                critic_review.strip(),
-                "",
-                "## Original draft",
-                "",
-                draft_plan.strip(),
-            )
-        ).strip()
-
-    @staticmethod
-    def _render_framework_plan(
-        *,
-        context: OrchestrationContext,
-        dispatch_plan: DispatchPlan,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        coverage: dict,
-    ) -> str:
+    def _render_framework_plan(context: OrchestrationContext, specialists: SpecialistRound) -> str:
         """Render the canonical Implementer handoff without inventing advice."""
+        coverage = specialists.coverage
         lines = [
             "# Optimization plan",
             "",
@@ -1777,7 +1561,7 @@ class OrchestrationService:
         )
         for path in dict.fromkeys(evidence_paths):
             lines.append(f"- {path}")
-        successful = [outcome for outcome in specialist_outcomes if outcome.content is not None]
+        successful = specialists.analyses
         if successful:
             lines.extend(("", "## Available specialist analyses"))
             for outcome in successful:
@@ -1788,9 +1572,9 @@ class OrchestrationService:
                         outcome.content or "",
                     )
                 )
-        if dispatch_plan.normalization_notes:
+        if specialists.dispatch_plan.normalization_notes:
             lines.extend(("", "## Dispatch normalization"))
-            lines.extend(f"- {note}" for note in dispatch_plan.normalization_notes)
+            lines.extend(f"- {note}" for note in specialists.dispatch_plan.normalization_notes)
         return "\n".join(lines).strip()
 
 

@@ -107,7 +107,7 @@ def _visible_gpu_count() -> int:
         import torch
 
         return int(torch.cuda.device_count())
-    except Exception:  # noqa: BLE001 - no torch, no driver, no answer
+    except (ImportError, OSError, RuntimeError):
         return GPU_COUNT_UNKNOWN
 
 
@@ -262,7 +262,8 @@ def dispatch_single_task(
             status=TASK_STATUS_FAILED,
             reason=reason,
         )
-    except Exception as error:  # noqa: BLE001 - translated into a dispatch failure
+    except Exception as error:  # isolation boundary: one prepared operator task
+        log.warning("single-task dispatch failed for %s: %s", task_path, error, exc_info=True)
         reason = f"single-task dispatch failed: {error}"
         state_store.transition(TASK_STATUS_FAILED, reason=reason)
         return SingleTaskResult(

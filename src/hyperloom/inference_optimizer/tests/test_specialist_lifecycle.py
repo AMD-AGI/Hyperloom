@@ -19,6 +19,7 @@ from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollab
 from hyperloom.orchestrator.state.shared_state import SharedState
 from ._dispatch_helpers import pump_until_settled
 from .conftest import use_fake_specialist_cli
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 @dataclass
@@ -262,16 +263,27 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
 
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(task_id="task-no-round", params={})
-    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-no-round",
     )
     assert entry["round_id"] == "task-no-round"
+
+
+@pytest.mark.asyncio
+async def test_build_specialist_round_entry_records_run_error_and_notes(coord):
+    task = _StubTask(task_id="t-err", params={})
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
+        task=task,
+        done_payload={**_done_payload(), "_specialist_notes": ["n1", 2]},
+        source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-err",
+        run_error="dispatch failed",
+    )
+    assert entry["status"] == "failed"
+    assert entry["error"] == entry["run_error"] == "dispatch failed"
+    assert entry["notes"] == ["n1", "2"]
 
 
 # 5. End-to-end: dispatcher exit hook bookkeeping
@@ -289,7 +301,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.task_registry import Task
 
@@ -323,7 +335,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     executor = _build_specialist_executor(
         spec_args,
@@ -347,9 +359,11 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         requires_lanes=tuple(),
     )
     await coord.tasks.create_or_return_existing(
-        kind=task.kind,
-        params=task.params,
-        idempotency_key=task.idempotency_key,
+        TaskSpec(
+            kind=task.kind,
+            params=task.params,
+            idempotency_key=task.idempotency_key,
+        ),
     )
     await coord.tick(n=1)
     await pump_until_settled(coord.dispatcher)
@@ -466,7 +480,7 @@ async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord
 
 
 @pytest.mark.asyncio
-async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_coord):
+async def test_force_stalled_source_patch_without_git_root_is_refused_and_recorded_once(force_coord):
     state = force_coord.shared_state
     state.framework_repo_path = ""
     for _ in range(10):
@@ -483,7 +497,6 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_not_awaited()
-    assert state.pruned_families == ["source_patch"]
     failures = [
         (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
     ]
@@ -514,10 +527,9 @@ async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_co
 
 
 @pytest.mark.asyncio
-async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
+async def test_force_stalled_research_specialist_needs_no_source_root(force_coord):
     state = force_coord.shared_state
     state.framework_repo_path = ""
-    state.add_pruned_family("source_patch")
     state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
     state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
 
@@ -553,3 +565,67 @@ async def test_force_stalled_domain_noop_outside_explore(force_coord):
     )
     await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
     force_coord.router.handle_intent.assert_not_awaited()
+
+
+# 8. SharedState.save failures around the specialist bookkeeping
+def _stall_serving_domain(state) -> None:
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+
+
+def _record_result_site(coord, _force_coord):
+    task = _StubTask(task_id="task-1", params={})
+    coord.tasks.register(task)
+
+    def run():
+        return coord.specialist_dispatch.record_specialist_result(
+            task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
+        )
+
+    return coord.shared_state, run, lambda: [r["round_id"] for r in coord.shared_state.specialist_rounds] == ["task-1"]
+
+
+def _force_dispatch_site(_coord, force_coord):
+    _stall_serving_domain(force_coord.shared_state)
+    run = force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist
+    return force_coord.shared_state, run, lambda: force_coord.router.handle_intent.await_count == 1
+
+
+_SAVE_SITES = {
+    "record_result": _record_result_site,
+    "force_dispatch": _force_dispatch_site,
+}
+
+
+def _save_raising(exc: Exception):
+    def _save(_session_dir) -> None:
+        raise exc
+
+    return _save
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _SAVE_SITES)
+async def test_save_os_error_is_logged_and_the_bookkeeping_stays(coord, force_coord, caplog, site):
+    state, run, kept = _SAVE_SITES[site](coord, force_coord)
+    err = OSError("no space left on device")
+    state.save = _save_raising(err)
+
+    with caplog.at_level("ERROR"):
+        await run()
+
+    assert kept()
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", _SAVE_SITES)
+async def test_save_serialization_defect_propagates(coord, force_coord, site):
+    state, run, _kept = _SAVE_SITES[site](coord, force_coord)
+    state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await run()

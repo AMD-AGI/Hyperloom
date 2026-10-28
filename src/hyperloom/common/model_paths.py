@@ -97,7 +97,7 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     return None
 
 
-def resolve_serving_model_path(raw: str) -> str:
+def resolve_serving_model_path(raw: str, *, model_base: str | None = None) -> str:
     """Resolve a session model identity to a path suitable for launching servers."""
     text = str(raw or "").strip()
     if not text:
@@ -108,7 +108,7 @@ def resolve_serving_model_path(raw: str) -> str:
             return str(direct)
     except OSError:
         pass
-    base = os.environ.get("HL_MODEL_BASE", "").strip()
+    base = (os.environ.get("HL_MODEL_BASE", "") if model_base is None else model_base).strip()
     if base:
         leaf = text.rstrip("/").split("/")[-1]
         if leaf:
@@ -128,16 +128,11 @@ def resolve_session_model_path(
     *,
     params: dict[str, Any] | None = None,
     state_model_path: str = "",
-    for_serving: bool = False,
 ) -> str:
-    """Unified session model-path precedence for executors and handlers."""
+    """The session's model path, resolved for serving: params, then ``$MODEL_PATH``, then the state's."""
     raw = (
         str((params or {}).get("model_path") or "").strip()
         or os.environ.get("MODEL_PATH", "").strip()
         or str(state_model_path or "").strip()
     )
-    if not raw:
-        return ""
-    if for_serving:
-        return resolve_serving_model_path(raw)
-    return raw
+    return resolve_serving_model_path(raw)

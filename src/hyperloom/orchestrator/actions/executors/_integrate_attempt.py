@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from ...enablement.recipe.credentials import detect_credential_channels
 
 if TYPE_CHECKING:
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
@@ -59,3 +62,31 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.source_root
+
+    def benchmark_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bind the measured launch to this attempt's acquired runtime and applied source."""
+        result = {
+            **params,
+            "source_patches": [
+                {"framework_root": str(self.framework_root), "patch_file": str(path)} for path in self.applied
+            ],
+        }
+        if self.provision_result is not None and self.provision_result.ok:
+            result["runtime_override"] = self.provision_result.runtime.to_runtime_override()
+        return result
+
+    def accepted_runtime_records(self) -> dict[str, Any]:
+        """The runtime this attempt booted on, as an accepted round records it for rearm; empty when it provisioned none."""
+        result = self.provision_result
+        if self.stack_action is None or result is None or not result.ok:
+            return {}
+        return {
+            "enablement_kept_stack_action": {
+                **self.stack_action.to_state(),
+                "resolved_ref": result.resolved_ref,
+                "resolved_packages": {str(k): dict(v) for k, v in result.resolved_packages.items()},
+                "credential_channels": detect_credential_channels(os.environ),
+            },
+            "enablement_active_runtime": result.runtime.to_state(),
+            "installed_versions": dict(result.installed_versions),
+        }

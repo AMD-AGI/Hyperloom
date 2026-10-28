@@ -18,7 +18,7 @@ def tl_module():
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_env(monkeypatch):
-    for k in ("ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
+    for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "LLM_GATEWAY_KEY"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -53,6 +53,15 @@ def test_non_safe_gateway_leaves_dot_form_untouched(tl_module, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_MODEL", "Claude-Opus-4.7")
     assert tl_module._resolve_tracelens_model() == "Claude-Opus-4.7"
+
+
+def test_claude_model_backs_an_unset_anthropic_model(tl_module, monkeypatch):
+    _use_safe_gateway(monkeypatch)
+    monkeypatch.setenv("CLAUDE_MODEL", "Claude-Opus-4.7")
+    assert tl_module._resolve_tracelens_model() == "claude-opus-4-7"
+
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+    assert tl_module._resolve_tracelens_model() == "claude-sonnet-4-5"
 
 
 def test_empty_env_yields_empty(tl_module, monkeypatch):

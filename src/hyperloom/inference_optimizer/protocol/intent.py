@@ -14,6 +14,12 @@ from hyperloom.common.coerce import to_int
 
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
+# Body of the observation a critic turn emits when it has nothing to say.
+DEFAULT_IDLE_BODY = "ok (critic)"
+
+# Ceiling on a single extend_lease step; repeated extensions are allowed. The PolicyGate enforces it; it is declared
+# here so the payload contract each backend renders for the agents states the same number.
+EXTEND_LEASE_MAX_SEC: int = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -31,8 +37,6 @@ class IntentType(str, Enum):
     # Orchestration scheduling and phase control.
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
-    # specialist exit: one per task.
-    SPECIALIST_DONE = "specialist_done"
 
 
 @dataclass
@@ -55,8 +59,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
-    # specialist exit envelope; the runner re-stamps and defaults the payload.
-    IntentType.SPECIALIST_DONE: ("gap_canonical_id", "domain", "proposal_set", "summary"),
 }
 
 
@@ -65,12 +67,25 @@ class NoIntentEmitted(RuntimeError):
 
 
 class IntentValidationError(RuntimeError):
-    """Envelope present but schema invalid (raw + reason captured)."""
+    """Envelope present but schema invalid."""
 
-    def __init__(self, reason: str, raw: str | None = None):
-        """Initialise the validation error."""
-        super().__init__(reason)
-        self.raw = raw
+
+def _without_unset_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop the payload fields an agent wrote as JSON ``null``, one level into ``params``.
+
+    Readers downstream resolve an omitted field through ``get(name, default)``,
+    which returns the stored ``None`` when the key is present, so a field the
+    agent declined to set reaches them as a value rather than as its default.
+    An explore round proposing ``keep_threshold_pct: null`` died on
+    ``float(None)`` and took its whole measurement with it. Null is the
+    transport's way of spelling "not supplied", so it is removed here, where
+    the envelope enters, rather than guarded for at each reader.
+    """
+    cleaned = {name: value for name, value in payload.items() if value is not None}
+    params = cleaned.get("params")
+    if isinstance(params, dict):
+        cleaned["params"] = {name: value for name, value in params.items() if value is not None}
+    return cleaned
 
 
 def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
@@ -96,6 +111,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         payload = item["payload"]
         if not isinstance(payload, dict):
             raise IntentValidationError(f"intents[{i}].payload must be object, got {type(payload).__name__}")
+        payload = _without_unset_fields(payload)
         for required in _PAYLOAD_REQUIRED[it]:
             if required not in payload:
                 raise IntentValidationError(
@@ -191,6 +207,8 @@ def _validate_review_verdict_payload(
 
 __all__ = [
     "ALLOWED_VERDICTS",
+    "DEFAULT_IDLE_BODY",
+    "EXTEND_LEASE_MAX_SEC",
     "Intent",
     "IntentType",
     "IntentValidationError",

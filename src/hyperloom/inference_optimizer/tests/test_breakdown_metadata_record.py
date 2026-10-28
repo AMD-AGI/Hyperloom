@@ -12,16 +12,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import MetadataSources, collect_v6_metadata
 from hyperloom.inference_optimizer.breakdown.recorder import (
     assemble_parts,
     record_metadata_identity,
     record_metadata_langfuse,
-    recorder_for,
-    section_shape,
-    snapshot_metadata,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION
+from hyperloom.inference_optimizer.breakdown.recorder.recorder import SECTION_SHAPES, recorder_for
+from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION, snapshot_metadata
 
 _MANIFEST = {
     "session_id": "sess-1",
@@ -66,7 +64,6 @@ def _state(**overrides):
         max_model_len=4096,
         operator_extra_env={"HSA_NO_SCRATCH_RECLAIM": "1"},
         operator_server_args="--enable-torch-compile",
-        server_args="",
         crash_count=0,
         crash_timestamps=[],
         degraded_mode=False,
@@ -86,7 +83,7 @@ def _state(**overrides):
 
 
 def test_metadata_is_a_registered_singleton():
-    assert section_shape(SECTION) == "singleton"
+    assert SECTION_SHAPES[SECTION] == "singleton"
 
 
 def test_the_manifest_stamp_records_identity_and_image(tmp_path):
@@ -301,11 +298,11 @@ def _collect(recorded=None, **overrides):
         model_info={"model_type": "deepseek_v3", "hidden_size": 7168},
         langfuse={"enabled": False},
         state={},
-        warnings=["w"],
         recorded=recorded,
     )
     kwargs.update(overrides)
-    return collect_v6_metadata(**kwargs)
+    exported_at_utc = kwargs.pop("exported_at_utc")
+    return collect_v6_metadata(MetadataSources(**kwargs), exported_at_utc=exported_at_utc)
 
 
 def test_a_recorded_leaf_beats_the_projection(tmp_path):
@@ -348,7 +345,7 @@ def test_tool_provenance_keeps_commit_and_root_dir():
 def test_export_facts_are_never_taken_from_a_fragment():
     metadata = _collect(recorded={"exported_at_utc": "1999-01-01T00:00:00+00:00", "warnings": ["stale"]})
     assert metadata["exported_at_utc"] == "2026-09-01T02:00:05+00:00"
-    assert metadata["warnings"] == ["w"]
+    assert "warnings" not in metadata
 
 
 def test_recorded_elapsed_is_taken_verbatim():

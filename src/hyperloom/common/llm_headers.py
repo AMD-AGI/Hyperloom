@@ -29,6 +29,7 @@ __all__ = [
     "expand_env_refs",
     "format_custom_headers",
     "parse_custom_headers",
+    "parse_unexpanded_headers",
 ]
 
 
@@ -76,6 +77,14 @@ def _from_lines(text: str) -> dict[str, str]:
     return headers
 
 
+def parse_unexpanded_headers(raw: str | None) -> dict[str, str]:
+    """Parse the header wire format as written, leaving ``${VAR}`` references unexpanded."""
+    if not raw:
+        return {}
+    headers = _from_json(raw.strip())
+    return _from_lines(raw) if headers is None else headers
+
+
 def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Parse custom LLM headers: a JSON object, or ``Name: value`` lines.
 
@@ -90,13 +99,7 @@ def parse_custom_headers(raw: str | None, *, env: Mapping[str, str] | None = Non
     """
     if not raw:
         return {}
-    expanded = expand_env_refs(raw, env)
-    text = expanded.strip()
-    if not text:
-        return {}
-    headers = _from_json(text)
-    if headers is None:
-        headers = _from_lines(expanded)
+    headers = parse_unexpanded_headers(expand_env_refs(raw, env))
     for name, value in headers.items():
         # An empty value usually means an unresolved ${VAR}; a blank subscription key still 401s at the gateway, so
         # surface it rather than fail silently.

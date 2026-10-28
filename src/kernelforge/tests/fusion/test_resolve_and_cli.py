@@ -23,6 +23,7 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import get_agent_provider, register_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
+from kernelforge.fusion.discover import DiscoveryRetry, DiscoverySession
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module
 from kernelforge.fusion import agent_selection
@@ -30,13 +31,15 @@ from kernelforge.fusion import command as cli_module
 from kernelforge.fusion import harness_authoring
 from kernelforge.fusion.author import (
     AUTHOR_RC_SAFETY,
+    AuthorAgent,
+    AuthorWorkspace,
     run_author,
 )
 from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
 from kernelforge.fusion.command import _framework_repo_root, _package_root
 from kernelforge.fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
 from kernelforge.fusion.command import run as main
-from kernelforge.fusion.emit import export_artifacts
+from kernelforge.fusion.emit import FusionFiles, export_artifacts
 from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
 from kernelforge.fusion.locate import resolve_framework_source_file
 
@@ -181,14 +184,14 @@ def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monk
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     provider, model = _resolve_agent_choice("codex", None)
     assert provider == "codex"
-    assert model == "gpt-5.6-sol"
+    assert model == "gpt-6-astra"
 
 
 def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     provider, model = _resolve_agent_choice("claude", None)
     assert provider == "claude"
-    assert model == "claude-opus-5"
+    assert model == "claude-opus-5-5"
 
 
 def test_agent_model_precedence(clean_agent_env, monkeypatch):
@@ -218,8 +221,8 @@ def test_explicit_backend_disables_cross_provider_fallback(
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit") is backend
-    assert captured["fallback_provider"] == ""
-    assert captured["sandbox_mode"] == "workspace-write"
+    assert captured["settings"].fallback_provider == ""
+    assert captured["settings"].sandbox_mode == "workspace-write"
 
 
 @pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
@@ -242,7 +245,7 @@ def test_explicit_secure_sandbox_mode_is_wired(
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", mode) is backend
-    assert captured["sandbox_mode"] == mode
+    assert captured["settings"].sandbox_mode == mode
 
 
 def test_bypass_is_wired(clean_agent_env, monkeypatch):
@@ -260,7 +263,7 @@ def test_bypass_is_wired(clean_agent_env, monkeypatch):
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["sandbox_mode"] == "bypass"
+    assert captured["settings"].sandbox_mode == "bypass"
 
 
 def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
@@ -280,7 +283,7 @@ def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, m
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["sandbox_mode"] == "bypass"
+    assert captured["settings"].sandbox_mode == "bypass"
 
 
 def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
@@ -307,19 +310,10 @@ def test_author_harness_is_staged_inside_worktree_then_published(tmp_path):
     staging = harness_authoring._author_harness_target(str(repo), out)
     assert Path(staging).resolve().is_relative_to(repo.resolve())
 
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -332,23 +326,14 @@ def test_author_harness_staging_survives_running_the_harness(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     cache = Path(staging).parent / "__pycache__"
     cache.mkdir()
     (cache / "kernel_harness.cpython-310.pyc").write_bytes(b"\x00bytecode")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -361,22 +346,13 @@ def test_author_harness_staging_tolerates_another_harness(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     sibling = Path(staging).parent / "kernel_harness_c262b47917a2.py"
     sibling.write_text("print('other run')\n", encoding="utf-8")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -390,54 +366,16 @@ def test_author_harness_staging_still_reports_foreign_leftovers(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     (Path(staging).parent / "stray.py").write_text("STRAY = True\n", encoding="utf-8")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok is False
     assert "stray.py" in reason
     assert Path(staging).parent.exists()
-
-
-def test_inherited_harness_staging_detects_author_mutation(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    out = tmp_path / "out"
-    final = out / "kernel_harness.py"
-    final.parent.mkdir()
-    final.write_text("print('inherited')\n", encoding="utf-8")
-    staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(final),
-        inherited=True,
-    )
-    assert ready, reason
-    Path(staging).write_text("print('mutated')\n", encoding="utf-8")
-
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(final),
-        inherited=True,
-        author_ok=True,
-    )
-
-    assert ok is False
-    assert reason == "author modified the inherited harness"
-    assert final.read_text(encoding="utf-8") == "print('inherited')\n"
-    assert not Path(staging).exists()
 
 
 def test_registered_discovery_returns_final_text_without_bare_openai(
@@ -464,10 +402,7 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        model="gpt-test",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        protected_files=[str(source)],
+        DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path), protected_files=[str(source)]),
     )
 
     assert fn("DISCOVERY PROMPT") == '[{"name":"fused"}]'
@@ -505,10 +440,7 @@ def test_registered_discovery_rejects_and_restores_source_edits(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        model="gpt-test",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        protected_files=[str(source)],
+        DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path), protected_files=[str(source)]),
     )
 
     with pytest.raises(discover_module.DiscoverySafetyError, match="modified protected source"):
@@ -532,10 +464,8 @@ def test_registered_discovery_retries_transient_timeout(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=2,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, sleep=lambda _delay: None),
     )
 
     assert fn("DISCOVERY PROMPT") == "[]"
@@ -556,10 +486,8 @@ def test_registered_discovery_does_not_retry_auth_failure(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=3,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=3, sleep=lambda _delay: None),
     )
 
     with pytest.raises(LlmUnavailableError) as exc_info:
@@ -586,10 +514,8 @@ def test_registered_discovery_does_not_retry_safety_violation(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=5,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=5, sleep=lambda _delay: None),
     )
 
     with pytest.raises(
@@ -663,10 +589,8 @@ def test_framework_transaction_restores_non_target_claude_shell_edits(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-shell-gap.log"),
-        backend=Backend(),
-        target_files=[str(source)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-shell-gap.log"), target_files=[str(source)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -695,19 +619,26 @@ def _autoloop_recipe(source: Path):
 def _autoloop_result(tmp_path, monkeypatch, *, source: Path, author: bool = True):
     """Run ``_run_fusion_autoloop`` end to end and return its LoopResult."""
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (True, ""))
+    return _run_autoloop(tmp_path, source, author=author)
+
+
+def _run_autoloop(tmp_path: Path, source: Path, *, author: bool):
+    """Drive ``_run_fusion_autoloop`` for the one recipe on ``source`` with the defaults a run would pass."""
     return cli_module._run_fusion_autoloop(
         [_autoloop_recipe(source)],
-        framework="vllm",
-        out=tmp_path,
-        repo_root=str(source.parent),
-        author=author,
-        gpu="0",
-        llm_model="m",
-        target_speedup=1.03,
-        ab_isl=512,
-        ab_osl=64,
-        max_turns=1,
-        agent_factory=object,
+        cli_module._FusionRun(
+            out=tmp_path,
+            repo_root=str(source.parent),
+            pristine_dir="",
+            framework_root="",
+            repo_scope=False,
+            session=cli_module.ServingSession("vllm", "", "0", 512, 64),
+            author=cli_module.AuthorAgent(backend=object, gpu="0", model="m", max_turns=1),
+            gpu_arch="",
+            target_speedup=1.03,
+        ),
+        cli_module._LoopPlan(author=author),
+        cli_module.CampaignRuntime(gpu="0", model="m"),
     )
 
 
@@ -736,8 +667,8 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
 
     seen: list[dict] = []
 
-    def fake_campaign(recipe, **kwargs):
-        seen.append(kwargs)
+    def fake_campaign(recipe, workspace, brief, runtime, target_speedup):
+        seen.append({"workspace": workspace, "brief": brief, "target_speedup": target_speedup})
         return SimpleNamespace(
             result=SimpleNamespace(kept=True, kernel_speedup=1.2),
             experiment_id="exp-1",
@@ -748,17 +679,17 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
 
     assert len(seen) == 1
     # Harness path is now per-recipe: kernel_harness_{stem}.py
-    assert "kernel_harness_" in seen[0]["harness_path"]
-    assert seen[0]["harness_path"].endswith(".py")
-    assert seen[0]["experience"] == "prior experience"
+    assert "kernel_harness_" in seen[0]["brief"].harness_path
+    assert seen[0]["brief"].harness_path.endswith(".py")
+    assert seen[0]["brief"].experience == "prior experience"
     assert seen[0]["target_speedup"] == 1.03
     # The shadow repository is visible through the .git pointer file in the tree, so shadow_env may be empty (pointer
     # case) or carry GIT_DIR (env fallback).
-    shadow_env = seen[0]["shadow_env"]
+    shadow_env = seen[0]["workspace"].git_env
     assert isinstance(shadow_env, dict)
     # The author is given a module that is already tracked, not left to create one that ``git add -u`` could never
     # commit.
-    assert seen[0]["fused_module"].endswith("qwen3_fused_residual_add_rmsnorm.py")
+    assert seen[0]["brief"].fused_module.endswith("qwen3_fused_residual_add_rmsnorm.py")
 
 
 def test_autoloop_gives_the_loop_a_git_workspace(tmp_path, monkeypatch):
@@ -794,8 +725,8 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
 
     on_entry: list[tuple[str, str]] = []
 
-    def fake_campaign(recipe, **kwargs):
-        fused = Path(kwargs["fused_module"])
+    def fake_campaign(recipe, workspace, brief, *_args, **_kwargs):
+        fused = Path(brief.fused_module)
         on_entry.append((source.read_text(encoding="utf-8"), fused.read_text(encoding="utf-8")))
         # Stand in for what the loop commits on its own smaller margin, which fusion then judges a miss.
         fused.write_text("FUSED = 1\n", encoding="utf-8")
@@ -832,20 +763,7 @@ def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(tmp_path, 
     monkeypatch.setattr(cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign"))
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (False, "author exited 3"))
 
-    result = cli_module._run_fusion_autoloop(
-        [_autoloop_recipe(source)],
-        framework="vllm",
-        out=tmp_path,
-        repo_root=str(source.parent),
-        author=True,
-        gpu="0",
-        llm_model="m",
-        target_speedup=1.03,
-        ab_isl=512,
-        ab_osl=64,
-        max_turns=1,
-        agent_factory=object,
-    )
+    result = _run_autoloop(tmp_path, source, author=True)
 
     assert started == []
     assert result.kept is False
@@ -884,8 +802,8 @@ def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_pa
 
     seen_state: list[bool] = []
 
-    def fake_campaign(recipe, *, workspace, **_kwargs):
-        state = Path(workspace) / "forge_experiments"
+    def fake_campaign(recipe, workspace, *_args, **_kwargs):
+        state = Path(workspace.root) / "forge_experiments"
         seen_state.append(state.exists())
         (state / "candidates").mkdir(parents=True, exist_ok=True)
         (state / "run_state.json").write_text("{}", encoding="utf-8")
@@ -917,7 +835,7 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
     source = model_dir / "qwen3.py"
     source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
 
-    def fake_campaign(recipe, **_kwargs):
+    def fake_campaign(recipe, *_args, **_kwargs):
         return SimpleNamespace(
             result=SimpleNamespace(kept=True, kernel_speedup=1.2),
             experiment_id="exp-42",
@@ -1010,11 +928,7 @@ def test_prepare_author_harness_marks_an_occupied_staging_target_deterministic(
     Path(staging).parent.mkdir(parents=True, exist_ok=True)
     Path(staging).write_text("print('left behind')\n", encoding="utf-8")
 
-    ready, reason, deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, deterministic = harness_authoring._prepare_author_harness(staging)
 
     assert ready is False
     assert "already exists" in reason
@@ -1160,7 +1074,7 @@ class TestNonGitRepoRoot:
             "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\ndef forward(x):\n    return x\n",
             encoding="utf-8",
         )
-        arts = export_artifacts(str(site), str(src), out, pristine_dir=pdir)
+        arts = export_artifacts(str(site), FusionFiles(str(src)), out / "fusion.patch", pristine_dir=pdir)
         assert arts.patch is not None, "venv-in-git export must still produce a patch"
         rel = "vllm/model_executor/models/qwen3.py"
         patch_text = (out / "fusion.patch").read_text()
@@ -1337,8 +1251,8 @@ class TestCliDryRun:
 
         seen: dict[str, object] = {}
 
-        def spy(diagnosis, **kwargs):
-            seen.update(kwargs)
+        def spy(diagnosis, target, *_args, **_kwargs):
+            seen["target"] = target
             return []
 
         monkeypatch.setattr(cli_module, "discover_recipes", spy)
@@ -1384,14 +1298,14 @@ class TestCliDryRun:
         )
 
         assert res.exit_code == 0, res.output
-        assert seen.get("framework_root") == str(root)
+        assert seen["target"].install.framework_root == str(root)
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
         from kernelforge.fusion import command as cli_module
         from kernelforge.fusion.llm_failure import API_ERROR, LlmUnavailableError
 
-        def dead_agent(_backend, **_kwargs):
+        def dead_agent(_backend, *_args):
             def _fn(_prompt):
                 raise LlmUnavailableError(
                     "discovery LLM unreachable after 5 attempts: BadRequestError: Error code: 400",

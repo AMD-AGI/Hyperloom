@@ -16,26 +16,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows
 from hyperloom.common.jsonio import read_json
 
-# Re-exported: callers have always named the section tuples through the
-# assembler, and they now live in a leaf module the event writers can share.
-from .sections import (
-    BASELINE_EVENT_SECTIONS,
-    CONC_SWEEP_EVENT_SECTIONS,
-    ENABLEMENT_EVENT_SECTIONS,
-    EVENT_SECTIONS,
-    FRAMEWORK_EVENT_SECTIONS,
-    KERNEL_EVENT_SECTIONS,
-    PHASE_EVENT_SECTIONS,
-    ROOFLINE_EVENT_SECTIONS,
-    STACK_EVENT_SECTIONS,
-    WARM_REPLAY_EVENT_SECTIONS,
-    WARM_START_EVENT_SECTIONS,
-    may_hold_event,
-    section_glob,
-    slug,
-)
+from .sections import EVENT_SECTIONS, may_hold_event, section_glob, slug
 
 _UNREADABLE = object()
 
@@ -108,8 +92,7 @@ def assemble_parts(
         return {}
 
     items: dict[str, list[dict[str, Any]]] = {}
-    singletons: dict[str, dict[str, Any]] = {}
-    discarded: dict[str, list[str]] = {}
+    singletons: dict[str, list[dict[str, Any]]] = {}
 
     for path in _fragment_paths(d, only_sections, only_event):
         rec = _load(path, warns)
@@ -120,34 +103,28 @@ def assemble_parts(
             warns.append(f"recorder: {path.name} missing 'section'")
             continue
         if rec.get("kind") == "singleton":
-            prev = singletons.get(section)
-            if prev is None or str(rec.get("ts") or "") >= str(prev.get("ts") or ""):
-                if prev is not None:
-                    discarded.setdefault(section, []).append(str(prev.get("producer") or "?"))
-                singletons[section] = rec
-            else:
-                discarded.setdefault(section, []).append(str(rec.get("producer") or "?"))
+            singletons.setdefault(section, []).append(rec)
         else:
             items.setdefault(section, []).append(rec)
-
-    # A singleton fragment is named for its producer, so a section with more than one is one two producers claimed.
-    for section, producers in discarded.items():
-        warns.append(
-            f"recorder: {section} was written as a singleton by more than one "
-            f"producer; only the newest was kept and "
-            f"{sorted(set(producers))} were dropped whole"
-        )
 
     out: dict[str, Any] = {}
     for section, recs in items.items():
         recs.sort(key=lambda r: (int(r.get("seq") or 0), str(r.get("ts") or "")))
         out[section] = [r.get("payload") for r in recs]
-    for section, rec in singletons.items():
-        out[section] = rec.get("payload")
+    for section, recs in singletons.items():
+        recs.sort(key=lambda r: str(r.get("ts") or ""))
+        # A singleton fragment is named for its producer, so a section with more than one is one two producers claimed.
+        if len(recs) > 1:
+            dropped = sorted({str(r.get("producer") or "?") for r in recs[:-1]})
+            warns.append(
+                f"recorder: {section} was written as a singleton by more than one "
+                f"producer; only the newest was kept and "
+                f"{dropped} were dropped whole"
+            )
+        out[section] = recs[-1].get("payload")
 
     _compose_versions(out)
     _compose_critic(out)
-    _compose_robustness(out)
     _compose_close(out)
     if not keep_event_rows:
         _drop_event_rows(out)
@@ -192,7 +169,7 @@ def _compose_write_back(out: dict[str, Any]) -> dict[str, Any] | None:
     if arc is None and attempts is None:
         return None
     block = dict(arc) if isinstance(arc, dict) else {}
-    rows = [row for row in attempts if isinstance(row, dict)] if isinstance(attempts, list) else []
+    rows = dict_rows(attempts)
     rows.sort(key=lambda row: int(row.get("attempt") or 0))
     block["attempts"] = rows
     if not block.get("status"):
@@ -215,8 +192,7 @@ def close_steps(session_dir: Path | str) -> list[dict[str, Any]]:
     close = assemble_parts(session_dir, warnings=[]).get("close")
     if not isinstance(close, dict):
         return []
-    steps = close.get("steps")
-    return [row for row in steps if isinstance(row, dict)] if isinstance(steps, list) else []
+    return dict_rows(close.get("steps"))
 
 
 def _compose_versions(out: dict[str, Any]) -> None:
@@ -256,37 +232,13 @@ def _compose_critic(out: dict[str, Any]) -> None:
     if not isinstance(rows, list):
         return
 
-    def _iter_of(row: dict[str, Any]) -> int:
-        try:
-            return int(row.get("iter") or 0)
-        except (TypeError, ValueError):
-            return 0
-
+    # ``iter`` restarts with the process on resume, so only the timestamp orders
+    # the passes; rows without one keep their relative order after the rest.
     iterations = sorted(
         (r for r in rows if isinstance(r, dict)),
-        key=lambda r: (_iter_of(r), str(r.get("ts") or "")),
+        key=lambda r: (not r.get("ts"), str(r.get("ts") or "")),
     )
     out["critic"] = {"iterations": iterations}
-
-
-def _compose_robustness(out: dict[str, Any]) -> None:
-    """Fold the ``robustness_turn`` substream into ``robustness``, ordered by
-    turn, mutating ``out`` and popping the raw substream."""
-    rows = out.pop("robustness_turn", None)
-    if not isinstance(rows, list):
-        return
-
-    def _turn_of(row: dict[str, Any]) -> int:
-        try:
-            return int(row.get("turn_idx") or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    turns = sorted(
-        (r for r in rows if isinstance(r, dict)),
-        key=lambda r: (_turn_of(r), str(r.get("ts") or "")),
-    )
-    out["robustness"] = {"turns": turns}
 
 
 def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list[dict[str, Any]]]:
@@ -303,8 +255,7 @@ def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list
     the rows that come back may still include other events', and callers pick
     out their own with :func:`~.event_rows.rows_for_event` as before.
 
-    Raises :exc:`SessionNotBoundError` when no session is bound, as do the
-    per-event wrappers below, which only name their own section tuple.
+    Raises :exc:`SessionNotBoundError` when no session is bound.
     """
     from ...session.session_binding import bound_session  # local: avoid import cycle
 
@@ -315,11 +266,7 @@ def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list
         only_sections=tuple(sections),
         only_event=event,
     )
-    parts: dict[str, list[dict[str, Any]]] = {}
-    for section in sections:
-        rows = assembled.get(section)
-        parts[section] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
-    return parts
+    return {section: dict_rows(assembled.get(section)) for section in sections}
 
 
 def recorded_section(section: str, *, detail: str = "") -> list[dict[str, Any]]:
@@ -349,56 +296,6 @@ def recorded_rows(section: str, *, event: str) -> list[dict[str, Any]]:
     from .event_rows import rows_for_event  # local: avoid an import cycle at module load
 
     return rows_for_event(recorded_section(section, detail=f"reading back the rows of event {event}"), event)
-
-
-def kernel_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the KERNEL substreams of the bound session, keyed by section."""
-    return event_parts(KERNEL_EVENT_SECTIONS, event=event)
-
-
-def roofline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the roofline substreams of the bound session, keyed by section."""
-    return event_parts(ROOFLINE_EVENT_SECTIONS, event=event)
-
-
-def baseline_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the baseline substreams of the bound session, keyed by section."""
-    return event_parts(BASELINE_EVENT_SECTIONS, event=event)
-
-
-def conc_sweep_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the conc-sweep substreams of the bound session, keyed by section."""
-    return event_parts(CONC_SWEEP_EVENT_SECTIONS, event=event)
-
-
-def enablement_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the enablement substreams of the bound session, keyed by section."""
-    return event_parts(ENABLEMENT_EVENT_SECTIONS, event=event)
-
-
-def phase_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the phase substreams of the bound session, keyed by section."""
-    return event_parts(PHASE_EVENT_SECTIONS, event=event)
-
-
-def stack_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the stack-ledger substreams of the bound session, keyed by section."""
-    return event_parts(STACK_EVENT_SECTIONS, event=event)
-
-
-def warm_replay_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the warm-replay substreams of the bound session, keyed by section."""
-    return event_parts(WARM_REPLAY_EVENT_SECTIONS, event=event)
-
-
-def warm_start_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the warm-start substreams of the bound session, keyed by section."""
-    return event_parts(WARM_START_EVENT_SECTIONS, event=event)
-
-
-def framework_event_parts(event: str = "") -> dict[str, list[dict[str, Any]]]:
-    """Return the framework substreams of the bound session, keyed by section."""
-    return event_parts(FRAMEWORK_EVENT_SECTIONS, event=event)
 
 
 def _drop_event_rows(out: dict[str, Any]) -> None:

@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.llm import process_reaping
+from kernelforge.tools import process_reaping
 from kernelforge.agent_backends.claude import _reap_workspace_processes
-from kernelforge.llm.process_reaping import (
+from kernelforge.tools.process_reaping import (
     _read_proc,
     _Survey,
     install_child_subreaper,
@@ -45,7 +45,7 @@ _EXITS_WITH_7 = _READY + "raise SystemExit(7)"
 # place ``signal.signal`` refuses.
 _COLLECTS_AN_ORPHAN_OFF_THE_MAIN_THREAD = """
 import os, signal, subprocess, sys, threading, time
-from kernelforge.llm.process_reaping import _read_proc, install_child_subreaper
+from kernelforge.tools.process_reaping import _read_proc, install_child_subreaper
 
 armed = []
 worker = threading.Thread(target=lambda: armed.append(install_child_subreaper()))
@@ -313,7 +313,7 @@ async def test_a_process_of_ours_that_moved_out_of_the_workspace_is_reaped(tmp_p
     # Its cwd says it has nothing to do with the workspace; its parent says otherwise, and the parent is the one that
     # started it there.
     assert os.path.realpath(f"/proc/{moved}/cwd") == str(elsewhere.resolve())
-    assert moved in process_reaping.owned_processes_under(str(workspace))
+    assert moved in process_reaping._survey(os.path.realpath(workspace)).owned
 
     report = await _reap_workspace_processes(str(workspace))
 

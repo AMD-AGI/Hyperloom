@@ -9,21 +9,21 @@ that measured it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, first_str, to_unix, to_mapping
 from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
+from ..variant_funnel import variants_from_timeline
 from ._common import (
-    _dict_rows,
     _first,
-    _mapping,
     _optional_bool,
-    _parse_iso_unix as _timestamp_number,
     _to_float as _optional_float,
     _to_int as _optional_int,
 )
@@ -49,43 +49,47 @@ def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_v6_metadata(
-    *,
-    exported_at_utc: str,
-    session: dict[str, Any],
-    workload: dict[str, Any],
-    model_info: dict[str, Any],
-    langfuse: dict[str, Any],
-    state: dict[str, Any],
-    warnings: list[str],
-    recorded: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build the V6 ``metadata`` section, preferring recorded facts.
+@dataclass(frozen=True)
+class MetadataSources:
+    """What the V6 ``metadata`` section is projected from.
 
-    Every field here is recorded at the moment it is decided (see
-    ``recorder/session_metadata.py``); this collector is the fallback for a
-    session whose fragments are missing or partial, and ``recorded`` is
-    overlaid leaf-by-leaf on top of it so a live-recorded run is never
-    downgraded to a re-derived value.
-
-    ``exported_at_utc`` and ``warnings`` are facts about the export itself,
-    not the session, so they are never taken from a fragment.
-
-    Args:
-        exported_at_utc: When this export ran.
+    Attributes:
         session: The resolved ``session`` section.
         workload: The resolved ``workload`` section.
         model_info: The parsed model config summary.
         langfuse: The Langfuse push receipt.
         state: Parsed ``state.json``.
-        warnings: The V6 warnings accumulated by this export.
         recorded: The recorder's ``metadata`` fragment, when present.
+    """
+
+    session: dict[str, Any]
+    workload: dict[str, Any]
+    model_info: dict[str, Any]
+    langfuse: dict[str, Any]
+    state: dict[str, Any]
+    recorded: dict[str, Any] | None = None
+
+
+def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str) -> dict[str, Any]:
+    """Build the V6 ``metadata`` section, preferring recorded facts.
+
+    Every field here is recorded at the moment it is decided (see
+    ``recorder/session_metadata.py``); this collector is the fallback for a
+    session whose fragments are missing or partial, and ``sources.recorded`` is
+    overlaid leaf-by-leaf on top of it so a live-recorded run is never
+    downgraded to a re-derived value.
+
+    ``exported_at_utc`` is a fact about the export itself, not the session, so
+    it is never taken from a fragment.
+
+    Args:
+        sources: What the section is projected from.
+        exported_at_utc: When this export ran.
 
     Returns:
         The ``metadata`` section.
     """
-    recovery = session.get("recovery") if isinstance(session.get("recovery"), dict) else {}
-    image = str(session.get("image") or "").strip()
+    workload, state = sources.workload, sources.state
     task_config = {
         "model_name": str(workload.get("model_name") or ""),
         "model_path": str(workload.get("model_path") or ""),
@@ -102,57 +106,64 @@ def collect_v6_metadata(
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
-        "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
-        "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
+        "launch_server_args": str(state.get("operator_server_args") or ""),
+        "architecture": architecture_block(sources.model_info, model_class=workload.get("model_class")),
     }
     signature = workload_signature(task_config)
     if signature:
         task_config["workload_signature"] = signature
     projected = {
         "versions": {
-            "framework": str(workload.get("framework_name") or "") or None,
-            "framework_version": str(workload.get("framework_version") or "") or None,
+            "framework": task_config["framework_name"] or None,
+            "framework_version": task_config["framework_version"] or None,
             # Probed per tool the moment it is first used and written straight
             # into the recorded ``metadata`` singleton, so there is nothing to
             # re-derive here: the overlay supplies the whole map.
             "tools": {},
         },
-        "session": {
-            "session_id": str(session.get("session_id") or ""),
-            "claw_session_id": session.get("claw_session_id"),
-            "sandbox_user_id": session.get("sandbox_user_id"),
-            "created_at_utc": str(session.get("created_at_utc") or ""),
-            "start_ts": str(session.get("start_ts") or ""),
-            "ended_at_utc": str(session.get("ended_at_utc") or ""),
-            "host": str(session.get("host") or ""),
-            "session_dir": str(session.get("session_dir") or ""),
-            "user_data_path": str(session.get("user_data_path") or ""),
-            "code_revision": str(session.get("code_revision") or ""),
-            "pid": int(session.get("pid") or 0),
-            "image": image or None,
-            "image_id": (image.split("/")[-1] or None) if image else None,
-            "max_minutes": int(session.get("max_minutes") or 0),
-            "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
-            "total_elapsed_minutes": _projected_total_elapsed_minutes(session, state),
-            "tick_count": int(session.get("tick_count") or 0),
-            "recovery": {
-                "recovered": bool(recovery.get("recovered")),
-                "crash_count": int(recovery.get("crash_count") or 0),
-                "crash_timestamps": list(recovery.get("crash_timestamps") or []),
-                "degraded_mode": bool(recovery.get("degraded_mode")),
-                "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
-                "last_tick_exception": recovery.get("last_tick_exception"),
-            },
-        },
+        "session": _session_block(sources.session, state),
         "task_config": task_config,
-        "langfuse": langfuse_block(langfuse),
+        "langfuse": langfuse_block(sources.langfuse),
     }
     grading = grading_block(state)
     if grading:
         projected["grading"] = grading
-    metadata = _overlay_recorded(projected, recorded)
+    metadata = _overlay_recorded(projected, sources.recorded)
     _mask_launch_env(metadata)
-    return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+    return {"exported_at_utc": exported_at_utc, **metadata}
+
+
+def _session_block(session: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """The ``metadata.session`` block, with ``state`` read for the minutes charged across every leg."""
+    recovery = to_mapping(session.get("recovery"))
+    image = str(session.get("image") or "").strip()
+    return {
+        "session_id": str(session.get("session_id") or ""),
+        "claw_session_id": session.get("claw_session_id"),
+        "sandbox_user_id": session.get("sandbox_user_id"),
+        "created_at_utc": str(session.get("created_at_utc") or ""),
+        "start_ts": str(session.get("start_ts") or ""),
+        "ended_at_utc": str(session.get("ended_at_utc") or ""),
+        "host": str(session.get("host") or ""),
+        "session_dir": str(session.get("session_dir") or ""),
+        "user_data_path": str(session.get("user_data_path") or ""),
+        "code_revision": str(session.get("code_revision") or ""),
+        "pid": int(session.get("pid") or 0),
+        "image": image or None,
+        "image_id": image.split("/")[-1] or None,
+        "max_minutes": int(session.get("max_minutes") or 0),
+        "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
+        "total_elapsed_minutes": _projected_total_elapsed_minutes(session, state),
+        "tick_count": int(session.get("tick_count") or 0),
+        "recovery": {
+            "recovered": bool(recovery.get("recovered")),
+            "crash_count": int(recovery.get("crash_count") or 0),
+            "crash_timestamps": list(recovery.get("crash_timestamps") or []),
+            "degraded_mode": bool(recovery.get("degraded_mode")),
+            "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
+            "last_tick_exception": recovery.get("last_tick_exception"),
+        },
+    }
 
 
 def _mask_launch_env(metadata: dict[str, Any]) -> None:
@@ -233,20 +244,6 @@ def _recorded_leaf(value: Any, *, key: str = "") -> bool:
     return True
 
 
-def _recorded_types(timeline: list[dict[str, Any]], event_type: str) -> bool:
-    """Whether the durable events already hold one of a type.
-
-    Args:
-        timeline (list[dict[str, Any]]): The durable events read back.
-        event_type (str): The type to look for.
-
-    Returns:
-        bool: True when at least one durable event has that type.
-    """
-    wanted = str(event_type)
-    return any(isinstance(event, dict) and str(event.get("type") or "") == wanted for event in timeline)
-
-
 def collect_v6_timeline(
     session_dir: Path,
     warnings: list[str],
@@ -271,8 +268,8 @@ def collect_v6_timeline(
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
-            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) is None,
-            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) or 0.0,
+            to_unix(_first(row[1].get("start_time"), row[1].get("end_time"))) is None,
+            to_unix(_first(row[1].get("start_time"), row[1].get("end_time"))) or 0.0,
             row[0],
         )
     )
@@ -299,9 +296,7 @@ def _stage_reached(
         "FRAMEWORK_AGENT": "framework_agent",
         "EXPLORE": "framework_agent",
         "KERNEL_AGENT": (
-            "kernel"
-            if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning"))
-            else "kernel_agent"
+            "kernel" if any(state.get(key) for key in ("last_fusion", "last_gemm_tuning")) else "kernel_agent"
         ),
         "SWEEP": "conc_sweep",
         "CLOSE": "close",
@@ -314,7 +309,7 @@ def _stage_reached(
             if kind:
                 return kind
     if phase == "PRELUDE":
-        heuristic = _prelude_stage_from_state(state, timeline)
+        heuristic = _prelude_stage_from_state(state)
         if heuristic:
             if warnings is not None:
                 warnings.append(
@@ -324,40 +319,31 @@ def _stage_reached(
     return "install"
 
 
-def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, Any]]) -> str:
+#: Each PRELUDE stage with the ``state.json`` fields that show a run reached it; the first stage with any set wins.
+_PRELUDE_STAGE_FIELDS = (
+    ("roofline", ("roofline_snapshots", "last_roofline", "roofline_attempts")),
+    ("profile", ("last_profile_trace", "last_profile", "profile_attempts")),
+    ("warm_replay", ("warm_replay_attempted", "warm_replay_outcome", "warm_replay_pending")),
+    ("baseline", ("baseline_tput", "last_baseline", "baseline_attempts", "baseline_failure_streak")),
+    (
+        "warm_start",
+        ("warm_start_ts", "warm_start_recipe", "warm_start_pitfalls", "warm_start_lessons", "warm_start_context"),
+    ),
+)
+
+
+def _prelude_stage_from_state(state: dict[str, Any]) -> str:
     """PRELUDE stage from leftover state fields when the timeline is empty."""
-    if state.get("roofline_snapshots") or state.get("last_roofline") or state.get("roofline_attempts"):
-        return "roofline"
-    if state.get("last_profile_trace") or state.get("last_profile") or state.get("profile_attempts"):
-        return "profile"
-    if state.get("warm_replay_attempted") or state.get("warm_replay_outcome") or state.get("warm_replay_pending"):
-        return "warm_replay"
-    if _recorded_types(timeline, "enablement"):
-        return "enablement"
-    baseline_tput = state.get("baseline_tput")
-    if (
-        isinstance(baseline_tput, (int, float))
-        and baseline_tput > 0
-        or state.get("last_baseline")
-        or state.get("baseline_attempts")
-        or int(state.get("baseline_failure_streak") or 0) > 0
-    ):
-        return "baseline"
-    if (
-        state.get("warm_start_ts")
-        or state.get("warm_start_recipe")
-        or state.get("warm_start_pitfalls")
-        or state.get("warm_start_lessons")
-        or state.get("warm_start_context")
-    ):
-        return "warm_start"
+    for stage, fields in _PRELUDE_STAGE_FIELDS:
+        if any(state.get(field) for field in fields):
+            return stage
     return ""
 
 
 #: The figures ``outcome.baseline`` publishes, named as the ``baseline`` event's
 #: own measurement block names them so the read is a straight lift.
 _BASELINE_OUTCOME_FIELDS = (
-    "throughput_tok_s_per_gpu",
+    "output_throughput",
     "accuracy",
     "ttft_mean_ms",
     "e2el_mean_ms",
@@ -385,11 +371,11 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
     """
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
 
-    source = _mapping(recorded)
+    source = to_mapping(recorded)
     return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
 
 
-def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
+def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
     Two dispatches reach the baseline executor and land an action on a
@@ -413,8 +399,8 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     for event in timeline:
         if not isinstance(event, dict) or str(event.get("type") or "") != "baseline":
             continue
-        for action in _dict_rows(_mapping(event.get("ext")).get("actions")):
-            if not _optional_bool(_mapping(action.get("request")).get("establishes_quality_ref")):
+        for action in dict_rows(to_mapping(event.get("ext")).get("actions")):
+            if not _optional_bool(to_mapping(action.get("request")).get("establishes_quality_ref")):
                 continue
             if str(action.get("status") or "").strip().lower() not in _ANCHORING_BASELINE_STATUSES:
                 continue
@@ -433,9 +419,9 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
             "submission_invalid_reasons": [],
         }
     anchors.sort(key=lambda row: row[0])
-    if source_ids is not None and anchors[-1][2]:
+    if anchors[-1][2]:
         source_ids.append(anchors[-1][2])
-    measurement = _mapping(anchors[-1][1].get("measurement"))
+    measurement = to_mapping(anchors[-1][1].get("measurement"))
     submission_valid = measurement.get("submission_valid")
     return {
         **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
@@ -450,7 +436,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     }
 
 
-def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
+def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's gain attribution off the ``stack`` ledger event.
 
     Every figure here is read, not computed: the ledger event's ``ext`` was
@@ -473,46 +459,30 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
     ledger: dict[str, Any] = {}
     for event in timeline:
         if isinstance(event, dict) and str(event.get("type") or "") == "stack":
-            ledger = _mapping(event.get("ext"))
-            if source_ids is not None:
-                source_ids[:] = [str(event["id"])] if event.get("id") else []
+            ledger = to_mapping(event.get("ext"))
+            source_ids[:] = [str(event["id"])] if event.get("id") else []
     available = bool(ledger)
-    buckets = _mapping(_mapping(ledger.get("adoptions")).get("by_source"))
-
-    def _bucket(*names: str) -> dict[str, Any]:
-        rows = [_mapping(buckets.get(name)) for name in names]
-        return {
-            "total_gain_pct": (
-                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
-            ),
-            "keep_count": sum(_optional_int(row.get("count")) or 0 for row in rows),
-            # Adoptions in this bucket whose contribution could not be measured
-            # at all. Zero of these is what makes ``total_gain_pct`` a complete
-            # account of the bucket rather than a lower bound.
-            "unmeasured_keep_count": sum(_optional_int(row.get("unmeasured")) or 0 for row in rows),
-        }
-
-    kernel_backends = _mapping(_mapping(buckets.get("kernel")).get("by_backend"))
-    validations = _mapping(ledger.get("validations"))
-    settled = _mapping(validations.get("settled"))
+    adoptions = to_mapping(ledger.get("adoptions"))
+    validations = to_mapping(ledger.get("validations"))
+    settled = to_mapping(validations.get("settled"))
     return {
         # The axis every percentage below shares. The reconciliation has to be single-axis: an attributed figure on
         # one axis against an unattributed figure on another makes the gap meaningless. Read off the validation row
         # that produced the settled figure, falling back to the axis the adoptions were graded on for a session that
         # adopted but never validated -- and never from the session's configured axis, which says what was asked
         # for rather than what this figure was measured on.
-        "graded_on": str(settled.get("graded_objective") or ledger.get("objective") or "") or None,
+        "graded_on": first_str(settled.get("graded_objective"), ledger.get("objective")) or None,
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
-        "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
+        "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")),
         "attributed_gain_pct_excluding_fixes": _optional_float(ledger.get("attributed_gain_pct_excluding_fixes")),
-        "by_keep_reason": dict(_mapping(_mapping(ledger.get("adoptions")).get("by_keep_reason"))),
-        "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
+        "by_keep_reason": dict(to_mapping(adoptions.get("by_keep_reason"))),
+        "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")),
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),
         "chain_total_gain_pct": _optional_float(ledger.get("chain_total_gain_pct")),
-        "adoption_count": _optional_int(_mapping(ledger.get("adoptions")).get("count")) or 0,
+        "adoption_count": _optional_int(adoptions.get("count")) or 0,
         # Which stack the settled figure was measured on, and when. Both are
         # read off the validation row that produced the figure rather than
         # inferred from the stack's length at export.
@@ -531,24 +501,44 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # no ledger, which is not the same as a stack that outran its
         # validation, so the negation is only taken when the ledger exists.
         "stack_changed_after_validation": (not bool(validations.get("at_head")) if available else False),
-        "attribution": {
-            "available": available,
-            "by_source": {
-                "warm_replay": _bucket("warm_replay"),
-                # V6 folds the old Explore phase into Framework Agent, so the
-                # two ledger buckets are combined at this boundary.
-                "framework_agent": _bucket("framework_agent", "explore"),
-                "kernel": {
-                    **_bucket("kernel"),
-                    "by_backend": {
-                        "geak": _bucket_of(kernel_backends, "geak", available),
-                        "forge": _bucket_of(kernel_backends, "forge", available),
-                    },
+        "attribution": _attribution(to_mapping(adoptions.get("by_source")), available),
+        "guards": dict(to_mapping(ledger.get("guards"))),
+        "notes": _validation_notes(ledger),
+    }
+
+
+def _attribution(buckets: dict[str, Any], available: bool) -> dict[str, Any]:
+    """The ledger's adoptions by source, the kernel source by backend; ``available`` says the ledger exists."""
+
+    def _bucket(*names: str) -> dict[str, Any]:
+        rows = [to_mapping(buckets.get(name)) for name in names]
+        return {
+            "total_gain_pct": (
+                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
+            ),
+            "keep_count": sum(_optional_int(row.get("count")) or 0 for row in rows),
+            # Adoptions in this bucket whose contribution could not be measured
+            # at all. Zero of these is what makes ``total_gain_pct`` a complete
+            # account of the bucket rather than a lower bound.
+            "unmeasured_keep_count": sum(_optional_int(row.get("unmeasured")) or 0 for row in rows),
+        }
+
+    kernel_backends = to_mapping(to_mapping(buckets.get("kernel")).get("by_backend"))
+    return {
+        "available": available,
+        "by_source": {
+            "warm_replay": _bucket("warm_replay"),
+            # V6 folds the old Explore phase into Framework Agent, so the
+            # two ledger buckets are combined at this boundary.
+            "framework_agent": _bucket("framework_agent", "explore"),
+            "kernel": {
+                **_bucket("kernel"),
+                "by_backend": {
+                    "geak": _bucket_of(kernel_backends, "geak", available),
+                    "forge": _bucket_of(kernel_backends, "forge", available),
                 },
             },
         },
-        "guards": dict(_mapping(ledger.get("guards"))),
-        "notes": _validation_notes(ledger),
     }
 
 
@@ -563,7 +553,7 @@ def _bucket_of(backends: dict[str, Any], name: str, available: bool) -> dict[str
     Returns:
         dict[str, Any]: The backend's adoption count and summed contribution.
     """
-    row = _mapping(backends.get(name))
+    row = to_mapping(backends.get(name))
     return {
         "total_gain_pct": _optional_float(row.get("total_gain_pct")) if available else None,
         "keep_count": _optional_int(row.get("count")) or 0,
@@ -592,7 +582,7 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     if not ledger:
         return []
     notes: list[str] = []
-    guards = _mapping(ledger.get("guards"))
+    guards = to_mapping(ledger.get("guards"))
     unmeasured = _optional_int(guards.get("unmeasured")) or 0
     if unmeasured:
         notes.append(f"{unmeasured} adoption(s) have no measurable contribution; attributed gain is a lower bound")
@@ -613,7 +603,7 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
         )
     # No note for an off-objective adoption: a comparison that cannot supply the configured axis pair fails instead
     # of settling for another axis, so every row in this sum is on the axis ``graded_on`` names by construction.
-    validations = _mapping(ledger.get("validations"))
+    validations = to_mapping(ledger.get("validations"))
     if not _optional_int(validations.get("count")):
         notes.append("no whole-stack validation was measured, so the ledger has nothing to reconcile against")
     elif validations.get("at_head") is False:
@@ -621,18 +611,11 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     return notes
 
 
-def collect_v6_outcome(
-    *,
-    session: dict[str, Any],
-    close: dict[str, Any],
-    state: dict[str, Any],
-    timeline: list[dict[str, Any]],
-    warnings: list[str] | None = None,
-    recorded: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Assemble the V6 ``outcome`` block off the timeline and the close-out.
+@dataclass(frozen=True)
+class OutcomeSources:
+    """What the V6 ``outcome`` block is assembled from.
 
-    Args:
+    Attributes:
         session (dict[str, Any]): The session section, read for the stop
             reason.
         close (dict[str, Any]): The ``close`` section, whose ``final_recipe``
@@ -643,14 +626,28 @@ def collect_v6_outcome(
         state (dict[str, Any]): Parsed ``state.json``, read for the stage the
             run reached.
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
+        recorded (dict[str, Any] | None): The recorder's ``outcome`` fragment,
+            when present.
+    """
+
+    session: dict[str, Any]
+    close: dict[str, Any]
+    state: dict[str, Any]
+    timeline: list[dict[str, Any]]
+    recorded: dict[str, Any] | None = None
+
+
+def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = None) -> dict[str, Any]:
+    """Assemble the V6 ``outcome`` block off the timeline and the close-out.
 
     Returns:
         dict[str, Any]: The ``outcome`` block.
     """
+    session, state, timeline = sources.session, sources.state, sources.timeline
     stop_reason = str(session.get("stop_reason") or "").strip()
     baseline_ids: list[str] = []
     baseline = _baseline_from_timeline(timeline, baseline_ids)
-    measured_tput = _optional_float(baseline.get("throughput_tok_s_per_gpu"))
+    measured_tput = _optional_float(baseline.get("output_throughput"))
     if measured_tput is None:
         measured_tput = _optional_float(state.get("baseline_tput")) or 0.0
     outcome_status = _outcome_status(stop_reason, measured_tput)
@@ -662,8 +659,8 @@ def collect_v6_outcome(
         break
     validation_ids: list[str] = []
     validation = _validation_from_timeline(timeline, validation_ids)
-    recipe = _mapping(close.get("final_recipe"))
-    stage_recorded = str(_mapping(recorded).get("stage_reached_recorded") or "")
+    recipe = to_mapping(sources.close.get("final_recipe"))
+    stage_recorded = str(to_mapping(sources.recorded).get("stage_reached_recorded") or "")
     outcome = {
         "stop_reason": stop_reason,
         "status": outcome_status,
@@ -672,7 +669,7 @@ def collect_v6_outcome(
         "baseline": baseline,
         "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
-            "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
+            "output_throughput": _optional_float(recipe.get("throughput")),
             # The ledger's own settled figure rather than a second tally of it.
             # Absent a validation this is ``None``, not ``0.0``: nothing
             # measured is not the same as a measured zero.
@@ -684,7 +681,7 @@ def collect_v6_outcome(
             "graded_on": validation.get("graded_on"),
             "perf": validation.get("perf"),
             "action_path": [str(step) for step in recipe.get("action_path") or []],
-            "extra_envs": dict(_mapping(recipe.get("extra_envs"))),
+            "extra_envs": dict(to_mapping(recipe.get("extra_envs"))),
             "extra_server_args": str(recipe.get("extra_server_args") or ""),
             # Read off the validation row that measured the final stack: the
             # settled figure and the latency and launch beside it come from one
@@ -692,6 +689,7 @@ def collect_v6_outcome(
             **_measured_final(validation, recipe),
         },
         "validation": validation,
+        "variants": variants_from_timeline(timeline),
     }
     if stage_recorded:
         outcome["stage_reached_recorded"] = stage_recorded

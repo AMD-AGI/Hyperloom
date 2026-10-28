@@ -22,6 +22,8 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
 )
 from kernelforge.knowledge.kb_store.identity.warmstart_rank import rank_fallback_identities
 from kernelforge.knowledge.kb_store.record_store import (
+    KBStoreError,
+    RewriteRecordError,
     RewriteRecordStore,
     create_rewrite_record_store,
     safe_rel_path,
@@ -44,20 +46,14 @@ def candidate_session_id(canonical_id: str, kernel_name: str, content_digest: st
 
 
 @dataclass(frozen=True)
-class CandidateMetadata:
-    """Ranking metadata for one previously recorded port."""
+class CandidateBundle:
+    """One selected port fully materialized in its own local directory."""
 
     session_id: str
     value: dict[str, Any]
     speedup: float | None
     is_champion: bool
     measured_speedup: float | None
-
-
-@dataclass(frozen=True)
-class CandidateBundle(CandidateMetadata):
-    """One selected port fully materialized in its own local directory."""
-
     bundle_dir: Path
     recipe_path: Path
     files_dir: Path
@@ -117,7 +113,7 @@ class KernelRecipeKB:
             return cls(None, reason="not_configured")
         try:
             canonical_id = kernel_recipe_canonical_id(identity)
-        except Exception as error:  # noqa: BLE001 - an invalid identity cold-starts
+        except ValueError as error:  # an invalid identity cold-starts
             return cls(
                 None,
                 reason=sanitize_read_error(error, secrets=kb_store_secrets(config)),
@@ -144,34 +140,6 @@ class KernelRecipeKB:
         return self._store is not None and bool(self.canonical_id)
 
     # -- read ----------------------------------------------------------------
-
-    def read_best(self, destination: str | Path) -> CandidateBundle | None:
-        """Materialize and return this producer's Top1, or ``None`` when cold."""
-        ranked = self.read_top_n(destination, limit=1)
-        return ranked[0] if ranked else None
-
-    def list_candidates(self, limit: int = 3) -> list[CandidateMetadata]:
-        """Return ranking metadata without downloading candidate artifacts."""
-        if not self.active or limit <= 0:
-            return []
-        try:
-            found = self._store.candidates(self.canonical_id, limit=limit)
-        except Exception as error:  # noqa: BLE001 - a KB read must cold-start
-            self.reason = sanitize_read_error(error, secrets=self._config_secrets())
-            return []
-        summaries: list[CandidateMetadata] = []
-        for candidate in found:
-            value = candidate.knowledge.get("value")
-            summaries.append(
-                CandidateMetadata(
-                    session_id=candidate.session_id,
-                    value=dict(value) if isinstance(value, Mapping) else {},
-                    speedup=candidate.speedup,
-                    is_champion=candidate.is_champion,
-                    measured_speedup=candidate.measured_speedup,
-                )
-            )
-        return summaries
 
     def read_top_n(
         self,
@@ -204,7 +172,7 @@ class KernelRecipeKB:
                     )
                 )
             return bundles
-        except Exception as error:  # noqa: BLE001 - a KB read must cold-start
+        except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
             self.reason = sanitize_read_error(error, secrets=self._config_secrets())
             return []
 
@@ -215,7 +183,7 @@ class KernelRecipeKB:
         try:
             rows = self._store.search_identities(self._identity, limit=limit)
             return rank_fallback_identities(self._identity, rows)
-        except Exception as error:  # noqa: BLE001 - fuzzy search must cold-start
+        except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
             self.reason = sanitize_read_error(error, secrets=self._config_secrets())
             return []
 
@@ -225,7 +193,7 @@ class KernelRecipeKB:
             return b""
         try:
             return self._store.read_bytes(self.canonical_id, session_id, rel_path)
-        except Exception:  # noqa: BLE001 - an unreadable artifact is just a miss
+        except (KBStoreError, RewriteRecordError, OSError):
             return b""
 
     # -- write ---------------------------------------------------------------
@@ -236,33 +204,30 @@ class KernelRecipeKB:
         files: Any = (),
         speedup: float | None = None,
     ) -> dict[str, Any]:
-        """Record the complete picture of one port, plus the files it needs."""
+        """Record the complete picture of one port, plus the files it needs.
+
+        Store and staging failures propagate to the caller.
+        """
         if not self.active:
             return {"written": False, "reason": self.reason or "not_configured"}
         if not isinstance(knowledge, Mapping):
             return {"written": False, "reason": "knowledge_not_a_mapping"}
-        try:
-            named = _named_files(files)
-            document = {
-                "producer": self._identity.producer,
-                "speedup": round(speedup, 4) if speedup is not None else None,
-                "identity": asdict(self._identity),
-                "value": dict(knowledge),
-            }
-            session_id = candidate_session_id(
-                self.canonical_id,
-                self._identity.kernel_name,
-                _port_digest(knowledge, named),
-            )
-            with tempfile.TemporaryDirectory(prefix="rewrite-agent-kb-") as temporary:
-                staged = self._stage(named, Path(temporary))
-                self._store.write(self.canonical_id, session_id, document, staged)
-            promoted = self._maybe_promote(session_id, speedup)
-        except Exception as error:  # noqa: BLE001 - a KB write never breaks a rewrite
-            return {
-                "written": False,
-                "reason": sanitize_read_error(error, secrets=self._config_secrets()),
-            }
+        named = _named_files(files)
+        document = {
+            "producer": self._identity.producer,
+            "speedup": round(speedup, 4) if speedup is not None else None,
+            "identity": asdict(self._identity),
+            "value": dict(knowledge),
+        }
+        session_id = candidate_session_id(
+            self.canonical_id,
+            self._identity.kernel_name,
+            _port_digest(knowledge, named),
+        )
+        with tempfile.TemporaryDirectory(prefix="rewrite-agent-kb-") as temporary:
+            staged = self._stage(named, Path(temporary))
+            self._store.write(self.canonical_id, session_id, document, staged)
+        promoted = self._maybe_promote(session_id, speedup)
         return {
             "written": True,
             "canonical_id": self.canonical_id,
@@ -278,20 +243,17 @@ class KernelRecipeKB:
         session_id: str,
         measured_speedup: float,
     ) -> dict[str, Any]:
-        """Amend one recorded candidate with the speedup this run measured."""
+        """Amend one recorded candidate with the speedup this run measured.
+
+        Store failures propagate to the caller.
+        """
         if not self.active:
             return {"recorded": False, "reason": self.reason or "not_configured"}
-        try:
-            self._store.record_measured_speedup(
-                self.canonical_id,
-                session_id,
-                measured_speedup,
-            )
-        except Exception as error:  # noqa: BLE001 - reported, never raised at a run
-            return {
-                "recorded": False,
-                "reason": sanitize_read_error(error, secrets=self._config_secrets()),
-            }
+        self._store.record_measured_speedup(
+            self.canonical_id,
+            session_id,
+            measured_speedup,
+        )
         return {
             "recorded": True,
             "canonical_id": self.canonical_id,
@@ -333,7 +295,6 @@ class KernelRecipeKB:
 
 __all__ = [
     "CandidateBundle",
-    "CandidateMetadata",
     "KernelRecipeKB",
     "kb_store_secrets",
 ]

@@ -85,12 +85,17 @@ def generate_tuner(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     retry_note: str = "",
 ) -> GeneratedTuner:
-    """Author a tuner script into ``work_dir``; never raises."""
+    """Author a tuner script into ``work_dir``; an unusable provider or a failed session is a failed outcome."""
     work_dir.mkdir(parents=True, exist_ok=True)
     script_path = work_dir / "tuner.py"
 
     try:
-        from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+        from kernelforge.agent_backends.base import (
+            AgentProviderError,
+            AgentRunSpec,
+            AgentRuntimeSettings,
+            AgentToolPolicy,
+        )
         from kernelforge.agent_backends.registry import (
             create_registered_backend,
             resolve_agent_runtime,
@@ -114,11 +119,10 @@ def generate_tuner(
             # The model variable is per-provider, so it is only readable once
             # the provider is settled.
             model=model or resolve_agent_model(chosen.name),
-            timeout_sec=timeout_s,
-            reasoning_effort=resolve_agent_reasoning_effort(),
+            settings=AgentRuntimeSettings(timeout_sec=timeout_s, reasoning_effort=resolve_agent_reasoning_effort()),
         )
         backend = create_registered_backend(runtime)
-    except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
+    except (AgentProviderError, ValueError) as exc:
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")
 
     isolated = _isolate(work_dir)
@@ -141,7 +145,8 @@ def generate_tuner(
 
     try:
         result = _run(backend, spec)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # isolation boundary: one Tier3 authoring session, reported in the outcome
+        log.warning("tier-3 authoring session failed", exc_info=True)
         return GeneratedTuner(False, None, f"authoring session failed: {exc!r}")
 
     provider = str(getattr(backend, "name", "") or "")

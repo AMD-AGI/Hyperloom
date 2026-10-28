@@ -35,9 +35,9 @@ def test_config_framework_reads_materialized_yaml(tmp_path):
 
 
 def _count_scans(monkeypatch) -> dict[str, int]:
-    calls = {"scan": 0, "death": 0}
+    calls = {"scan": 0}
 
-    def _scan(server_log_path, offsets, residuals=None, identities=None):
+    def _scan(self, server_log_path):
         calls["scan"] += 1
         return sk._LogScan(
             saw_ready=False,
@@ -47,12 +47,7 @@ def _count_scans(monkeypatch) -> dict[str, int]:
             child_spoke=False,
         )
 
-    def _death(path):
-        calls["death"] += 1
-        return
-
-    monkeypatch.setattr(sk, "_scan_logs_increment", _scan)
-    monkeypatch.setattr(sk, "_server_log_shows_death", _death)
+    monkeypatch.setattr(sk._LogCursor, "advance", _scan)
     return calls
 
 
@@ -60,22 +55,21 @@ def test_no_server_log_leaves_both_watchdogs_disarmed(monkeypatch):
     calls = _count_scans(monkeypatch)
 
     proc = sk.run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(1.2)"], timeout=30, server_log_path=None
+        [sys.executable, "-c", "import time; time.sleep(1.2)"],
+        watch=sk.RoundWatch(timeout=30, server_log_path=None),
     )
 
     assert proc.returncode == 0
-    assert calls == {"scan": 0, "death": 0}
+    assert calls == {"scan": 0}
 
 
-def test_server_log_is_scanned_without_runtime_death_markers(monkeypatch, tmp_path: Path):
+def test_server_log_is_scanned(monkeypatch, tmp_path: Path):
     calls = _count_scans(monkeypatch)
 
     proc = sk.run_with_session_kill(
         [sys.executable, "-c", "import time; time.sleep(1.2)"],
-        timeout=30,
-        server_log_path=str(tmp_path / "server.log"),
+        watch=sk.RoundWatch(timeout=30, server_log_path=str(tmp_path / "server.log")),
     )
 
     assert proc.returncode == 0
     assert calls["scan"] > 0
-    assert calls["death"] == 0

@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
+from hyperloom.common.coerce import to_float
+from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.common.llm_config import (
+    DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
     apply_reasoning_effort,
     astream_chat_completion_text,
@@ -22,15 +24,16 @@ from hyperloom.common.llm_config import (
 )
 from ..roles.base import parse_call_timeout_env
 from hyperloom.common.timeutil import format_exc_brief
+from hyperloom.common.token_usage import openai_usage_counts
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 
 log = logging.getLogger(__name__)
 
 
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
-    "claude-opus-5",
+    DEFAULT_CLAUDE_MODEL,
     "gpt-5.6-sol",
     # Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",
@@ -60,13 +63,6 @@ Rules:
 - "reason" MUST be <= 15 words. Keep it terse to keep the reply short.
 - Do not add keys other than "score" and "reason".
 """.strip()
-
-
-def _extract_scores_json(text: str) -> dict[str, Any] | None:
-    """Pull the last valid ``{"scores": {...}}`` object out of a reply."""
-    from hyperloom.common.jsonio import extract_last_json_with_key
-
-    return extract_last_json_with_key(text, "scores")
 
 
 @dataclass(frozen=True)
@@ -113,15 +109,8 @@ def _clip(value: Any, *, limit: int = _MAX_FIELD_CHARS) -> str:
 
 def _coerce_score(raw: Any) -> float | None:
     """Coerce a model-emitted score into a clamped [0, 10] float."""
-    if isinstance(raw, bool):
-        return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(val):
-        return None
-    return max(0.0, min(10.0, val))
+    val = to_float(raw)
+    return None if val is None else max(0.0, min(10.0, val))
 
 
 def _normalise_model_scores(
@@ -150,14 +139,19 @@ def _normalise_model_scores(
     return out
 
 
+class ScorerCallKeys(NamedTuple):
+    """The task, tick and phase a scoring call is attributed to in the traces."""
+
+    task_id: str | None = None
+    tick: int | None = None
+    phase: str | None = None
+
+
 @dataclass
 class ProposalScorer:
     """Score proposals without ranking or selecting them."""
 
     models: tuple[str, ...] = DEFAULT_SCORER_MODELS
-    # Scorer talks the OpenAI protocol, so prefer the OpenAI-side key/URL.
-    api_key_env: str = "OPENAI_API_KEY"
-    base_url_env: str = "OPENAI_BASE_URL"
     # Large cap so reasoning raters can finish reasoning and still emit the scores JSON.
     max_completion_tokens: int = 4096
     call_timeout_s: float = field(
@@ -191,10 +185,7 @@ class ProposalScorer:
         if self._client is not None:
             return self._client
         try:
-            self._client = get_async_openai_client(
-                api_key_env=self.api_key_env,
-                base_url_env=self.base_url_env,
-            )
+            self._client = get_async_openai_client()
         except LLMConfigError as exc:
             raise RuntimeError(str(exc).replace("OpenAI-compatible client", "ProposalScorer")) from exc
         return self._client
@@ -237,10 +228,7 @@ class ProposalScorer:
         model: str,
         prompt: str,
         scoring_entries: list[_ScoringProposal],
-        *,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
+        keys: ScorerCallKeys = ScorerCallKeys(),
     ) -> dict[str, dict[str, Any]]:
         """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
         client = self._ensure_client()
@@ -269,52 +257,22 @@ class ProposalScorer:
             )
         except asyncio.TimeoutError as exc:
             error = RuntimeError(f"timed out after {self.call_timeout_s:.0f}s")
-            self._trace_scorer_llm_failure(
-                model,
-                error,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-            )
+            self._trace_scorer_llm_failure(model, error, keys, latency_ms=int((time.perf_counter() - _t0) * 1000))
             raise error from exc
         except Exception as exc:
             # Anything else out of the stream (transport, proxy 5xx, malformed chunk) is still a model call that
             # produced nothing usable.
-            self._trace_scorer_llm_failure(
-                model,
-                exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-            )
+            self._trace_scorer_llm_failure(model, exc, keys, latency_ms=int((time.perf_counter() - _t0) * 1000))
             raise
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         # One id for both halves of this call, so the emitter pairs them on the call itself instead of on a ts-second
         # bucket shared with the other models being scored concurrently.
         call_id = new_call_id()
         # Record this model's token spend before parsing (best-effort).
-        self._trace_scorer_llm_call(
-            model,
-            usage,
-            latency_ms=latency_ms,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
-            call_id=call_id,
-        )
+        self._trace_scorer_llm_call(model, usage, keys, latency_ms=latency_ms, call_id=call_id)
         # Persist the full (redacted) prompt + reply alongside the token row.
-        self._record_scorer_conversation(
-            model,
-            full_prompt,
-            text,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
-            call_id=call_id,
-        )
-        parsed = _extract_scores_json(text)
+        self._record_scorer_conversation(model, full_prompt, text, keys, call_id=call_id)
+        parsed = extract_last_json_with_key(text, "scores")
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
         return _normalise_model_scores(parsed, scoring_entries=scoring_entries)
@@ -323,35 +281,29 @@ class ProposalScorer:
         self,
         model: str,
         usage: Any,
+        keys: ScorerCallKeys,
         *,
         latency_ms: int | None = None,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
         call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call."""
         if self.session_dir is None:
             return
         try:
-            input_tokens = None
-            output_tokens = None
-            if usage is not None:
-                pt = getattr(usage, "prompt_tokens", None)
-                ct = getattr(usage, "completion_tokens", None)
-                input_tokens = int(pt) if pt is not None else None
-                output_tokens = int(ct) if ct is not None else None
+            counts = openai_usage_counts(usage)
             record = LLMCallRecord(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",  # must match the conversation row's role
                 call_id=call_id,
                 model=str(model),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
+                task_id=keys.task_id,
+                tick=keys.tick,
+                phase=keys.phase,
+                input_tokens=counts.get("input_tokens"),
+                output_tokens=counts.get("output_tokens"),
+                cache_read_input_tokens=counts.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=counts.get("cache_creation_input_tokens"),
                 # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
                 # consistent with the backends that report it on their turn metadata.
                 reasoning_output_tokens=reasoning_output_tokens(usage),
@@ -369,27 +321,23 @@ class ProposalScorer:
         self,
         model: str,
         error: BaseException,
+        keys: ScorerCallKeys,
         *,
         latency_ms: int | None = None,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` row for a scoring call that never returned."""
         if self.session_dir is None:
             return
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",
-                error=error,
-                model=str(model),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-                latency_ms=latency_ms,
+                task_id=keys.task_id,
+                tick=keys.tick,
+                phase=keys.phase,
             )
+            record = LLMCallRecord.for_failure(site, error, model=str(model), latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
@@ -403,10 +351,8 @@ class ProposalScorer:
         model: str,
         prompt: str,
         response: str,
+        keys: ScorerCallKeys,
         *,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
         call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call."""
@@ -419,9 +365,9 @@ class ProposalScorer:
             component="proposal_scorer",
             role="proposal_scorer",
             call_id=call_id,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
+            task_id=keys.task_id,
+            tick=keys.tick,
+            phase=keys.phase,
             model=str(model),
             prompt=prompt or "",
             response=response or "",
@@ -456,12 +402,7 @@ class ProposalScorer:
         results = await asyncio.gather(
             *(
                 self._score_one_model(
-                    m,
-                    prompt,
-                    scoring_entries,
-                    task_id=task_id,
-                    tick=tick,
-                    phase=phase,
+                    m, prompt, scoring_entries, ScorerCallKeys(task_id=task_id, tick=tick, phase=phase)
                 )
                 for m in self.models
             ),
@@ -485,4 +426,4 @@ class ProposalScorer:
         return {"scale": "0-10", "models": models_out, "errors": errors}
 
 
-__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS", "_extract_scores_json"]
+__all__ = ["ProposalScorer", "DEFAULT_SCORER_MODELS"]

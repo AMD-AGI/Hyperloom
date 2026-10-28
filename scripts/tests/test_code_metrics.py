@@ -506,35 +506,58 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
     units = FakeUnits(tmp_path, "src/p.py", SOURCE).units
     rows = [
         {
-            "code": "C901",
-            "message": "`pick` is too complex (11 > 10)",
-            "filename": str(tmp_path / "src/p.py"),
-            "location": {"row": 2},
-        },
-        {
             "code": "PLR1702",
             "message": "Too many nested blocks (6 > 5)",
             "filename": str(tmp_path / "src/p.py"),
             "location": {"row": 4},
         },
         {
-            "code": "C901",
-            "message": "`inner` is too complex (21 > 20)",
+            "code": "PLR0913",
+            "message": "Too many arguments in function definition (7 > 5)",
             "filename": str(tmp_path / "src/p.py"),
-            "location": {"row": 14},
+            "location": {"row": 2},
         },
     ]
     got = [(f.metric, f.unit, f.value, f.line) for f in collect.parse_ruff(rows, tmp_path, units)]
     assert got == [
-        (CC, "Planner.pick", 11, 2),
         ("nested-blocks", "Planner.pick", 6, 4),
-        (CC, "helper.inner", 21, 14),
+        (collect.FUNCTION_ARGS, "Planner.pick", 7, 2),
     ]
     with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic"):
         collect.parse_ruff([{**rows[0], "message": "reworded"}], tmp_path, units)
     # A rule this gate no longer selects is unexpected output, not a silently dropped row.
-    with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic: PLR0911"):
-        collect.parse_ruff([{**rows[0], "code": "PLR0911"}], tmp_path, units)
+    for code in ("PLR0911", "C901"):
+        with pytest.raises(collect.ToolError, match=f"unexpected ruff diagnostic: {code}"):
+            collect.parse_ruff([{**rows[0], "code": code}], tmp_path, units)
+
+
+def test_radon_blocks_map_functions_and_closures_to_units(tmp_path: Path) -> None:
+    units = FakeUnits(tmp_path, "src/p.py", SOURCE).units
+    pick = {"type": "method", "name": "pick", "classname": "Planner", "lineno": 2, "complexity": 21, "closures": []}
+    size = {"type": "method", "name": "size", "classname": "Planner", "lineno": 9, "complexity": 1, "closures": []}
+    inner = {"type": "function", "name": "inner", "lineno": 14, "complexity": 22, "closures": []}
+    rows = {
+        str(tmp_path / "src/p.py"): [
+            {"type": "class", "name": "Planner", "lineno": 1, "complexity": 30, "methods": [pick, size]},
+            pick,
+            size,
+            {"type": "function", "name": "helper", "lineno": 13, "complexity": 20, "closures": [inner]},
+        ]
+    }
+    got = [(f.metric, f.unit, f.value, f.line) for f in collect.parse_radon(rows, tmp_path, 20, units)]
+    assert got == [(CC, "Planner.pick", 21, 2), (CC, "helper.inner", 22, 14)]
+    with pytest.raises(collect.ToolError, match="radon could not measure"):
+        collect.parse_radon({str(tmp_path / "src/p.py"): {"error": "invalid syntax"}}, tmp_path, 20, units)
+
+
+@pytest.mark.skipif(shutil.which("radon") is None, reason="radon")
+def test_cyclomatic_complexity_counts_boolean_operators(tmp_path: Path) -> None:
+    # McCabe counts this function as 1; every `and` is a branch for the gate.
+    operands = " and ".join(f"x{i}" for i in range(22))
+    path = "src/a.py"
+    FakeUnits(tmp_path, path, f"def f({', '.join(f'x{i}' for i in range(22))}):\n    return {operands}\n")
+    got = collect.radon_findings(tmp_path, [path], 20, collect.Units(tmp_path))
+    assert got == [collect.Finding(CC, path, "f", 22, 1)]
 
 
 def test_complexipy_rows_keep_only_violations_with_their_line(tmp_path: Path) -> None:
@@ -583,11 +606,15 @@ def test_list_files_splits_tests_and_honours_exclude(tmp_path: Path) -> None:
 def test_repo_config_names_every_metric_with_a_threshold() -> None:
     config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert config is not None
-    assert set(config.thresholds) == set(collect.METRICS)
+    # A pending metric (PENDING) is the one name the table may still be missing.
+    assert set(collect.METRICS) - set(collect.PENDING) <= set(config.thresholds) <= set(collect.METRICS)
     assert config.tools["ruff"] in (ROOT / ".github/workflows/lint.yml").read_text(encoding="utf-8")
     baseline = code_metrics.load_baseline((ROOT / config.baseline).read_text(encoding="utf-8"))
     assert not [path for _metric, path, _unit in baseline if Path(path).name.startswith("code_metrics")]
-    assert "radon" not in config.tools and "maintainability-index" not in config.thresholds
+    assert f'"radon=={config.tools["radon"]}"' in (ROOT / ".github/workflows/code-metrics.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "maintainability-index" not in config.thresholds
 
 
 def test_comment_poster_never_runs_pull_request_code() -> None:
@@ -599,6 +626,20 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
     gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
     assert gate["jobs"]["code-metrics"]["name"] == "code-metrics"
     assert gate["name"] in poster[True]["workflow_run"]["workflows"]
+
+
+def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    without_args = text.replace("function-args = 5\n", "")
+    with pytest.raises(collect.ToolError, match="thresholds must name"):
+        code_metrics.parse_config(without_args)
+    monkeypatch.setattr(code_metrics, "PENDING", (collect.FUNCTION_ARGS,))
+    config = code_metrics.parse_config(without_args)
+    assert config is not None and collect.FUNCTION_ARGS not in config.thresholds
+    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == ["PLR1702"]
+    for broken in (text.replace("nested-blocks = 4\n", ""), text.replace("nested-blocks =", "mccabe =")):
+        with pytest.raises(collect.ToolError, match="thresholds must name"):
+            code_metrics.parse_config(broken)
 
 
 @pytest.mark.parametrize(
@@ -1240,29 +1281,93 @@ def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Rep
     _code, report = repo.gate()
     config = code_metrics.parse_config((repo.path / "pyproject.toml").read_text(encoding="utf-8"))
     rows = [line for line in report.splitlines() if line.startswith("| ") and "fails > " in line]
-    assert len(rows) == len(collect.METRICS)
-    for metric in collect.METRICS.values():
+    # A pending metric has no threshold yet, so the table has no limit to state for it.
+    measured = [metric for metric in collect.METRICS.values() if metric.name in config.thresholds]
+    assert len(rows) == len(measured)
+    for metric in measured:
         limit = f"fails > {config.thresholds[metric.name]}"
         if metric.name == collect.MODULE_LINES:
             limit = f"warns > {config.params['module-lines-warning']}, {limit}"
         assert any(row.startswith(f"| {metric.label} | {limit} | ") for row in rows), (metric.name, rows)
 
 
-def test_function_length_counts_def_to_last_line_and_nested_functions_alone(tmp_path: Path) -> None:
-    body = "    x = 1\n" * 77
+def test_function_length_counts_body_code_lines_and_nested_functions_alone(tmp_path: Path) -> None:
     source = (
         "@decorator\n@another\n"
-        f'def outer():\n    """Doc."""\n    # comment\n{body}'
-        "    def inner():\n" + "        y = 2\n" * 80 + "    return inner\n"
+        'def outer(\n    a,\n):\n    """Doc.\n\n    More doc.\n    """\n    # comment\n\n'
+        + "    x = 1\n" * 50
+        + '    text = """\n\n    keep\n    """\n'
+        + '    def inner():\n        """Inner doc."""\n'
+        + "        y = 2\n" * 51
+        + "    return inner\n"
     )
     units = FakeUnits(tmp_path, "src/f.py", source).units
-    got = {f.unit: (f.value, f.line) for f in collect.function_line_findings(["src/f.py"], 80, units)}
-    # outer: def line, docstring, comment, 77 lines, return: 1 + 1 + 1 + 77 + 1; inner is its own unit.
-    assert got == {"outer": (81, 3), "outer.inner": (81, 83)}
-    assert collect.function_line_findings(["src/f.py"], 81, units) == []
+    got = {f.unit: (f.value, f.line) for f in collect.function_line_findings(["src/f.py"], 50, units)}
+    # outer: 50 assignments, the string's 3 non-blank lines and the return; inner is its own unit.
+    assert got == {"outer": (54, 3), "outer.inner": (51, 66)}
+    assert collect.function_line_findings(["src/f.py"], 54, units) == []
 
 
-@pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")
+def test_directory_entries_count_direct_modules_and_subdirectories() -> None:
+    files = ["src/a/x.py", "src/a/y.py", "src/a/b/z.py", "src/a/b/c/w.py", "src/q.py"]
+    assert collect.directory_findings(files, 2) == [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 3, 1)
+    ]
+
+
+def test_a_directory_is_judged_when_the_change_touches_a_file_under_it() -> None:
+    outcome = code_metrics_report.Outcome(touched={"src/a/b/z.py"})
+    assert [outcome.judged(p) for p in ("src/a", "src/a/b", "src/a/b/z.py", "src/ab", "src/a/x.py")] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
+def test_a_worse_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({key("src/a", collect.MODULE, collect.DIRECTORY_ENTRIES): 51})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 52, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 | 52 |" in section(report, WORSE)
+
+
+def test_a_new_directory_is_not_measured_again_at_the_base_as_a_file(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
+    repo.write_baseline({})
+    base = repo.commit()
+    repo.touch("src/a/new.py")
+    repo.findings = [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 51, 1),
+        cc("src/a/new.py", "f", 25),
+    ]
+
+    code, report = repo.gate("--base-ref", base)
+
+    assert asked == ["src/a/new.py"]
+    assert code == 1 and "| Directory size (entries) | 51 |" in section(report, NEW)
+
+
+@pytest.mark.skipif(
+    shutil.which("ruff") is None or shutil.which("complexipy") is None or shutil.which("radon") is None,
+    reason="ruff/complexipy/radon",
+)
 def test_base_values_measures_the_files_as_they_were_at_the_base(tmp_path: Path) -> None:
     branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(21))
     (tmp_path / "src").mkdir()
@@ -1290,3 +1395,10 @@ def test_ci_reads_the_pr_from_the_api_and_logs_the_full_report() -> None:
     assert "--pull-request-json" not in run
     # stdout is the untruncated report (waived rows included) for the job log.
     assert 'python "$impl/code_metrics.py" "${args[@]}"\n' in run and "/dev/null" not in run.split("set +e", 1)[1]
+
+
+def test_the_local_install_line_names_every_pinned_python_tool() -> None:
+    outcome = code_metrics_report.Outcome()
+    outcome.versions = {"ruff": "0.16.2", "complexipy": "8.0.1", "radon": "6.0.1", "vulture": "2.16", "jscpd": "5.4.1"}
+    fix = code_metrics_report._how_to_fix(outcome)
+    assert "`pip install ruff==0.16.2 complexipy==8.0.1 radon==6.0.1 vulture==2.16`" in fix

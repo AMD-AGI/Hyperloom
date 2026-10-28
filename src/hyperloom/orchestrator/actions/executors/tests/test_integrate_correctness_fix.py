@@ -64,7 +64,6 @@ async def _gate(
     return await IntegratePatchExecutor(session_dir=tmp_path / "session")._gate_perf(
         attempt=attempt,
         params={"base_tput": 1000.0, "keep_threshold_pct": 1.0},
-        extra={"shared_state": state},
         bench_result={
             "output_throughput": tput,
             "launch_evidence_path": _slot(tmp_path, "after", after_log),
@@ -143,6 +142,31 @@ async def test_fix_over_the_latency_budget_reverts(tmp_path):
     assert out["status"] == "reverted"
     assert out["reason"] == (
         f"throughput delta -1.50% < keep_threshold 1.00%; correctness fix {FINDING} refused: latency_budget_exceeded"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state_fields", "reason"),
+    [
+        pytest.param({"power_budget_w": 700.0}, "power_budget_exceeded", id="total"),
+        pytest.param({"power_budget_per_gpu_w": {"4": 300.0}}, "gpu_power_budget_exceeded", id="per-gpu"),
+    ],
+)
+async def test_fix_over_the_power_budget_reverts(tmp_path, state_fields, reason):
+    """The correctness-fix route runs after a REVERT, so it must apply the power budget itself, as it does latency."""
+    out = await _gate(
+        tmp_path,
+        after_log=CLEAN_LOG,
+        tput=985.0,
+        accuracy_pass=True,
+        state_fields=state_fields,
+        bench_fields={"gpu_power_by_gpu_w": {"4": 400.0, "5": 400.0}},
+    )
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == (
+        f"throughput delta -1.50% < keep_threshold 1.00%; correctness fix {FINDING} refused: {reason}"
     )
 
 

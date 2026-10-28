@@ -20,9 +20,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import dict_rows, to_mapping
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
 
-from ..base import as_dict, dict_rows, events_of
+from ..base import events_of
 
 __all__ = ["FrameworkTally", "config_attempts", "config_tally", "specialist_tally"]
 
@@ -66,7 +67,7 @@ class FrameworkTally:
         round_id = str(attempt.get("round_id") or "")
         if round_id:
             self.rounds.add(round_id)
-        gain = as_dict(attempt.get("measurement")).get("gain_pct")
+        gain = to_mapping(attempt.get("measurement")).get("gain_pct")
         if isinstance(gain, (int, float)) and (self.best_gain_pct is None or gain > self.best_gain_pct):
             self.best_gain_pct = float(gain)
 
@@ -88,14 +89,14 @@ def config_attempts(breakdown: dict[str, Any]) -> list[tuple[dict[str, Any], dic
     """
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for event in events_of(breakdown, "framework_agent"):
-        ext = as_dict(event.get("ext"))
+        ext = to_mapping(event.get("ext"))
         proposals = {
             str(row.get("proposal_id") or ""): row for row in dict_rows(ext.get("proposals")) if row.get("proposal_id")
         }
         for attempt in dict_rows(ext.get("attempts")):
             if str(attempt.get("arm") or "") != ARM_CONFIG:
                 continue
-            pairs.append((attempt, as_dict(proposals.get(str(attempt.get("proposal_ref") or "")))))
+            pairs.append((attempt, to_mapping(proposals.get(str(attempt.get("proposal_ref") or "")))))
     return pairs
 
 
@@ -130,13 +131,24 @@ def specialist_tally(breakdown: dict[str, Any]) -> tuple[FrameworkTally, int]:
         if str(proposal.get("producer") or "") == _PRODUCER_SPECIALIST:
             tally.add(attempt)
 
-    rounds = 0
+    # A dispatch appears as a phase row and as a run sharing its id; count it once.
+    dispatched: set[str] = set()
+    unkeyed = 0
     for event in events_of(breakdown, "phase"):
-        for row in dict_rows(as_dict(as_dict(event.get("ext")).get("actions")).get("rows")):
+        for row in dict_rows(to_mapping(to_mapping(event.get("ext")).get("actions")).get("rows")):
             if str(row.get("action") or "") == "specialist":
-                rounds += 1
+                task_id = str(row.get("task_id") or "")
+                if task_id:
+                    dispatched.add(task_id)
+                else:
+                    unkeyed += 1
     for event in events_of(breakdown, "framework_agent"):
-        for row in dict_rows(as_dict(event.get("ext")).get("runs")):
+        for row in dict_rows(to_mapping(event.get("ext")).get("runs")):
             if str(row.get("role") or "") in {"discovery", "authoring"}:
-                rounds += 1
+                run_id = str(row.get("run_id") or "")
+                if run_id:
+                    dispatched.add(run_id)
+                else:
+                    unkeyed += 1
+    rounds = len(dispatched) + unkeyed
     return tally, rounds

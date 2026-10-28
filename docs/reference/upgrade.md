@@ -82,6 +82,38 @@ These flags are rejected with `unrecognized arguments`:
 * On the rayjob backend, `--pd-prefill-ep`, `--pd-decode-ep` and
   `--pd-*-extra-args` now fail the server restart instead of being ignored;
   they are supported on infera only.
+* `--pr-feed-window-days` and `--local-kb-root` (no reader left): drop them;
+  select the knowledge root with `KNOWLEDGE_LOCAL_ROOT`.
+* `kernelforge forge-loop --return-after-read-kb`, and the TraceLens kernel tool's
+  `--skip-split` / `--source-root` (with `TRACELENS_SOURCE_ROOT`): drop them.
+* `hyperloom multi-node kernel-bench` is removed; nothing in the optimizer calls it.
+
+### Required: sessions created before this release do not resume
+
+Every session's `storage/coordinator.db` now records schema version 8, and
+there are no in-place migrations. `optimize --resume-from` on a session whose
+database records an older version, which is every session started by 1.1.4 or
+earlier, exits 2 at resume admission, before `state.json` or the database is
+touched:
+
+```text
+ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8:
+sessions created before this release cannot be resumed. Finish the session under the
+build that started it, or start a new session.
+```
+
+Opening such a database through the coordinator storage raises the same
+message without writing to it. The legacy shapes the old migrations handled
+(`events.priority`, a `leases` table without `owner_scope`, `state.json`
+without `elapsed_charged_sec` or `phase_elapsed_totals`, manifests without
+`workflow_contract_version`) are no longer read. Finish in-flight sessions
+before upgrading.
+
+### Required: `session_breakdown.json` drops `robustness`
+
+The top-level `robustness` key, `close.robustness` and the
+`robustness_escalated` stop reason are gone; they were always empty since the
+robustness agent was retired. Consumers that read them should stop.
 
 ### Required: quantization failure exits 4
 
@@ -100,15 +132,15 @@ only the optimizer-family commands moved under `hyperloom`):
 | Entry | Typical use |
 |---|---|
 | `kernelforge` / `python -m kernelforge.cli` | KernelForge campaigns (orchestrator dispatches `-m kernelforge.cli`) |
-| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Global Experience KB service and collect CLI |
-| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,push,pull}` | Per-workspace Experience KB sidecar (setup skill, optimizer SKILL) |
-| `python -m hyperloom.inference_optimizer.framework_deps` | Installer dependency probe (`install.sh`) |
+| `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
+| `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
+| `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
 | `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review,replay-dead-letter}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, `bypass_trace_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 
 There is no `hyperloom kb` subcommand in 1.1.x; keep using
-`experience_kb_service` or the `hyperloom-kb-*` console scripts above.
+`experience_kb_service`, `hyperloom-kb`, or the `hyperloom-kb-*` console scripts above.
 
 ---
 
@@ -121,9 +153,9 @@ Apply the following changes in order. Required steps must be completed before ru
 The `optimize` CLI multi-node image and per-node GPU flags were renamed
 and the legacy names are no longer accepted (no alias). Any launcher that
 passes the old flags will fail with `unrecognized arguments`. The image
-and per-node GPU count are now set purely through flags; the previous
-`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read, so move its value
-onto `--mn-image`.
+is platform-owned and `--mn-image` is accepted but ignored; the per-node GPU
+count is set through `--gpus-per-node`. The previous
+`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read.
 
 ```diff
 # run launchers, k8s ConfigMaps, .env
@@ -132,7 +164,6 @@ onto `--mn-image`.
 - --rayjob-gpus-per-node 8
 + --gpus-per-node 8
 - INFERENCE_OPTIMIZER_RAYJOB_IMAGE=harbor/...
-+ --mn-image harbor/...
 ```
 
 The new flags cover both multi-node backends (`rayjob` head+workers and
@@ -227,8 +258,28 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v6.0`. V6 is a
-breaking cutover for the timeline: each action records its own event as it
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 changes
+three things inside the 6 major, a declared exception to the major-bump rule: it
+renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
+the `baseline` event's `measurement` to `output_throughput` (the old key is no
+longer written), removes keys no producer populated or that only carried a
+constant, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
+the old key, so readers must accept both keys or migrate.
+Re-exporting a 6.0 session directory emits a null
+`outcome.baseline.output_throughput` and the `contract_digest` recorded at
+session creation, and the default output overwrites the archived
+`<session_dir>/session_breakdown.json`. The removed keys (disposition: removed
+in 6.1, never populated) are `policy.force_exit_budget_pct`,
+`policy.variant_timeout_sec`, `policy.overtime_kill_ratio`,
+`trace_validate_ref`, `critic_review.iteration`, `geak.product.cfg_hash`,
+`geak.product.final_overlay_digest`, `entry.budget_remaining_sec` and the
+roofline rows' `rocprof_roofline`; the roofline rows' `roofline_measured` and the
+baseline action's `convergence` (disposition: removed in 6.1, constant) are
+removed as well.
+`attributed_gain_pct`, `unattributed_gain_pct` and run `empty` are null when
+unmeasured or not provided.
+
+V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
 artefacts were written, and the KERNEL and BASELINE projections are no longer
 emitted. Ordering that relied on the old collapsed windows changes as a result.
@@ -273,23 +324,9 @@ Without the explicit mode, local/default ignores both credentials. Set
 
 The implicit local root changed from `$USER_DATA_PATH/kb` (or
 `/workspace/hyperloom/kb`) to `$USER_DATA_PATH/knowledge` (or
-`~/.cache/hyperloom/knowledge`). Upgrade local deployments in this order:
-
-1. Stop every old Hyperloom process that can write the legacy Recipe KB.
-2. Back up the legacy root, including `recipe.json`, `history/`, and
-   `attempts.ndjson`.
-3. Install the new revision while leaving `KNOWLEDGE_LOCAL_ROOT`,
-   `--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` unset for the first start.
-4. Start one new local-mode process. It migrates the Recipe corpus once,
-   excludes live lock/temp files, preserves unrelated data already under the
-   new knowledge root, and writes a durable marker only after success.
-5. Verify warm-start data, then roll out the remaining new processes.
-
-If the destination already contains Recipes or the completion marker,
-migration is intentionally skipped. A migration error while legacy Recipes
-exist fails startup; restore from the backup or correct permissions and retry.
-Deployments that explicitly keep `--local-kb-root` or
-`HYPERLOOM_LOCAL_KB_ROOT` continue using that path and are not migrated.
+`~/.cache/hyperloom/knowledge`). Data under the old root is neither read nor
+migrated; `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` are removed, so use
+`KNOWLEDGE_LOCAL_ROOT` to select a root.
 
 ---
 
@@ -305,13 +342,14 @@ For any minor or patch upgrade:
    ```bash
    . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
    ```
-4. If you have ongoing sessions you want to resume across the upgrade,
-   verify `manifest.json` and `state.json` are intact, then run
+4. To resume an ongoing session across the upgrade, first check the target
+   release's upgrade section: a release that raises the `coordinator.db`
+   schema version (1.1.x → this release does) refuses sessions started before
+   it, so finish those under the build that started them. Otherwise verify
+   `manifest.json`, `state.json` and `storage/coordinator.db` are intact, then run
    `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
-Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
-sessions. The one-time implicit Recipe-root migration described above is the
-only automatic storage move.
+Upgrades do not move storage or rewrite historical sessions.
 
 ---
 

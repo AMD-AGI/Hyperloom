@@ -83,7 +83,7 @@ Approve example:
   "verdict": "approve",
   "source": "critic",
   "confidence": "high",
-  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s/GPU gain with passing accuracy and active-path proof.",
+  "reasoning": "Controlled A/B evidence shows a 4.2% tok/s gain with passing accuracy and active-path proof.",
   "predicted_gain_pct": 4.2,
   "kb_evidence": [
     "kb:qwen3/attn-dispatch-best-config"
@@ -102,65 +102,3 @@ Approve example:
   ]
 }
 ```
-
-## KB Draft Schema
-
-```json
-{
-  "kind": "kb_draft",
-  "kb_drafts": [
-    {
-      "category": "kernel_optimization",
-      "action": "Patched the active fused attention kernel for Qwen3-14B on MI355X.",
-      "lesson": "The fused attention rewrite produced an E2E gain only when the dispatch path and shape-specific tuning config were updated together.",
-      "model_family": "qwen",
-      "model": "Qwen3-14B",
-      "gpu": "MI355X",
-      "framework": "SGLang",
-      "tags": [
-        "attention",
-        "dispatch",
-        "best_config"
-      ],
-      "result": {
-        "status": "KEEP",
-        "gain_pct": 4.2,
-        "baseline_tput_per_gpu": 1200.0,
-        "final_tput_per_gpu": 1250.4,
-        "accuracy": "pass"
-      },
-      "confidence": 0.9,
-      "source": "final_report",
-      "context": "Controlled A/B with matched launch parameters and passing accuracy gate.",
-      "supersedes": null,
-      "validated_date": "",
-      "strategy_tested": [
-        "kernel_rewrite",
-        "dispatch_update",
-        "shape_config_update"
-      ]
-    }
-  ],
-  "rejected_candidates": [
-    {
-      "source_section": "Backend exploration",
-      "reason": "No controlled benchmark evidence was reported."
-    }
-  ],
-  "notes": []
-}
-```
-
-Allowed values:
-
-- `kind`: `kb_draft`
-- `kb_drafts[].category`: one of the categories in `actions/draft_kb.md`
-- `kb_drafts[].confidence`: number from `0.0` to `1.0`
-
-## Two Outputs in One Turn
-
-There is no combined wrapper object. When both a review and a KB draft
-are produced, they are supplied as two separate JSON payloads — the
-review via `commit-review --review`, the draft via a separate `commit-review`
-on a `kb_draft_request` whose review carries `kb_drafts` — each matching its
-own schema above.

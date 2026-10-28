@@ -11,7 +11,6 @@ import pytest
 
 from hyperloom.orchestrator.specialists.domains import FREEFORM_DOMAIN
 from hyperloom.orchestrator.specialists.runner import (
-    RETRYABLE_SPECIALIST_FAILURES,
     SpecialistFailureType,
     classify_specialist_failure,
 )
@@ -28,7 +27,6 @@ from .conftest import make_coordinator
     "status,error,expected_type,expected_retry",
     [
         ("succeeded", "", SpecialistFailureType.NONE, False),
-        ("tool_violation", "emitted explore", SpecialistFailureType.TOOL_VIOLATION, False),
         # Transient infra failures (status == 'stale' with a backend_error).
         ("stale", "subprocess_timeout", SpecialistFailureType.TIMEOUT, True),
         ("stale", "subprocess_stale_heartbeat", SpecialistFailureType.STALE_HEARTBEAT, True),
@@ -52,37 +50,10 @@ def test_classify_specialist_failure(status, error, expected_type, expected_retr
     assert retry_eligible is expected_retry
 
 
-def test_only_infra_failures_are_in_the_retryable_set():
-    assert RETRYABLE_SPECIALIST_FAILURES == frozenset(
-        {
-            SpecialistFailureType.TIMEOUT,
-            SpecialistFailureType.STALE_HEARTBEAT,
-            SpecialistFailureType.CRASH,
-        }
-    )
-
-
 def test_classify_is_case_and_whitespace_insensitive():
     ftype, retry_eligible = classify_specialist_failure("  STALE ", "  Subprocess_Timeout  ")
     assert ftype == SpecialistFailureType.TIMEOUT
     assert retry_eligible is True
-
-
-def test_retry_eligibility_matches_membership():
-    """Every retry-eligible classification must be a member of the set, and every non-eligible one must not be — the two sources of truth agree."""
-    cases = [
-        ("succeeded", ""),
-        ("tool_violation", "x"),
-        ("stale", "subprocess_timeout"),
-        ("stale", "subprocess_stale_heartbeat"),
-        ("stale", "subprocess_exit_code:1"),
-        ("empty_synthesised", "unknown_domain"),
-        ("empty_synthesised", ""),
-        ("weird", ""),
-    ]
-    for status, error in cases:
-        ftype, retry_eligible = classify_specialist_failure(status, error)
-        assert retry_eligible == (ftype in RETRYABLE_SPECIALIST_FAILURES)
 
 
 # Auto-retry notice block (prompt builder)
@@ -136,20 +107,12 @@ def _make_explore_phase_stub(tmp_path, registry_lanes, registry_ttl, gpu_ttl, ca
     fake_task = MagicMock()
     fake_task.task_id = "retry-task-1"
 
-    async def _fake_create(
-        kind,
-        params,
-        idempotency_key,
-        requires_lanes,
-        lease_ttl_sec,
-        dispatch_class=None,
-        dispatch_origin=None,
-    ):
+    async def _fake_create(spec):
         captured_tasks.append(
             {
-                "kind": kind,
-                "requires_lanes": list(requires_lanes or []),
-                "lease_ttl_sec": lease_ttl_sec,
+                "kind": spec.kind,
+                "requires_lanes": list(spec.requires_lanes or []),
+                "lease_ttl_sec": spec.lease_ttl_sec,
             }
         )
         return fake_task, False

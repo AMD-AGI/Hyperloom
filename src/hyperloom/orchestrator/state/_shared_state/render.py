@@ -7,18 +7,24 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
-from hyperloom.common.env import env_bool
-from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom.common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
 _FAILURE_EXCERPT_CHARS = 600
+
+_WARM_START_MAX_LINES = 12
+_GAPS_MAX_ENTRIES = 10
+_UNTESTED_PROPOSALS_MAX_ENTRIES = 12
+_PROPOSAL_SCORE_ROUNDS = 2
 
 # Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
 _MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
@@ -51,9 +57,6 @@ def render_model_arch_compact(arch: dict | None) -> str:
     return "; ".join(parts)
 
 
-# Width budget for artifact anchors; sized so a full uuid4 fid still fits ws=.
-_VARIANT_ANCHOR_MAX_CHARS = 100
-
 # Numeric fields a ``trace_health_warnings[]`` entry may carry, as ``(key, label, suffix)`` in render order.
 _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("idle_pct", "idle", "%"),
@@ -64,12 +67,100 @@ _WARNING_EXTRA_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _as_float(value: Any) -> float:
-    """Coerce a warm-start context number, 0.0 when absent or unparseable."""
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+class _ProposalRound(NamedTuple):
+    """The attribution a specialist round stamps onto every proposal it produced."""
+
+    domain: str
+    severity: str
+    priority: int
+    task_id: str
+    provenance: str
+    kb_read_id: str
+    kb_rendered_refs: list[str]
+
+
+def _round_attribution(entry: dict[str, Any], severity_of: dict[str, str]) -> _ProposalRound:
+    """Read one specialist round's attribution. ``provenance`` defaults to its domain: a proposal cannot choose it."""
+    from hyperloom.common.coerce import to_int
+
+    domain = str(entry.get("domain") or "?").removesuffix("_specialist")
+    return _ProposalRound(
+        domain=domain,
+        severity=severity_of.get(str(entry.get("gap_canonical_id") or ""), ""),
+        priority=to_int(entry.get("priority"), default=0),
+        task_id=str(entry.get("task_id") or "")[:8],
+        provenance=str(entry.get("provenance") or f"specialist:{domain}"),
+        kb_read_id=str(entry.get("kb_read_id") or ""),
+        kb_rendered_refs=list(entry.get("kb_rendered_refs") or []),
+    )
+
+
+def _stamp_round_attribution(
+    row: dict[str, Any],
+    proposal: dict[str, Any],
+    index: int,
+    attribution: _ProposalRound,
+) -> None:
+    """Stamp a normalized proposal with the identity its round gives it, naming it when it named itself nothing."""
+    row["name"] = row["name"] or f"{attribution.domain or 'specialist'}-{attribution.task_id}-{index}"
+    row["domain"] = attribution.domain
+    row["severity"] = attribution.severity
+    row["provenance"] = attribution.provenance
+    # Already checked against the read this round's dispatch was shown, which travels with them.
+    row["experience_citations"] = list(proposal.get("experience_citations") or [])
+    row["kb_read_id"] = attribution.kb_read_id
+    row["kb_rendered_refs"] = list(attribution.kb_rendered_refs)
+
+
+def _skipped_kernels_suffix(blob: dict[str, Any]) -> str:
+    """The operators TraceLens declined to route, surfaced only when no candidate is routable."""
+    rendered = [
+        f"{s.get('kernel_id')}:{s.get('name')}:{s.get('skip_reason') or '?'}"
+        for s in blob.get("skipped_kernels_top") or []
+        if isinstance(s, dict) and s.get("kernel_id")
+    ]
+    if not rendered:
+        return ""
+    return f" skipped_kernels_top=[{'; '.join(rendered)}]"
+
+
+def _trace_health_warnings_suffix(blob: dict[str, Any]) -> str:
+    """The TraceLens routing signals on this trace, inline; omitted in steady-state."""
+    warnings = blob.get("trace_health_warnings") or []
+    if not warnings:
+        return ""
+    rendered: list[str] = []
+    for w in warnings:
+        if not isinstance(w, dict):
+            continue
+        code = str(w.get("code") or "unknown")
+        extras = [f"{label}={w[key]}{suffix}" for key, label, suffix in _WARNING_EXTRA_FIELDS if key in w]
+        rendered.append(f"{code}({','.join(extras)})" if extras else code)
+    return f" warnings=[{'; '.join(rendered)}]"
+
+
+def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -> str:
+    """Render one ``untested_proposal_rows`` row, marking each field it carries.
+
+    ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
+    """
+    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    if row["atomic"]:
+        parts.append("ATOMIC")
+    if row["extra_args"]:
+        parts.append(f"+args={row['extra_args']}")
+    if row["extra_envs"]:
+        parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
+    if row["remove_args"]:
+        parts.append("-args=" + " ".join(row["remove_args"]))
+    if row["unset_envs"]:
+        parts.append("-envs=" + ",".join(row["unset_envs"]))
+    if row["args_mode"] == "replace":
+        parts.append("mode=replace")
+    reason = row["reason"].replace("\n", " ").strip()[:why_chars].rstrip()
+    if reason:
+        parts.append(f"why={reason}")
+    return _flatten_for_prompt(" ".join(parts))
 
 
 class _RenderMixin:
@@ -112,7 +203,13 @@ class _RenderMixin:
             )
         )
         n_config_attempt = sum(1 for m in mix if (m or {}).get("change_type") == "config_attempt")
-        consec = int(self.consecutive_config_only_rounds or 0)
+        consec = 0
+        for m in reversed(mix):
+            change_type = (m or {}).get("change_type")
+            if change_type == "code_patch":
+                break
+            if change_type == "config":
+                consec += 1
         return (
             f"config_keeps={n_config} config_attempts={n_config_attempt} "
             f"code_patch_keeps={n_patch} code_patch_attempts={n_patch_attempt} "
@@ -120,7 +217,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness)."""
+        """Mission-progress block of every tick's turn section (raw/validated gain, time vs budget, stack staleness)."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -151,7 +248,7 @@ class _RenderMixin:
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
-        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+        elif geak_pending_status in GEAK_DROPPED_STATUSES:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
             # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
@@ -160,6 +257,7 @@ class _RenderMixin:
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry
+        from ...kernel import kernel_decisions
 
         lines = [
             f"baseline  : {framework_registry.format_primary_metric(self.framework, self.baseline_tput)}",
@@ -169,16 +267,15 @@ class _RenderMixin:
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{geak_pending_tag}",
         ]
-        # Surface reusable hot kernels still owing a kernel_opt attempt.
-        untried_hot = self.untried_hot_reusable_kernels()
-        if untried_hot:
+        # Surface reusable hot kernels no backend has produced a patch for yet.
+        if untried_hot := kernel_decisions.untried_hot_reusable_kernels(self):
             lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
         lines.append(budget_line)
         return "\n".join(lines)
 
     def _format_current_best_for_mission(self) -> str:
         """Render the ``current_best`` one-liner for the mission summary."""
-        if not isinstance(self.current_best, dict) or not self.current_best:
+        if not self.current_best:
             return "(none)"
         from hyperloom.inference_optimizer import framework_registry
 
@@ -204,7 +301,41 @@ class _RenderMixin:
             "(reason latency_budget_exceeded / latency_unmeasured in explore_search and the journal)"
         )
 
-    def to_warm_start_summary(self, *, max_lines: int = 12) -> str:
+    def to_constraint_sections(self) -> list[str]:
+        """A header and the summary line for each session budget that is set, latency first."""
+        sections: list[str] = []
+        for title, block in (("Latency", self.to_latency_budget_summary()), ("Power", self.to_power_budget_summary())):
+            if block:
+                sections += [f"=== {title} budget (constraint) ===", block]
+        return sections
+
+    def to_power_budget_summary(self) -> str:
+        """One line stating the power budgets and the cap the cards are at; empty when no budget is set."""
+        budget = float(getattr(self, "power_budget_w", 0.0) or 0.0)
+        per_gpu = dict(getattr(self, "power_budget_per_gpu_w", None) or {})
+        if budget <= 0 and not per_gpu:
+            return ""
+        caps = sorted(
+            {
+                float(row["power_cap_w"])
+                for row in ((getattr(self, "gpu_power_settings", None) or {}).get("observed") or {}).values()
+                if isinstance(row, dict) and isinstance(row.get("power_cap_w"), (int, float))
+            }
+        )
+        parts = []
+        if budget > 0:
+            parts.append(f"{budget:g} W total across the serving GPUs")
+        if per_gpu:
+            parts.append(
+                "per-GPU " + ", ".join(f"GPU {g} {w:g} W" for g, w in sorted(per_gpu.items(), key=lambda i: int(i[0])))
+            )
+        cap = f", cards capped at {'/'.join(f'{c:g}' for c in caps)} W" if caps else ""
+        return (
+            f"{'; '.join(parts)}{cap}: a KEEP over a budget, or with no per-GPU power reported, is refused (reason "
+            "power_budget_exceeded / gpu_power_budget_exceeded / power_unmeasured in explore_search and the journal)"
+        )
+
+    def to_warm_start_summary(self) -> str:
         """Render the ``=== Warm start ===`` prompt section from the T0 warm-start context.
 
         ``recipe_kb_t0._build_warm_start_context`` already computes the
@@ -221,154 +352,71 @@ class _RenderMixin:
         if not isinstance(ctx, dict) or not ctx:
             return ""
         status = str(ctx.get("status") or "").strip()
-        if status == "miss":
-            return "recipe: none — first session for this workload/hw"
-        if status == "seed_only":
-            # T0 seeds a row for every session, so this — not ``miss`` — is what a
-            # genuine first session looks like: a row exists, nothing measured it.
-            return "recipe: seed only — first session for this workload/hw"
-
-        match = ctx.get("match")
-        match = match if isinstance(match, dict) else {}
-        head = [f"recipe: {status or 'hit'}"]
-        tier = str(match.get("tier") or "").strip()
-        if tier:
-            head.append(f"tier={tier}")
-        confidence = _as_float(match.get("confidence"))
-        if confidence > 0:
-            head.append(f"confidence={confidence:.2f}")
+        if status in warm_start.FIRST_SESSION_LINES:
+            return warm_start.FIRST_SESSION_LINES[status]
+        head = [f"recipe: {status or 'hit'}", *warm_start.match_facts(ctx.get("match"))]
         out: list[str] = [" ".join(head)]
-
-        replay = ctx.get("recommended_replay")
-        replay = replay if isinstance(replay, dict) else {}
-        best_tput = _as_float(replay.get("best_throughput"))
-        if best_tput > 0:
-            out.append(f"  · best_throughput={best_tput:.1f}")
-        args = str(replay.get("extra_server_args") or "").strip()
-        if args:
-            out.append(f"  · extra_server_args={args[:240]}")
-        envs = replay.get("extra_envs")
-        if isinstance(envs, dict) and envs:
-            rendered = " ".join(f"{k}={v}" for k, v in envs.items())
-            out.append(f"  · extra_envs={rendered[:240]}")
-        gain = _as_float(replay.get("expected_gain_pct"))
-        if gain > 0:
-            out.append(f"  · expected_gain={gain:.2f}%")
-        # A borrowed config is another workload's measurement; say so, or the
-        # numbers above read as this session's own history.
-        config_tier = str(replay.get("config_tier") or "").strip()
-        if replay and config_tier and config_tier != "self":
-            donor = str(replay.get("donor_model") or replay.get("donor_canonical_id") or "?")
-            donor_conf = _as_float(replay.get("config_confidence"))
-            suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
-            out.append(f"  · borrowed from {donor} (config_tier={config_tier}{suffix})")
-        if not replay:
-            # Remote Recipe hits replay through the section SDKs, so the context
-            # carries no config; the priors below are still real.
-            out.append("  · (no replayable config on this match)")
-
-        counts = [
-            (label, len(ctx.get(key) or []))
-            for label, key in (("proven", "proven_prior"), ("avoid", "do_not_repeat"), ("lessons", "lessons"))
-        ]
-        live = [f"{label}={n}" for label, n in counts if n]
-        if live:
-            out.append(f"  · priors: {' '.join(live)}")
-
-        # Count the rows that render, not the rows that exist: a header claiming
-        # "pitfalls (3)" above nothing is the same class of lie this block had.
-        rendered: list[str] = []
-        elided = 0
-        for entry in ctx.get("pitfalls") or []:
-            if not isinstance(entry, dict):
-                continue
-            description = str(entry.get("description") or "").strip()
-            if not description:
-                continue
-            if len(rendered) >= 5:
-                elided += 1
-                continue
-            severity = str(entry.get("severity") or "").strip()
-            suffix = f" (severity={severity})" if severity else ""
-            rendered.append(f"  · {description.splitlines()[0].strip()[:240]}{suffix}")
-        if rendered:
-            out.append(f"pitfalls ({len(rendered)}):")
-            out.extend(rendered)
-            if elided:
-                out.append(f"  · (+{elided} more elided; see state.json `warm_start_context`)")
-        if max_lines and len(out) > max_lines:
-            out = out[:max_lines]
-            out.append(f"  · (truncated to {max_lines} lines)")
+        out.extend(warm_start.replay_lines(ctx))
+        priors = warm_start.priors_line(ctx)
+        if priors:
+            out.append(priors)
+        out.extend(warm_start.pitfall_lines(ctx))
+        if len(out) > _WARM_START_MAX_LINES:
+            out = out[:_WARM_START_MAX_LINES]
+            out.append(f"  · (truncated to {_WARM_START_MAX_LINES} lines)")
         return "\n".join(out)
 
-    def to_gaps_summary(self, *, max_entries: int = 10, max_attempts: int = 0) -> str:
-        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at ``max_entries`` newest rows."""
+    def to_gaps_summary(self, *, max_attempts: int = 0) -> str:
+        """Render :attr:`gaps` for prompt injection; empty when no gaps. Capped at the newest ``_GAPS_MAX_ENTRIES`` rows."""
         if not self.gaps:
             return ""
-        # Newest first by last_updated_ts (fallback to first_seen_ts/insertion).
         ordered = list(self.gaps)
-        ordered.sort(
-            key=lambda g: str(
-                g.get("last_updated_ts") or g.get("first_seen_ts") or "",
-            ),
-            reverse=True,
-        )
+        ordered.sort(key=gap_rows.recency_key, reverse=True)
         rows: list[str] = []
-        for gap in ordered[:max_entries]:
+        for gap in ordered[:_GAPS_MAX_ENTRIES]:
             if not isinstance(gap, dict):
                 continue
-            cid = str(gap.get("canonical_id") or "?")
-            layer = str(gap.get("layer") or "?")
-            severity = str(gap.get("severity") or "?")
-            symptom = str(gap.get("symptom") or "").replace("\n", " ").strip()
-            if len(symptom) > 200:
-                symptom = symptom[:197] + "..."
-            attempts = gap.get("attempts") or []
-            attempt_n = len(attempts) if isinstance(attempts, list) else 0
-            last_tag = ""
-            if isinstance(attempts, list) and attempts:
-                last = attempts[-1]
-                if isinstance(last, dict):
-                    last_tag = f" last={last.get('action', '?')}:{last.get('outcome', '?')}"
-            rows.append(f"  - {cid} [{layer}/{severity}] {symptom}\n      attempts={attempt_n}{last_tag}")
-            if max_attempts > 0 and isinstance(attempts, list):
-                for a in attempts[-max_attempts:]:
-                    if not isinstance(a, dict):
-                        continue
-                    fid = a.get("failure_id") or ""
-                    rows.append(
-                        f"        attempt: {a.get('action', '?')} outcome={a.get('outcome', '?')}"
-                        f" err={a.get('error_class', '')}" + (f" fid={fid}" if fid else "")
-                    )
-        if len(ordered) > max_entries:
-            rows.append(f"  · (+{len(ordered) - max_entries} older gaps elided; see state.json `gaps[]`)")
+            rows.append(gap_rows.summary_row(gap))
+            rows.extend(gap_rows.attempt_rows(gap, max_attempts))
+        if len(ordered) > _GAPS_MAX_ENTRIES:
+            rows.append(f"  · (+{len(ordered) - _GAPS_MAX_ENTRIES} older gaps elided; see state.json `gaps[]`)")
         return "\n".join(rows)
 
+    def benched_fingerprints(self) -> set[str]:
+        """Content fingerprints of every variant an explore round has benched."""
+        from ...actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(row)
+            for row in ((self.explore_search or {}).get("tested") or {}).values()
+            if isinstance(row, dict)
+        }
+
     def untested_proposal_rows(self) -> list[dict[str, Any]]:
-        """Executable proposals from this cycle that no explore round has benched, highest severity first."""
+        """Executable proposals from this cycle that no explore round has benched.
+
+        Ordered by round ``priority`` (predictor rounds set one, specialist rounds
+        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        round's, ``specialist:<domain>`` unless the round's recorder set one; a
+        proposal cannot choose it, since a specialist writes its own proposals.
+        """
         from hyperloom.common.coerce import to_int
 
         from ...actions.executors._proposal_identity import content_fingerprint, is_executable, normalize_proposal
 
         cycle = to_int(self.macro_cycle, default=0)
-        benched = {
-            content_fingerprint(row)
-            for row in ((self.explore_search or {}).get("tested") or {}).values()
-            if isinstance(row, dict)
-        }
+        benched = self.benched_fingerprints()
         severity_of = {
             str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
             for g in (self.gaps or [])
             if isinstance(g, dict)
         }
-        ranked: list[tuple[int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
-            domain = str(entry.get("domain") or "?").removesuffix("_specialist")
-            severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
-            task_id = str(entry.get("task_id") or "")[:8]
+            attribution = _round_attribution(entry, severity_of)
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -379,42 +427,21 @@ class _RenderMixin:
                 if fingerprint in benched or fingerprint in seen:
                     continue
                 seen.add(fingerprint)
-                row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
-                row["domain"] = domain
-                row["severity"] = severity
                 row["fingerprint"] = fingerprint
-                # Already checked against the read this round's dispatch was shown, which travels with them.
-                row["experience_citations"] = list(proposal.get("experience_citations") or [])
-                row["kb_read_id"] = str(entry.get("kb_read_id") or "")
-                row["kb_rendered_refs"] = list(entry.get("kb_rendered_refs") or [])
-                ranked.append((GAP_SEVERITY_RANK.get(severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1]))
-        return [row for _, _, row in ranked]
+                _stamp_round_attribution(row, proposal, index, attribution)
+                ranked.append((attribution.priority, GAP_SEVERITY_RANK.get(attribution.severity, 0), order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
+        return [row for _, _, _, row in ranked]
 
-    @staticmethod
-    def _untested_proposal_line(row: dict[str, Any]) -> str:
-        """Render one queue row, marking each field it carries."""
-        parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
-        if row["atomic"]:
-            parts.append("ATOMIC")
-        if row["extra_args"]:
-            parts.append(f"+args={row['extra_args']}")
-        if row["extra_envs"]:
-            parts.append("+envs=" + ",".join(f"{k}={v}" for k, v in sorted(row["extra_envs"].items())))
-        if row["remove_args"]:
-            parts.append("-args=" + " ".join(row["remove_args"]))
-        if row["unset_envs"]:
-            parts.append("-envs=" + ",".join(row["unset_envs"]))
-        if row["args_mode"] == "replace":
-            parts.append("mode=replace")
-        reason = row["reason"].replace("\n", " ").strip()[:80].rstrip()
-        if reason:
-            parts.append(f"why={reason}")
-        return _flatten_for_prompt(" ".join(parts))
+    def to_untested_proposals_summary(self, *, skip_provenance: str = "") -> str:
+        """Render the specialist proposals still waiting for a benchmark slot.
 
-    def to_untested_proposals_summary(self, *, max_entries: int = 12) -> str:
-        """Render the specialist proposals still waiting for a benchmark slot."""
-        rows = self.untested_proposal_rows()
+        Args:
+            skip_provenance: Leave out the rows a producer with its own section renders.
+        """
+        rows = [
+            row for row in self.untested_proposal_rows() if not skip_provenance or row["provenance"] != skip_provenance
+        ]
         if not rows:
             return ""
         out = [
@@ -423,12 +450,12 @@ class _RenderMixin:
             "queue whenever no explore is queued or running; dispatch `explore` only for variants not listed here.",
             "",
         ]
-        out.extend(self._untested_proposal_line(row) for row in rows[:max_entries])
-        if len(rows) > max_entries:
-            out.append(f"(+{len(rows) - max_entries} more not shown)")
+        out.extend(untested_proposal_line(row) for row in rows[:_UNTESTED_PROPOSALS_MAX_ENTRIES])
+        if len(rows) > _UNTESTED_PROPOSALS_MAX_ENTRIES:
+            out.append(f"(+{len(rows) - _UNTESTED_PROPOSALS_MAX_ENTRIES} more not shown)")
         return "\n".join(out)
 
-    def to_proposal_scores_summary(self, *, max_rounds: int = 2) -> str:
+    def to_proposal_scores_summary(self) -> str:
         """Render advisory multi-model proposal scores for Orchestration; no mean/sorting, rater identities anonymized. Empty when no recent round carries scores."""
         rounds = [
             r
@@ -439,94 +466,22 @@ class _RenderMixin:
         ]
         if not rounds:
             return ""
-        shown = rounds[-max_rounds:]
-        # Map each real slug to an anonymized ``rater_N`` label.
-        all_slugs: set[str] = set()
-        for r in shown:
-            models = r["ensemble_scores"].get("models") or {}
-            all_slugs.update(str(s) for s in models.keys())
-            errs = r["ensemble_scores"].get("errors") or {}
-            all_slugs.update(str(s) for s in errs.keys())
-        rater_label = {slug: f"rater_{i}" for i, slug in enumerate(sorted(all_slugs), start=1)}
+        shown = rounds[-_PROPOSAL_SCORE_ROUNDS:]
+        labels = proposal_scores.rater_labels(shown)
         rows: list[str] = [
             "(Advisory only — one reference among many, NOT a ranking "
             "directive. Scores are 0-10 likelihood-of-throughput-gain "
             "priors from independent anonymized raters; weigh on merit "
             "alongside gaps / KB / analysis.md.)",
         ]
-        for r in shown:
-            ens = r["ensemble_scores"]
-            models = ens.get("models") or {}
-            scale = str(ens.get("scale") or "0-10")
-            round_id = str(r.get("round_id") or "?")
-            domain = str(r.get("domain") or "?")
-            rows.append(f"round={round_id} domain={domain} scale={scale}")
-            # Collect variant names across models, preserving proposal_set order.
-            ordered_names: list[str] = []
-            seen: set[str] = set()
-            for variant in r.get("proposal_set") or []:
-                if isinstance(variant, dict):
-                    nm = str(variant.get("name") or "")
-                    if nm and nm not in seen:
-                        ordered_names.append(nm)
-                        seen.add(nm)
-            for per_model in models.values():
-                if isinstance(per_model, dict):
-                    for nm in per_model:
-                        if nm not in seen:
-                            ordered_names.append(nm)
-                            seen.add(nm)
-            # Render raters in stable label order.
-            ordered_slugs = sorted(
-                (s for s in models if s in rater_label),
-                key=lambda s: rater_label[s],
-            )
-            for nm in ordered_names:
-                parts: list[str] = []
-                for model_slug in ordered_slugs:
-                    per_model = models.get(model_slug)
-                    if not isinstance(per_model, dict):
-                        continue
-                    label = rater_label[model_slug]
-                    cell = per_model.get(nm)
-                    if isinstance(cell, dict) and cell.get("score") is not None:
-                        reason = str(cell.get("reason") or "").replace("\n", " ")
-                        if len(reason) > 80:
-                            reason = reason[:77] + "..."
-                        parts.append(f'{label}={float(cell["score"]):.1f} ("{reason}")')
-                    else:
-                        parts.append(f"{label}=n/a")
-                rows.append(f"  - {nm}: " + ", ".join(parts))
-            errors = ens.get("errors") or {}
-            if errors:
-                err_labels = ", ".join(sorted(rater_label.get(str(s), "rater_?") for s in errors))
-                rows.append(f"  · raters unavailable this round: {err_labels}")
+        for round_row in shown:
+            rows.extend(proposal_scores.round_rows(round_row, labels))
         return "\n".join(rows)
-
-    def _format_last_kernel_opt(self) -> str:
-        """Render the latest kernel-opt outcome for prompt injection."""
-        if not self.last_kernel_opt:
-            return "(none)"
-        outcome = self.last_kernel_opt
-        kernel_id = str(outcome.get("kernel_id") or "")
-        attempts_entry = self.kernel_opt_attempts.get(kernel_id) or {}
-        history_tag = ""
-        if attempts_entry:
-            history_tag = (
-                f" history=attempts={attempts_entry.get('attempts', 0)}"
-                f"/partial={attempts_entry.get('partial_count', 0)}"
-            )
-            rejected_reason = attempts_entry.get("rejected_reason")
-            if rejected_reason:
-                history_tag += f"/retired={rejected_reason}"
-        return (
-            f"kernel_id={kernel_id or '?'} "
-            f"decision={outcome.get('decision', '?')} "
-            f"speedup={outcome.get('micro_speedup', '?')}{history_tag}"
-        )
 
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection."""
+        from ...kernel import kernel_decisions
+
         lines = [
             f"session_id={self.session_id or '(unset)'}",
             f"model={self.model_name or '(unset)'}  class={self.model_class or '(unset)'}",
@@ -539,6 +494,7 @@ class _RenderMixin:
             f"baseline_tput={self.baseline_tput}  baseline_acc={self.baseline_accuracy}",
             f"baseline_failure_streak={self.baseline_failure_streak}",
             f"current_best={self._format_current_best()}",
+            f"current_launch_flags(already passed by the running stack)={self._format_current_launch_flags()}",
             f"optimization_stack={self._format_optimization_stack()}",
             (
                 f"cumulative_gain_validated={self.cumulative_gain_validated}% "
@@ -553,14 +509,12 @@ class _RenderMixin:
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
-            f"analysis_md={self._format_analysis_md_full()}",
+            f"analysis_md={self._format_analysis_md_pointer()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"last_kernel_opt={self._format_last_kernel_opt()}",
-            # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
-            (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
-            (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
-            f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
+            # Pending KEEPs the integrate gate will drain.
+            (f"pending_keep_kernels={kernel_decisions.pending_keep_kernel_ids(self) or '(none)'}"),
+            (f"has_keep_pending_integrate={'true' if kernel_decisions.has_keep_pending_integrate(self) else 'false'}"),
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
@@ -569,9 +523,7 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -579,6 +531,10 @@ class _RenderMixin:
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def to_tick_summary(self) -> str:
+        """The per-tick counters of the prompt summary: the tick number and each agent's last pass."""
+        return f"tick={int(self.tick or 0)}\nagent_last_active={self._format_agent_last_active()}"
 
     def _format_agent_last_active(self) -> str:
         """Render each agent's last completed reactor pass as a relative age.
@@ -671,61 +627,12 @@ class _RenderMixin:
     def _format_variant_line(entry: dict[str, Any]) -> str:
         """One-line render of a search variant for prompt blocks."""
         name = str(entry.get("name") or "?")
-        gain = entry.get("gain_pct")
-        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
-        tput = entry.get("tput") or entry.get("output_throughput") or result.get("output_throughput")
-        # A REVERT carries no ``gain_pct`` by design; its graded movement is ``graded_gain_pct``. Only a row with
-        # neither was never measured on the graded axis -- printing "no_meas" for a guard refusal sends readers
-        # hunting for a broken extractor.
-        graded_gain = entry.get("graded_gain_pct")
-        if isinstance(gain, (int, float)) and not isinstance(gain, bool):
-            gain_s = f"{gain:+.2f}%"
-        elif isinstance(graded_gain, (int, float)) and not isinstance(graded_gain, bool):
-            gain_s = f"{graded_gain:+.2f}%"
-        else:
-            gain_s = " no_meas"
-        tput_s = f" (tput={tput:.1f})" if isinstance(tput, (int, float)) and tput > 0 else ""
-        # The gain column is meaningless without the axis it was taken on.
-        graded_obj = str(entry.get("graded_objective") or "").strip()
-        graded_obj_s = f" [{graded_obj}]" if graded_obj and graded_obj != GRADED_OUTPUT else ""
-        args = str(entry.get("extra_server_args") or "").strip() or "(no-flag)"
-        envs = entry.get("extra_envs") or {}
-        envs_s = " " + " ".join(f"{k}={v}" for k, v in sorted(envs.items())) if envs else ""
-        parts: list[str] = []
-        error_class = str(entry.get("error_class") or "").strip()
-        if error_class:
-            parts.append(f"err={error_class}")
-        reason = str(entry.get("reason") or "").strip()
-        # Threshold rejections are already conveyed by the gain column.
-        if reason and reason not in ("not_keep", "gain_below_threshold"):
-            ratio = entry.get("wall_clock_ratio_vs_baseline")
-            ratio_s = f" {ratio:.2f}x" if isinstance(ratio, (int, float)) and ratio > 0 else ""
-            # error_excerpt on variant rows is tail-1200 (boot assertion at end); flatten+defang prevents
-            # section-header injection from untrusted log text.
-            body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
-            parts.append(f"reason={body[-120:]}{ratio_s}")
-
-        # Paths show last two segments; full path available via get_failure(fid).
-        fid = str(entry.get("failure_id") or "").strip()
-        ws_raw = str(entry.get("workspace") or "").strip()
-        log_raw = str(entry.get("server_log_path") or "").strip()
-        ws_seg = "/".join(PurePosixPath(ws_raw).parts[-2:]) if ws_raw else ""
-        log_seg = "/".join(PurePosixPath(log_raw).parts[-2:]) if log_raw else ""
-        anchors = (
-            ([f"fid={fid}"] if fid else [])
-            + ([f"ws={ws_seg}"] if ws_seg else [])
-            + ([f"log={log_seg}"] if log_seg else [])
+        return (
+            f"{name:28s} {variant_line.format_measurement(entry)}"
+            f"  {variant_line.format_config(entry)}"
+            f"{variant_line.format_diagnosis(entry)}"
+            f"{variant_line.format_anchors(entry)}"
         )
-        anchor_s = ("  " + " ".join(anchors)) if anchors else ""
-        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and log_seg:
-            anchors = [a for a in anchors if not a.startswith("log=")]
-            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
-        if len(anchor_s) > _VARIANT_ANCHOR_MAX_CHARS and ws_seg:
-            anchors = [a for a in anchors if not a.startswith("ws=")]
-            anchor_s = ("  " + " ".join(anchors)) if anchors else ""
-
-        suffix = "  " + " ".join(parts) if parts else ""
-        return f"{name:28s} {gain_s:>9}{graded_obj_s}{tput_s}  {args}{envs_s}{suffix}{anchor_s}"
 
     @staticmethod
     def _format_search_state(search: dict[str, Any] | None) -> str:
@@ -750,11 +657,6 @@ class _RenderMixin:
             f"  rejected={len(search.get('rejected') or [])}"
             f"  tested={len(tested)}"
         )
-        # Surfaced on the head line because a whole round reaped by the overtime gate is otherwise invisible.
-        last_round = search.get("last_round")
-        n_killed = len((last_round or {}).get("killed_overtime") or []) if isinstance(last_round, dict) else 0
-        if n_killed:
-            head += f"  killed_overtime(last_round)={n_killed}"
         out: list[str] = ["", head]
         rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
         if not rows:
@@ -776,6 +678,13 @@ class _RenderMixin:
             return "(none)"
         return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
 
+    def _format_current_launch_flags(self) -> str:
+        """The server flags ``current_best`` launched with, as its measurement recorded them."""
+        measurement = getattr(self, "current_best_measurement", None)
+        evidence = measurement.get("launch_evidence") if isinstance(measurement, dict) else None
+        flags = str(evidence.get("requested_server_args") or "") if isinstance(evidence, dict) else ""
+        return _flatten_for_prompt(dedupe_extra_server_args(flags.strip())) or "(unknown)"
+
     def _format_optimization_stack(self) -> str:
         """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
@@ -787,20 +696,10 @@ class _RenderMixin:
             parts.append(f"{entry.get('action', '?')}:{entry.get('variant_name', '?')}")
         return parts or "(none)"
 
-    @staticmethod
-    def _strip_base64_data_urls(text: str) -> str:
-        """Drop base64 image payloads before prompt injection (in-memory only). Delegates to ``hyperloom.inference_optimizer.tracelens_md``."""
-        if not text:
-            return text or ""
-        from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
-
-        return strip_base64_data_urls(text)
-
-    def _format_analysis_md_full(self) -> str:
-        """Inject TraceLens analysis.md verbatim between ``=== TraceLens Analysis ... ===`` bookends. Empty cache → one-line hint to propose ``roofline``."""
+    def _format_analysis_md_pointer(self) -> str:
+        """Point the prompt at the ``show_analysis_md`` tool once a TraceLens snapshot exists. Empty cache → one-line hint to propose ``roofline``."""
         cached = self.last_trace_analyze or {}
-        md_text = cached.get("analysis_md_text") or ""
-        if not md_text:
+        if not cached.get("analysis_md_text"):
             return (
                 "(no TraceLens snapshot yet — analysis is auto-enqueued "
                 "by the Coordinator at the end of PRELUDE and on every "
@@ -810,26 +709,13 @@ class _RenderMixin:
                 "`profile` are Coordinator-managed; you may also propose "
                 "them directly if the situation warrants it.)"
             )
-        md_text = self._strip_base64_data_urls(md_text)
         snap = cached.get("roofline_snapshot_id", "?")
-        gain = cached.get("roofline_baseline_gain_at_snapshot", 0.0)
-        try:
-            gain_str = f"{float(gain):.2f}"
-        except (TypeError, ValueError):
-            gain_str = "?"
-        # By default point at the show_analysis_md tool; set INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE=1 to inline
-        # the verbatim md.
-        if not env_bool("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE"):
-            return (
-                f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
-                "full report not inlined; see profiler_digest above or call the "
-                "show_analysis_md context tool for the verbatim analysis.md.)"
-            )
+        gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
+        gain_str = "?" if gain is None else f"{gain:.2f}"
         return (
-            f"\n=== TraceLens Analysis (snapshot #{snap}, "
-            f"gain at snapshot = {gain_str}%) ===\n"
-            f"{md_text}\n"
-            f"=== End TraceLens Analysis ===\n"
+            f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
+            "full report not inlined; see profiler_digest above or call the "
+            "show_analysis_md context tool for the verbatim analysis.md.)"
         )
 
     def _format_profiler_digest(self) -> str:
@@ -859,31 +745,5 @@ class _RenderMixin:
             f"candidates_path={blob.get('candidates_path', '?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
-        # With no routable candidates, surface skipped operators.
-        skipped_suffix = ""
-        if not ids:
-            sk = blob.get("skipped_kernels_top") or []
-            rendered_sk = [
-                f"{s.get('kernel_id')}:{s.get('name')}:{s.get('skip_reason') or '?'}"
-                for s in sk
-                if isinstance(s, dict) and s.get("kernel_id")
-            ]
-            if rendered_sk:
-                skipped_suffix = f" skipped_kernels_top=[{'; '.join(rendered_sk)}]"
-        # Surface TraceLens routing signals inline; omitted in steady-state.
-        warnings = blob.get("trace_health_warnings") or []
-        if not warnings:
-            return base + skipped_suffix
-        rendered: list[str] = []
-        for w in warnings:
-            if not isinstance(w, dict):
-                continue
-            code = str(w.get("code") or "unknown")
-            extras: list[str] = [
-                f"{label}={w[key]}{suffix}" for key, label, suffix in _WARNING_EXTRA_FIELDS if key in w
-            ]
-            if extras:
-                rendered.append(f"{code}({','.join(extras)})")
-            else:
-                rendered.append(code)
-        return f"{base}{skipped_suffix} warnings=[{'; '.join(rendered)}]"
+        skipped = _skipped_kernels_suffix(blob) if not ids else ""
+        return f"{base}{skipped}{_trace_health_warnings_suffix(blob)}"

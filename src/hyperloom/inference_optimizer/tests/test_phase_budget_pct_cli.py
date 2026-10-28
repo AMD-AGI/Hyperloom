@@ -10,6 +10,7 @@ import inspect
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.orchestrator.loop.coordinator import CoordinatorSettings
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PHASE_BUDGET_PCT,
     PHASE_FRAMEWORK_AGENT,
@@ -210,7 +211,7 @@ def _persisted_session(session_dir, **fields) -> None:
 
 def test_fresh_session_budget_args_override_state(tmp_path) -> None:
     """Fresh session: explicit budget args reach state after renormalise + redistribute."""
-    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.55})
+    coord = make_coordinator(tmp_path, settings=CoordinatorSettings(phase_budget_pct={PHASE_KERNEL_AGENT: 0.55}))
 
     budget = coord.shared_state.phase_budget_pct
     assert budget[PHASE_KERNEL_AGENT] == pytest.approx(0.55)
@@ -219,10 +220,10 @@ def test_fresh_session_budget_args_override_state(tmp_path) -> None:
 
 
 def test_resume_without_explicit_budget_args_preserves_state(tmp_path) -> None:
-    """Resume without explicit args: state budget (including LLM-added bumps) is unchanged."""
-    # A session that already has a saved budget with an LLM-added bump above the default.
-    bumped = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
-    _persisted_session(tmp_path, phase_budget_pct=bumped, phase=PHASE_PRELUDE)
+    """Resume without explicit args: the persisted state budget is unchanged."""
+    # A saved budget that differs from the default, so keeping it is observable.
+    persisted = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
+    _persisted_session(tmp_path, phase_budget_pct=persisted, phase=PHASE_PRELUDE)
 
     # No explicit budget args (None means "operator said nothing").
     coord = make_coordinator(tmp_path)
@@ -232,11 +233,11 @@ def test_resume_without_explicit_budget_args_preserves_state(tmp_path) -> None:
 
 def test_resume_with_explicit_budget_args_overwrites_state(tmp_path) -> None:
     """Resume with explicit args: state budget is overwritten by the CLI values."""
-    bumped = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
-    _persisted_session(tmp_path, phase_budget_pct=bumped, phase=PHASE_PRELUDE)
+    persisted = {**DEFAULT_PHASE_BUDGET_PCT, PHASE_KERNEL_AGENT: 0.65}
+    _persisted_session(tmp_path, phase_budget_pct=persisted, phase=PHASE_PRELUDE)
 
     # Operator explicitly passes a new kernel share.
-    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.30})
+    coord = make_coordinator(tmp_path, settings=CoordinatorSettings(phase_budget_pct={PHASE_KERNEL_AGENT: 0.30}))
 
-    # The CLI value wins; the LLM bump is gone.
+    # The CLI value wins over the persisted share.
     assert coord.shared_state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.30)

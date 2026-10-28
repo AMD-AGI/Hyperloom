@@ -250,6 +250,26 @@ class TestFmoeDispatchParsing:
         assert report["covered"] == 0
         assert report["kernel_name_mismatch"] == 1
 
+    def test_an_unquoted_activation_repr_matches_its_tuned_row(self, tmp_path):
+        kn1 = "flydsl_moe1_afp4_wfp4_bf16_t128x128x256_bnt0_fp4"
+        kn2 = "flydsl_moe2_layout_afp4_wfp4_bf16_t128x128x128_atomic_sbm128"
+        line = (
+            f"[aiter] [fused_moe] using 2stage (kernelName1='{kn1}', kernelName2='{kn2}') for "
+            "('gfx950', 256, 16384, 6144, 2048, 64, 8, <ActivationType.Silu: 0>, 'torch.bfloat16', "
+            "'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', 'QuantType.per_1x32', True, False)"
+        )
+        path = tmp_path / "tuned_fmoe.csv"
+        path.write_text(
+            "gfx,cu_num,token,model_dim,inter_dim,expert,topk,act_type,dtype,"
+            "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1,kernelId,us,"
+            "kernelName1,kernelName2\n"
+            "gfx950,256,16384,6144,2048,64,8,ActivationType.Silu,torch.bfloat16,"
+            f"torch.float4_e2m1fn_x2,torch.float4_e2m1fn_x2,QuantType.per_1x32,1,0,1,10.0,{kn1},{kn2}\n",
+            encoding="utf-8",
+        )
+        report = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(path), parse_aiter_fused_moe_dispatches(line))
+        assert report["coverage_pct"] == 100.0
+
     def test_csv_key_rejects_different_gfx(self, tmp_path):
         path = tmp_path / "tuned_fmoe.csv"
         path.write_text(
@@ -481,14 +501,14 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         assert report["runtime_lookup_hit"] == 0
         assert report["runtime_lookup_miss"] == 1
 
-    def test_unexpected_failure_is_undetermined(self, tmp_path):
-        """The wrapper swallows anything the body throws (it can block a KEEP)."""
+    def test_unreadable_evidence_is_undetermined(self, tmp_path):
+        """A log or CSV the body cannot read is undetermined rather than a block on the KEEP."""
         from types import SimpleNamespace
 
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         def _boom(*_args, **_kwargs):
-            raise RuntimeError("coverage exploded")
+            raise PermissionError("server.log is not readable")
 
         phase = SimpleNamespace(
             session_dir=tmp_path,
@@ -520,10 +540,8 @@ class TestE2EValidationFailsOpen:
 
         from hyperloom.orchestrator.phases.kernel import KernelPhase
 
-        recorded: list[dict] = []
         saved: list[object] = []
         state = SimpleNamespace(
-            record_gemm_tuning=recorded.append,
             save=saved.append,
             macro_cycle=0,
             gemm_tuning_attempts=[],
@@ -546,7 +564,7 @@ class TestE2EValidationFailsOpen:
             "timeline",
         ):
             setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
-        return phase, recorded
+        return phase, state
 
     @pytest.mark.asyncio
     async def test_exception_is_recorded_as_a_fault_not_raised(self, tmp_path):
@@ -555,12 +573,12 @@ class TestE2EValidationFailsOpen:
         async def _boom(_result):
             raise RuntimeError("e2e exploded")
 
-        phase, recorded = self._phase(tmp_path, _boom)
+        phase, state = self._phase(tmp_path, _boom)
         result: dict = {"backend": "forge"}
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert recorded == [result]
+        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
         fault = result["e2e_results"]["faults"][0]
         assert fault["error_class"] == "e2e_validation_exception"
         assert "RuntimeError: e2e exploded" in fault["error"]
@@ -620,10 +638,10 @@ class TestE2EValidationFailsOpen:
         async def _ok(_result):
             return None
 
-        phase, recorded = self._phase(tmp_path, _ok)
+        phase, state = self._phase(tmp_path, _ok)
         result: dict = {"backend": "forge"}
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert recorded == [result]
+        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
         assert "e2e_results" not in result

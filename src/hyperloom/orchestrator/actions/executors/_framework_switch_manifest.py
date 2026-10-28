@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import (
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -60,31 +60,30 @@ def _clean_list(raw: Any) -> list[str]:
     return [s for s in (str(i or "").strip() for i in items) if s]
 
 
-def parse_manifest(
-    raw: Any,
-    *,
-    reserved_env: "frozenset[str] | set[str] | None" = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse and validate a switch manifest."""
-    problems: list[str] = []
-    entries: list[dict[str, Any]] = []
+def _manifest_entries(raw: Any) -> list[dict[str, Any]] | None:
+    """Switch entries from either manifest spelling, or ``None`` if ``raw`` is neither."""
     if isinstance(raw, dict):
+        entries: list[dict[str, Any]] = []
         for name, body in raw.items():
             entry = dict(body) if isinstance(body, dict) else {}
             entry.setdefault("switch", name)
             entries.append(entry)
-    elif isinstance(raw, (list, tuple)):
-        entries = [dict(e) for e in raw if isinstance(e, dict)]
-    elif raw:
-        return [], [f"manifest must be a list or dict, got {type(raw).__name__}"]
-    if not entries:
-        return [], problems
+        return entries
+    if isinstance(raw, (list, tuple)):
+        return [dict(e) for e in raw if isinstance(e, dict)]
+    return None if raw else []
 
-    if len(entries) > MAX_SWITCHES:
-        problems.append(f"manifest declares {len(entries)} switches; keeping the first {MAX_SWITCHES}")
-        entries = entries[:MAX_SWITCHES]
 
-    reserved = {str(k).strip().upper() for k in (reserved_env or set())}
+class _AcceptedSwitches(NamedTuple):
+    """Switch records keyed by upper-case name, with the reasons the other entries were dropped."""
+
+    by_name: dict[str, dict[str, Any]]
+    problems: list[str]
+
+
+def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
+    """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
+    problems: list[str] = []
     accepted: dict[str, dict[str, Any]] = {}
     for entry in entries:
         name = str(entry.get("switch") or entry.get("name") or "").strip()
@@ -122,8 +121,12 @@ def parse_manifest(
             "depends_on": _clean_list(entry.get("depends_on")),
             "enables": _clean_list(entry.get("enables")),
         }
+    return _AcceptedSwitches(accepted, problems)
 
-    # Resolve edges against the accepted set.
+
+def _resolve_edge_references(accepted: dict[str, dict[str, Any]]) -> list[str]:
+    """Rewrite every edge list to the upper-case names it actually reaches in ``accepted``."""
+    problems: list[str] = []
     for name, entry in accepted.items():
         for field in ("depends_on", "enables"):
             resolved: list[str] = []
@@ -138,8 +141,11 @@ def parse_manifest(
                 if ref_upper not in resolved:
                     resolved.append(ref_upper)
             entry[field] = resolved
+    return problems
 
-    # Make the two edge directions agree.
+
+def _mirror_edge_directions(accepted: dict[str, dict[str, Any]]) -> None:
+    """Make ``depends_on`` and ``enables`` agree, so either direction sees the whole graph."""
     for name, entry in accepted.items():
         for dep in entry["depends_on"]:
             if name not in accepted[dep]["enables"]:
@@ -148,13 +154,36 @@ def parse_manifest(
             if name not in accepted[enabled]["depends_on"]:
                 accepted[enabled]["depends_on"].append(name)
 
-    cycles = _break_cycles(accepted)
-    problems.extend(cycles)
 
-    for entry in accepted.values():
+def parse_manifest(
+    raw: Any,
+    *,
+    reserved_env: "frozenset[str] | set[str] | None" = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Parse and validate a switch manifest."""
+    entries = _manifest_entries(raw)
+    if entries is None:
+        return [], [f"manifest must be a list or dict, got {type(raw).__name__}"]
+    if not entries:
+        return [], []
+
+    problems: list[str] = []
+    if len(entries) > MAX_SWITCHES:
+        problems.append(f"manifest declares {len(entries)} switches; keeping the first {MAX_SWITCHES}")
+        entries = entries[:MAX_SWITCHES]
+
+    reserved = {str(k).strip().upper() for k in (reserved_env or set())}
+    accepted = _accept_switches(entries, reserved)
+    switches = accepted.by_name
+    problems.extend(accepted.problems)
+    problems.extend(_resolve_edge_references(switches))
+    _mirror_edge_directions(switches)
+    problems.extend(_break_cycles(switches))
+
+    for entry in switches.values():
         entry["enabler"] = bool(entry["enables"])
 
-    return list(accepted.values()), problems
+    return list(switches.values()), problems
 
 
 def _break_cycles(accepted: dict[str, dict[str, Any]]) -> list[str]:

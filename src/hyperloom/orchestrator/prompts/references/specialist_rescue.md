@@ -23,13 +23,17 @@ queued behind the lane or GPUs it holds.
 
 ## Moves for a single task
 
-- `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
-  and it acts without restarting. Prefer this when the agent works well but
-  on the wrong question, or to answer its `residual_questions`.
+- `send_message{to='specialist:<task_id>', topic='observation', body_md}` —
+  lands in its inbox and it acts without restarting. Prefer this when the
+  agent works well but on the wrong question, or to answer its
+  `residual_questions`. `to` also takes a list
+  (`to=['specialist:<a>', 'specialist:<b>']`) to redirect several at once.
 - `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and the
-  expiry of the lanes and GPUs the task holds, in bounded steps, and moves a
-  running specialist's wall-clock kill deadline out by `extra_sec`. An
-  expired lease stops nothing by itself; extend a specialist whose work
+  expiry of the lanes the task holds, in bounded steps, and moves a
+  running specialist's wall-clock kill deadline out by `extra_sec`, never
+  past the phase end. The observation's `wall_budget_extension_sec` is how
+  far the deadline has moved in total; `0` means the phase has no room left.
+  An expired lease stops nothing by itself; extend a specialist whose work
   needs longer than its wall-clock budget.
 
 There is no single-task cancel. The only cancel is `prune_branch`, and it
@@ -38,11 +42,13 @@ takes a whole family.
 ## Move for the queue
 
 - `prune_branch{family, reason, scope='queued'}` — cancels every *queued*
-  task of one family and leaves the family usable. Use it when a backlog
-  outlived its purpose: several turns queued the same measurement before the
-  first one returned, and the answer is now in hand. The default
-  `scope='family'` instead retires the action for the rest of the run, so
-  reach for it only when the family itself is a dead end. Queued baselines
-  are drained automatically once `baseline_tput > 0` (a `baseline_drain`
-  observation reports what was cancelled); this is the manual equivalent for
-  any family.
+  task of one family and leaves the family usable. `family` is either a
+  catalogue family (the `family=` tag in the action list, covering every
+  action that carries it) or a single action name such as `baseline`. Use
+  it when a backlog outlived its purpose: several turns queued the same
+  measurement before the first one returned, and the answer is now in hand.
+  The default `scope='family'` instead retires every action it names for the
+  rest of the run, so reach for it only when the family itself is a dead end.
+  Queued baselines are drained automatically once `baseline_tput > 0` (a
+  `baseline_drain` observation reports what was cancelled); this is the
+  manual equivalent for any family.

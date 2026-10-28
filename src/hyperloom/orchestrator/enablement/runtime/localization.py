@@ -9,9 +9,12 @@ import difflib
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from hyperloom.common.github_urls import repo_slug
+
+if TYPE_CHECKING:
+    from .stack_actions import EnablementStackAction
 
 
 # A closure that touches any of these is a compiled / build-backend change and must defer to a targeted build, never
@@ -37,7 +40,6 @@ class ClosureVerdict:
 
     kind: str
     reason: str = ""
-    compiled_paths: tuple[str, ...] = ()
 
     @property
     def is_localizable(self) -> bool:
@@ -68,7 +70,6 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
                 "closure includes compiled / build-backend file(s) requiring a "
                 "targeted build (Rung 5, deferred): " + ", ".join(compiled[:8])
             ),
-            compiled_paths=compiled,
         )
     return ClosureVerdict(kind=PYTHON_ONLY, reason=f"{len(clean)} python-only file(s)")
 
@@ -147,7 +148,7 @@ def _classify_pr_diff(diff_text: str, scope: str) -> tuple[str, list[str], Closu
 
 
 def build_localization_diff(
-    action: object,
+    action: EnablementStackAction,
     *,
     fetch_pr_patches: Callable[[str, int], str],
     fetch_raw_file: Callable[[str, str, str], str],
@@ -161,12 +162,11 @@ def build_localization_diff(
 
     Blocking (synchronous HTTP); call via ``asyncio.to_thread``.
     """
-    kind = str(getattr(action, "kind", "") or "")
-    repo_url = str(getattr(action, "repo_url", "") or "")
-    slug = _repo_slug_safe(repo_url)
+    kind = action.kind
+    slug = _repo_slug_safe(action.repo_url)
 
     if kind == "pr_backport":
-        pr_number = int(getattr(action, "pr_number", 0) or 0)
+        pr_number = action.pr_number
         if not slug or pr_number <= 0:
             return "", [], ClosureVerdict(kind=EMPTY, reason="pr_backport missing repo_url/pr_number")
         diff_text = fetch_pr_patches(slug, pr_number) or ""
@@ -175,8 +175,8 @@ def build_localization_diff(
         return _classify_pr_diff(diff_text, scope)
 
     if kind == "vendor_files":
-        ref = str(getattr(action, "ref", "") or "")
-        rels = [str(p) for p in (getattr(action, "localized_paths", ()) or [])]
+        ref = action.ref
+        rels = [str(p) for p in action.localized_paths]
         if not slug or not ref or not rels:
             return "", [], ClosureVerdict(kind=EMPTY, reason="vendor_files missing repo_url/ref/paths")
         verdict = classify_closure(rels)

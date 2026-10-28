@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 @pytest.fixture(autouse=True)
@@ -95,39 +95,17 @@ def test_sweep_closes_when_insufficient_remaining():
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
+    assert reason == "time_exhausted"
+    assert evidence["terminal"] is True
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
-    """LLM skip_to_close after a refused conc_sweep must not become global_converged."""
-    st = _sweep_state(max_minutes=180, started_hours_ago=166 / 60.0)
-    st.last_conc_sweep = {}
-    st.last_conc_sweep = {
-        "status": "skipped",
-        "was_skipped": True,
-        "skip_reason": "session_time_budget",
-    }
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
-    assert evidence.get("sweep_status") == "skipped"
-
-
-def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
-    """skip_to_close remains an early close when SWEEP has nothing to close on."""
-    st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
-    st.last_conc_sweep = {}
-    st.last_conc_sweep = {}
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, _evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "global_converged"
+def test_a_run_without_framework_agent_closes_on_the_ladder_whatever_time_is_left():
+    """No further cycle was possible, so the clock is not why the run ended."""
+    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
+    target, reason, evidence = ps.compute_next_phase(st, flags=ps.PhaseFlags(optimize_enabled=False))
+    assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
+    assert "terminal" not in evidence
 
 
 def _framework_state(
@@ -148,95 +126,11 @@ def _framework_state(
     )
 
 
-@pytest.mark.parametrize(
-    ("phase", "started_hours_ago", "budget_reason"),
-    [
-        # 3h budget, ~1h54m spent: ~66 min left, under the 5400s reloop floor.
-        (ps.PHASE_ENABLEMENT, 1.9, "time_exhausted"),
-        (ps.PHASE_FRAMEWORK_AGENT, 1.9, "time_exhausted"),
-        # Ample budget left.
-        (ps.PHASE_ENABLEMENT, 0.5, "global_converged"),
-        (ps.PHASE_FRAMEWORK_AGENT, 0.5, "global_converged"),
-    ],
-)
-def test_skip_to_close_without_baseline_is_baseline_failed(phase, started_hours_ago, budget_reason):
-    """An early close that never measured a baseline must not read as a normal closeout."""
-    st = _framework_state(max_minutes=180, started_hours_ago=started_hours_ago, baseline_tput=0.0, phase=phase)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "baseline_failed"
-    assert evidence["terminal"] is True
-    assert evidence["baseline_tput"] == 0.0
-    # The budget verdict the close would otherwise have carried stays visible.
-    assert evidence["unmeasured_close_reason"] == budget_reason
-    assert evidence["min_remaining_sec_effective"] == 5400.0
-
-
-def test_skip_to_close_without_baseline_is_not_a_success_terminal():
-    """Consumers that read the stop_reason alone must not see a normal closeout."""
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS, outcome_status
-
-    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    _target, reason, _evidence = ps.compute_next_phase(st)
-    assert ps.is_valid_stop_reason(reason)
-    assert reason not in SUCCESS_STOP_REASONS
-    assert outcome_status(reason, 0.0) == "failed"
-
-
-def test_skip_to_close_replay_of_record_without_baseline_fact_is_unchanged():
-    """A decision frozen before the baseline fact existed replays to what it decided."""
-    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    inputs = ps.workflow_predicate_inputs(st)
-    assert inputs["global"]["baseline_tput"] == 0.0
-    del inputs["global"]["baseline_tput"]
-    _target, reason, _evidence = ps.replay_next_phase(inputs)
-    assert reason == "time_exhausted"
-
-
-def test_skip_to_close_inputs_validate_against_workflow_schema():
-    """The new baseline fact is declared by the current workflow-evaluation schema."""
-    jsonschema = pytest.importorskip("jsonschema")
-    from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_schema
-
-    schema = workflow_schema()
-    st = _framework_state(max_minutes=180, started_hours_ago=1.9, baseline_tput=0.0)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    global_inputs = ps.workflow_predicate_inputs(st)["global"]
-    validator = jsonschema.Draft202012Validator({"$defs": schema["$defs"], **schema["$defs"]["workflow_global"]})
-    assert list(validator.iter_errors(global_inputs)) == []
-    st.consume_pending_escalate_hint()
-    assert ps.workflow_predicate_inputs(st)["global"]["baseline_tput"] is None
-
-
-def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
-    """A budget-driven close is time_exhausted, not an early close."""
-    # 3h budget, ~2h39m spent -> ~1260s left, under the 5400s reloop floor.
-    st = _framework_state(max_minutes=180, started_hours_ago=2.65)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "time_exhausted"
-    assert evidence["min_remaining_sec_effective"] == 5400.0
-    assert evidence["session_remaining_seconds"] < 1800.0
-
-
-def test_framework_skip_to_close_with_budget_left_stays_escalated():
-    """With budget to spare, skip_to_close is still a genuine early abandonment."""
+def test_a_stale_skip_to_close_hint_does_not_close_the_run():
+    """A hint persisted by an earlier version is ignored rather than acted on."""
     st = _framework_state(max_minutes=180, started_hours_ago=1.0)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "global_converged"
-    assert evidence["session_remaining_seconds"] >= 1620.0
+    st.pending_escalate_hint = "skip_to_close"
+    assert ps.compute_next_phase(st) is None
 
 
 def test_cycle_reloop_floor_covers_one_variant_grant():
@@ -246,22 +140,8 @@ def test_cycle_reloop_floor_covers_one_variant_grant():
     assert ps._cycle_reloop_min_remaining_sec(st) == 5400.0
 
 
-def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
-    """Budget that cannot fund one variant round is exhausted, not an early close."""
-    # 3h budget, ~1699s left: above the old 15% floor, below one variant grant.
-    st = _framework_state(max_minutes=180, started_hours_ago=2.528)
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_CLOSE
-    assert reason == "time_exhausted"
-    assert evidence["min_remaining_sec_effective"] == 5400.0
-    assert 1620.0 < evidence["session_remaining_seconds"] < 1800.0
-
-
-def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
-    """A skipped conc_sweep with budget left must not be aborted by skip_to_close."""
+def test_sweep_reloops_when_conc_sweep_was_skipped_and_budget_remains():
+    """A skipped conc_sweep with budget left does not end the run."""
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     st.last_conc_sweep = {}
     st.last_conc_sweep = {
@@ -269,7 +149,6 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
         "was_skipped": True,
         "skip_reason": "session_time_budget",
     }
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -307,7 +186,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
+    assert reason == "time_exhausted"
     assert "loopback" not in evidence
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
@@ -346,13 +225,6 @@ def test_long_and_unbounded_runs_are_long():
     # Unbounded (max_minutes == 0) → long.
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
-
-
-def test_sweep_closes_at_the_macro_cycle_cap():
-    st = _sweep_state(macro_cycle=ps.DEFAULT_MAX_MACRO_CYCLES - 1)
-    target, reason, ev = ps.compute_next_phase(st)
-    assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
-    assert ev["reloop_blocked"] == "max_cycles"
 
 
 # per-cycle budget window
@@ -513,37 +385,6 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     loopback_row = next(r for r in reversed(st.phase_history) if r.get("to_phase"))
     assert loopback_row["to_phase"] == "FRAMEWORK_AGENT"
     assert loopback_row["cycle"] == 1
-
-
-@pytest.mark.asyncio
-async def test_skip_to_close_is_consumed_when_sweep_already_settled(
-    cyclic_coordinator,
-    monkeypatch,
-):
-    """A suppressed skip_to_close must not leak into the next phase."""
-    c = cyclic_coordinator
-    st = c.shared_state
-    now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_SWEEP
-    st.start_ts = (now - timedelta(minutes=166)).isoformat()
-    st.max_minutes = 180
-    st.macro_cycle = 0
-    st.last_conc_sweep = {}
-    st.last_conc_sweep = {
-        "status": "skipped",
-        "was_skipped": True,
-        "skip_reason": "session_time_budget",
-    }
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-
-    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
-        return None
-
-    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)
-    await c.phase_machine.advance_phase_if_needed()
-
-    assert st.phase == ps.PHASE_CLOSE
-    assert st.pending_escalate_hint == ""
 
 
 @pytest.mark.asyncio

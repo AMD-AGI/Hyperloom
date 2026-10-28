@@ -7,16 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from ..session.sbd_v6 import SCHEMA_VERSION_V6
-
-
-#: Current breakdown schema version. V6 stamps the document once the timeline
-#: is recorded by the actions themselves rather than projected out of their
-#: artefacts afterwards, which is what makes an event's start time its real one.
-#: ``enablement`` gained its ledger-sourced round fields inside this version:
-#: they add a section to the block rather than reshape the document.
-SCHEMA_VERSION = SCHEMA_VERSION_V6
-
 
 class V6ToolVersion(TypedDict, total=False):
     """One external tool's recorded provenance."""
@@ -156,7 +146,7 @@ class V6GradedAxes(TypedDict, total=False):
     Every axis is present on every measurement, ``None`` where nothing measured
     it: absent would be indistinguishable from an axis the framework failed to
     report, and zero reads as "measured, and it was zero". A synthetic run
-    carries nulls throughout.
+    carries nulls for the AgentX-only axes; ``output_tput_per_gpu`` is set whenever the TP degree is known.
     """
 
     e2e_norm_intvty_p90: float | None
@@ -185,15 +175,11 @@ class V6GradingTputGuard(TypedDict, total=False):
 
 
 class V6Grading(TypedDict, total=False):
-    """The axis this session was configured to grade on.
+    """The grading mode this session was started in.
 
-    The session-level setting and only that. What a promotion was actually
-    decided on is ``outcome.validation.graded_on``, read off the promotion
-    itself. On a session that promoted anything the two agree, because a
-    comparison that cannot supply the configured axis pair fails rather than
-    settling for another axis -- no promotion is ever graded off-objective.
-    Neither field resolves the other even so: a session can be configured for
-    an axis and promote nothing on it.
+    ``objective`` is a start-time mode marker (``e2e_norm_intvty_p90`` on an interactivity session), not the
+    promotion axis: that is ``outcome.validation.graded_on`` / ``outcome.final.graded_on``, absent when nothing
+    was adopted and the adoption axis when nothing was validated.
     """
 
     benchmark_mode: str
@@ -282,13 +268,15 @@ class V6OutcomeValidation(TypedDict, total=False):
     #: produced -- a revalidation moves the cumulative figure without
     #: re-promoting the recipe, so ``current_best`` can be a later measurement.
     perf: V6GradedAxes
-    attributed_gain_pct: float
+    #: ``None`` when no adoption could be measured.
+    attributed_gain_pct: float | None
     #: ``attributed_gain_pct`` without adoptions kept for a non-gain reason;
     #: ``None`` on a ledger recorded before the field existed.
     attributed_gain_pct_excluding_fixes: float | None
     #: Per ``keep_reason``: ``count``, ``total_gain_pct``, ``unmeasured``.
     by_keep_reason: dict[str, Any]
-    unattributed_gain_pct: float
+    #: ``None`` when nothing was measured or no chain total exists.
+    unattributed_gain_pct: float | None
     chain_total_gain_pct: float | None
     validated_total_gain_pct: float | None
     reconciliation_gap_pct: float | None
@@ -319,6 +307,29 @@ class V6OutcomeValidation(TypedDict, total=False):
     notes: list[str]
 
 
+class V6OutcomeVariants(TypedDict, total=False):
+    """The framework phase's bench runs, counted by how each ended.
+
+    Read off the ``attempts`` of every ``framework_agent`` event, configuration
+    variants and source patches alike; an attempt that never reached the bench
+    is not counted, and kernel candidates are the kernel lane's own funnel.
+    """
+
+    #: ``kept + reverted + failed``.
+    bench_runs: int
+    #: Distinct changes among the runs, by arm and fingerprint: a change benched
+    #: again on a later stack is one change and two runs.
+    distinct: int
+    #: Runs adopted into the stack.
+    kept: int
+    #: Runs measured and not adopted.
+    reverted: int
+    #: Runs that reached the bench and produced no measurement.
+    failed: int
+    #: ``kept`` per bench run; ``None`` when nothing was benched.
+    keep_rate_pct: float | None
+
+
 class V6Outcome(TypedDict, total=False):
     """V6 session result projection for downstream consumers."""
 
@@ -329,6 +340,7 @@ class V6Outcome(TypedDict, total=False):
     anchoring_eval: dict[str, Any] | None
     final: dict[str, Any]
     validation: V6OutcomeValidation
+    variants: V6OutcomeVariants
 
 
 class V6TimelineEvent(TypedDict, total=False):
@@ -483,11 +495,10 @@ class V6RooflineKernel(TypedDict, total=False):
     the kernel worth optimizing is often a cheap one running at low efficiency,
     which is exactly what a top-N-by-cost cut removes.
 
-    The two analysis routes agree on identity and cost and diverge on
-    provenance: the bypass route measures attainment against a real rocprof
-    ceiling and sets ``roofline_measured`` / ``roofline_attainment_pct``, where
-    TraceLens has only its analytical model. The absent field is itself the
-    answer to "was this number measured"."""
+    The two analysis routes agree on identity and cost and diverge in the
+    tail: the bypass route reports ``roofline_attainment_pct`` from its
+    analytical model, which TraceLens rows do not carry. ``roofline_source``
+    says whether a row's bound came from a model or is a placeholder."""
 
     kernel_id: str
     name: str
@@ -506,11 +517,9 @@ class V6RooflineKernel(TypedDict, total=False):
     roofline_attainment_pct: float | None
     roofline_name: str | None
     roofline_source: str
-    roofline_measured: bool
     suggestion: str
     recommended_actions: list[str]
     reusable_native_kernel: bool
-    rocprof_roofline: dict[str, Any] | None
 
 
 class V6RooflineKernelTable(TypedDict, total=False):
@@ -713,19 +722,14 @@ class V6ConcSweepPlan(TypedDict, total=False):
 class V6ConcSweepBudget(TypedDict, total=False):
     """The budget the ladder was admitted under.
 
-    Both totals are kept because they disagree: the sweep raises its own
-    default when that default cannot fund even one rung at the cap the grid
-    runner will actually grant. ``rung_cost_sec`` is that granted cap rather
-    than the declared timeout, since pricing at the smaller admits a rung the
-    budget cannot pay for. ``deadline`` is a wall-clock epoch."""
+    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is the
+    expected duration of one rung used for admission. ``deadline`` is a
+    wall-clock epoch."""
 
     declared_total_sec: int | None
-    granted_total_sec: int | None
     rung_cost_sec: float | None
-    raised: bool
     gate_active: bool
     deadline: float | None
-    session_soft_deadline_sec: float | None
 
 
 class V6ConcSweepEnvironment(TypedDict, total=False):
@@ -1062,16 +1066,17 @@ class V6EnablementAttempt(TypedDict, total=False):
     ``launch_log`` for the whole lane and every advance overwrote it, so the
     export published the newest gap as the reason the lane had opened.
 
-    ``files`` and ``accepted_config_path`` are session-relative and name only
-    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``files`` paths are session-relative and name only copies the round's
+    archive took, which is a weaker claim than "fetchable":
     ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
     session that hit the file or byte cap ships a truncated package and a
     consumer must tolerate a miss. ``patches_applied`` and
     ``artifacts_applied[].target`` are the workspace originals the round
     reported, which are never packaged -- they are identity, not a way to
-    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
-    which stays absolute because the revalidation baseline opens that one
-    directly."""
+    fetch. The round's accepted config is its ``files`` entry with role
+    ``launch_config``; note the asymmetry with
+    ``V6EnablementResult.accepted_config_path``, which stays absolute because
+    the revalidation baseline opens that one directly."""
 
     attempt: int
     task_id: str
@@ -1093,7 +1098,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     patches_span_multiple_roots: bool
     framework_root: str | None
     files: list[V6ArchivedFile]
-    accepted_config_path: str | None
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None
@@ -1254,18 +1258,6 @@ class V6PhaseMarker(TypedDict, total=False):
     ts: str
 
 
-class V6PhaseDenial(TypedDict, total=False):
-    """One author-time PolicyGate refusal in the phase where it happened."""
-
-    actor: str
-    proposal_msg_id: str | None
-    action: str
-    phase: str
-    rule: str
-    hint: str
-    denied_at: str
-
-
 class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 
@@ -1398,8 +1390,8 @@ class V6StackValidation(TypedDict, total=False):
     source: str
     measurement_basis: str
     #: The axis the figure was graded on, so an intvty-graded gain is not later
-    #: read as an output gain. Always the axis the session was configured for:
-    #: only a comparison the orchestrator found comparable is recorded here.
+    #: read as an output gain. Only a comparison the orchestrator found
+    #: comparable is recorded here.
     graded_objective: str
     #: The graded axes of the measurement that produced the figure, recorded
     #: beside it because a later revalidation moves the cumulative gain without
@@ -1420,66 +1412,13 @@ class V6StackExt(TypedDict, total=False):
     objective: str
     adoptions: dict[str, Any]
     validations: dict[str, Any]
-    attributed_gain_pct: float
-    attributed_gain_pct_excluding_fixes: float
+    attributed_gain_pct: float | None
+    attributed_gain_pct_excluding_fixes: float | None
     chain_total_gain_pct: float | None
     unattributed_gain_pct: float | None
     validated_total_gain_pct: float | None
     reconciliation_gap_pct: float | None
     guards: dict[str, int]
-
-
-class V6CriticReviewVariant(TypedDict, total=False):
-    """One variant's ruling from a grid the Critic reviewed per variant.
-
-    A rejected variant never reaches a bench, so there is no attempt row for
-    its ruling to live on and this is the only record that it was judged. The
-    map is kept per variant rather than collapsed because the collapse is
-    deliberately lossy: a grid proceeds on its approved subset, and the
-    proposal's summary verdict does not say which variants that was."""
-
-    variant_name: str
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reason: str
-    failure_reason_code: str
-
-
-class V6CriticReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, recorded on the proposal itself.
-
-    The review is a sub-structure of its subject rather than a stream of its
-    own. On the bus a proposal and its verdict are two messages about one
-    thing, and the Critic reviews proposals raised by every phase -- so a
-    ruling attached to the proposal follows it wherever it was raised, needs no
-    per-phase home, and leaves nothing to reconcile between a review list and a
-    proposal list.
-
-    Both verdicts are kept. A reject the loop held to a rule that only declared
-    ``advise`` is two facts, and reporting either alone misreads the round: the
-    authored verdict alone says a proposal was refused that in fact ran, the
-    effective verdict alone says one was approved that the Critic refused."""
-
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reviewer: str
-    iteration: int | None
-    reason: str
-    confidence: float | None
-    failure_reason_code: str
-    concerns: list[str]
-    reviewed_at: str
-    required_evidence: list[Any]
-    risks: list[Any]
-    notes: list[Any]
-    kb_evidence: list[Any]
-    packet_evidence: list[Any]
-    advice_text: str
-    alternative_action: str
-    variants: list[V6CriticReviewVariant]
-    outcome: dict[str, Any]
 
 
 class CriticIteration(TypedDict, total=False):
@@ -1517,68 +1456,6 @@ class V6Critic(TypedDict, total=False):
     iterations: list[CriticIteration]
 
 
-class V6RobustnessIntent(TypedDict, total=False):
-    """One intent the robustness agent raised on a turn."""
-
-    type: str
-    severity: str
-    topic: str
-    payload: dict[str, Any]
-
-
-class V6RobustnessTurn(TypedDict, total=False):
-    """The robustness agent's account of one turn.
-
-    ``outcome`` distinguishes a turn that produced intents from one the agent
-    could not complete, which is the distinction the section it replaces could
-    not express: a mute agent and a silent session looked identical."""
-
-    turn_idx: int
-    outcome: Literal["intents", "invalid_envelope", "no_envelope"]
-    ts: str
-    tick_index: int
-    intents: list[V6RobustnessIntent]
-    parse_warnings: list[str]
-    workdir: str
-    detail: str
-
-
-class V6Robustness(TypedDict, total=False):
-    """What the robustness agent raised, outside the business timeline.
-
-    The agent watches the session from the side, so its turns belong to no
-    phase or macro cycle and it keeps a fixed top-level place instead. An
-    empty ``turns`` is an answer, not a gap: the agent never completed a turn."""
-
-    turns: list[V6RobustnessTurn]
-
-
-class V6RobustnessFinding(TypedDict, total=False):
-    """One firing of the robustness ladder, as the ladder itself persisted it.
-
-    Read from the ladder's own JSONL log at close time rather than mirrored
-    through a recorder: the log is already durable and complete, so a second
-    copy taken as each finding was raised could only be the same rows or fewer."""
-
-    tick_index: int
-    timestamp_unix: float
-    symptom_name: str
-    severity: str
-    summary: str
-    rca_text: str
-    intents: list[str]
-    evidence: dict[str, Any]
-
-
-class V6CloseRobustness(TypedDict, total=False):
-    """The close sequencer's final robustness verdict."""
-
-    escalated: bool
-    stop_reason: str
-    findings: list[V6RobustnessFinding]
-    findings_total: int
-
-
 class V6FinalRecipe(TypedDict, total=False):
     """The configuration the session ended on, as the close-out settled it."""
 
@@ -1605,15 +1482,6 @@ class V6Close(TypedDict, total=False):
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
-    # The whole robustness account: the close-out's verdict (``escalated`` and
-    # the ``stop_reason`` it was drawn from), the agent's own ``turns``, and
-    # the ``findings`` the ladder persisted. Together because they are one
-    # account of one thing -- the verdict on its own says a session was
-    # escalated without saying what for, and the findings of an un-escalated
-    # session, the ones judged survivable, had nowhere to be read at all.
-    # ``findings`` and ``findings_total`` are absent when the ladder never
-    # wrote anything, because an empty list would claim it ran and found none.
-    robustness: V6CloseRobustness
     artifacts: dict[str, Any]
     # Absent when the session never attempted to publish its Recipe.
     kb_write_back: V6KBWriteBackExt
@@ -1642,7 +1510,6 @@ class V6FrameworkPolicySourceArm(TypedDict, total=False):
 
     no_keep_streak_threshold: int | None
     discovery_retry_limit: int | None
-    authoring_enabled: bool | None
 
 
 class V6FrameworkPolicy(TypedDict, total=False):
@@ -1652,9 +1519,6 @@ class V6FrameworkPolicy(TypedDict, total=False):
     one the session ended on and not the one this entry acted under."""
 
     keep_threshold_pct: float | None
-    variant_timeout_sec: int | None
-    overtime_kill_ratio: float | None
-    force_exit_budget_pct: float | None
     config: V6FrameworkPolicyConfigArm
     source: V6FrameworkPolicySourceArm
 
@@ -1702,7 +1566,7 @@ class V6FrameworkRun(TypedDict, total=False):
     notes: list[str]
     parallelism: int | None
     proposals_total: int | None
-    empty: bool
+    empty: bool | None
     confidence: float | None
     confidence_avg: float | None
     ensemble_scores: dict[str, Any]
@@ -1750,7 +1614,6 @@ class V6FrameworkCriticReview(TypedDict, total=False):
     effective_verdict: str
     held_to_rule: str
     reviewer: str
-    iteration: int | None
     reason: str
     confidence: float | None
     failure_reason_code: str
@@ -1766,8 +1629,7 @@ class V6FrameworkProposalTerminal(TypedDict, total=False):
     """Where a proposal ended up.
 
     ``dropped`` covers every way it never reached a measurement and ``reason``
-    says which; ``pending`` is one the phase never resolved, the honest reading
-    of a session killed mid-review."""
+    says which. A proposal the phase never resolved carries none."""
 
     disposition: str
     reason: str
@@ -1958,6 +1820,9 @@ class V6FrameworkAttempt(TypedDict, total=False):
     stage: str
     decision: str
     adopted: bool | None
+    #: Whether the attempt reached the bench, whatever came of it; absent on a
+    #: row recorded before the field existed.
+    benched: bool | None
     attribution_eligible: bool | None
     validation_basis: str
     fingerprint: str
@@ -1974,7 +1839,6 @@ class V6FrameworkAttempt(TypedDict, total=False):
     reasoning_origin: str
     experience_citations: list[V6ExperienceCitation]
     target_files: list[str]
-    accepted_kernels: list[str]
     measured_against: V6FrameworkStack
     config_delta: V6FrameworkConfigDelta
     measurement: V6FrameworkMeasurement
@@ -2029,11 +1893,11 @@ class V6KernelEntry(TypedDict, total=False):
     route_reason: str
     resumed: bool
     stack_depth_in: int | None
-    budget_remaining_sec: float | None
     roofline_snapshot_id: int | None
     roofline_snapshot_ts: str | None
     roofline_baseline_gain_at_snapshot: float | None
-    snapshot_staleness: float | None
+    #: ``"absent"`` when the entry inherited no analysis snapshot, ``"fresh"`` otherwise.
+    snapshot_staleness: str | None
 
 
 class V6KernelReprofile(TypedDict, total=False):
@@ -2047,13 +1911,6 @@ class V6KernelReprofile(TypedDict, total=False):
     snapshot_landed: bool
     snapshot_id_before: int | None
     snapshot_id_after: int | None
-
-
-class V6RowScope(TypedDict, total=False):
-    """Recording-side bookkeeping every V6 row fragment carries."""
-
-    event_id: str
-    ordinal: int
 
 
 class V6KernelAnalysisArtifacts(TypedDict, total=False):
@@ -2084,7 +1941,7 @@ class V6KernelAnalysisDetail(TypedDict, total=False):
     artifacts: V6KernelAnalysisArtifacts
 
 
-class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
+class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, total=False):
     """One analysis the KERNEL phase requested for itself."""
 
     run_id: str
@@ -2101,25 +1958,24 @@ class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, V6RowScope, total=False):
     steady_state_trace: str | None
     analysis_md_path: str | None
     reusable_native_kernel_ids: list[str]
-    trace_validate_ref: str | None
 
 
 class V6KernelRewriteE2E(TypedDict, total=False):
     """End-to-end integration sub-result of one kernel rewrite.
 
-    Derived at assembly from the event's ``integrate`` rows, never accepted
-    from a caller: the gate that produces it runs outside the phase that
-    produced the rewrite, so the lane has no verdict of its own to state. The
-    rows carry the full account, including the attempts this collapses; this
-    is the standing verdict, on the row it rules on.
+    Derived at assembly from the event's ``integrate`` rows (and a GEAK
+    candidate's rebench), never accepted from a caller. ``e2e_gain_pct`` is
+    Hyperloom-measured; GEAK's own figure is ``self_reported_e2e_gain_pct``.
     """
 
     integrated: bool
     e2e_gain_pct: float | None
+    self_reported_e2e_gain_pct: float | None
     validated: bool | None
     decision: str | None
     patch_path: str | None
     target_file: str | None
+    graded_objective: str | None
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2133,16 +1989,13 @@ class V6KernelRebenchEngagement(TypedDict, total=False):
     observed_overlay_digest: str | None
 
 
-class V6KernelRebenchAttempt(V6RowScope, total=False):
+class V6KernelRebenchAttempt(TypedDict, total=False):
     """One end-to-end re-measurement of a candidate."""
 
     attempt_id: str
     source_kind: str
-    source_ref: str | None
     idempotency_key: str | None
     task_id: str | None
-    dispatched_at: str | None
-    settled_at: str | None
     base_tput: float | None
     measured_tput: float | None
     decision: str | None
@@ -2237,7 +2090,7 @@ class V6KernelGeakDelegation(TypedDict, total=False):
     stages_reached: list[str]
 
 
-class V6KernelGeakDiscoveryRun(V6RowScope, total=False):
+class V6KernelGeakDiscoveryRun(TypedDict, total=False):
     """One hot-kernel discovery run GEAK performed for itself."""
 
     source: str | None
@@ -2260,7 +2113,7 @@ class V6KernelGeakBackendResult(TypedDict, total=False):
     error_class: str | None
 
 
-class V6KernelGeakAttempt(V6RowScope, total=False):
+class V6KernelGeakAttempt(TypedDict, total=False):
     """One kernel GEAK considered, replayed from its conclusion file.
 
     GEAK's ``kernel_journey.json`` names every kernel it considered, which
@@ -2283,7 +2136,7 @@ class V6KernelGeakAttempt(V6RowScope, total=False):
     e2e: V6KernelRewriteE2E | None
 
 
-class V6KernelGeakAuthoredKernel(V6RowScope, total=False):
+class V6KernelGeakAuthoredKernel(TypedDict, total=False):
     """One kernel GEAK authored and accepted.
 
     GEAK routes an acceptance to its kernel queue or its head queue purely by
@@ -2301,7 +2154,7 @@ class V6KernelGeakAuthoredKernel(V6RowScope, total=False):
     aliases: list[str]
 
 
-class V6KernelGeakEnvSelection(V6RowScope, total=False):
+class V6KernelGeakEnvSelection(TypedDict, total=False):
     """One environment / flag selection GEAK accepted."""
 
     selection: str
@@ -2343,9 +2196,7 @@ class V6KernelGeakProduct(TypedDict, total=False):
     accepted_flags: str | list[str] | None
     accepted_envs: dict[str, Any]
     accepted_config: dict[str, Any]
-    cfg_hash: str | None
     final_overlay: str | None
-    final_overlay_digest: str | None
     final_launch_script: str | None
     bench_script: str | None
     final_patch: str | None
@@ -2355,12 +2206,11 @@ class V6KernelGeakRebench(TypedDict, total=False):
     """How GEAK's re-measurement campaign was bounded, and how it ended.
 
     The attempts themselves are on ``ext.rebench``, which the settled attempts
-    point at by id. What stays here is what only GEAK's campaign has: the
-    per-cycle ceiling it ran under, which attempt the acceptances were settled
-    against, and the terminal error when it never reached one."""
+    point at by id. What stays here is what only GEAK's campaign has: how many
+    attempts it used, which attempt the acceptances were settled against, and
+    the terminal error when it never reached one."""
 
     required: bool
-    max_attempts: int | None
     attempts_used: int
     settled_against: str
     final_status: str | None
@@ -2432,6 +2282,7 @@ class V6KernelAttempt(TypedDict, total=False):
     backends_tried: list[str]
     speedup: float | None
     gain_pct: float | None
+    gain_axis: str | None  # kernel_micro, output_throughput or the gate's graded axis
     compile_status: str
     correctness: bool | None
     artifact_path: str
@@ -2460,6 +2311,7 @@ class V6KernelDeliveredRow(TypedDict, total=False):
     ref: str
     kernel_id: str
     gain_pct: float | None
+    gain_axis: str | None
     settled_by: str
 
 
@@ -2628,19 +2480,15 @@ class SessionBreakdown(TypedDict, total=False):
     timeline: list[V6TimelineEvent]
     close: V6Close
     critic: V6Critic
-    robustness: V6Robustness
 
 
 __all__ = [
     "CriticIteration",
-    "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V6",
     "SessionBreakdown",
     "V6ArchivedFile",
     "V6BaselineExt",
     "V6BaselineProgress",
     "V6Close",
-    "V6CloseRobustness",
     "V6ConcSweepArm",
     "V6ConcSweepArtifacts",
     "V6ConcSweepBoot",
@@ -2663,8 +2511,6 @@ __all__ = [
     "V6ConcSweepRuntime",
     "V6ConcSweepWorkload",
     "V6Critic",
-    "V6CriticReview",
-    "V6CriticReviewVariant",
     "V6EnablementAttempt",
     "V6EnablementBuild",
     "V6EnablementExt",
@@ -2738,6 +2584,7 @@ __all__ = [
     "V6OutcomeGainBucket",
     "V6OutcomeKernelAttribution",
     "V6OutcomeValidation",
+    "V6OutcomeVariants",
     "V6PhaseAction",
     "V6PhaseExt",
     "V6PhaseMarker",
@@ -2745,17 +2592,12 @@ __all__ = [
     "V6PhaseProposalOutcome",
     "V6PhaseProposalReview",
     "V6PhaseSegment",
-    "V6Robustness",
-    "V6RobustnessFinding",
-    "V6RobustnessIntent",
-    "V6RobustnessTurn",
     "V6RooflineEventSnapshot",
     "V6RooflineExt",
     "V6RooflineKernel",
     "V6RooflineKernelTable",
     "V6RooflineProgress",
     "V6RooflineTrajectoryPoint",
-    "V6RowScope",
     "V6StackAdoption",
     "V6StackExt",
     "V6StackValidation",

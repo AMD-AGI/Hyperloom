@@ -11,10 +11,10 @@ import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.jsonio import read_json
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 
 #: Precision tag -> canonical peak-table key.
 _PRECISION_ALIASES: dict[str, str] = {
@@ -35,12 +35,9 @@ _PRECISION_ALIASES: dict[str, str] = {
 
 
 def peak_tflops(gpu_type: str, precision: str) -> float:
-    """Matrix-core peak TFLOPS for ``(gpu, precision)``; 0.0 on any miss."""
-    table = (HW_SPECS.get((gpu_type or "").strip().lower()) or {}).get("peak_tflops")
-    if not table:
-        return 0.0
+    """The session roofline's compute peak TFLOPS for ``(gpu, precision)``; 0.0 on any miss."""
     key = _PRECISION_ALIASES.get((precision or "").strip().lower(), (precision or "").strip().lower())
-    return float(table.get(key, 0.0))
+    return resolve_compute_peak_provenance(gpu_type, key)["compute_peak_tflops"]
 
 
 # Low-level FLOPs primitives (2 FLOPs / MAC).
@@ -197,6 +194,46 @@ def _resolve_intermediate(cfg: dict[str, Any], hidden: int) -> int:
     return int(4 * hidden)
 
 
+class _MoeGeometry(NamedTuple):
+    """A denoiser's routed-expert geometry; all zero for a dense denoiser."""
+
+    num_experts: int
+    active_experts: int
+    moe_intermediate: int
+
+
+def _resolve_moe(cfg: dict[str, Any], intermediate: int) -> _MoeGeometry:
+    num_experts = int(cfg.get("num_experts") or cfg.get("num_routed_experts") or 0)
+    active = int(cfg.get("num_activated_experts") or cfg.get("num_experts_per_tok") or cfg.get("top_k") or 0)
+    moe_inter = int(cfg.get("moe_intermediate_dim") or cfg.get("moe_intermediate_size") or 0)
+    if num_experts and not active:
+        active = 2  # documented fallback when the config omits top-k
+    if num_experts and not moe_inter:
+        moe_inter = intermediate
+    return _MoeGeometry(num_experts, active, moe_inter)
+
+
+def _resolve_unet(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the SDXL UNet block geometry the UNet FLOPs model reads."""
+    return {
+        "block_out_channels": list(cfg.get("block_out_channels") or []),
+        "layers_per_block": int(cfg.get("layers_per_block") or 2),
+        "transformer_layers_per_block": list(cfg.get("transformer_layers_per_block") or []),
+        "down_block_types": list(cfg.get("down_block_types") or []),
+        "cross_attention_dim": int(cfg.get("cross_attention_dim") or 0),
+        "in_channels": int(cfg.get("in_channels") or 4),
+    }
+
+
+def _pipeline_defaults(model_class: str, basename: str) -> dict[str, Any]:
+    """Return the class pipeline defaults refined by any matching model-basename hint."""
+    defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
+    for hint_key, hint in _BASENAME_HINTS.items():
+        if hint_key in basename:
+            defaults.update(hint)
+    return defaults
+
+
 def _safetensors_header(path: Path) -> dict[str, Any] | None:
     try:
         with open(path, "rb") as f:
@@ -259,11 +296,8 @@ def _infer_geometry_from_safetensors(model_dir: Path) -> DenoiserGeometry | None
 
     diffusers_naming = any(k.startswith(("transformer_blocks.", "single_transformer_blocks.")) for k in keys)
     model_class = "FluxTransformer2DModel" if diffusers_naming else "HunyuanImageTransformer2DModel"
-    defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
     basename = model_dir.name.lower()
-    for hint_key, hint in _BASENAME_HINTS.items():
-        if hint_key in basename:
-            defaults.update(hint)
+    defaults = _pipeline_defaults(model_class, basename)
 
     return DenoiserGeometry(
         model_class=model_class,
@@ -304,23 +338,13 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
     # Z-Image adds refiner layers on top of n_layers.
     n_double += int(cfg.get("n_refiner_layers") or 0)
 
-    # MoE
-    num_experts = int(cfg.get("num_experts") or cfg.get("num_routed_experts") or 0)
-    active = int(cfg.get("num_activated_experts") or cfg.get("num_experts_per_tok") or cfg.get("top_k") or 0)
-    moe_inter = int(cfg.get("moe_intermediate_dim") or cfg.get("moe_intermediate_size") or 0)
-    if num_experts and not active:
-        active = 2  # documented fallback when the config omits top-k
-    if num_experts and not moe_inter:
-        moe_inter = intermediate
+    moe = _resolve_moe(cfg, intermediate)
 
     # gated FFN: Sana / Z-Image style, plus classes that use SwiGLU without saying so.
     gated = family in ("sana",) or model_class in _GATED_FFN_CLASSES or bool(cfg.get("use_gated_mlp"))
 
-    defaults = dict(_CLASS_DEFAULTS.get(model_class, {}))
     basename = d.name.lower()
-    for hint_key, hint in _BASENAME_HINTS.items():
-        if hint_key in basename:
-            defaults.update(hint)
+    defaults = _pipeline_defaults(model_class, basename)
 
     patch = 2
     ps = cfg.get("patch_size") or cfg.get("all_patch_size")
@@ -334,14 +358,7 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
 
     unet_geom: dict[str, Any] = {}
     if family == "unet":
-        unet_geom = {
-            "block_out_channels": list(cfg.get("block_out_channels") or []),
-            "layers_per_block": int(cfg.get("layers_per_block") or 2),
-            "transformer_layers_per_block": list(cfg.get("transformer_layers_per_block") or []),
-            "down_block_types": list(cfg.get("down_block_types") or []),
-            "cross_attention_dim": int(cfg.get("cross_attention_dim") or 0),
-            "in_channels": int(cfg.get("in_channels") or 4),
-        }
+        unet_geom = _resolve_unet(cfg)
 
     return DenoiserGeometry(
         model_class=model_class,
@@ -352,9 +369,9 @@ def resolve_geometry(model_dir: str | Path) -> DenoiserGeometry | None:
         head_dim=head_dim,
         intermediate=intermediate,
         gated_ffn=gated,
-        num_experts=num_experts,
-        active_experts=active,
-        moe_intermediate=moe_inter,
+        num_experts=moe.num_experts,
+        active_experts=moe.active_experts,
+        moe_intermediate=moe.moe_intermediate,
         vae_spatial=int(defaults.get("vae_spatial", 8)),
         patch=patch,
         text_tokens=int(defaults.get("text_tokens", 256)),
@@ -516,13 +533,10 @@ def analytic_ceiling(
     *,
     gpu_type: str = "mi355x",
     precision: str = "bf16",
-    height: int = 1024,
-    width: int = 1024,
     num_steps: int | None = None,
-    cfg_batch: int | None = None,
 ) -> dict[str, Any] | None:
     """Analytic compute-bound ceiling (ideal ms) for one image."""
-    est = estimate_image_flops(model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch)
+    est = estimate_image_flops(model_dir, num_steps=num_steps)
     if est is None:
         return None
     pk = peak_tflops(gpu_type, precision)

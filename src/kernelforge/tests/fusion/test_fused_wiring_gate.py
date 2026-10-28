@@ -113,13 +113,9 @@ class TestTheArtifactRepeatsTheVerdict:
         )
         return serving_gate._run_serving_smoke(
             recipe,
-            base_note="MICRO KEEP 1.31x",
-            framework="sglang",
-            out=tmp_path,
-            gpu="gfx950",
-            model_path="/models/lfm2",
-            isl=128,
-            osl=128,
+            "MICRO KEEP 1.31x",
+            serving_gate.ServingSession(framework="sglang", model_path="/models/lfm2", gpu="gfx950", isl=128, osl=128),
+            tmp_path,
         )
 
     def test_an_unchecked_wiring_is_named_in_the_note(self, tmp_path, monkeypatch):

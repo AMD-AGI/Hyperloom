@@ -26,51 +26,10 @@ def _gap_keywords(gap: str) -> tuple[str, ...]:
     return tuple(extract_keywords(gap))
 
 
-def test_pr_states_defaults_to_open() -> None:
-    req = _minimal_request()
-    assert req.pr_states == ("open",)
-
-
 def test_dispatch_unknown_search_mode_raises() -> None:
     """A search mode with no backend is a configuration error, not an empty result."""
     with pytest.raises(src.SourceConfigError, match="unknown search_mode"):
         src.enumerate_candidates(_minimal_request(search_modes=("gbrain_pr_kb",)))
-
-
-def test_pr_monitor_search_state_broadens_with_pr_states(monkeypatch) -> None:
-    """pr_states=all -> pr_monitor search queried with state='all'."""
-    captured: dict[str, str] = {}
-
-    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
-        captured["state"] = state
-        return [GitHubPr(number=7, title="perf fastpath", html_url="https://github.com/x/y/pull/7")]
-
-    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
-    req = _minimal_request(
-        keywords=_gap_keywords("speed up decode"),
-        pr_states=("all",),
-        pr_monitor=PRMonitorConfig(base_url="http://pr_monitor.local"),
-    )
-    out = src._run_pr_monitor(req)
-    assert captured["state"] == "all"
-    assert out and out[0].source == "pr_monitor"
-
-
-def test_pr_monitor_search_state_open_only_default(monkeypatch) -> None:
-    captured: dict[str, str] = {}
-
-    def _fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
-        captured["state"] = state
-        return []
-
-    monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", _fake_search)
-    monkeypatch.setattr(src, "list_perf_prs", lambda *a, **k: [])
-    req = _minimal_request(
-        keywords=_gap_keywords("speed up decode"),
-        pr_monitor=PRMonitorConfig(base_url="http://pr_monitor.local"),
-    )
-    src._run_pr_monitor(req)
-    assert captured["state"] == "open"
 
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
@@ -85,7 +44,7 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
 
     seen_repo_urls: list[str] = []
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_pr_monitor(repo_url, *, monitor, limit):
         seen_repo_urls.append(repo_url)
         return [
             GitHubPr(number=11, title=f"{framework}-pr-1", html_url="u1"),
@@ -95,7 +54,7 @@ def test_dispatch_pr_monitor_search_per_framework(framework: str, monkeypatch) -
 
     out = src.enumerate_candidates(req)
     assert seen_repo_urls == [framework_registry.repo_url(framework)]
-    assert any(c.source == "pr_monitor" for c in out)
+    assert [c.ref for c in out] == ["PR:11"]
 
 
 def test_dispatch_pr_monitor_without_config_raises() -> None:
@@ -113,13 +72,13 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
         pr_monitor=_PR_MONITOR,
     )
 
-    def fake_pr_monitor(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_pr_monitor(repo_url, *, monitor, limit):
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
         ]
 
-    def fake_github(repo_url, *, limit, states=("open",), terms=()):
+    def fake_github(repo_url, *, limit, terms=()):
         return [
             GitHubPr(number=2, title="dup", html_url="dup"),
             GitHubPr(number=3, title="c", html_url="u3"),
@@ -132,16 +91,14 @@ def test_dispatch_unions_pr_monitor_and_github(monkeypatch) -> None:
     refs = [c.ref for c in out]
     # pr_monitor first, then github (dedup keeps first occurrence)
     assert refs == ["PR:1", "PR:2", "PR:3"]
-    by_ref = {c.ref: c.source for c in out}
-    assert by_ref["PR:2"] == "pr_monitor"
-    assert by_ref["PR:3"] == "github"
+    assert out[1].title == "b"
 
 
 def test_github_searches_for_the_request_keywords(monkeypatch) -> None:
     """An enablement request names the failure, so the GitHub query must carry it."""
     captured: dict[str, object] = {}
 
-    def fake_github(repo_url, *, limit, states=("open",), terms=()):
+    def fake_github(repo_url, *, limit, terms=()):
         captured["terms"] = terms
         return []
 
@@ -152,11 +109,22 @@ def test_github_searches_for_the_request_keywords(monkeypatch) -> None:
     assert captured["terms"] == ("deepseekv4", "causallm", "architectures")
 
 
+def test_github_backend_failure_reaches_the_caller(monkeypatch) -> None:
+    """A github backend bug is not turned into an empty result."""
+
+    def broken_github(repo_url, *, limit, terms=()):
+        raise RuntimeError("github backend bug")
+
+    monkeypatch.setattr(src.github_backend, "search_perf_prs", broken_github)
+    with pytest.raises(RuntimeError, match="github backend bug"):
+        src.enumerate_candidates(_minimal_request(search_modes=("github",)))
+
+
 def test_github_without_keywords_searches_the_perf_terms(monkeypatch) -> None:
     """Perf discovery names no failure and keeps the perf term set."""
     captured: dict[str, object] = {}
 
-    def fake_github(repo_url, *, limit, states=("open",), terms=()):
+    def fake_github(repo_url, *, limit, terms=()):
         captured["terms"] = terms
         return []
 
@@ -169,7 +137,7 @@ def test_pr_monitor_uses_search_endpoint_when_keywords_present(monkeypatch) -> N
     """When the request carries keywords, dispatcher uses /v1/search/prs."""
     captured: dict[str, object] = {}
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
+    def fake_search(repo_url, *, monitor, query, limit):
         captured["called"] = "search"
         captured["query"] = query
         captured["limit"] = limit
@@ -211,7 +179,7 @@ def test_pr_monitor_falls_back_to_list_when_search_returns_empty(monkeypatch) ->
         calls.append("search")
         return []
 
-    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_list(repo_url, *, monitor, limit):
         calls.append("list")
         return [
             GitHubPr(number=40, title="NPU Ascend backend", html_url="u40"),
@@ -240,7 +208,7 @@ def test_pr_monitor_falls_back_to_list_when_search_unavailable(monkeypatch) -> N
     def fake_search(*_a, **_kw):
         raise src.PRMonitorError("404 Not Found at /v1/search/prs")
 
-    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_list(repo_url, *, monitor, limit):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -273,7 +241,7 @@ def test_pr_monitor_no_keywords_uses_list_only_path(monkeypatch) -> None:
         captured["called"] = "search"
         return []
 
-    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_list(repo_url, *, monitor, limit):
         captured["called"] = "list"
         captured["limit"] = limit
         return [
@@ -321,7 +289,7 @@ def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
     """End-to-end: request keywords are sent as the PR Monitor query verbatim."""
     captured: dict[str, object] = {}
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
+    def fake_search(repo_url, *, monitor, query, limit):
         captured["query"] = query
         return [GitHubPr(number=99, title="mi300x perf PR", html_url="u")]
 
@@ -344,20 +312,10 @@ def test_pr_monitor_uses_explicit_keywords(monkeypatch) -> None:
     assert [c.ref for c in out] == ["PR:99"]
 
 
-def test_rank_by_keyword_overlap_empty_keywords_is_identity() -> None:
-    """An empty keyword list returns the input list unchanged."""
-    prs = [
-        GitHubPr(number=1, title="a", html_url="u1"),
-        GitHubPr(number=2, title="b", html_url="u2"),
-    ]
-    out = src._rank_by_keyword_overlap(prs, [])
-    assert out == prs
-
-
 def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch) -> None:
     """A dense+mi300x PR must rank ahead of PR:25769 MegaMoE at the enumerate_candidates boundary."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
+    def fake_search(repo_url, *, monitor, query, limit):
         return [
             GitHubPr(
                 number=25769,
@@ -389,10 +347,10 @@ def test_pr25769_megamoe_demoted_at_dispatcher_for_dense_mi300x_gap(monkeypatch)
     assert "PR:25769" in refs
 
 
-def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> None:
-    """The dispatcher transports the rerank score on every pr_monitor Candidate; order is score-descending, stable on ties."""
+def test_pr_monitor_path_orders_candidates_by_keyword_score(monkeypatch) -> None:
+    """pr_monitor candidates come back in rerank-score order: the dense+mi300x PR first, the doc edit last."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
+    def fake_search(repo_url, *, monitor, query, limit):
         return [
             GitHubPr(number=10, title="optimize sglang bf16 dense attention on mi300x", html_url="u10"),
             GitHubPr(number=11, title="MegaMoE NextN A2A", html_url="u11"),
@@ -409,23 +367,18 @@ def test_candidate_score_field_populated_for_pr_monitor_path(monkeypatch) -> Non
         keywords=_gap_keywords("improve sglang bf16 dense throughput on mi300x"),
     )
     out = src.enumerate_candidates(req)
-    scores = [(c.ref, c.score) for c in out]
-    # PR:10 best (positive hits, no anti); PR:12 worst (0).
-    assert scores[0][0] == "PR:10"
-    assert scores[0][1] > 0.0, f"top candidate must carry a positive score; got {scores}"
-    # PR:11 MegaMoE has anti hits so its score should be <= top candidate.
-    assert scores[1][1] <= scores[0][1]
-    # Sort order must match score desc.
-    assert scores == sorted(scores, key=lambda x: -x[1])
+    refs = [c.ref for c in out]
+    assert refs[0] == "PR:10"
+    assert refs[-1] == "PR:12"
 
 
-def test_candidate_score_defaults_to_zero_for_list_only_path(monkeypatch) -> None:
-    """No keywords -> cheap listing path; Candidate.score defaults to 0.0 (no ranking happened)."""
+def test_pr_monitor_no_keywords_never_calls_search(monkeypatch) -> None:
+    """No keywords -> cheap listing path; the search endpoint is never hit."""
 
     def fake_search(*a, **kw):  # would never be called when keywords empty
         raise AssertionError("search must not be called on the no-keyword path")
 
-    def fake_list(repo_url, *, base_url, limit, timeout_sec, state=None):
+    def fake_list(repo_url, *, monitor, limit):
         return [GitHubPr(number=30, title="generic PR", html_url="u30")]
 
     monkeypatch.setattr(src, "search_perf_prs_via_pr_monitor_search", fake_search)
@@ -437,15 +390,13 @@ def test_candidate_score_defaults_to_zero_for_list_only_path(monkeypatch) -> Non
         pr_monitor=_PR_MONITOR,
     )
     out = src.enumerate_candidates(req)
-    assert len(out) == 1
-    assert out[0].score == 0.0
-    assert out[0].ref == "PR:30"
+    assert [c.ref for c in out] == ["PR:30"]
 
 
 def test_anti_signal_inactive_at_dispatcher_when_no_trigger_in_gap(monkeypatch) -> None:
     """Anti rerank is a no-op when the gap carries no anti-trigger keyword."""
 
-    def fake_search(repo_url, *, base_url, query, limit, state, timeout_sec):
+    def fake_search(repo_url, *, monitor, query, limit):
         return [
             GitHubPr(number=10, title="fp8 moe perf improvement", html_url="u10"),
             GitHubPr(number=11, title="fp8 attention fusion", html_url="u11"),

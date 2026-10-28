@@ -7,10 +7,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from kernelforge.loop.run_state import AnalysisRefreshState
 from kernelforge.orchestrator.contracts import calculate_evidence_gain
 
 
 ANALYSIS_REFRESH_THRESHOLD = 0.05
+# (refresh, reason) for a commit already attempted, by how that attempt ended.
+_ATTEMPTED_COMMIT_OUTCOMES = {
+    "exhausted": (False, "ANALYSIS_ATTEMPTS_EXHAUSTED"),
+    "failed": (True, "RETRY_FAILED_ANALYSIS"),
+}
 
 
 @dataclass(frozen=True)
@@ -24,57 +30,34 @@ class AnalysisRefreshDecision:
 
 
 def decide_analysis_refresh(
+    state: AnalysisRefreshState,
     *,
     canonical_commit: str,
-    evidence_commit: str,
-    evidence_mean_case_speedup: float | None,
-    evidence_status: str,
     current_mean_case_speedup: float | None,
     supervisor_due: bool,
-    last_attempt_commit: str = "",
-    last_attempt_status: str = "",
-    last_attempt_iteration: int = -1,
     current_iteration: int = 0,
 ) -> AnalysisRefreshDecision:
     """Decide whether the current canonical commit needs fresh Analysis."""
+    canonical = canonical_commit.strip()
+    evidence = str(state.evidence_commit or "").strip()
+    stale = bool(evidence) and canonical != evidence
+    gain = calculate_evidence_gain(state.evidence_mean_case_speedup, current_mean_case_speedup)
 
-    canonical = str(canonical_commit or "").strip()
-    evidence = str(evidence_commit or "").strip()
-    stale = bool(canonical and evidence and canonical != evidence)
-    gain = calculate_evidence_gain(
-        evidence_mean_case_speedup,
-        current_mean_case_speedup,
-    )
+    if state.last_attempt_commit == canonical:
+        outcome = _ATTEMPTED_COMMIT_OUTCOMES.get(state.last_attempt_status)
+        if state.last_attempt_iteration == current_iteration:
+            outcome = (False, "ALREADY_ATTEMPTED_THIS_ITERATION")
+        if outcome is not None:
+            refresh, reason = outcome
+            return AnalysisRefreshDecision(
+                refresh=refresh,
+                reasons=(reason,),
+                evidence_stale=stale or not evidence,
+                gain_since_evidence=gain,
+            )
 
-    attempted_this_iteration = (
-        canonical and last_attempt_commit == canonical and last_attempt_iteration == current_iteration
-    )
-    if attempted_this_iteration:
-        return AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("ALREADY_ATTEMPTED_THIS_ITERATION",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
-
-    if canonical and last_attempt_commit == canonical and last_attempt_status == "exhausted":
-        return AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("ANALYSIS_ATTEMPTS_EXHAUSTED",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
-
-    if canonical and last_attempt_commit == canonical and last_attempt_status == "failed":
-        return AnalysisRefreshDecision(
-            refresh=True,
-            reasons=("RETRY_FAILED_ANALYSIS",),
-            evidence_stale=stale or not evidence,
-            gain_since_evidence=gain,
-        )
-
-    status = str(evidence_status or "").strip().lower()
-    if canonical and evidence == canonical and status == "partial" and last_attempt_iteration < current_iteration:
+    status = str(state.evidence_status or "").strip().lower()
+    if evidence == canonical and status == "partial" and state.last_attempt_iteration < current_iteration:
         return AnalysisRefreshDecision(
             refresh=True,
             reasons=("PARTIAL_UPGRADE",),
@@ -82,11 +65,11 @@ def decide_analysis_refresh(
             gain_since_evidence=gain,
         )
 
-    if not evidence or evidence_mean_case_speedup is None:
+    if not evidence or state.evidence_mean_case_speedup is None:
         return AnalysisRefreshDecision(
             refresh=True,
             reasons=("INITIAL_ANALYSIS",),
-            evidence_stale=bool(evidence and canonical != evidence),
+            evidence_stale=stale,
             gain_since_evidence=gain,
         )
 

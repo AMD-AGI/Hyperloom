@@ -6,56 +6,57 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+from .evidence import padded_m
 
 log = logging.getLogger(__name__)
 
-# sglang CUDAGraph capture batch sizes - key decode sizes (thorough mode).
-_SGLANG_CUDAGRAPH_BS_THOROUGH = [
-    1,
-    2,
-    4,
-    8,
-    12,
-    16,
-    24,
-    32,
-    48,
-    56,
-    64,
-    72,
-    80,
-    88,
-    96,
-    104,
-    112,
-    120,
-    128,
-]
+# sglang's default CUDA-graph capture batch sizes up to 256 (no speculative decoding, padding on): 1, 2, 4, 12 and
+# every multiple of _SGLANG_CUDAGRAPH_STEP.
+_SGLANG_CUDAGRAPH_STEP = 8
+_SGLANG_CUDAGRAPH_BS = tuple(sorted((1, 2, 4, 12, *range(_SGLANG_CUDAGRAPH_STEP, 257, _SGLANG_CUDAGRAPH_STEP))))
+_SGLANG_CUDAGRAPH_BS_THOROUGH = [bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= 128]
 
 
-def compute_dense_nk_shapes(
-    hidden_size: int,
-    intermediate_size: int,
-    num_heads: int,
-    num_kv_heads: int,
-    tp: int,
-    *,
-    head_dim: int = 0,
-    v_head_dim: int = 0,
-    q_lora_rank: int = 0,
-    kv_lora_rank: int = 0,
-    qk_nope_head_dim: int = 0,
-    qk_rope_head_dim: int = 0,
-    o_lora_rank: int = 0,
-    o_groups: int = 0,
-) -> list[tuple[int, int]]:
+class MGrid(Enum):
+    """How a decode or demand M becomes the M a row is tuned at."""
+
+    BUCKET = "bucket"  # evidence.padded_m: aiter's multiple of 16 up to 256, a power of two above
+    EXACT = "exact"
+
+
+@dataclass(frozen=True)
+class DenseGeometry:
+    """The model dimensions the dense projection shapes follow from; 0 means absent or derived."""
+
+    hidden_size: int
+    intermediate_size: int
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int = 0
+    v_head_dim: int = 0
+    q_lora_rank: int = 0
+    kv_lora_rank: int = 0
+    qk_nope_head_dim: int = 0
+    qk_rope_head_dim: int = 0
+
+
+def compute_dense_nk_shapes(geometry: DenseGeometry, tp: int) -> list[tuple[int, int]]:
     """Compute the dense GEMM (N, K) = (output_dim, input_dim) projection shapes."""
+    hidden_size = geometry.hidden_size
+    intermediate_size = geometry.intermediate_size
+    q_lora_rank = geometry.q_lora_rank
+    kv_lora_rank = geometry.kv_lora_rank
+    qk_nope_head_dim = geometry.qk_nope_head_dim
+    qk_rope_head_dim = geometry.qk_rope_head_dim
     tp = max(1, int(tp or 1))
-    nh = max(1, int(num_heads or 1))
-    nkv = max(1, int(num_kv_heads or nh))
-    qk_head = int(head_dim or 0) or (hidden_size // nh if hidden_size else 0)
-    vh = int(v_head_dim or 0) or qk_head
+    nh = max(1, int(geometry.num_heads or 1))
+    nkv = max(1, int(geometry.num_kv_heads or nh))
+    qk_head = int(geometry.head_dim or 0) or (hidden_size // nh if hidden_size else 0)
+    vh = int(geometry.v_head_dim or 0) or qk_head
 
     shapes: list[tuple[int, int]] = []
     if q_lora_rank and kv_lora_rank:
@@ -90,14 +91,20 @@ def compute_dense_nk_shapes(
     return out
 
 
-_DECODE_M_GRID = (1, 4, 16, 32, 64, 128, 256)
+#: The decode band has a row per graph batch size up to this M and one per power of two above it: a row per batch
+#: size up to 256 makes the band at high concurrency take the timeout budget of whole (N, K) groups.
+_FINE_DECODE_M = 64
 
 
-def compute_decode_m_values(conc: int) -> list[int]:
-    """Decode-step M (batch) sizes: ``M ≈ num_running_requests``, capped by ``conc``."""
+def compute_decode_m_values(conc: int, m_grid: MGrid = MGrid.BUCKET) -> list[int]:
+    """Decode-step M: the graph batch sizes up to ``conc`` (only the powers of two above :data:`_FINE_DECODE_M`), plus
+    ``conc`` itself, mapped through ``m_grid``."""
     conc = max(1, int(conc or 64))
-    m_set = {m for m in _DECODE_M_GRID if m <= conc}
-    m_set.update((1, conc))
+    fine = {bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= min(conc, _FINE_DECODE_M)}
+    coarse = {1 << p for p in range(_FINE_DECODE_M.bit_length(), conc.bit_length())}
+    m_set = fine | coarse | {1, conc}
+    if m_grid is MGrid.BUCKET:
+        m_set = {padded_m(m) for m in m_set}
     return sorted(m_set)
 
 
@@ -146,17 +153,15 @@ def write_mnk_untuned_csv(
     output_path: Path,
     *,
     needs_q_dtype_w: bool = False,
-    q_dtype: str = "",
-    filename: str = "untuned_dense.csv",
 ) -> Path:
     """Write an aiter-style untuned CSV for the fp8/fp4 dense tuners."""
-    csv_path = output_path / filename
+    csv_path = output_path / "untuned_dense.csv"
     output_path.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         if needs_q_dtype_w:
             from .tuners._aiter_dense_common import _aiter_fp8_dtype_str
 
-            effective_q = q_dtype or _aiter_fp8_dtype_str()
+            effective_q = _aiter_fp8_dtype_str()
             f.write("M,N,K,q_dtype_w\n")
             for m in m_values:
                 for n, k in nk_shapes:

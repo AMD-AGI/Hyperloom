@@ -43,7 +43,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.3 --target .
+pip install hyperloom-inference-optimizer==1.1.4 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -73,7 +73,7 @@ It asks for these values with a fixed option order:
    - `Use AMD gateway (https://llm-api.amd.com/anthropic)`
    - `Custom`
 2. Model:
-   - `Use default (claude-opus-5)`
+   - `Use default (claude-opus-5-5)`
    - `Custom`
 3. Secrets:
    - Setup writes placeholders in `.env`.
@@ -209,7 +209,7 @@ LLM defaults:
 
 | Mode | Required secret | Default base URL | Default model |
 |------|-----------------|------------------|---------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5` |
+| Anthropic | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` | `CLAUDE_MODEL=claude-opus-5-5` |
 
 Setup creates or updates `.env` in the current workspace and writes the resolved
 values there. Setup asks for the Anthropic side only; to run on Codex, add
@@ -236,8 +236,10 @@ An exported value still wins. `rocm700` additionally requires Python 3.10 and
 setup fails outright on any other interpreter, because the source install would
 pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
 the source install, which is a fallback rather than a validated path.
-Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
-`GEAK_ROOT`) are added later by the workload skill's `install.sh`.
+Kernel-agent paths `TRACELENS_ROOT` and `GEAK_ROOT` are added later by the
+workload skill's `install.sh`. `MAGPIE_PATH` and `INFERENCEX_PATH` follow their
+pins and reach the runtime through the kernel-agent env file, not `.env`;
+export them in the shell to override them persistently.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
@@ -245,6 +247,10 @@ by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
 and KB tokens are never forwarded. To suppress credential forwarding when the
 agent CLI (`claude` or `codex`) is authenticated through its own config, set
 `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`.
+
+To also keep specialists away from the app's own files and `/proc/<pid>/environ`, set
+`HYPERLOOM_SPECIALIST_USER` to a non-root account; see
+[environment variables](../reference/environment-variables.md).
 
 `.env` in the current workspace is the single source of truth; no extra script
 needs sourcing. Setup only needs to run again when changing the LLM provider,
@@ -347,7 +353,7 @@ paste API keys into chat.
 cat > .env <<'EOF'
 ANTHROPIC_API_KEY=<PLEASE_FILL_IN>
 ANTHROPIC_BASE_URL=https://api.anthropic.com
-CLAUDE_MODEL=claude-opus-5
+CLAUDE_MODEL=claude-opus-5-5
 # Writable artifact root for runtime files, dependency checkouts, logs,
 # optimizer runs, and generated env files. Set an absolute path you own.
 USER_DATA_PATH=<PLEASE_FILL_IN>
@@ -434,8 +440,8 @@ framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.21-rocm10-mi35x-20261008`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.22-rocm10-mi30x-20261022`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.22-rocm10-mi35x-20261022`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:

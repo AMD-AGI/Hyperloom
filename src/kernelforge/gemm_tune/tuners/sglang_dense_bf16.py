@@ -9,11 +9,12 @@ import csv
 import logging
 import math
 import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from .base import BaseTuner, TuneResult, micro_metrics
-from ..dense_shapes import compute_dense_nk_shapes, compute_dense_m_values
+from ..dense_shapes import DenseGeometry, compute_dense_nk_shapes, compute_dense_m_values
 from ..evidence import demand_for_tuner, demand_shapes, load_demand
 from ..script_discovery import discover_tuner_script
 from ..script_probe import filter_args, probe_script
@@ -143,7 +144,7 @@ def _shape_key(row: dict[str, str]) -> tuple[int, int, int] | None:
 
 
 # Shared with the fp8 dense path: the tuned CSV is deployed verbatim there too.
-from ._aiter_dense_common import _row_err_ratio, drop_inaccurate_rows  # noqa: E402
+from ._row_accuracy import drop_inaccurate_rows, dropped_row_record  # noqa: E402
 
 
 def _parse_profile_defaults(profile_csv: Path) -> dict[tuple[int, int, int], float]:
@@ -220,6 +221,17 @@ def _parse_tuner_results(
     return results
 
 
+@dataclass(frozen=True)
+class _BatchRun:
+    """The grouped tuning batch: its artifact, how many shapes it was given, its budget and how it exited."""
+
+    tuned_csv: Path
+    n_expected: int
+    batch_timeout: int
+    rc: int
+    not_finished: bool = False
+
+
 class SglangDenseBf16Tuner(BaseTuner):
     """Tune dense BF16/FP16 GEMM kernels for sglang via aiter's gemm_a16w16 tuner."""
 
@@ -277,19 +289,19 @@ class SglangDenseBf16Tuner(BaseTuner):
         num_heads = profile.raw_config.get("num_attention_heads", 32)
         num_kv_heads = profile.raw_config.get("num_key_value_heads", num_heads)
         return _compute_nk_shapes(
-            hidden_size=profile.hidden_size,
-            intermediate_size=profile.intermediate_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            tp=self.ctx.tp,
-            head_dim=int(getattr(profile, "head_dim", 0) or 0),
-            v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
-            qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
-            qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
-            o_lora_rank=int(getattr(profile, "o_lora_rank", 0) or 0),
-            o_groups=int(getattr(profile, "o_groups", 0) or 0),
+            DenseGeometry(
+                hidden_size=profile.hidden_size,
+                intermediate_size=profile.intermediate_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=int(getattr(profile, "head_dim", 0) or 0),
+                v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
+                q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
+                kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+                qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
+                qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
+            ),
+            self.ctx.tp,
         )
 
     def _shape_budget(self) -> int:
@@ -343,6 +355,16 @@ class SglangDenseBf16Tuner(BaseTuner):
         ceiling = max(outer - _TIMEOUT_RESERVE_S, 1)
         return int(min(max(n_shapes, 1) * per_shape, ceiling))
 
+    def _failure(self, error: str, error_class: str, expected_shapes: int) -> TuneResult:
+        """The failed result of a batch that was given ``expected_shapes`` shapes."""
+        return TuneResult(
+            tuner_name=self.name,
+            status="failed",
+            error=error,
+            error_class=error_class,
+            expected_shapes=expected_shapes,
+        )
+
     def run(self) -> TuneResult:
         aiter_root = resolve_aiter_root()
         assert aiter_root is not None
@@ -356,26 +378,18 @@ class SglangDenseBf16Tuner(BaseTuner):
         dtype_str = "torch.bfloat16"
 
         self._warn_about_unread_inputs()
-        nk_shapes = self._nk_shapes()
-
-        m_values = _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough)
-
         # A demand list beats anything derived from config.json: it is the set of keys the runtime actually asked for.
         demand = self._demand_shapes()
         if demand:
             n_expected = len(demand)
-            untuned_csv = _generate_untuned_csv_from_demand(
-                demand,
-                self.work_dir,
-                dtype=dtype_str,
-            )
+            untuned_csv = _generate_untuned_csv_from_demand(demand, self.work_dir, dtype=dtype_str)
         else:
+            nk_shapes = self._nk_shapes()
             # Fit the derived cross product to the budget, or a thorough run generates ~20x the shapes its window
             # can pay for.
+            budget = self._shape_budget()
             m_values = _fit_m_values_to_budget(
-                m_values,
-                len(nk_shapes),
-                self._shape_budget(),
+                _compute_m_values(self.ctx.conc, thorough=self.ctx.thorough), len(nk_shapes), budget
             )
             n_expected = len(nk_shapes) * len(m_values)
             log.info(
@@ -384,14 +398,9 @@ class SglangDenseBf16Tuner(BaseTuner):
                 len(m_values),
                 n_expected,
                 self.ctx.thorough,
-                self._shape_budget(),
+                budget,
             )
-            untuned_csv = _generate_untuned_csv(
-                nk_shapes,
-                m_values,
-                self.work_dir,
-                dtype=dtype_str,
-            )
+            untuned_csv = _generate_untuned_csv(nk_shapes, m_values, self.work_dir, dtype=dtype_str)
 
         tuned_csv = self.work_dir / "tuned_dense_bf16.csv"
         profile_csv = self.work_dir / "profile_dense_bf16.csv"
@@ -406,82 +415,52 @@ class SglangDenseBf16Tuner(BaseTuner):
 
         # `hipblaslt` is the only libtype gated on TWO conditions: matching --libtype is not enough, --with-hipblaslt
         # must be set as well (gemm_a16w16_tune.py: `if with_hipblaslt and ("all" in libtype or "hipblaslt" in
-        # libtype)`).
-        if self.ctx.thorough:
-            libtype_args = ["--libtype", "all", "--with-hipblaslt"]
-            iters, warmup = self.ctx.iters, self.ctx.warmup
-        else:
-            # `torch` rides along for measurement, not for winning.
-            libtype_args = ["--libtype", "hipblaslt,torch", "--with-hipblaslt"]
-            iters, warmup = min(self.ctx.iters, 50), min(self.ctx.warmup, 10)
-
-        tail = [
-            "-i",
-            str(untuned_csv),
-            "-o",
-            str(tuned_csv),
-            "-o2",
-            str(profile_csv),
-            "--indtype",
-            "bf16",
-            "--outdtype",
-            "bf16",
-            "--mp",
-            str(self.ctx.mp),
-            "--iters",
-            str(iters),
-            "--warmup",
-            str(warmup),
-            "--timeout",
-            str(batch_timeout),
-            "--shape_grouped",
-            "-v",
-            *libtype_args,
-        ]
+        # libtype)`). Outside a thorough run `torch` rides along for measurement, not for winning.
+        thorough = self.ctx.thorough
+        libtypes = "all" if thorough else "hipblaslt,torch"
+        iters = self.ctx.iters if thorough else min(self.ctx.iters, 50)
+        warmup = self.ctx.warmup if thorough else min(self.ctx.warmup, 10)
+        tail = ["-i", str(untuned_csv), "-o", str(tuned_csv), "-o2", str(profile_csv), "--indtype", "bf16"]
+        tail += ["--outdtype", "bf16", "--mp", str(self.ctx.mp), "--iters", str(iters), "--warmup", str(warmup)]
+        tail += ["--timeout", str(batch_timeout), "--shape_grouped", "-v", "--libtype", libtypes, "--with-hipblaslt"]
 
         # Ask the script what it accepts before spending minutes on it.
         filtered = filter_args(tail, probe_script(tuner_script))
         if not filtered.ok:
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=(
-                    f"{tuner_script} does not accept "
-                    f"{', '.join(filtered.rejected_required)}; without it the tuner has "
-                    "no candidates to search"
-                ),
-                error_class="unsupported_argument",
-                expected_shapes=n_expected,
+            return self._failure(
+                f"{tuner_script} does not accept {', '.join(filtered.rejected_required)}; without it the tuner has "
+                "no candidates to search",
+                "unsupported_argument",
+                n_expected,
             )
 
-        cmd = ["python3", str(tuner_script), *filtered.args]
-
         # Run from the script's directory: its sibling modules are imported by bare name.
-        cwd = tuner_script.parent
-
         rc, stdout, stderr = run_subprocess(
-            cmd,
-            cwd=cwd,
+            ["python3", str(tuner_script), *filtered.args],
+            cwd=tuner_script.parent,
             timeout_s=self.ctx.timeout_s,
             log_file=self.work_dir / "tune.log",
         )
+        batch = _BatchRun(tuned_csv, n_expected, batch_timeout, rc)
+        return self._judge_batch(batch, profile_csv, tuner_script, stdout, stderr)
 
-        if rc == 124:
+    def _judge_batch(
+        self, batch: _BatchRun, profile_csv: Path, tuner_script: Path, stdout: str, stderr: str
+    ) -> TuneResult:
+        """The batch's result, judged by the rows it left on disk."""
+        tuned_csv, n_expected = batch.tuned_csv, batch.n_expected
+        if batch.rc == 124:
             # Killed by the outer timeout -- but the tuner writes rows as it goes, so some shapes may already be on
             # disk.
             accuracy = drop_inaccurate_rows(tuned_csv)
             self._dropped_inaccurate = accuracy.dropped
             salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
             if salvaged and not accuracy.completed:
-                return TuneResult(
-                    tuner_name=self.name,
-                    status="failed",
-                    error=(
-                        f"Tuning timed out after {self.ctx.timeout_s}s and aiter's accuracy figures "
-                        f"were not applied to {tuned_csv}: {accuracy.reason}"
-                    ),
-                    error_class="accuracy_filter_incomplete",
-                    expected_shapes=n_expected,
+                return self._failure(
+                    f"Tuning timed out after {self.ctx.timeout_s}s and aiter's accuracy figures "
+                    f"were not applied to {tuned_csv}: {accuracy.reason}",
+                    "accuracy_filter_incomplete",
+                    n_expected,
                 )
             if salvaged:
                 log.warning(
@@ -490,20 +469,9 @@ class SglangDenseBf16Tuner(BaseTuner):
                     len(salvaged),
                     n_expected,
                 )
-                return self._build_result(
-                    salvaged,
-                    n_expected,
-                    tuned_csv,
-                    batch_timeout,
-                    rc=rc,
-                    forced_status="partial_output",
-                )
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"Tuning timed out after {self.ctx.timeout_s}s with no rows written",
-                error_class="timeout",
-                expected_shapes=n_expected,
+                return self._build_result(salvaged, batch, forced_status="partial_output")
+            return self._failure(
+                f"Tuning timed out after {self.ctx.timeout_s}s with no rows written", "timeout", n_expected
             )
 
         combined = f"{stderr or ''}\n{stdout or ''}"
@@ -512,13 +480,7 @@ class SglangDenseBf16Tuner(BaseTuner):
                 (ln.strip() for ln in combined.splitlines() if _UNRECOGNIZED_ARG_MARKER in ln),
                 _UNRECOGNIZED_ARG_MARKER,
             )
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"{tuner_script} rejected an argument: {rejected}",
-                error_class="unsupported_argument",
-                expected_shapes=n_expected,
-            )
+            return self._failure(f"{tuner_script} rejected an argument: {rejected}", "unsupported_argument", n_expected)
 
         # The exit code cannot decide success here. gemm_a16w16_tune.py returns 1 even when every shape tuned, and the
         # gemm_tuner.py shim rewrites that same 1 into a 0 -- so failing on `rc != 0` throws away good results, while
@@ -529,11 +491,10 @@ class SglangDenseBf16Tuner(BaseTuner):
         accuracy = drop_inaccurate_rows(tuned_csv)
         self._dropped_inaccurate = accuracy.dropped
         shape_results = _parse_tuner_results(tuned_csv, defaults)
-        total = len(shape_results)
         not_finished = _NOT_FINISHED_MARKER in (stdout or "") or _NOT_FINISHED_MARKER in (stderr or "")
 
-        if total == 0:
-            detail = f"rc={rc}"
+        if not shape_results:
+            detail = f"rc={batch.rc}"
             if not_finished:
                 detail += f", aiter reported {_NOT_FINISHED_MARKER}"
             return TuneResult(
@@ -542,40 +503,28 @@ class SglangDenseBf16Tuner(BaseTuner):
                 artifact_path=str(tuned_csv) if tuned_csv.is_file() else "",
                 total_shapes=0,
                 expected_shapes=n_expected,
-                error=(f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} ({detail}): {stderr[-300:]}"),
+                error=f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} ({detail}): {stderr[-300:]}",
                 error_class="empty_output",
             )
 
         if not accuracy.completed:
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"aiter's accuracy figures were not applied to {tuned_csv}: {accuracy.reason}",
-                error_class="accuracy_filter_incomplete",
-                expected_shapes=n_expected,
+            return self._failure(
+                f"aiter's accuracy figures were not applied to {tuned_csv}: {accuracy.reason}",
+                "accuracy_filter_incomplete",
+                n_expected,
             )
 
-        return self._build_result(
-            shape_results,
-            n_expected,
-            tuned_csv,
-            batch_timeout,
-            rc=rc,
-            not_finished=not_finished,
-        )
+        return self._build_result(shape_results, replace(batch, not_finished=not_finished))
 
     def _build_result(
         self,
         shape_results: list[dict[str, Any]],
-        n_expected: int,
-        tuned_csv: Path,
-        batch_timeout: int,
-        *,
-        rc: int,
-        not_finished: bool = False,
+        batch: _BatchRun,
         forced_status: str | None = None,
     ) -> TuneResult:
         """Assemble the TuneResult from the rows that were actually written."""
+        n_expected = batch.n_expected
+        tuned_csv = batch.tuned_csv
         total = len(shape_results)
         improved = [r for r in shape_results if r.get("improved")]
         unverified = [r for r in shape_results if r.get("tuned_unverified")]
@@ -595,9 +544,9 @@ class SglangDenseBf16Tuner(BaseTuner):
                 "%s",
                 produced,
                 n_expected,
-                rc,
-                not_finished,
-                batch_timeout,
+                batch.rc,
+                batch.not_finished,
+                batch.batch_timeout,
                 (
                     f". Separately, {len(dropped)} of those rows were dropped as "
                     f"inaccurate, leaving {total} in the artifact"
@@ -634,16 +583,5 @@ class SglangDenseBf16Tuner(BaseTuner):
             best_micro_speedup=metrics.best,
             avg_micro_speedup=metrics.avg,
             shape_results=shape_results,
-            dropped_inaccurate=[
-                {
-                    "M": r.get("M"),
-                    "N": r.get("N"),
-                    "K": r.get("K"),
-                    "libtype": r.get("libtype"),
-                    "splitK": r.get("splitK"),
-                    "us": r.get("us"),
-                    "err_ratio": _row_err_ratio(r),
-                }
-                for r in dropped
-            ],
+            dropped_inaccurate=[dropped_row_record(r) for r in dropped],
         )

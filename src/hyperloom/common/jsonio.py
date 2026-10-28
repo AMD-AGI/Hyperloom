@@ -52,69 +52,80 @@ def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
             yield data
 
 
+def _not_object(path: Path, data: Any) -> ValueError:
+    return ValueError(f"expected a JSON object at {path}, got {type(data).__name__}")
+
+
+def read_json_strict(
+    path: Path,
+    *,
+    require_dict: bool = False,
+    empty_value: Any = _EMPTY_UNSET,
+    errors: str = "strict",
+) -> Any:
+    """Parse JSON from *path*, raising ``OSError`` / ``ValueError`` on any failure.
+
+    ``empty_value``, when given, is returned for a blank file instead of a decode error.
+    """
+    text = path.read_text(encoding="utf-8", errors=errors)
+    if empty_value is not _EMPTY_UNSET and not text.strip():
+        data = empty_value
+    else:
+        data = json.loads(text)
+    if require_dict and not isinstance(data, dict):
+        raise _not_object(path, data)
+    return data
+
+
 def read_json(
     path: Path,
     default: Any = None,
     *,
     require_dict: bool = False,
-    strict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
-    empty_value: Any = _EMPTY_UNSET,
+    errors: str = "strict",
 ) -> Any:
-    """Parse JSON from *path*."""
+    """Parse JSON from *path*; on failure report to ``on_error`` and return ``default``."""
     try:
-        text = path.read_text(encoding="utf-8")
-        if empty_value is not _EMPTY_UNSET and not text.strip():
-            data = empty_value
-        else:
-            data = json.loads(text)
+        data = read_json_strict(path, errors=errors)
     except (OSError, json.JSONDecodeError) as exc:
-        if strict:
-            raise
         if on_error is not None:
             on_error(exc)
         return default
     if require_dict and not isinstance(data, dict):
-        exc = ValueError(f"expected a JSON object at {path}, got {type(data).__name__}")
-        if strict:
-            raise exc
         if on_error is not None:
-            on_error(exc)
+            on_error(_not_object(path, data))
         return default
     return data
 
 
 def read_jsonl(
     path: Path,
-    default: Any = None,
     *,
-    require_dict: bool = False,
-    skip_malformed: bool = False,
-    skip_non_dict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
-) -> list[Any]:
-    """Parse a JSONL file."""
+) -> list[dict[str, Any]]:
+    """Parse the JSON-object rows of a JSONL file.
+
+    An unreadable file is reported to ``on_error`` and yields ``[]``. A malformed line or a non-object row is reported
+    to ``on_error`` and skipped.
+    """
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         if on_error is not None:
             on_error(exc)
-        return [] if default is None else default
+        return []
 
-    rows: list[Any] = []
+    rows: list[dict[str, Any]] = []
     for line_no, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
             continue
         try:
             data = json.loads(stripped)
-            if require_dict and not isinstance(data, dict):
-                if skip_non_dict:
-                    continue
+            if not isinstance(data, dict):
                 raise ValueError(f"expected JSON object at {path}:{line_no}, got {type(data).__name__}")
-        except (json.JSONDecodeError, ValueError) as exc:
-            if not skip_malformed:
-                raise
+        except ValueError as exc:
             if on_error is not None:
                 on_error(exc)
             continue
@@ -122,30 +133,11 @@ def read_jsonl(
     return rows
 
 
-def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return a dict value or load one from a JSON path."""
-    fallback = {} if default is None else default
-    if value is None:
-        return fallback
-    if isinstance(value, dict):
-        return value
-    path = Path(value) if isinstance(value, (str, Path)) else None
-    if path is None:
-        return fallback
-    try:
-        is_file = path.is_file()
-    except OSError:
-        return fallback
-    if not is_file:
-        return fallback
-    return read_json(path, default=fallback, require_dict=True)
-
-
-def _qualifying(chunks: Iterable[str], required_key: str | None) -> Iterator[dict[str, Any]]:
+def _qualifying(chunks: Iterable[str], required_key: str) -> Iterator[dict[str, Any]]:
     """Every JSON object in ``chunks``, in order, that carries ``required_key``."""
     for chunk in chunks:
         for data in _iter_json_objects(chunk):
-            if required_key is None or required_key in data:
+            if required_key in data:
                 yield data
 
 
@@ -154,26 +146,16 @@ def _last(objects: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
     return tail[0] if tail else None
 
 
-def extract_first_json_with_key(
-    text: str,
-    required_key: str | None = None,
-    bare_re: re.Pattern[str] | None = None,
-    *,
-    last: bool = False,
-) -> dict[str, Any] | None:
-    """Pull a JSON object out of a model reply."""
+def extract_last_json_matching(text: str, required_key: str, bare_re: re.Pattern[str]) -> dict[str, Any] | None:
+    """Return the last JSON object carrying ``required_key`` among *text*'s fenced blocks, then its ``bare_re`` matches."""
     if not text:
         return None
     fenced = (m.group(1) for m in _FENCED_BLOCK_RE.finditer(text))
-    bare = (m.group(1) for m in bare_re.finditer(text)) if bare_re is not None else ()
-    candidates = _qualifying(chain(fenced, bare), required_key)
-    return _last(candidates) if last else next(candidates, None)
+    bare = (m.group(1) for m in bare_re.finditer(text))
+    return _last(_qualifying(chain(fenced, bare), required_key))
 
 
-def extract_last_json_with_key(
-    text: str,
-    required_key: str | None = None,
-) -> dict[str, Any] | None:
+def extract_last_json_with_key(text: str, required_key: str) -> dict[str, Any] | None:
     """Return the last JSON object in *text* (by start offset) that qualifies."""
     if not text:
         return None
@@ -181,35 +163,10 @@ def extract_last_json_with_key(
     return _last(_qualifying(chain(fenced, (text,)), required_key))
 
 
-def iter_sse_objects(raw: str) -> Iterator[Any]:
-    """Yield JSON objects decoded from an MCP HTTP response body."""
-    text = raw.lstrip()
-    if text.startswith(("{", "[")):
-        try:
-            yield json.loads(text)
-        except json.JSONDecodeError:
-            return
-        return
-    for block in re.split(r"\r?\n\r?\n", raw):
-        parts: list[str] = []
-        for line in block.splitlines():
-            if line.startswith("data:"):
-                seg = line[5:]
-                parts.append(seg[1:] if seg.startswith(" ") else seg)
-        payload = "\n".join(parts).strip()
-        if not payload:
-            continue
-        try:
-            yield json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-
-
 __all__ = [
-    "coerce_dict",
-    "extract_first_json_with_key",
+    "extract_last_json_matching",
     "extract_last_json_with_key",
-    "iter_sse_objects",
     "read_json",
+    "read_json_strict",
     "read_jsonl",
 ]

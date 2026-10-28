@@ -38,13 +38,33 @@ cmd = [
 ]
 ```
 
+`HYPERLOOM_AGENTX=1 hyperloom optimize --model ... --tp ... --conc ...` converts
+Hyperloom workload flags into native AgentX YAML. `--benchmark-config` accepts an
+explicit YAML for advanced settings. Both paths archive `benchmark.yaml` in the
+session and use the same Magpie execution contract.
+
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
-throughput/measurements and pick winners. Hyperloom pins Magpie to a ref that
+throughput/measurements and pick winners. Native AgentX uses Magpie’s managed
+server/replay/profiling contract and public validity verdict; Hyperloom does not
+patch its replay scripts or parse raw AIPerf exports. Hyperloom pins Magpie to a ref that
 already copies benchmark scripts atomically upstream; `_magpie_patcher.py` applies
-install-time compatibility patches (SGLang trust, eval concurrency, client
-tokenizer hook) to the pinned scripts. See
+install-time compatibility patches (SGLang trust, eval concurrency) to the
+pinned scripts. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
 
 ## Magpie documentation
 
 For detailed documentation on Magpie, see [Magpie on ROCm Docs](https://rocm.docs.amd.com/projects/magpie/en/latest/).
+
+Native AgentX currently pins Magpie to
+`6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e` and InferenceX to
+`408c015be4b22d14c69518643609669405507077`. Magpie owns the native InferenceX
+checkout and resolves its `inferencex-e2e/` project layout. To supply a checkout,
+set `benchmark.inferencex_path` in the workload YAML or `MAGPIE_INFERENCEX_PATH`.
+Native runs do not inherit the synthetic checkout from `INFERENCEX_PATH`.
+
+The general installer and synthetic/MLPerf preflight retain InferenceX
+`3d5581562f643f9bdeb8410cd924e2c70906c966`, which the GSM8K and profiling patches
+support. Those paths continue to honor `INFERENCEX_PATH` and `INFERENCEX_REF`;
+native AgentX skips these compatibility patches.
+See [the AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload).

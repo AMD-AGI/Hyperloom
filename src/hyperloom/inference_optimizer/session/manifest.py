@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session manifest writer — the first file written after ``make_session_dir()`` and the canonical session-resume tag (atomic write via tmp + ``os.replace``)."""
+"""Session manifest writer — the first file written after ``make_session_dir()`` and the canonical session-resume tag."""
 
 from __future__ import annotations
 
@@ -12,12 +12,11 @@ import os
 import platform
 import socket
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
@@ -27,19 +26,6 @@ from .session_paths import manifest_path
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
-
-
-def _git_revision() -> str:
-    """Best-effort source revision of the repo containing this package."""
-    here = Path(__file__).resolve().parent
-    rev = _git_revision_at(here)
-    if rev:
-        return rev
-    for env_var in ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA"):
-        val = (os.environ.get(env_var) or "").strip()
-        if val:
-            return val
-    return ""
 
 
 def _git_capture(path: Path, args: list[str]) -> str:
@@ -129,40 +115,7 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
     }
 
 
-def _detect_image() -> str | None:
-    """Best-effort container image detection: env vars -> known mount points -> cgroup probe."""
-    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        val = (os.environ.get(var) or "").strip()
-        if val:
-            return val
-    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
-        try:
-            p = Path(marker)
-            if p.exists():
-                txt = p.read_text(encoding="utf-8", errors="replace").strip()
-                if txt:
-                    return txt
-        except OSError:
-            continue
-    try:
-        cgroup = Path("/proc/1/cgroup")
-        if cgroup.exists():
-            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
-                if "docker" not in line and "containerd" not in line:
-                    continue
-                import re as _re
-
-                m = _re.search(r"([0-9a-f]{12,64})", line)
-                if m:
-                    short = m.group(1)[:12]
-                    return f"unknown@{short}"
-    except OSError as exc:
-        # /proc/1/cgroup may be unreadable; fall through to None.
-        log.debug("cgroup-based image detection failed: %r", exc)
-    return None
-
-
-def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
+def _objective_summary(args: argparse.Namespace | None) -> dict[str, Any]:
     """Mirror cli._run_optimize's objective derivation, without importing it."""
     targets: list[dict[str, Any]] = []
     if getattr(args, "target_gain", None):
@@ -186,17 +139,10 @@ def build_session_id(model_name: str = "") -> str:
     return f"{stem}_{utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
 
-def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
-    """Return the session-locked GPU specialist capacity."""
-    raw = getattr(args, "gpu_specialist_capacity", None) if args is not None else None
-    if raw is not None:
-        try:
-            return max(0, int(raw))
-        except (TypeError, ValueError):
-            pass
-    from hyperloom.common.visible_devices import detect_gpu_count
-
-    return detect_gpu_count()
+def _env_digits(name: str) -> int | None:
+    """The env var as an ``int`` when it is all digits, else ``None``."""
+    raw = os.environ.get(name, "")
+    return int(raw) if raw.strip().isdigit() else None
 
 
 def build_manifest(
@@ -206,71 +152,40 @@ def build_manifest(
     session_id: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the session manifest dictionary (schema ``SCHEMA_VERSION``)."""
-    from ..breakdown.workflow_contract import CURRENT_WORKFLOW_CONTRACT_VERSION, workflow_contract_digest
+    from ..breakdown.workflow_contract import workflow_contract, workflow_contract_digest
 
-    model_path = ""
-    model_name = ""
-    framework = os.environ.get("FRAMEWORK", "")
-    gpu_type = os.environ.get("GPU_TYPE", "")
+    model_path = model_name = ""
+    model = getattr(args, "model", None)
+    if model:
+        model_path = str(model)
+        # Prefer the quantize prelude's pinned source identity over the generic "quantized" export-dir basename.
+        model_name = (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
+    framework = str(getattr(args, "framework", None) or os.environ.get("FRAMEWORK", ""))
+    gpu_type = str(getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", ""))
     workload: dict[str, Any] = {
-        "max_model_len": int(os.environ["MAX_MODEL_LEN"])
-        if os.environ.get("MAX_MODEL_LEN", "").strip().isdigit()
-        else None,
-        "precision": os.environ.get("PRECISION", "") or None,
-        "conc": int(os.environ["CONC"]) if os.environ.get("CONC", "").strip().isdigit() else None,
+        "max_model_len": _env_digits("MAX_MODEL_LEN"),
+        "precision": str(getattr(args, "precision", None) or os.environ.get("PRECISION", "")) or None,
+        "conc": _env_digits("CONC"),
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
     # are inert. The Critic reads this block, so it carries the distribution.
-    _agentx_on = env_bool("HYPERLOOM_AGENTX")
-    if _agentx_on:
-        from hyperloom.inference_optimizer.agentx.mapping import (
-            CANONICAL_CORPUS_DURATION_S,
-            CANONICAL_CORPUS_ENTRIES,
-            CANONICAL_CORPUS_LOADER,
-            CANONICAL_ISL,
-            CANONICAL_OSL,
-            CANONICAL_PREFIX_CACHE_HIT,
-        )
+    from hyperloom.common.perf_metric import agentx_enabled
+    from hyperloom.common.benchmark_config import benchmark_config_path
 
-        workload.update(
-            benchmark_mode="agentx",
-            corpus_loader=CANONICAL_CORPUS_LOADER,
-            corpus_entries=CANONICAL_CORPUS_ENTRIES,
-            corpus_duration_s=CANONICAL_CORPUS_DURATION_S,
-            isl_distribution=dict(CANONICAL_ISL),
-            osl_distribution=dict(CANONICAL_OSL),
-            prefix_cache_hit=CANONICAL_PREFIX_CACHE_HIT,
-        )
+    if agentx_enabled():
+        workload.update(benchmark_mode="agentx", benchmark_config=str(benchmark_config_path() or ""))
     else:
-        workload["isl"] = int(os.environ["ISL"]) if os.environ.get("ISL", "").strip().isdigit() else None
-        workload["osl"] = int(os.environ["OSL"]) if os.environ.get("OSL", "").strip().isdigit() else None
-    tp = int(os.environ["TP"]) if os.environ.get("TP", "").strip().isdigit() else None
-    if args is not None:
-        if getattr(args, "model", None):
-            model_path = str(args.model)
-            # Prefer the quantize prelude's pinned source identity over the generic "quantized" export-dir basename.
-            model_name = (getattr(args, "model_display_name", "") or "").strip() or Path(model_path).name
-        if getattr(args, "framework", None):
-            framework = str(args.framework)
-        if getattr(args, "gpu_type", None):
-            gpu_type = str(args.gpu_type)
-        if not _agentx_on:
-            if getattr(args, "isl", None) is not None:
-                workload["isl"] = int(args.isl)
-            if getattr(args, "osl", None) is not None:
-                workload["osl"] = int(args.osl)
-        if getattr(args, "precision", None):
-            workload["precision"] = str(args.precision)
-    claw_session_id = (os.environ.get("CLAW_SESSION_ID") or "").strip() or None
-    sandbox_user_id = (os.environ.get("SANDBOX_USER_ID") or "").strip() or None
-    # Shared provenance builder (WP-0): single source of truth for gfx/EP/ graph-mode/server-args, kept in lockstep
-    # with the TraceShapeManifest's provenance block so the two never drift.
+        isl, osl = getattr(args, "isl", None), getattr(args, "osl", None)
+        workload["isl"] = _env_digits("ISL") if isl is None else int(isl)
+        workload["osl"] = _env_digits("OSL") if osl is None else int(osl)
+    # Shared provenance builder (WP-0) so a trace consumer can pin gfx arch / EP / graph mode / server args, kept in
+    # lockstep with the TraceShapeManifest's provenance block so the two never drift.
     _prov = build_provenance(args, env=os.environ)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id or build_session_id(model_name),
-        "claw_session_id": claw_session_id,
-        "sandbox_user_id": sandbox_user_id,
+        "claw_session_id": os.environ.get("CLAW_SESSION_ID", "").strip() or None,
+        "sandbox_user_id": os.environ.get("SANDBOX_USER_ID", "").strip() or None,
         "created_at_utc": now_iso(timespec="seconds"),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root snapshotted so a trace-based consumer can locate the on-disk artifacts.
@@ -279,44 +194,33 @@ def build_manifest(
         "model_name": model_name,
         "framework": framework or "sglang",
         "gpu_type": gpu_type,
-        "tp": tp,
-        # Added provenance (schema v4) via the shared WP-0 builder so a trace consumer can pin gfx arch /
-        # expert-parallel / graph mode / server args.
-        "gfx_arch": _prov.get("gfx_arch"),
-        "ep": _prov.get("ep"),
-        "graph_mode": _prov.get("graph_mode"),
-        "server_args": _prov.get("server_args"),
-        "server_args_hash": _prov.get("server_args_hash"),
+        "tp": _env_digits("TP"),
+        **{key: _prov.get(key) for key in ("gfx_arch", "ep", "graph_mode", "server_args", "server_args_hash")},
         "workload": workload,
-        "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
-        "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60) if args is not None else 0,
-        "code_revision": _git_revision(),
+        "objective": _objective_summary(args),
+        "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
+        "code_revision": _prov["code_revision"],
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
-        "host": platform.node() or socket.gethostname() or "",
-        "image": _detect_image(),
+        "host": platform.node() or socket.gethostname(),
+        "image": _prov["image"],
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
-        # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
-        "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1) if args is not None else 1,
-        "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # Workflow identity is stamped only on a fresh manifest. Resumed
         # pre-contract sessions therefore remain honestly legacy.
-        "workflow_contract_version": CURRENT_WORKFLOW_CONTRACT_VERSION,
+        "workflow_contract_version": workflow_contract()["workflow_contract_version"],
         "workflow_contract_digest": workflow_contract_digest(),
         "workflow_flags": {
-            "kernel_enabled": not bool(getattr(args, "no_kernel", False)) if args is not None else True,
-            "framework_agent_enabled": not bool(getattr(args, "no_framework_agent", False))
-            if args is not None
-            else True,
-            "enablement_mode": str(getattr(args, "enablement", "all") or "all") if args is not None else "all",
+            "kernel_enabled": not getattr(args, "no_kernel", False),
+            "framework_agent_enabled": not getattr(args, "no_framework_agent", False),
+            "enablement_mode": getattr(args, "enablement", "all"),
         },
         # IR-3 soft-degrade audit.
-        "kb_degraded_reason": (getattr(args, "kb_degraded_reason", None) if args is not None else None),
-        "pr_degraded_reason": (getattr(args, "pr_degraded_reason", None) if args is not None else None),
+        "kb_degraded_reason": getattr(args, "kb_degraded_reason", None),
+        "pr_degraded_reason": getattr(args, "pr_degraded_reason", None),
         # Operator-supplied reference recipe source (audit only); the resolved server_args / envs / model are
         # authoritative in state.json.
-        "reference_script": (getattr(args, "reference_script", None) if args is not None else None),
+        "reference_script": getattr(args, "reference_script", None),
     }
 
 
@@ -329,16 +233,7 @@ def write_manifest(
     """Atomically write ``manifest.json`` under session_dir; returns the manifest dict."""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
-    target = manifest_path(sd)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".manifest.", suffix=".tmp", dir=str(target.parent))
-    os.close(fd)
-    tmp_path = Path(tmp)
-    tmp_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, target)
+    atomic_write_json(manifest_path(sd), manifest)
     # The manifest stamp is where the spawn-time image, host and pid are
     # resolved; record them now so the exporter reads a fact instead of
     # re-probing the environment of whichever process happens to export.

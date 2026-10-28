@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -22,6 +21,14 @@ _TOKENIZER_FILES = (
     "tokenizer.model",
     "vocab.json",
 )
+
+_BLOCKED = "blocked.md"
+_LAST_PHASE = "last_phase.txt"
+_EVAL_REPORT = "eval_report.json"
+_EVAL_SKIPPED = "eval_skipped.txt"
+#: The per-attempt markers ``collect_artifacts`` reads: where the attempt stopped and how it ended. Every attempt of
+#: one run shares the run directory, so the retry loop archives these before each attempt.
+ATTEMPT_MARKER_FILES = (_BLOCKED, _LAST_PHASE, _EVAL_REPORT, _EVAL_SKIPPED)
 
 
 @dataclass(frozen=True)
@@ -66,7 +73,6 @@ class CollectedArtifacts:
     # SKILL.md control-plane files
     last_phase: str | None  # contents of last_phase.txt
     blocked_reason: str | None  # contents of blocked.md
-    fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
 # parsing helpers
@@ -101,19 +107,6 @@ def _read_text(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except OSError:
         return None
-
-
-def _read_json(path: Path) -> tuple[dict | None, str | None]:
-    """Read and parse a JSON file."""
-    error: str | None = None
-
-    def _record_decode_error(exc: BaseException) -> None:
-        nonlocal error
-        if isinstance(exc, json.JSONDecodeError):
-            error = f"json_decode_error: {exc.msg} at line {exc.lineno}"
-
-    data = read_json(path, default=None, on_error=_record_decode_error)
-    return data, error
 
 
 def _resolve_quantized_dir(workspace: Path) -> tuple[Path | None, bool, str | None]:
@@ -173,35 +166,16 @@ def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
     return False
 
 
-def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
-    """Find ``fix_hypothesis_attempt_N.md`` files and return the sorted Ns."""
-
-    pattern = re.compile(r"^fix_hypothesis_attempt_(\d+)\.md$")
-    ns: list[int] = []
-    try:
-        for entry in workspace.iterdir():
-            m = pattern.match(entry.name)
-            if m and entry.is_file():
-                ns.append(int(m.group(1)))
-    except FileNotFoundError:
-        return ()
-    return tuple(sorted(ns))
-
-
-def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
+def _strict_validation_enabled() -> bool:
     """Return whether strict validation mode is enabled."""
-    raw = (env if env is not None else os.environ).get(STRICT_VALIDATION_ENV, "1")
+    raw = os.environ.get(STRICT_VALIDATION_ENV, "1")
     return raw.strip().lower() not in ("0", "false", "no", "")
 
 
 # public entry
 
 
-def collect_artifacts(
-    workspace: Path,
-    *,
-    env: dict[str, str] | None = None,
-) -> CollectedArtifacts:
+def collect_artifacts(workspace: Path) -> CollectedArtifacts:
     """Scan a run workspace and summarize the on-disk artifacts."""
     workspace = Path(workspace)
 
@@ -216,11 +190,9 @@ def collect_artifacts(
     validation_present = validation_text is not None
     validation_steps = _parse_validation_report(validation_text) if validation_text else ValidationSteps()
 
-    eval_data, _ = _read_json(workspace / "eval_report.json")
-
     return CollectedArtifacts(
         workspace=workspace,
-        strict_validation=_strict_validation_enabled(env),
+        strict_validation=_strict_validation_enabled(),
         manifest_present=manifest_present,
         manifest_parse_error=manifest_err,
         quantized_model_dir=qdir,
@@ -232,12 +204,11 @@ def collect_artifacts(
         has_tokenizer=has_tokenizer,
         validation_report_present=validation_present,
         validation_steps=validation_steps,
-        eval_report_present=(workspace / "eval_report.json").is_file(),
-        eval_report_data=eval_data,
-        eval_skipped_reason=_read_text(workspace / "eval_skipped.txt"),
-        last_phase=(_read_text(workspace / "last_phase.txt") or "").strip() or None,
-        blocked_reason=_read_text(workspace / "blocked.md"),
-        fix_hypothesis_attempts=_scan_hypothesis_attempts(workspace),
+        eval_report_present=(workspace / _EVAL_REPORT).is_file(),
+        eval_report_data=read_json(workspace / _EVAL_REPORT, default=None),
+        eval_skipped_reason=_read_text(workspace / _EVAL_SKIPPED),
+        last_phase=(_read_text(workspace / _LAST_PHASE) or "").strip() or None,
+        blocked_reason=_read_text(workspace / _BLOCKED),
     )
 
 

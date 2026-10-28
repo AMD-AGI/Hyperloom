@@ -11,9 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tracker import ExperimentTracker
+from kernelforge.tracker import CampaignSegment, ExperimentSubject, ExperimentTracker
 
-from kernelforge.conftest import SRC_ROOT
+from kernelforge.tests._experiment_records import persisted_experiments
+from kernelforge.tests.conftest import SRC_ROOT
 
 
 def _log_iterations_worker(
@@ -63,10 +64,10 @@ def _create_segment_worker(
     ready_queue.put(True)
     start_event.wait()
     segment = tracker.create_segment(
-        campaign_id=campaign_id,
-        segment_index=segment_index,
-        parent_experiment_id=parent_experiment_id,
-        task_id="gemm",
+        CampaignSegment(
+            campaign_id=campaign_id, segment_index=segment_index, parent_experiment_id=parent_experiment_id
+        ),
+        ExperimentSubject(task_id="gemm"),
     )
     result_queue.put(segment.experiment_id)
 
@@ -75,12 +76,14 @@ def test_create_experiment():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
         exp = tracker.create(
-            task_id="test_gemm",
-            backend="triton",
-            kernel_backend="triton",
-            description="Test GEMM experiment",
-            target_wall_ms=1.0,
-            baseline_wall_ms=2.0,
+            ExperimentSubject(
+                task_id="test_gemm",
+                backend="triton",
+                kernel_backend="triton",
+                description="Test GEMM experiment",
+                target_wall_ms=1.0,
+                baseline_wall_ms=2.0,
+            )
         )
         assert exp.experiment_id
         assert exp.task_id == "test_gemm"
@@ -92,7 +95,7 @@ def test_create_experiment_with_caller_owned_id():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
 
-        exp = tracker.create(task_id="test", experiment_id="hyperloom")
+        exp = tracker.create(ExperimentSubject(task_id="test"), experiment_id="hyperloom")
 
         assert exp.experiment_id == "hyperloom"
         assert (Path(tmpdir) / "hyperloom.json").exists()
@@ -101,7 +104,7 @@ def test_create_experiment_with_caller_owned_id():
 def test_set_checkpoint_persists_best_commit():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
-        exp = tracker.create(task_id="test", experiment_id="hyperloom")
+        exp = tracker.create(ExperimentSubject(task_id="test"), experiment_id="hyperloom")
         checkpoint = {
             "state": "best_committed",
             "best_commit": "abc123",
@@ -118,20 +121,19 @@ def test_create_experiment_rejects_path_like_id():
         tracker = ExperimentTracker(tmpdir)
 
         with pytest.raises(ValueError):
-            tracker.create(task_id="test", experiment_id="../escape")
+            tracker.create(ExperimentSubject(task_id="test"), experiment_id="../escape")
 
 
 def test_log_iteration():
     with tempfile.TemporaryDirectory() as tmpdir:
         tracker = ExperimentTracker(tmpdir)
-        exp = tracker.create(task_id="test", backend="ck")
+        exp = tracker.create(ExperimentSubject(task_id="test", backend="ck"))
 
         it = tracker.log_iteration(
             exp.experiment_id,
             config={"BLOCK_M": 128, "BLOCK_N": 128},
             snr_db=35.0,
             wall_ms=1.5,
-            wait_mfma_ratio=3.2,
             vgpr=240,
             decision="Try BLOCK_K=128",
         )
@@ -154,24 +156,11 @@ def test_log_iteration():
         assert loaded.iterations[1].wall_ms == 1.2
 
 
-def test_list_experiments():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tracker = ExperimentTracker(tmpdir)
-        tracker.create(task_id="exp1", backend="ck")
-        tracker.create(task_id="exp2", backend="triton")
-
-        exps = tracker.list_experiments()
-        assert len(exps) == 2
-
-
 def test_create_segment_persists_directly_in_experiments_root(tmp_path):
     tracker = ExperimentTracker(tmp_path)
 
     segment = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-        task_id="gemm",
-        backend="triton",
+        CampaignSegment(campaign_id="campaign-1", segment_index=1), ExperimentSubject(task_id="gemm", backend="triton")
     )
 
     assert segment.campaign_id == "campaign-1"
@@ -186,16 +175,12 @@ def test_create_segment_persists_directly_in_experiments_root(tmp_path):
 def test_create_child_segment_links_parent_and_interrupts_abandoned_run(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     parent = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=1), ExperimentSubject(task_id="gemm")
     )
 
     child = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=2,
-        parent_experiment_id=parent.experiment_id,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id=parent.experiment_id),
+        ExperimentSubject(task_id="gemm"),
     )
 
     reloaded_parent = tracker.get(parent.experiment_id)
@@ -209,31 +194,25 @@ def test_create_child_segment_links_parent_and_interrupts_abandoned_run(tmp_path
 def test_create_segment_crash_retry_reuses_persisted_child(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     parent = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=1), ExperimentSubject(task_id="gemm")
     )
     child = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=2,
-        parent_experiment_id=parent.experiment_id,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id=parent.experiment_id),
+        ExperimentSubject(task_id="gemm"),
     )
     parent_ended_at = tracker.get(parent.experiment_id).ended_at
     (tmp_path / "unrelated.json").write_text("{not valid json")
 
     retried = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=2,
-        parent_experiment_id=parent.experiment_id,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id=parent.experiment_id),
+        ExperimentSubject(task_id="gemm"),
     )
 
     assert retried.experiment_id == child.experiment_id
     assert tracker.get(parent.experiment_id).ended_at == parent_ended_at
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
@@ -241,26 +220,19 @@ def test_create_segment_crash_retry_reuses_persisted_child(tmp_path):
 
 def test_create_segment_retry_rejects_parent_mismatch(tmp_path):
     tracker = ExperimentTracker(tmp_path)
-    parent = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-    )
+    parent = tracker.create_segment(CampaignSegment(campaign_id="campaign-1", segment_index=1))
     child = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=2,
-        parent_experiment_id=parent.experiment_id,
+        CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id=parent.experiment_id)
     )
 
     with pytest.raises(ValueError, match="parent_experiment_id mismatch"):
         tracker.create_segment(
-            campaign_id="campaign-1",
-            segment_index=2,
-            parent_experiment_id="different-parent",
+            CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id="different-parent")
         )
 
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
@@ -268,23 +240,16 @@ def test_create_segment_retry_rejects_parent_mismatch(tmp_path):
 
 def test_create_child_segment_rejects_broken_lineage(tmp_path):
     tracker = ExperimentTracker(tmp_path)
-    parent = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-    )
+    parent = tracker.create_segment(CampaignSegment(campaign_id="campaign-1", segment_index=1))
 
     with pytest.raises(ValueError, match="campaign mismatch"):
         tracker.create_segment(
-            campaign_id="campaign-2",
-            segment_index=2,
-            parent_experiment_id=parent.experiment_id,
+            CampaignSegment(campaign_id="campaign-2", segment_index=2, parent_experiment_id=parent.experiment_id)
         )
 
     with pytest.raises(ValueError, match="segment index"):
         tracker.create_segment(
-            campaign_id="campaign-1",
-            segment_index=3,
-            parent_experiment_id=parent.experiment_id,
+            CampaignSegment(campaign_id="campaign-1", segment_index=3, parent_experiment_id=parent.experiment_id)
         )
 
 
@@ -292,7 +257,7 @@ def test_mark_complete_is_idempotent_and_fires_callbacks_once(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     completed = []
     tracker.on_complete(lambda exp: completed.append(exp.experiment_id))
-    exp = tracker.create(task_id="gemm")
+    exp = tracker.create(ExperimentSubject(task_id="gemm"))
 
     first = tracker.mark_complete(exp.experiment_id)
     second = tracker.mark_complete(exp.experiment_id)
@@ -305,22 +270,22 @@ def test_mark_complete_is_idempotent_and_fires_callbacks_once(tmp_path):
 
 def test_mark_interrupted_is_idempotent_and_does_not_overwrite_completion(tmp_path):
     tracker = ExperimentTracker(tmp_path)
-    exp = tracker.create(task_id="gemm")
+    exp = tracker.create(ExperimentSubject(task_id="gemm"))
 
-    first = tracker.mark_interrupted(exp.experiment_id)
-    second = tracker.mark_interrupted(exp.experiment_id)
+    first = tracker._mark_interrupted_locked(tracker.get(exp.experiment_id))
+    second = tracker._mark_interrupted_locked(tracker.get(exp.experiment_id))
     assert first.status == "interrupted"
     assert second.ended_at == first.ended_at
 
-    completed = tracker.create(task_id="completed")
+    completed = tracker.create(ExperimentSubject(task_id="completed"))
     tracker.mark_complete(completed.experiment_id)
-    tracker.mark_interrupted(completed.experiment_id)
+    tracker._mark_interrupted_locked(tracker.get(completed.experiment_id))
     assert tracker.get(completed.experiment_id).status == "completed"
 
 
 def test_experiment_save_is_atomic(tmp_path, monkeypatch):
     tracker = ExperimentTracker(tmp_path)
-    exp = tracker.create(task_id="gemm")
+    exp = tracker.create(ExperimentSubject(task_id="gemm"))
 
     def fail_replace(src, dst):
         raise OSError("simulated replace failure")
@@ -335,7 +300,7 @@ def test_experiment_save_is_atomic(tmp_path, monkeypatch):
 
 def test_concurrent_processes_preserve_all_logged_iterations(tmp_path):
     tracker = ExperimentTracker(tmp_path)
-    exp = tracker.create(task_id="gemm")
+    exp = tracker.create(ExperimentSubject(task_id="gemm"))
     process_count = 4
     iterations_per_process = 8
     context = multiprocessing.get_context("spawn")
@@ -375,9 +340,7 @@ def test_concurrent_processes_preserve_all_logged_iterations(tmp_path):
 def test_concurrent_processes_create_one_campaign_segment(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     parent = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=1), ExperimentSubject(task_id="gemm")
     )
     process_count = 4
     context = multiprocessing.get_context("spawn")
@@ -413,7 +376,7 @@ def test_concurrent_processes_create_one_campaign_segment(tmp_path):
     assert len(set(experiment_ids)) == 1
     matching_segments = [
         experiment
-        for experiment in tracker.list_experiments()
+        for experiment in persisted_experiments(tracker.dir)
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
     assert [experiment.experiment_id for experiment in matching_segments] == [experiment_ids[0]]
@@ -422,9 +385,7 @@ def test_concurrent_processes_create_one_campaign_segment(tmp_path):
 def test_concurrent_subprocess_updates_preserve_fields_and_single_transition(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     exp = tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=1,
-        task_id="gemm",
+        CampaignSegment(campaign_id="campaign-1", segment_index=1), ExperimentSubject(task_id="gemm")
     )
     gate = tmp_path / "start"
     callback_log = tmp_path / "callbacks.log"
@@ -433,7 +394,7 @@ import sys
 import time
 from pathlib import Path
 
-from kernelforge.tracker import ExperimentTracker
+from kernelforge.tracker import CampaignSegment, ExperimentTracker
 
 experiments_dir, experiment_id, operation, ready_path, gate_path, callback_path = sys.argv[1:]
 tracker = ExperimentTracker(experiments_dir)
@@ -465,9 +426,7 @@ elif operation == "complete":
     tracker.mark_complete(experiment_id)
 elif operation == "segment":
     tracker.create_segment(
-        campaign_id="campaign-1",
-        segment_index=2,
-        parent_experiment_id=experiment_id,
+        CampaignSegment(campaign_id="campaign-1", segment_index=2, parent_experiment_id=experiment_id)
     )
 else:
     raise AssertionError(f"unknown operation: {operation}")
@@ -527,13 +486,13 @@ def test_create_segment_rejects_an_unusable_campaign_or_index(tmp_path):
     tracker = ExperimentTracker(tmp_path)
 
     with pytest.raises(ValueError, match="campaign_id is required"):
-        tracker.create_segment(campaign_id="   ", segment_index=1)
+        tracker.create_segment(CampaignSegment(campaign_id="   ", segment_index=1))
 
     with pytest.raises(ValueError, match="segment index must be at least 1"):
-        tracker.create_segment(campaign_id="campaign-1", segment_index=0)
+        tracker.create_segment(CampaignSegment(campaign_id="campaign-1", segment_index=0))
 
     with pytest.raises(ValueError, match="must be 1 when no parent"):
-        tracker.create_segment(campaign_id="campaign-1", segment_index=2)
+        tracker.create_segment(CampaignSegment(campaign_id="campaign-1", segment_index=2))
 
     # A rejected request must leave no half-created segment behind.
     assert list(tmp_path.glob("*.json")) == []
@@ -544,7 +503,7 @@ def test_segment_lookup_ignores_unreadable_and_non_experiment_json(tmp_path):
     (tmp_path / "corrupt.json").write_text("{not valid json")
     (tmp_path / "not_an_experiment.json").write_text(json.dumps([{"campaign_id": "campaign-1", "segment_index": 1}]))
 
-    segment = tracker.create_segment(campaign_id="campaign-1", segment_index=1)
+    segment = tracker.create_segment(CampaignSegment(campaign_id="campaign-1", segment_index=1))
 
     # A stray file that merely looks like a match must not be adopted as one.
     assert segment.campaign_id == "campaign-1"
@@ -554,7 +513,7 @@ def test_segment_lookup_ignores_unreadable_and_non_experiment_json(tmp_path):
 
 def test_set_checkpoint_ignores_an_empty_payload(tmp_path):
     tracker = ExperimentTracker(tmp_path)
-    exp = tracker.create(task_id="test", experiment_id="hyperloom")
+    exp = tracker.create(ExperimentSubject(task_id="test"), experiment_id="hyperloom")
     checkpoint = {"state": "best_committed", "best_commit": "abc123"}
     tracker.set_checkpoint(exp.experiment_id, checkpoint)
 

@@ -7,20 +7,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gzip
 import json
 import logging
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from hyperloom.common.coerce import to_float
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 
-from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
+from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -35,6 +36,8 @@ from .llm_failure import (
     retry_delay,
 )
 from .locate import (
+    FrameworkInstall,
+    _compile_pass_recipe,
     _read_source,
     _unclaimable_note,
     covered_by_vllm_compile_pass,
@@ -43,15 +46,72 @@ from .locate import (
     vllm_compile_pass_state,
 )
 from .models import Diagnosis, Recipe
-from .vllm_passes import PassState, resolve_target_runtime
+from .vllm_passes import resolve_target_runtime
 
 log = logging.getLogger("forge_fusion")
 
 LlmFn = Callable[[str], str]  # prompt -> raw model text (expected to contain JSON)
 
+
+@dataclass(frozen=True)
+class DiscoveryTarget:
+    """What discovery proposes fusions for: the model, the framework install, the source file, shapes and scope."""
+
+    model_type: str
+    install: FrameworkInstall
+    source_file: str
+    shapes: dict[str, Any]
+    repo_scope: bool = False
+    repo_root: str = ""
+
+
+@dataclass(frozen=True)
+class DiscoveryEvidence:
+    """The runtime evidence a discovery prompt cites: diagnosis, hot kernels, fusion boundaries, known operators."""
+
+    diagnosis: Diagnosis
+    hot_kernels: list[dict[str, Any]]
+    ordered_boundaries: Optional[list[dict[str, Any]]] = None
+    existing_operator_hints: Optional[list[dict[str, str]]] = None
+
+
+@dataclass(frozen=True)
+class DiscoveryPrompting:
+    """How many fusions discovery asks for, and the operator-knowledge corpus its hints come from."""
+
+    max_fusions: Optional[int] = None
+    knowledge_root: str | Path | None = None
+
+
+@dataclass(frozen=True)
+class DiscoverySession:
+    """One read-only discovery session: model, per-attempt timeout, transcript, working dir and guarded files."""
+
+    model: str = ""
+    timeout_s: int = 900
+    log_path: str = ""
+    workdir: str = "."
+    protected_files: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class DiscoveryRetry:
+    """Overrides for how many attempts a discovery call makes and how it backs off between them."""
+
+    attempts: Optional[int] = None
+    base_delay_sec: Optional[float] = None
+    max_delay_sec: Optional[float] = None
+    sleep: Optional[Callable[[float], Any]] = None
+
+
 # Each proposed fusion costs discovery tokens plus one authoring subprocess and validation pass, and that cost is paid
 # before the E2E gate can reject it.
 _DEFAULT_MAX_FUSIONS = 4
+# Hot kernels quoted in the discovery prompt.
+_TOP_KERNELS = 15
+# Operator hints offered, and the share of the best score a hint must reach.
+_OPERATOR_HINT_LIMIT = 12
+_OPERATOR_HINT_MIN_SCORE_RATIO = 0.25
 
 # Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
@@ -74,21 +134,10 @@ def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
     """Top GPU kernels from a kineto trace by total-duration share."""
-    p = Path(trace_path)
-    try:
-        opener = gzip.open if (p.suffix == ".gz" or p.name.endswith(".json.gz")) else open
-        with opener(p, "rt", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    events = data.get("traceEvents") if isinstance(data, dict) else None
-    if not isinstance(events, list):
-        return []
-
     agg: dict[str, list[float]] = {}
     total = 0.0
-    for ev in events:
-        if not isinstance(ev, dict) or ev.get("cat") != "kernel":
+    for ev in _load_trace_events(trace_path):
+        if ev.get("cat") != "kernel":
             continue
         try:
             dur = float(ev.get("dur"))
@@ -120,20 +169,6 @@ def hot_kernels_from_trace(
         )
     rows.sort(key=lambda r: r["share"], reverse=True)
     return rows[:top_n]
-
-
-def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(trace_path)
-    try:
-        opener = gzip.open if path.suffix == ".gz" or path.name.endswith(".json.gz") else open
-        with opener(path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return []
-    events = payload.get("traceEvents") if isinstance(payload, dict) else None
-    if not isinstance(events, list):
-        return []
-    return [event for event in events if isinstance(event, dict)]
 
 
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
@@ -393,10 +428,8 @@ def existing_operator_hints_from_knowledge(
     knowledge_root: str | Path | None,
     boundaries: list[dict[str, Any]],
     *,
-    limit: int = 12,
     fallback_categories: Optional[list[str]] = None,
     fallback_kernel_names: Optional[list[str]] = None,
-    min_score_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
     """Retrieve existing ROCm operator names using observed runtime semantics."""
     root = Path(knowledge_root) if knowledge_root else _default_knowledge_root()
@@ -411,36 +444,25 @@ def existing_operator_hints_from_knowledge(
                 "kernels": list(fallback_kernel_names or []),
             }
         )
-    if not evidence_sources:
-        return []
-
     boundary_terms = [_semantic_terms(source) for source in evidence_sources]
-    boundary_terms = [terms for terms in boundary_terms if terms]
-    if not boundary_terms:
+    if not any(boundary_terms):
         return []
 
     best: dict[str, tuple[float, dict[str, Any]]] = {}
     for path, entries in _knowledge_entries(root):
         for entry in entries:
-            op_terms: set[str] = entry["operator_terms"]
-            paragraph_tokens: set[str] = entry["paragraph_tokens"]
-            score = float("-inf")
-            for terms in boundary_terms:
-                evidence_overlap = len(terms & paragraph_tokens)
-                operator_overlap = len(op_terms & terms)
-                candidate_score = operator_overlap * 100.0 + evidence_overlap * 10.0 - entry["paragraph_length"] / 500.0
-                if entry["is_declared"]:
-                    candidate_score += 500.0
-                score = max(score, candidate_score)
+            overlap = max(
+                len(entry["operator_terms"] & terms) * 100.0 + len(terms & entry["paragraph_tokens"]) * 10.0
+                for terms in boundary_terms
+            )
+            score = overlap - entry["paragraph_length"] / 500.0
+            if entry["is_declared"]:
+                score += 500.0
             if score < 20.0:
                 continue
-            try:
-                relative_path = path.relative_to(root).as_posix()
-            except ValueError:
-                relative_path = str(path)
             row = {
                 "operator": entry["operator"],
-                "path": relative_path,
+                "path": path.relative_to(root).as_posix(),
                 "evidence": entry["evidence"],
                 "score": round(score, 1),
             }
@@ -457,8 +479,8 @@ def existing_operator_hints_from_knowledge(
         return []
     # Pre-trim marginal matches relative to the best one, so a long tail of weak hints cannot pad the prompt and
     # inflate downstream authoring attempts.
-    cutoff = ranked[0][0] * min_score_ratio
-    return [row for score, row in ranked[:limit] if score >= cutoff]
+    cutoff = ranked[0][0] * _OPERATOR_HINT_MIN_SCORE_RATIO
+    return [row for score, row in ranked[:_OPERATOR_HINT_LIMIT] if score >= cutoff]
 
 
 # Terms a proposal may declare in ``ops``.
@@ -683,29 +705,27 @@ def _output_schema_block(model_type: str, *, repo_scope: bool = False) -> str:
 
 
 def build_discovery_prompt(
-    *,
-    model_type: str,
-    framework: str,
+    target: DiscoveryTarget,
     source_text: str,
-    diagnosis: Diagnosis,
-    hot_kernels: list[dict[str, Any]],
-    shapes: dict[str, Any],
+    evidence: DiscoveryEvidence,
     max_fusions: int = _DEFAULT_MAX_FUSIONS,
-    ordered_boundaries: Optional[list[dict[str, Any]]] = None,
-    existing_operator_hints: Optional[list[dict[str, str]]] = None,
-    source_files: Sequence[str] = (),
-    repo_scope: bool = False,
-    repo_root: str = "",
 ) -> str:
     """Assemble the discovery prompt from runtime, source, and operator evidence.
 
-    ``repo_scope`` embeds no source at all and points the agent at the repository
-    instead, naming ``source_files`` as the entry points to start from.
+    Repo scope embeds no source at all and points the agent at the repository
+    instead, naming the target's source file as the entry point to start from.
     """
+    model_type, framework, shapes, repo_scope = (
+        target.model_type,
+        target.install.framework,
+        target.shapes,
+        target.repo_scope,
+    )
+    diagnosis, hot_kernels = evidence.diagnosis, evidence.hot_kernels
     if repo_scope:
         source_block = render_repo_scope_brief(
-            repo_root,
-            source_files,
+            target.repo_root,
+            [target.source_file] if target.source_file else [],
             model_type=model_type,
             framework=framework,
         )
@@ -749,14 +769,14 @@ def build_discovery_prompt(
         line += f"\n    kernels: {' | '.join(boundary.get('kernels', []))[:500]}"
         return line
 
-    boundary_lines = "\n".join(boundary_line(boundary) for boundary in (ordered_boundaries or []))
+    boundary_lines = "\n".join(boundary_line(boundary) for boundary in (evidence.ordered_boundaries or []))
 
     def operator_line(hint: dict[str, Any]) -> str:
         score = hint.get("score")
         score_text = f" score={float(score):.1f}" if score is not None else ""
         return f"  - `{hint['operator']}` ({hint['path']}){score_text}: {hint['evidence']}"
 
-    operator_lines = "\n".join(operator_line(hint) for hint in (existing_operator_hints or []))
+    operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
     return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
 on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
@@ -801,12 +821,16 @@ runs back-to-back on the decode path.
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings.
+
+    The object a cut left half-written comes last, once repaired, unless it repeats one already recovered.
+    """
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1
     in_str = False
     esc = False
+    commas: list[int] = []
     for i, ch in enumerate(text):
         if in_str:
             if esc:
@@ -821,15 +845,20 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
         elif ch == "{":
             if depth == 0:
                 start = i
+                commas = []
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    with contextlib.suppress(json.JSONDecodeError, ValueError):
-                        obj = json.loads(text[start : i + 1])
-                        if isinstance(obj, dict):
-                            out.append(obj)
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
+                    obj = json.loads(text[start : i + 1])
+                    if isinstance(obj, dict):
+                        out.append(obj)
+        elif ch == "," and depth == 1:
+            commas.append(i - start)
+    repaired = _repair_truncated_object(text[start:], depth, in_str, commas) if depth else None
+    if repaired is not None and repaired not in out:
+        out.append(repaired)
     return out
 
 
@@ -861,9 +890,6 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
     # Fallback: salvage complete objects from a truncated/unclosed array, then the object the cut left half-written --
     # with three quarters of responses arriving truncated, that last object is often the only one there is.
     salvaged = _salvage_objects(text)
-    repaired = _repair_truncated_object(text)
-    if repaired is not None and repaired not in salvaged:
-        salvaged.append(repaired)
     if not salvaged:
         log.warning(
             "discovery: no JSON proposals parsed from %d chars of model text; "
@@ -877,50 +903,20 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 _REPAIRED_REQUIRED_ANY = ("op_chain", "fusion_math")
 
 
-def _repair_truncated_object(text: str) -> dict[str, Any] | None:
-    """Recover the proposal that a cut-off response left half-written."""
-    depth = 0
-    start = -1
-    in_str = False
-    esc = False
-    boundaries: list[int] = []
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-                boundaries = []
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0:
-                    start = -1
-                    boundaries = []
-        elif ch == "," and depth == 1:
-            boundaries.append(i)
-    if depth <= 0 or start < 0:
-        return None
+def _repair_truncated_object(fragment: str, depth: int, in_str: bool, commas: list[int]) -> dict[str, Any] | None:
+    """Recover the proposal that a cut-off response left half-written.
 
-    attempts = [text[start:] + ('"' if in_str else "") + "}" * depth]
-    attempts.extend(text[start:mark] + "}" for mark in reversed(boundaries))
+    ``fragment`` runs from the object's opening brace to the cut, with ``depth`` braces and maybe a string still
+    open; ``commas`` are the offsets of its top-level separators, where a field before the cut ends complete.
+    """
+    attempts = [fragment + ('"' if in_str else "") + "}" * depth]
+    attempts.extend(fragment[:mark] + "}" for mark in reversed(commas))
     for attempt in attempts:
         try:
             obj = json.loads(attempt)
         except (json.JSONDecodeError, ValueError):
             continue
-        if not isinstance(obj, dict) or not obj:
-            continue
-        if not str(obj.get("name") or "").strip():
+        if not isinstance(obj, dict) or not str(obj.get("name") or "").strip():
             continue
         if any(str(obj.get(key) or "").strip() for key in _REPAIRED_REQUIRED_ANY):
             return obj
@@ -934,6 +930,18 @@ def _norm_env_flag(flag: str, model_type: str) -> str:
     if prefix and not f.startswith(prefix):
         f = prefix + f
     return f
+
+
+def _field_text(item: dict[str, Any], key: str, default: str = "") -> str:
+    """A proposal field as text, ``default`` when the model left it empty or null."""
+    return str(item.get(key) or default)
+
+
+def _trace_lacks(categories: list[str], category_shares: dict[str, float] | None) -> bool:
+    """Whether the trace measured category shares but none of ``categories``."""
+    if not category_shares or not categories:
+        return False
+    return {category for category, share in category_shares.items() if float(share) > 0.0}.isdisjoint(categories)
 
 
 def _as_sequence(value: Any) -> list[Any]:
@@ -1009,207 +1017,144 @@ def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], defa
     return default
 
 
+def _proposal_edit_files(item: dict[str, Any], target: DiscoveryTarget, name: str) -> list[str]:
+    """The files a proposal wires itself into, its call site first; ``[]`` drops the proposal.
+
+    Single-file discovery maps the claimed file onto the one source file the prompt embedded. Repo scope embedded
+    nothing, so each proposal names its own files, and one whose call site does not resolve is dropped rather than
+    retargeted onto the target's source file.
+    """
+    if not target.repo_scope:
+        scope_files = [target.source_file] if target.source_file else []
+        return [resolve_proposed_source_file(item.get("source_file"), scope_files, target.source_file)]
+    call_site = resolve_repo_file(item.get("source_file"), target.repo_root)
+    if not call_site:
+        log.warning(
+            "discovery: dropping %s -- its source_file %r is not a file in %s",
+            name,
+            str(item.get("source_file") or "")[:200],
+            target.repo_root or "the framework repo",
+        )
+        return []
+    files = [call_site]
+    for value in _as_sequence(item.get("additional_files")):
+        resolved = resolve_repo_file(value, target.repo_root)
+        if not resolved:
+            log.warning(
+                "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
+                name,
+                str(value)[:200],
+            )
+        elif resolved not in files:
+            files.append(resolved)
+    return files
+
+
+def _scope_gate_drops(name: str, files: list[str], terms: list[str], explicit_target: bool) -> bool:
+    """Whether the scope gate drops a proposal declaring ``terms`` that none of its edit ``files`` perform.
+
+    A fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops those files do
+    not perform is unwireable no matter how good the kernel is. The files are the ones the model was shown or named,
+    never a file the chain was not claimed to be in. The gate recognizes nine coarse terms, so it can reject a
+    wireable chain; an operator-named target is kept with a warning, because discarding what was explicitly asked
+    for hides that.
+    """
+    outside = out_of_scope_terms("\n".join(_read_source(path) for path in files), terms)
+    if outside:
+        log.log(
+            logging.WARNING if explicit_target else logging.INFO,
+            "discovery: %s %s (%s not performed in %s -- the fusion crosses "
+            "a module boundary and has no wireable call site there)",
+            "keeping operator-named" if explicit_target else "dropping",
+            name,
+            ",".join(outside),
+            _file_names(files),
+        )
+    return bool(outside) and not explicit_target
+
+
+def _file_names(paths: Sequence[str]) -> str:
+    """``paths`` by file name, for a log line."""
+    return ", ".join(Path(p).name or p for p in paths)
+
+
 def parse_discovered_recipes(
     text: str,
+    target: DiscoveryTarget,
     *,
-    model_type: str,
-    framework: str,
-    source_file: str,
-    shapes: dict[str, Any],
     category_shares: dict[str, float] | None = None,
-    pass_probe: Optional[Callable[[str], PassState]] = None,
-    framework_root: str = "",
     explicit_target: bool = False,
-    in_scope_files: Sequence[str] = (),
-    repo_scope: bool = False,
-    repo_root: str = "",
 ) -> list[Recipe]:
     """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
 
-    ``explicit_target`` marks a run whose target an operator named. The scope gate
-    then warns instead of dropping: it recognizes nine coarse terms, so it can reject
-    a wireable chain, and discarding what was explicitly asked for hides that.
-
-    ``in_scope_files`` lists every file the prompt embedded. A proposal may name
-    any of them as its call site, and the scope gate judges against all of them --
-    it must see the same source the model did, or it drops chains for being
-    "outside" a file they were never claimed to be in.
-
-    ``repo_scope`` replaces that offered list with the repository: the prompt
-    embedded nothing, so each proposal names its own files and is judged against
-    the files IT named. A proposal whose call site does not resolve is dropped
-    rather than retargeted onto ``source_file``.
+    ``explicit_target``: an operator named the target, so the scope gate keeps, with a warning, what it would drop.
     """
-    runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    scope_files = [p for p in (in_scope_files or [source_file]) if p]
-    # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
-    # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.
-    source_text = "" if repo_scope else "\n".join(_read_source(path) for path in scope_files)
+    runtime = resolve_target_runtime(target.install.framework, framework_root=target.install.framework_root)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
-        name = str(item.get("name") or f"discovered_{i + 1}").strip()
-        try:
-            priority = float(item.get("priority"))
-        except (TypeError, ValueError):
-            priority = max(0.1, 1.0 - 0.1 * i)  # preserve LLM order when absent
-        anchors = item.get("source_anchors") or []
-        if isinstance(anchors, str):
-            anchors = [anchors]
-        op_chain = str(item.get("op_chain") or "")
-        fusion_math = str(item.get("fusion_math") or op_chain or "")
+        name = _field_text(item, "name", f"discovered_{i + 1}").strip()
+        op_chain = _field_text(item, "op_chain")
+        fusion_math = _field_text(item, "fusion_math", op_chain)
         # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose rationale or grep anchors, which
         # can mention an op in passing and would attach a category the fusion does not actually involve.
         defining_text = " ".join([name, op_chain, fusion_math])
         # What this fusion IS, as opposed to how this run described it.
-        declared = declared_ops(item)
-        traits = declared_traits(item)
-        identity_text = " ".join(declared) if declared else defining_text
-        # The gate keys on precision and variant words (quant, fp8, mla, kvcache) that no op category expresses, so it
-        # needs more than ``declared``.
-        gate_text = " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
-        # Recover the op categories: from the declaration when there is one, else from the prose via the fixed,
-        # model-agnostic vocabulary.
-        matched_categories = categories_in_text(identity_text)
+        declared, traits = declared_ops(item), declared_traits(item)
+        # The op categories: from the declaration when there is one, else from the prose.
+        categories = categories_in_text(" ".join(declared or [defining_text]))
         # Hallucination gate FIRST: a proposal whose ops the trace never measured has nothing to remove, and that is
         # true whether we would author it or claim a framework pass for it.
-        if category_shares and matched_categories:
-            if not any(float(category_shares.get(c, 0.0)) > 0.0 for c in matched_categories):
-                log.info(
-                    "discovery: dropping %s (proposed ops %s absent from the trace)",
-                    name,
-                    ",".join(matched_categories),
-                )
-                continue
-        # Which file(s) this proposal wires itself into. Resolved BEFORE the scope gate: under repo scope the gate has
-        # no run-wide source text and must read exactly the files this proposal named.
-        extra_files: list[str] = []
-        if repo_scope:
-            proposed_file = resolve_repo_file(item.get("source_file"), repo_root)
-            if not proposed_file:
-                log.warning(
-                    "discovery: dropping %s -- its source_file %r is not a file in %s",
-                    name,
-                    str(item.get("source_file") or "")[:200],
-                    repo_root or "the framework repo",
-                )
-                continue
-            for value in _as_sequence(item.get("additional_files")):
-                resolved = resolve_repo_file(value, repo_root)
-                if not resolved:
-                    log.warning(
-                        "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
-                        name,
-                        str(value)[:200],
-                    )
-                    continue
-                if resolved != proposed_file and resolved not in extra_files:
-                    extra_files.append(resolved)
-            gate_files = [proposed_file, *extra_files]
-            scope_text = "\n".join(_read_source(path) for path in gate_files)
-        else:
-            proposed_file = resolve_proposed_source_file(item.get("source_file"), scope_files, source_file)
-            gate_files = scope_files
-            scope_text = source_text
-        # SCOPE gate: a fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops
-        # that none of those files perform is unwireable no matter how good the kernel is.
-        outside = out_of_scope_terms(scope_text, [*declared, *traits])
-        if outside:
-            log.log(
-                logging.WARNING if explicit_target else logging.INFO,
-                "discovery: %s %s (%s not performed in %s -- the fusion crosses "
-                "a module boundary and has no wireable call site there)",
-                "keeping operator-named" if explicit_target else "dropping",
-                name,
-                ",".join(outside),
-                ", ".join(Path(p).name or p for p in gate_files),
-            )
-            if not explicit_target:
-                continue
-        # Compile-pass gate: never author a chain vLLM fuses at compile time.
+        if _trace_lacks(categories, category_shares):
+            log.info("discovery: dropping %s (proposed ops %s absent from the trace)", name, ",".join(categories))
+            continue
+        edit_files = _proposal_edit_files(item, target, name)
+        if not edit_files or _scope_gate_drops(name, edit_files, [*declared, *traits], explicit_target):
+            continue
+        # Compile-pass gate: never author a chain vLLM fuses at compile time. It keys on precision and variant words
+        # (quant, fp8, mla, kvcache) that no op category expresses, so it needs more than ``declared``.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],
-            text=gate_text,
-            framework=framework,
+            text=" ".join([*declared, *(traits or [defining_text])]),
+            framework=target.install.framework,
         )
-        pass_note = ""
-        if pass_name:
-            state = vllm_compile_pass_state(pass_name, probe=pass_probe, runtime=runtime)
-            if state is not None and state.enabled is True:
-                log.info(
-                    "discovery: dropping %s, vLLM compile pass %s already fuses it",
-                    name,
-                    state.flag or pass_name,
-                )
-                continue  # the framework really does fuse this: authoring is a no-op
-            if state is not None and state.claimable:
-                # Present but switched off and flippable: claim the native pass.
-                out.append(
-                    Recipe(
-                        pattern_id=f"compile_pass:{state.flag}",
-                        description=(
-                            f"vLLM implements this chain as compile pass `{state.flag}`, but "
-                            f"it is DISABLED in this install: enable the native pass instead "
-                            f"of authoring a kernel ({str(item.get('rationale') or op_chain or name)[:200]})"
-                        ),
-                        env_flag="",
-                        source_file=state.config_file,
-                        source_hints=[state.flag],
-                        fusion_math=fusion_math,
-                        eager_reference_hint="",
-                        shapes=shapes,
-                        matched_categories=matched_categories,
-                        trigger_share=priority,
-                        rocm_native=True,
-                        source_confirmed=True,
-                        already_satisfied=False,
-                        candidate_kind="compile_pass",
-                        compile_pass_flag=state.flag,
-                    )
-                )
-                continue
-            # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
-            # authoring work and record why.
-            if state is not None:
-                pass_note = _unclaimable_note(state)
-                log.info("compile pass not claimed for %s: %s", name, pass_note)
-        existing_operator = str(item.get("existing_operator") or "").strip()
-        candidate_kind = str(item.get("candidate_kind") or "").strip().lower()
-        if candidate_kind not in {"integration", "new_fusion", "replacement"}:
-            candidate_kind = "integration" if existing_operator else "new_fusion"
+        state = vllm_compile_pass_state(pass_name, probe=target.install.pass_probe, runtime=runtime)
+        if state is not None and state.enabled is True:
+            log.info("discovery: dropping %s, vLLM compile pass %s already fuses it", name, state.flag or pass_name)
+            continue  # the framework really does fuse this: authoring is a no-op
+        # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
+        # authoring work and record why.
+        pass_note = _unclaimable_note(state)
+        if pass_note:
+            log.info("compile pass not claimed for %s: %s", name, pass_note)
+        existing_operator = _field_text(item, "existing_operator").strip()
+        candidate_kind = _field_text(item, "candidate_kind").strip().lower()
         # ``integration`` is only meaningful with a named operator: the authoring prompt injects its "benchmark the
-        # existing operator first" block only when both fields are set, so an operator-less integration would claim
-        # the kind while silently skipping the constraint.
-        if candidate_kind == "integration" and not existing_operator:
-            candidate_kind = "new_fusion"
-        if proposed_file != source_file or extra_files:
-            log.info(
-                "discovery: %s wires into %s",
-                name,
-                ", ".join(Path(p).name or p for p in [proposed_file, *extra_files]),
-            )
-        out.append(
-            Recipe(
-                pattern_id=f"llm:{name}",
-                description=str(item.get("rationale") or op_chain or name)[:300],
-                env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), model_type),
-                source_file=proposed_file,
-                extra_files=extra_files,
-                source_hints=[str(a) for a in anchors],
-                fusion_math=fusion_math,
-                eager_reference_hint=str(item.get("eager_reference") or ""),
-                shapes=shapes,
-                matched_categories=matched_categories,
-                trigger_share=priority,
-                rocm_native=True,
-                source_confirmed=True,  # the LLM read the real source to propose it
-                already_satisfied=False,
-                candidate_kind=candidate_kind,
-                existing_operator=existing_operator,
-                compile_pass_note=pass_note,
-            )
+        # existing operator first" block only when both fields are set.
+        if candidate_kind not in {"new_fusion", "replacement"}:
+            candidate_kind = "integration" if existing_operator else "new_fusion"
+        recipe = Recipe(
+            pattern_id=f"llm:{name}",
+            description=_field_text(item, "rationale", op_chain or name)[:300],
+            env_flag=_norm_env_flag(_field_text(item, "env_flag", "FUSED"), target.model_type),
+            source_file=edit_files[0],
+            extra_files=edit_files[1:],
+            source_hints=[str(a) for a in _as_sequence(item.get("source_anchors") or [])],
+            fusion_math=fusion_math,
+            eager_reference_hint=_field_text(item, "eager_reference"),
+            shapes=target.shapes,
+            matched_categories=categories,
+            trigger_share=to_float(item.get("priority"), max(0.1, 1.0 - 0.1 * i)),  # preserve LLM order when absent
+            source_confirmed=True,  # the LLM read the real source to propose it
+            candidate_kind=candidate_kind,
+            existing_operator=existing_operator,
+            compile_pass_note=pass_note,
         )
-    out.sort(key=lambda r: r.trigger_share, reverse=True)
-    return rank_recipes(out)
+        if state is not None and state.claimable:
+            recipe = _compile_pass_recipe(recipe, state, "chain", recipe.description[:200])
+        elif edit_files != [target.source_file]:
+            log.info("discovery: %s wires into %s", name, _file_names(edit_files))
+        out.append(recipe)
+    return rank_recipes(sorted(out, key=lambda r: r.trigger_share, reverse=True))
 
 
 class DiscoverySafetyError(RuntimeError):
@@ -1300,76 +1245,33 @@ def _run_agent_discovery_once(
     return result
 
 
+def _override_or_env(override: Any, name: str, default: float, cast: Callable[[Any], Any]) -> Any:
+    """An explicit override, else the environment setting ``name`` with its default."""
+    return cast(override) if override is not None else cast(env_setting(name, default, cast=cast))
+
+
 def registered_agent_llm_fn(
     backend: Any,
-    *,
-    model: str = "",
-    timeout_s: int = 900,
-    log_path: str = "",
-    workdir: str = ".",
-    protected_files: Optional[list[str]] = None,
-    attempts: Optional[int] = None,
-    base_delay_sec: Optional[float] = None,
-    max_delay_sec: Optional[float] = None,
-    deadline_sec: Optional[float] = None,
-    sleep: Optional[Callable[[float], Any]] = None,
-    monotonic: Optional[Callable[[], float]] = None,
+    session: DiscoverySession = DiscoverySession(),
+    retry: DiscoveryRetry = DiscoveryRetry(),
 ) -> LlmFn:
     """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
-    selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
-    resolved_attempts = (
-        int(attempts)
-        if attempts is not None
-        else int(
-            env_setting(
-                "FORGE_FUSION_LLM_ATTEMPTS",
-                DEFAULT_ATTEMPTS,
-                cast=int,
-            )
-        )
+    timeout_s, log_path, workdir = session.timeout_s, session.log_path, session.workdir
+    selected_model = session.model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    resolved_attempts = _override_or_env(retry.attempts, "FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, int)
+    resolved_turns = max(1, int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)))
+    resolved_base_delay = _override_or_env(
+        retry.base_delay_sec, "FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, float
     )
-    resolved_turns = max(
-        1,
-        int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)),
+    resolved_max_delay = _override_or_env(
+        retry.max_delay_sec, "FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, float
     )
-    resolved_base_delay = (
-        float(base_delay_sec)
-        if base_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_BASE_SEC",
-                DEFAULT_BASE_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_max_delay = (
-        float(max_delay_sec)
-        if max_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_MAX_SEC",
-                DEFAULT_MAX_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_deadline = (
-        float(deadline_sec)
-        if deadline_sec is not None
-        else float(
-            env_setting(
-                "FORGE_LLM_RETRY_DEADLINE_SEC",
-                DEFAULT_DEADLINE_SEC,
-                cast=float,
-            )
-        )
-    )
-    pause = sleep or _time.sleep
-    clock = monotonic or _time.monotonic
-    protected = list(protected_files or [])
+    resolved_deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float))
+    pause = retry.sleep or _time.sleep
+    clock = _time.monotonic
+    protected = list(session.protected_files or [])
 
     def _record_transcript(progress: list[str], text: str) -> None:
         """Persist what the session did, whatever the outcome."""
@@ -1482,22 +1384,13 @@ def registered_agent_llm_fn(
 
 def discover_recipes(
     diagnosis: Diagnosis,
-    *,
-    model_type: str,
-    framework: str,
-    source_file: str,
-    shapes: dict[str, Any],
+    target: DiscoveryTarget,
     trace_path: str,
     llm_fn: LlmFn,
-    max_fusions: Optional[int] = None,
-    top_kernels: int = 15,
-    knowledge_root: str | Path | None = None,
-    pass_probe: Optional[Callable[[str], PassState]] = None,
-    framework_root: str = "",
-    repo_scope: bool = False,
-    repo_root: str = "",
+    prompting: DiscoveryPrompting = DiscoveryPrompting(),
 ) -> list[Recipe]:
     """LLM-autonomous discovery: propose fusible chains from the trace + source."""
+    source_file, repo_scope = target.source_file, target.repo_scope
     if not diagnosis.is_candidate:
         return []
     try:
@@ -1507,43 +1400,29 @@ def discover_recipes(
     if not source_text and not repo_scope:
         log.warning("discovery: model source unreadable (%s); cannot self-discover", source_file)
         return []
-    hot = hot_kernels_from_trace(trace_path, top_n=top_kernels)
+    hot = hot_kernels_from_trace(trace_path, top_n=_TOP_KERNELS)
     ordered_boundaries = ordered_fusion_boundaries_from_trace(trace_path)
     # Hot kernels and the diagnosis categories are folded in as a second evidence source: ordered boundaries need
     # repeats to exist, so a short trace would otherwise leave retrieval with nothing to match against.
     existing_operator_hints = existing_operator_hints_from_knowledge(
-        knowledge_root,
+        prompting.knowledge_root,
         ordered_boundaries,
         fallback_categories=list(diagnosis.dominant_categories),
         fallback_kernel_names=kernel_names_from_trace(trace_path),
     )
     prompt = build_discovery_prompt(
-        model_type=model_type,
-        framework=framework,
-        source_text=source_text,
-        diagnosis=diagnosis,
-        hot_kernels=hot,
-        shapes=shapes,
-        max_fusions=_resolve_max_fusions(max_fusions),
-        ordered_boundaries=ordered_boundaries,
-        existing_operator_hints=existing_operator_hints,
-        source_files=[source_file] if (repo_scope and source_file) else (),
-        repo_scope=repo_scope,
-        repo_root=repo_root,
+        target,
+        source_text,
+        DiscoveryEvidence(
+            diagnosis=diagnosis,
+            hot_kernels=hot,
+            ordered_boundaries=ordered_boundaries,
+            existing_operator_hints=existing_operator_hints,
+        ),
+        _resolve_max_fusions(prompting.max_fusions),
     )
     raw = llm_fn(prompt)
-    recipes = parse_discovered_recipes(
-        raw,
-        model_type=model_type,
-        framework=framework,
-        source_file=source_file,
-        shapes=shapes,
-        category_shares=diagnosis.category_shares,
-        pass_probe=pass_probe,
-        framework_root=framework_root,
-        repo_scope=repo_scope,
-        repo_root=repo_root,
-    )
+    recipes = parse_discovered_recipes(raw, target, category_shares=diagnosis.category_shares)
     log.info(
         "discovery proposed %d fusion(s): %s",
         len(recipes),

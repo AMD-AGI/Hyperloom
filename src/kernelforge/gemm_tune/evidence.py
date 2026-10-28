@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.env import EnvValueError, env_bool, env_int
 
 log = logging.getLogger(__name__)
@@ -36,9 +37,10 @@ HIT_TABLE = re.compile(r"is tuned on cu_num\s*=\s*\d+\s+in\s+(?P<table>[^,]+)")
 # Which tables the runtime actually loaded (os.pathsep-separated path list).
 MERGE_TABLES = re.compile(r"\[aiter\]\s+merge tuned file under model_configs/ and configs/\s+(?P<paths>\S+)")
 
-# aiter CK MoE dispatch; the tuple carries the dtype combination and token count.
+# aiter CK MoE dispatch; the tuple carries the dtype combination and token count. The tag is one word ("default",
+# "asm") except on a dispatch that names its kernels, which prints them as a parenthesised group.
 FUSED_MOE = re.compile(
-    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
+    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\([^)]*\)|\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
 # The same tuple, on the line that says the lookup MISSED.
@@ -90,9 +92,6 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, ...]] = {
 }
 # ``tuned_fmoe.csv`` stays out: this map also identifies dense tables, while
 # MoE has no dense (M, N, K) and carries its own key schema.
-
-# Key columns the log actually exposes, so a demand entry can never claim one it did not observe.
-UNLOGGABLE_KEY_FIELDS = ("q_dtype_w",)
 
 TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "bf16_tuned_gemm.csv": ("sglang_dense_bf16", "AITER_CONFIG_GEMM_BF16"),
@@ -197,8 +196,8 @@ def _moe_field(raw: str) -> str:
     return value
 
 
-def _moe_tuple(raw: str) -> list[str]:
-    """Split a dispatch tuple into normalised fields."""
+def moe_tuple(raw: str) -> list[str]:
+    """Split a dispatch tuple into its fields, each spelled the way the fmoe CSV spells it."""
     return [_moe_field(p) for p in raw.split(",")]
 
 
@@ -208,7 +207,7 @@ def _blank_moe() -> dict[str, Any]:
 
 def _moe_token_offset(parts: list[str]) -> int:
     """Index of ``token`` in a dispatch tuple."""
-    return 2 if parts and _as_int(parts[0]) is None else 1
+    return 2 if parts and to_int(parts[0]) is None else 1
 
 
 def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int | None:
@@ -216,7 +215,7 @@ def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int
     offset = _moe_token_offset(parts)
     if len(parts) <= offset:
         return None
-    token = _as_int(parts[offset])
+    token = to_int(parts[offset])
     key_parts = parts[offset:]
     if len(key_parts) != len(MOE_KEY_FIELDS):
         # A truncated tuple still tells us which token counts were dispatched, which is all the stage-coverage
@@ -275,11 +274,11 @@ def _moe_demand(report: dict[str, Any]) -> Demand | None:
         for token in rec.get("untuned_tokens") or []:
             row: dict[str, Any] = {f: str(rec.get(f, "")) for f in MOE_KEY_FIELDS}
             row["token"] = str(token)
-            row["requests"] = _as_int(counts.get(str(token))) or 0
+            row["requests"] = to_int(counts.get(str(token))) or 0
             keys.append(row)
     if not keys:
         return None
-    keys.sort(key=lambda r: (-r["requests"], _as_int(r["token"]) or 0))
+    keys.sort(key=lambda r: (-r["requests"], to_int(r["token"]) or 0))
 
     tuner, env_var = TABLE_TO_TUNER[MOE_TABLE]
     return Demand(
@@ -295,31 +294,139 @@ def _moe_demand(report: dict[str, Any]) -> Demand | None:
     )
 
 
-def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
-    """Parse a serving log into demands, an apply verdict, and dispatch facts.
+@dataclass
+class _LogScan:
+    """What one pass over a serving log accumulated."""
 
-    ``hit_logging=None`` keeps a zero-hit result inconclusive; callers that
-    enabled ``AITER_LOG_TUNED_CONFIG`` should pass ``True``.
-    """
-    demands: dict[str, Demand] = {}
-    key_counts: dict[str, dict[tuple, int]] = {}
-    hits = 0
-    misses = 0
-    merged: list[str] = []
+    demands: dict[str, Demand] = field(default_factory=dict)
+    key_counts: dict[str, dict[tuple, int]] = field(default_factory=dict)
+    hits: int = 0
+    misses: int = 0
+    merged: list[str] = field(default_factory=list)
     # Tables the runtime named in a lookup.
-    consulted: set[str] = set()
-    dispatch: dict[str, Any] = {}
-    vllm_moe: dict[str, list[str]] = {"hit": [], "miss": []}
+    consulted: set[str] = field(default_factory=set)
+    dispatch: dict[str, Any] = field(default_factory=dict)
+    vllm_moe: dict[str, list[str]] = field(default_factory=lambda: {"hit": [], "miss": []})
+    # Present only when a bound was hit, so its absence means the report describes the whole log.
+    truncated: dict[str, Any] = field(default_factory=dict)
 
-    max_lines = _env_positive_int(_MAX_LINES_ENV, DEFAULT_MAX_LINES)
-    max_keys = _env_positive_int(_MAX_KEYS_ENV, DEFAULT_MAX_KEYS_PER_TABLE)
-    truncated: dict[str, Any] = {}
-    lines_read = 0
 
-    for line in text.splitlines():
-        lines_read += 1
+def _count_demand_key(scan: _LogScan, base: str, key: tuple, *, max_keys: int) -> None:
+    """Count one requested key against its table, up to the per-table bound.
+
+    Repeats of keys already seen keep counting -- that ordering is the only
+    signal ``demand_shapes`` has -- but the set stops growing.
+    """
+    counts = scan.key_counts[base]
+    if key in counts or len(counts) < max_keys:
+        counts[key] = counts.get(key, 0) + 1
+    elif base not in scan.truncated.setdefault("tables", {}):
+        scan.truncated["tables"][base] = max_keys
+        log.warning(
+            "%s reached %d distinct demand keys; further new keys are counted as misses but not listed (raise %s)",
+            base,
+            max_keys,
+            _MAX_KEYS_ENV,
+        )
+
+
+def _record_dense_lookup(scan: _LogScan, match: re.Match, line: str, *, max_keys: int) -> None:
+    """Record one dense table lookup: a hit, or a miss with the key it asked for."""
+    if match.group("padded_M") is not None:
+        scan.hits += 1
+        hit_table = HIT_TABLE.search(line)
+        if hit_table:
+            scan.consulted.add(hit_table.group("table").strip())
+        return
+    scan.misses += 1
+    table_path = (match.group("miss_table") or "").strip()
+    if table_path:
+        scan.consulted.add(table_path)
+    base = canonical_table_name(table_path)
+    demand = scan.demands.get(base)
+    if demand is None:
+        tuner, env = TABLE_TO_TUNER.get(base, (None, None))
+        demand = Demand(
+            table=base,
+            tuner=tuner,
+            env_var=env,
+            key_schema=list(TABLE_KEY_SCHEMA.get(base, ("M", "N", "K"))),
+            logged_fields=[f for f in KEY_FIELDS if match.group(f) is not None],
+        )
+        scan.demands[base] = demand
+        scan.key_counts[base] = {}
+    demand.miss_count += 1
+    _count_demand_key(scan, base, tuple(match.group(f) for f in KEY_FIELDS), max_keys=max_keys)
+
+
+def _record_moe_dispatch(scan: _LogScan, match: re.Match) -> None:
+    """Record the stage a fused-MoE dispatch ran, and the token count it ran it for.
+
+    One model dispatches DIFFERENT stages at different token counts, so a single
+    "saw 1stage" boolean collapses the decode range away and suppresses tuning
+    that 2stage would have covered.
+    """
+    parts = moe_tuple(match.group("tuple"))
+    moe = _moe_dispatch_record(scan)
+    stage_key = f"{match.group('stage')}/{match.group('tag')}"
+    record = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
+    token = _record_moe_key(moe, parts, miss=False)
+    if token is not None:
+        record["tokens"].add(token)
+
+
+def _record_moe_miss(scan: _LogScan, match: re.Match) -> None:
+    """Record a fused-MoE lookup that found no tuned row.
+
+    The dispatch line says which stage ran, not whether a tuned row was found --
+    it prints identically either way.
+    """
+    moe = _moe_dispatch_record(scan)
+    moe["fallback_flavour"] = match.group("flavour")
+    _record_moe_key(moe, moe_tuple(match.group("tuple")), miss=True)
+
+
+def _moe_dispatch_record(scan: _LogScan) -> dict[str, Any]:
+    """The MoE entry of the scan's dispatch facts, created on first use."""
+    moe = scan.dispatch.setdefault("moe", _blank_moe())
+    moe.setdefault("by_stage", {})
+    moe.setdefault("keys", {})
+    return moe
+
+
+def _scan_log_line(scan: _LogScan, line: str, *, max_keys: int) -> None:
+    """Fold one log line into the scan, under whichever pattern claims it."""
+    dense = DENSE_LOOKUP.search(line)
+    if dense:
+        _record_dense_lookup(scan, dense, line, max_keys=max_keys)
+        return
+    merge = MERGE_TABLES.search(line)
+    if merge:
+        scan.merged.extend(path for path in re.split(r"[:;]", merge.group("paths")) if path)
+        return
+    dispatched = FUSED_MOE.search(line)
+    if dispatched:
+        _record_moe_dispatch(scan, dispatched)
+        return
+    missed = FUSED_MOE_MISS.search(line)
+    if missed:
+        _record_moe_miss(scan, missed)
+        return
+    vllm_hit = VLLM_MOE_HIT.search(line)
+    if vllm_hit:
+        scan.vllm_moe["hit"].append(vllm_hit.group("path"))
+        return
+    vllm_miss = VLLM_MOE_MISS.search(line)
+    if vllm_miss:
+        scan.vllm_moe["miss"].append(vllm_miss.group("path"))
+
+
+def _scan_log(text: str, *, max_lines: int, max_keys: int) -> _LogScan:
+    """Read the log line by line, up to the line bound, into one scan."""
+    scan = _LogScan()
+    for lines_read, line in enumerate(text.splitlines(), start=1):
         if lines_read > max_lines:
-            truncated["lines"] = max_lines
+            scan.truncated["lines"] = max_lines
             log.warning(
                 "serving log exceeds %d lines; demand is derived from the first %d only (raise %s to read further)",
                 max_lines,
@@ -327,166 +434,127 @@ def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
                 _MAX_LINES_ENV,
             )
             break
-        m = DENSE_LOOKUP.search(line)
-        if m:
-            if m.group("padded_M") is not None:
-                hits += 1
-                ht = HIT_TABLE.search(line)
-                if ht:
-                    consulted.add(ht.group("table").strip())
-            else:
-                misses += 1
-                table_path = (m.group("miss_table") or "").strip()
-                if table_path:
-                    consulted.add(table_path)
-                base = canonical_table_name(table_path)
-                tuner, env = TABLE_TO_TUNER.get(base, (None, None))
-                d = demands.get(base)
-                if d is None:
-                    d = Demand(
-                        table=base,
-                        tuner=tuner,
-                        env_var=env,
-                        key_schema=list(TABLE_KEY_SCHEMA.get(base, ("M", "N", "K"))),
-                        logged_fields=[f for f in KEY_FIELDS if m.group(f) is not None],
-                    )
-                    demands[base] = d
-                    key_counts[base] = {}
-                d.miss_count += 1
-                key = tuple(m.group(f) for f in KEY_FIELDS)
-                counts = key_counts[base]
-                # Keep counting repeats of keys already seen -- that ordering is the only signal demand_shapes has --
-                # but stop growing the set.
-                if key in counts or len(counts) < max_keys:
-                    counts[key] = counts.get(key, 0) + 1
-                elif base not in truncated.setdefault("tables", {}):
-                    truncated["tables"][base] = max_keys
-                    log.warning(
-                        "%s reached %d distinct demand keys; further new keys are "
-                        "counted as misses but not listed (raise %s)",
-                        base,
-                        max_keys,
-                        _MAX_KEYS_ENV,
-                    )
-            continue
+        _scan_log_line(scan, line, max_keys=max_keys)
+    return scan
 
-        mm = MERGE_TABLES.search(line)
-        if mm:
-            merged.extend(p for p in re.split(r"[:;]", mm.group("paths")) if p)
-            continue
 
-        fm = FUSED_MOE.search(line)
-        if fm:
-            # One model dispatches DIFFERENT stages at different token counts, so a single "saw 1stage" boolean
-            # collapses the decode range away and suppresses tuning that 2stage would have covered.
-            parts = _moe_tuple(fm.group("tuple"))
-            moe = dispatch.setdefault("moe", _blank_moe())
-            moe.setdefault("by_stage", {})
-            moe.setdefault("keys", {})
-            stage_key = f"{fm.group('stage')}/{fm.group('tag')}"
-            rec = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
-            token = _record_moe_key(moe, parts, miss=False)
-            if token is not None:
-                rec["tokens"].add(token)
-            continue
+def _settle_unkeyed_tuples(moe: dict[str, Any]) -> None:
+    """Move the count of short dispatch tuples from scratch keys onto the record.
 
-        fmm = FUSED_MOE_MISS.search(line)
-        if fmm:
-            # The dispatch line above says which stage ran, not whether a tuned row was found -- it prints identically
-            # either way.
-            moe = dispatch.setdefault("moe", _blank_moe())
-            moe.setdefault("by_stage", {})
-            moe.setdefault("keys", {})
-            moe["fallback_flavour"] = fmm.group("flavour")
-            _record_moe_key(moe, _moe_tuple(fmm.group("tuple")), miss=True)
-            continue
+    Short tuples are a supported aiter build variant and may appear thousands of
+    times in one serving log, so they are counted rather than warned about once
+    each.
+    """
+    unkeyed_count = moe.pop("_unkeyed_tuple_count", 0)
+    unkeyed_misses = moe.pop("_unkeyed_miss_count", 0)
+    field_counts = sorted(moe.pop("_unkeyed_field_counts", set()))
+    if not unkeyed_count:
+        return
+    log.warning(
+        "%d fused_moe tuple line(s) (%d misses) carry %s key fields; expected %d, recording tokens only",
+        unkeyed_count,
+        unkeyed_misses,
+        field_counts,
+        len(MOE_KEY_FIELDS),
+    )
+    moe["unkeyed_tuple_count"] = unkeyed_count
+    moe["unkeyed_miss_count"] = unkeyed_misses
 
-        vh = VLLM_MOE_HIT.search(line)
-        if vh:
-            vllm_moe["hit"].append(vh.group("path"))
-            continue
-        vm = VLLM_MOE_MISS.search(line)
-        if vm:
-            vllm_moe["miss"].append(vm.group("path"))
 
-    moe = dispatch.get("moe")
+def _settle_moe_stages(moe: dict[str, Any]) -> None:
+    """Order each stage's token counts and say which stages the log showed."""
+    for record in moe["by_stage"].values():
+        record["tokens"] = sorted(record["tokens"])
+    moe["stages_seen"] = sorted({key.split("/")[0] for key in moe["by_stage"]})
+    # A stage that only covers large token counts must not suppress tuning for the range the other stage serves.
+    moe["tunable_ck_2stage"] = any(key.startswith("2stage") for key in moe["by_stage"])
+
+
+def _settle_moe_keys(moe: dict[str, Any]) -> None:
+    """Order the MoE keys most-missed first, so a consumer that can afford one row tunes that one."""
+    moe["keys"] = [
+        {
+            **record,
+            "tokens": sorted(record["tokens"]),
+            "untuned_tokens": sorted(record["untuned_tokens"]),
+            "untuned_token_counts": dict(
+                sorted(
+                    (record.get("untuned_token_counts") or {}).items(),
+                    key=lambda kv: to_int(kv[0]) or 0,
+                )
+            ),
+        }
+        for record in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
+    ]
+    moe["miss_count"] = sum(record["miss_count"] for record in moe["keys"])
+
+
+def _settle_vllm_moe(scan: _LogScan) -> None:
+    """Fold the vLLM Triton MoE config lines into the dispatch facts.
+
+    A log carrying both aiter CK dispatch lines and vLLM Triton config lines is
+    a real shape (concatenated logs, or a framework switch inside one run).
+    """
+    moe_entry = scan.dispatch.setdefault("moe", {"impl": "vllm_triton"})
+    seen = {str(moe_entry.get("impl") or ""), "vllm_triton"}
+    seen.discard("")
+    if len(seen) > 1:
+        moe_entry["impl"] = "mixed"
+        moe_entry["impls_seen"] = sorted(seen)
+    moe_entry["vllm_config_hit"] = len(scan.vllm_moe["hit"])
+    moe_entry["vllm_config_miss"] = len(scan.vllm_moe["miss"])
+
+
+def _settle_dispatch(scan: _LogScan) -> None:
+    """Turn the scratch state the scan accumulated into the dispatch facts it reports."""
+    moe = scan.dispatch.get("moe")
     if moe:
-        unkeyed_count = moe.pop("_unkeyed_tuple_count", 0)
-        unkeyed_misses = moe.pop("_unkeyed_miss_count", 0)
-        field_counts = sorted(moe.pop("_unkeyed_field_counts", set()))
-        if unkeyed_count:
-            # Short tuples are a supported aiter build variant and may appear thousands of times in one serving log.
-            log.warning(
-                "%d fused_moe tuple line(s) (%d misses) carry %s key fields; expected %d, recording tokens only",
-                unkeyed_count,
-                unkeyed_misses,
-                field_counts,
-                len(MOE_KEY_FIELDS),
-            )
-            moe["unkeyed_tuple_count"] = unkeyed_count
-            moe["unkeyed_miss_count"] = unkeyed_misses
+        _settle_unkeyed_tuples(moe)
     if moe and "by_stage" in moe:
-        for rec in moe["by_stage"].values():
-            rec["tokens"] = sorted(rec["tokens"])
-        moe["stages_seen"] = sorted({k.split("/")[0] for k in moe["by_stage"]})
-        # A stage that only covers large token counts must not suppress tuning for the range the other stage serves.
-        moe["tunable_ck_2stage"] = any(k.startswith("2stage") for k in moe["by_stage"])
+        _settle_moe_stages(moe)
     if moe and isinstance(moe.get("keys"), dict):
-        # Most-missed key first, so a consumer that can only afford one row tunes the one the runtime asked for most.
-        moe["keys"] = [
-            {
-                **rec,
-                "tokens": sorted(rec["tokens"]),
-                "untuned_tokens": sorted(rec["untuned_tokens"]),
-                "untuned_token_counts": dict(
-                    sorted(
-                        (rec.get("untuned_token_counts") or {}).items(),
-                        key=lambda kv: _as_int(kv[0]) or 0,
-                    )
-                ),
-            }
-            for rec in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
+        _settle_moe_keys(moe)
+    if scan.vllm_moe["hit"] or scan.vllm_moe["miss"]:
+        _settle_vllm_moe(scan)
+
+
+def parse_log(text: str, *, hit_logging: bool | None = None) -> dict[str, Any]:
+    """Parse a serving log into demands, an apply verdict, and dispatch facts.
+
+    ``hit_logging=None`` keeps a zero-hit result inconclusive; callers that
+    enabled ``AITER_LOG_TUNED_CONFIG`` should pass ``True``.
+    """
+    scan = _scan_log(
+        text,
+        max_lines=_env_positive_int(_MAX_LINES_ENV, DEFAULT_MAX_LINES),
+        max_keys=_env_positive_int(_MAX_KEYS_ENV, DEFAULT_MAX_KEYS_PER_TABLE),
+    )
+    _settle_dispatch(scan)
+
+    for base, demand in scan.demands.items():
+        demand.keys = [
+            dict(zip(KEY_FIELDS, key, strict=True)) | {"requests": count}
+            for key, count in sorted(scan.key_counts[base].items(), key=lambda kv: -kv[1])
         ]
-        moe["miss_count"] = sum(r["miss_count"] for r in moe["keys"])
-
-    if vllm_moe["hit"] or vllm_moe["miss"]:
-        moe_entry = dispatch.setdefault("moe", {"impl": "vllm_triton"})
-        # A log carrying both aiter CK dispatch lines and vLLM Triton config lines is a real shape (concatenated logs,
-        # or a framework switch inside one run).
-        seen = {str(moe_entry.get("impl") or "")} | {"vllm_triton"}
-        seen.discard("")
-        if len(seen) > 1:
-            moe_entry["impl"] = "mixed"
-            moe_entry["impls_seen"] = sorted(seen)
-        moe_entry["vllm_config_hit"] = len(vllm_moe["hit"])
-        moe_entry["vllm_config_miss"] = len(vllm_moe["miss"])
-
-    for base, d in demands.items():
-        d.keys = [
-            dict(zip(KEY_FIELDS, k, strict=True)) | {"requests": n}
-            for k, n in sorted(key_counts[base].items(), key=lambda kv: -kv[1])
-        ]
-
-    moe_demand = _moe_demand({"dispatch": dispatch})
+    moe_demand = _moe_demand({"dispatch": scan.dispatch})
     if moe_demand is not None:
-        demands[MOE_TABLE] = moe_demand
+        scan.demands[MOE_TABLE] = moe_demand
 
-    ordered = sorted(demands.values(), key=lambda d: -d.miss_count)
-    total = hits + misses
+    ordered = sorted(scan.demands.values(), key=lambda d: -d.miss_count)
+    total = scan.hits + scan.misses
     return {
         "schema": SCHEMA_VERSION,
         "apply_verdict": {
-            "hit": hits,
-            "miss": misses,
-            "hit_ratio": (hits / total) if total else None,
-            "verdict": _apply_verdict(hits, misses, hit_logging),
+            "hit": scan.hits,
+            "miss": scan.misses,
+            "hit_ratio": (scan.hits / total) if total else None,
+            "verdict": _apply_verdict(scan.hits, scan.misses, hit_logging),
         },
-        "merged_tables": sorted(set(merged)),
-        "consulted_tables": sorted(consulted),
-        # Present only when a bound was hit, so its absence means the report describes the whole log.
-        **({"truncated": truncated} if truncated else {}),
-        "dispatch": dispatch,
-        "demands": [d.to_dict() for d in ordered],
+        "merged_tables": sorted(set(scan.merged)),
+        "consulted_tables": sorted(scan.consulted),
+        **({"truncated": scan.truncated} if scan.truncated else {}),
+        "dispatch": scan.dispatch,
+        "demands": [demand.to_dict() for demand in ordered],
     }
 
 
@@ -531,21 +599,24 @@ def demand_for_tuner(report: dict[str, Any], tuner_name: str) -> dict[str, Any] 
     return None
 
 
-def _as_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 # Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
 _PADDED_M_CAP = 8192
+# aiter's gl=0 padding rounds M up to a multiple of 16 up to this M.
+_PADDED_M_STEP16_MAX = 256
 
 
 def padded_m(m: int) -> int:
-    """The M a tuned row must be written at to serve ``m``."""
+    """The M a tuned row is written at to serve ``m`` through one of aiter's lookups.
+
+    aiter tries the exact M, then the gl=0 padding, then the gl=1 power of two.
+    Up to 256 the gl=0 multiple of 16 is the bucket, so the CUDA-graph batch
+    sizes keep rows of their own; above it the power of two collapses the many
+    distinct prefill M. M=1 is its own row: its gl=0 bucket is 16.
+    """
     if m <= 1:
         return 1
+    if m <= _PADDED_M_STEP16_MAX:
+        return -(-m // 16) * 16
     return min(1 << (m - 1).bit_length(), _PADDED_M_CAP)
 
 
@@ -566,10 +637,10 @@ def demand_shapes(
 
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
-        m, n, k = _as_int(key.get("M")), _as_int(key.get("N")), _as_int(key.get("K"))
+        m, n, k = to_int(key.get("M")), to_int(key.get("N")), to_int(key.get("K"))
         if m is None or n is None or k is None:
             continue
-        shape = {"M": m, "N": n, "K": k, "requests": _as_int(key.get("requests")) or 0}
+        shape = {"M": m, "N": n, "K": k, "requests": to_int(key.get("requests")) or 0}
         for extra in ("dtype", "otype", "bias", "scaleAB", "bpreshuffle"):
             if key.get(extra) is not None:
                 shape[extra] = key[extra]
@@ -602,7 +673,7 @@ def demand_shapes(
 def _moe_demand_shapes(entry: dict[str, Any], *, limit: int | None = None) -> list[dict[str, Any]]:
     """Return exact fused-MoE shape/token keys without dense M bucketing."""
     shapes = [dict(key) for key in entry.get("keys") or []]
-    shapes.sort(key=lambda s: (-(_as_int(s.get("requests")) or 0), _as_int(s.get("token")) or 0))
+    shapes.sort(key=lambda s: (-(to_int(s.get("requests")) or 0), to_int(s.get("token")) or 0))
     if limit is not None and limit > 0:
         shapes = shapes[:limit]
     return shapes
@@ -615,32 +686,28 @@ def moe_dispatch_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
     return list(keys) if isinstance(keys, list) else []
 
 
+def _token_set(values: Any) -> set[int]:
+    return {token for value in values or [] if (token := to_int(value)) is not None}
+
+
 def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
     """MoE keys whose missed tokens were actually served by CK 2-stage."""
     moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
-    by_stage = moe.get("by_stage") or {}
-    ck_tokens = {
-        token
-        for stage, rec in by_stage.items()
-        if str(stage).startswith("2stage")
-        for value in (rec.get("tokens") or [])
-        if (token := _as_int(value)) is not None
-    }
-    stage_tokens = {
-        token
-        for rec in by_stage.values()
-        for value in (rec.get("tokens") or [])
-        if (token := _as_int(value)) is not None
-    }
-    has_stage_detail = bool(stage_tokens)
+    ck_tokens: set[int] = set()
+    stage_tokens: set[int] = set()
+    for stage, rec in (moe.get("by_stage") or {}).items():
+        tokens = _token_set(rec.get("tokens"))
+        stage_tokens |= tokens
+        if str(stage).startswith("2stage"):
+            ck_tokens |= tokens
     missed: list[dict[str, Any]] = []
     for key in moe_dispatch_keys(report):
-        untuned = {token for value in (key.get("untuned_tokens") or []) if (token := _as_int(value)) is not None}
-        if not untuned and (_as_int(key.get("miss_count")) or 0) > 0:
+        untuned = _token_set(key.get("untuned_tokens"))
+        if not untuned and (to_int(key.get("miss_count")) or 0) > 0:
             # Compatibility with reports written before untuned_tokens was persisted: all observed tokens are the best
             # available bound.
-            untuned = {token for value in (key.get("tokens") or []) if (token := _as_int(value)) is not None}
-        if has_stage_detail:
+            untuned = _token_set(key.get("tokens"))
+        if stage_tokens:
             untuned &= ck_tokens
         if not untuned:
             continue

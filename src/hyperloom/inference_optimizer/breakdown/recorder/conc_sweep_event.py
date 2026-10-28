@@ -24,22 +24,28 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
     bool_or_none as _bool_or_none,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
-    text_or_none as _text_or_none,
+    text as _text,
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
-from .event_timeline import finish_event, open_event
+from .event_sink import EventSink
+from .event_timeline import EventHeader, finish_event, open_event
+from .sections import CONC_SWEEP_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -127,7 +133,13 @@ __all__ = [
     "STRATEGY_REFUSED",
     "STRATEGY_SERVER_RESTART",
     "STRATEGY_SINGLE_SERVER",
+    "ArmStrategy",
     "ConcSweepEventRecorder",
+    "SweepAnchor",
+    "SweepBudget",
+    "SweepEnvironment",
+    "SweepPlan",
+    "SweepRung",
     "assemble_conc_sweep_ext",
     "conc_sweep_event_id",
     "make_conc_sweep_recorder",
@@ -138,11 +150,6 @@ def conc_sweep_event_id(*, phase: str, macro_cycle: Any) -> str:
     """Build ``{phase}:{macro_cycle}:conc_sweep``. Raises ``ValueError`` if
     either segment is malformed."""
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
-
-
-def _text(value: Any) -> str:
-    """Coerce to a plain string, treating ``None`` as empty."""
-    return str(value or "")
 
 
 def _int_list(values: Any) -> list[int]:
@@ -181,6 +188,182 @@ def _pair_error(
     return "; ".join(reasons) or None
 
 
+@dataclass(frozen=True)
+class SweepAnchor:
+    """The optimized configuration the sweep was asked to compare.
+
+    The optimized arm is whatever the session's current best was when the
+    sweep started. ``action`` is the action kind that promoted it.
+    """
+
+    baseline_tput: Any = None
+    anchor_tput: Any = None
+    tp: Any = None
+    variant_id: Any = None
+    action: Any = None
+    extra_server_args: Any = None
+    extra_envs: Any = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``input_anchor`` block this record persists as."""
+        tput = _float_or_none(self.anchor_tput)
+        gpus = _int_or_none(self.tp)
+        per_gpu = round(tput / gpus, 4) if tput is not None and gpus else None
+        return {
+            "base_variant_id": _text_or_none(self.variant_id),
+            "base_action": _text_or_none(self.action),
+            "input_throughput_tok_s_per_gpu": per_gpu,
+            "anchor_tput": tput,
+            "baseline_tput": _float_or_none(self.baseline_tput),
+            "extra_server_args": _text(self.extra_server_args),
+            "extra_envs": _env_map(self.extra_envs),
+        }
+
+
+@dataclass(frozen=True)
+class SweepPlan:
+    """The ladder the sweep resolved and the order it will run it in.
+
+    ``concs_ordered`` is deduplicated and descending, because a single-server
+    arm boots at the most demanding rung so the lower ones need no restart.
+    ``grid_source`` is a ``GRID_*`` value, and ``num_prompts_factor`` turns a
+    rung's CONC into its NUM_PROMPTS.
+    """
+
+    concs_requested: Any = None
+    concs_ordered: Any = None
+    grid_source: str = ""
+    num_prompts_factor: Any = None
+    variant_timeout_sec: Any = None
+    arms_order: Sequence[str] = ()
+
+    def block(self) -> dict[str, Any]:
+        """The ``plan`` block this record persists as."""
+        return {
+            "grid_source": _text_or_none(self.grid_source),
+            "concs_requested": _int_list(self.concs_requested),
+            "concs_ordered": _int_list(self.concs_ordered),
+            "num_prompts_factor": _int_or_none(self.num_prompts_factor),
+            "variant_timeout_sec": _int_or_none(self.variant_timeout_sec),
+            "arms_order": [_text(arm) for arm in self.arms_order],
+        }
+
+
+@dataclass(frozen=True)
+class SweepBudget:
+    """The budget the ladder was admitted under.
+
+    ``rung_cost_sec`` is the measured expected duration used for admission, or
+    ``None`` when unknown. ``deadline`` is the sweep's wall-clock budget
+    boundary, not the earlier sweep/session monotonic deadline used by the
+    runner.
+    """
+
+    declared_total_sec: Any = None
+    rung_cost_sec: Any = None
+    deadline: Any = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``budget`` block this record persists as; the gate is active whenever a total was declared."""
+        return {
+            "declared_total_sec": _int_or_none(self.declared_total_sec),
+            "rung_cost_sec": _float_or_none(self.rung_cost_sec),
+            "gate_active": self.declared_total_sec is not None,
+            "deadline": _float_or_none(self.deadline),
+        }
+
+
+@dataclass(frozen=True)
+class SweepEnvironment:
+    """What the sweep resolved to run against, and where it writes its report.
+
+    ``sweep_task_id`` is the sweep's own minted id, distinct from the
+    dispatched task id: it names the ``runs/conc_sweep/`` workspace the rung
+    artifacts live under.
+    """
+
+    sweep_task_id: Any = None
+    workspace: Any = None
+    model_path: Any = None
+    gpu_type: Any = None
+    base_config_path: Any = None
+    report_json_path: Any = None
+    report_csv_path: Any = None
+
+    def payload(self) -> dict[str, Any]:
+        """The ``environment`` and ``artifacts`` blocks this record persists as."""
+        return {
+            "environment": {
+                "sweep_task_id": _text(self.sweep_task_id),
+                "workspace": _text(self.workspace),
+                "model_path": _text(self.model_path),
+                "gpu_type": _text(self.gpu_type),
+                "base_config_path": _text(self.base_config_path),
+            },
+            "artifacts": {
+                "report_json_path": _text(self.report_json_path),
+                "report_csv_path": _text(self.report_csv_path),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ArmStrategy:
+    """How one arm will run its ladder, and why.
+
+    ``strategy`` is a ``STRATEGY_*`` value and ``reason`` says why, when it was
+    not the intended one; ``lifecycle_eligible`` is whether the framework can
+    keep a server across rungs.
+    """
+
+    strategy: str
+    reason: Any = None
+    lifecycle_eligible: Any = None
+    lifecycle_reason: Any = None
+    port: Any = None
+    framework: Any = None
+    serving_lease_held: Any = None
+
+    def fields(self) -> dict[str, Any]:
+        """The arm row fields this record persists as."""
+        return {
+            "strategy": _text(self.strategy),
+            "strategy_reason": _text_or_none(self.reason),
+            "lifecycle": {
+                "eligible": None if self.lifecycle_eligible is None else bool(self.lifecycle_eligible),
+                "reason": _text(self.lifecycle_reason),
+                "port": _int_or_none(self.port),
+                "framework": _text(self.framework),
+            },
+            "serving_lease_held": None if self.serving_lease_held is None else bool(self.serving_lease_held),
+        }
+
+
+@dataclass(frozen=True)
+class SweepRung:
+    """One rung, measured or refused.
+
+    Attributes:
+        stage: A ``STAGE_*`` value.
+        committed: Whether this attempt is part of the published curve. A
+            failed boot is recorded uncommitted and promoted by
+            :meth:`ConcSweepEventRecorder.commit_variant` if a lower rung
+            eventually boots.
+        wall_duration_sec: Wall clock, distinct from the benchmark's own
+            ``duration_seconds``, which covers only the measured window.
+    """
+
+    stage: str
+    conc: Any
+    point: Mapping[str, Any] | None = None
+    committed: bool = True
+    num_prompts: Any = None
+    start_time: Any = None
+    wall_duration_sec: Any = None
+    granted_cap_sec: Any = None
+    budget_remaining_sec: Any = None
+
+
 class ConcSweepEventRecorder:
     """Records one concurrency sweep as it runs.
 
@@ -190,7 +373,7 @@ class ConcSweepEventRecorder:
 
     def __init__(
         self,
-        sink: RecordSink,
+        sink: EventSink,
         *,
         task_id: str = "",
         task_kind: str = "",
@@ -257,12 +440,9 @@ class ConcSweepEventRecorder:
     def begin(self) -> None:
         """Open the event this sweep belongs to."""
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
         )
 
     # ---- the plan --------------------------------------------------------
@@ -291,140 +471,30 @@ class ConcSweepEventRecorder:
             }
         )
 
-    def record_anchor(
-        self,
-        *,
-        baseline_tput: Any = None,
-        anchor_tput: Any = None,
-        tp: Any = None,
-        variant_id: Any = None,
-        action: Any = None,
-        extra_server_args: Any = None,
-        extra_envs: Any = None,
-    ) -> None:
+    def record_anchor(self, anchor: SweepAnchor) -> None:
         """Record the optimized configuration the sweep was asked to compare.
 
-        The optimized arm is whatever the session's current best was when the
-        sweep started, and that is a moving target: a sweep dispatched two
-        cycles later compares a different configuration under the same event
-        type. ``action`` is the action kind that promoted the current best.
+        That configuration is a moving target: a sweep dispatched two cycles
+        later compares a different configuration under the same event type.
         """
-        tput = _float_or_none(anchor_tput)
-        gpus = _int_or_none(tp)
-        per_gpu = round(tput / gpus, 4) if tput is not None and gpus else None
-        self._record_action(
-            {
-                "input_anchor": {
-                    "base_variant_id": _text_or_none(variant_id),
-                    "base_action": _text_or_none(action),
-                    "input_throughput_tok_s_per_gpu": per_gpu,
-                    "anchor_tput": tput,
-                    "baseline_tput": _float_or_none(baseline_tput),
-                    "extra_server_args": _text(extra_server_args),
-                    "extra_envs": _env_map(extra_envs),
-                }
-            }
-        )
+        self._record_action({"input_anchor": anchor.block()})
 
-    def record_plan(
-        self,
-        *,
-        concs_requested: Any = None,
-        concs_ordered: Any = None,
-        grid_source: str = "",
-        num_prompts_factor: Any = None,
-        variant_timeout_sec: Any = None,
-        arms_order: Sequence[str] = (),
-    ) -> None:
+    def record_plan(self, plan: SweepPlan) -> None:
         """Record the ladder the sweep resolved and the order it will run it in.
 
         The arm order matters to a reader of the budget: the optimized arm runs
         first as the more informative of the two, so a budget that runs out
-        takes the baseline arm with it. ``concs_ordered`` is deduplicated and
-        descending, because a single-server arm boots at the most demanding
-        rung so the lower ones need no restart. ``grid_source`` is a ``GRID_*``
-        value, and ``num_prompts_factor`` turns a rung's CONC into its
-        NUM_PROMPTS.
+        takes the baseline arm with it.
         """
-        self._record_action(
-            {
-                "plan": {
-                    "grid_source": _text_or_none(grid_source),
-                    "concs_requested": _int_list(concs_requested),
-                    "concs_ordered": _int_list(concs_ordered),
-                    "num_prompts_factor": _int_or_none(num_prompts_factor),
-                    "variant_timeout_sec": _int_or_none(variant_timeout_sec),
-                    "arms_order": [_text(arm) for arm in arms_order],
-                }
-            }
-        )
+        self._record_action({"plan": plan.block()})
 
-    def record_budget(
-        self,
-        *,
-        declared_total_sec: Any = None,
-        granted_total_sec: Any = None,
-        rung_cost_sec: Any = None,
-        raised: bool = False,
-        gate_active: bool = True,
-        deadline: Any = None,
-        session_soft_deadline_sec: Any = None,
-    ) -> None:
-        """Record the budget the ladder was admitted under.
+    def record_budget(self, budget: SweepBudget) -> None:
+        """Record the budget the ladder was admitted under."""
+        self._record_action({"budget": budget.block()})
 
-        Current sweeps keep declared and granted totals equal and do not raise
-        the budget to fit the per-process hard cap. ``rung_cost_sec`` is the
-        measured expected duration used for admission, or ``None`` when unknown.
-        The fields also preserve historical records that raised the budget.
-        ``deadline`` is the sweep's wall-clock budget boundary, not the earlier
-        sweep/session monotonic deadline used by the runner.
-        """
-        self._record_action(
-            {
-                "budget": {
-                    "declared_total_sec": _int_or_none(declared_total_sec),
-                    "granted_total_sec": _int_or_none(granted_total_sec),
-                    "rung_cost_sec": _float_or_none(rung_cost_sec),
-                    "raised": bool(raised),
-                    "gate_active": bool(gate_active),
-                    "deadline": _float_or_none(deadline),
-                    "session_soft_deadline_sec": _float_or_none(session_soft_deadline_sec),
-                }
-            }
-        )
-
-    def record_environment(
-        self,
-        *,
-        sweep_task_id: Any = None,
-        workspace: Any = None,
-        model_path: Any = None,
-        gpu_type: Any = None,
-        base_config_path: Any = None,
-        report_json_path: Any = None,
-        report_csv_path: Any = None,
-    ) -> None:
-        """Record what the sweep resolved to run against.
-
-        ``sweep_task_id`` is the sweep's own minted id, distinct from the
-        dispatched task id: it names the ``runs/conc_sweep/`` workspace the rung
-        artifacts live under, and nothing else ever wrote it down.
-        """
-        self._record_action(
-            {
-                "environment": {
-                    "sweep_task_id": _text(sweep_task_id),
-                    "workspace": _text(workspace),
-                    "model_path": _text(model_path),
-                    "gpu_type": _text(gpu_type),
-                    "base_config_path": _text(base_config_path),
-                },
-                "artifacts": {
-                    "report_json_path": _text(report_json_path),
-                    "report_csv_path": _text(report_csv_path),
-                },
-            }
-        )
+    def record_environment(self, environment: SweepEnvironment) -> None:
+        """Record what the sweep resolved to run against."""
+        self._record_action(environment.payload())
 
     # ---- arms ------------------------------------------------------------
 
@@ -463,41 +533,14 @@ class ConcSweepEventRecorder:
             },
         )
 
-    def record_arm_strategy(
-        self,
-        arm: str,
-        *,
-        strategy: str,
-        reason: Any = None,
-        lifecycle_eligible: Any = None,
-        lifecycle_reason: Any = None,
-        port: Any = None,
-        framework: Any = None,
-        serving_lease_held: Any = None,
-    ) -> None:
+    def record_arm_strategy(self, arm: str, strategy: ArmStrategy) -> None:
         """Record how this arm will run its ladder, and why.
 
         The reuse path and the restart path fail differently -- one can fail to
         boot at a concurrency, the other pays a server start per rung -- so a
         curve is not readable without knowing which one produced it.
-        ``strategy`` is a ``STRATEGY_*`` value and ``reason`` says why, when it
-        was not the intended one; ``lifecycle_eligible`` is whether the
-        framework can keep a server across rungs.
         """
-        self._record_arm(
-            arm,
-            {
-                "strategy": _text(strategy),
-                "strategy_reason": _text_or_none(reason),
-                "lifecycle": {
-                    "eligible": None if lifecycle_eligible is None else bool(lifecycle_eligible),
-                    "reason": _text(lifecycle_reason),
-                    "port": _int_or_none(port),
-                    "framework": _text(framework),
-                },
-                "serving_lease_held": None if serving_lease_held is None else bool(serving_lease_held),
-            },
-        )
+        self._record_arm(arm, strategy.fields())
 
     def record_arm_boot(
         self,
@@ -571,57 +614,36 @@ class ConcSweepEventRecorder:
 
     # ---- rungs -----------------------------------------------------------
 
-    def record_variant(
-        self,
-        arm: str,
-        *,
-        stage: str,
-        conc: Any,
-        point: Mapping[str, Any] | None = None,
-        committed: bool = True,
-        num_prompts: Any = None,
-        start_time: Any = None,
-        wall_duration_sec: Any = None,
-        granted_cap_sec: Any = None,
-        budget_remaining_sec: Any = None,
-    ) -> None:
+    def record_variant(self, arm: str, rung: SweepRung) -> None:
         """Record one rung, measured or refused.
 
         Everything around the measurement is what the report has no place for,
         since it carries one ``elapsed_sec`` for the whole sweep.
-
-        Args:
-            stage: A ``STAGE_*`` value.
-            committed: Whether this attempt is part of the published curve. A
-                failed boot is recorded uncommitted and promoted by
-                :meth:`commit_variant` if a lower rung eventually boots.
-            wall_duration_sec: Wall clock, distinct from the benchmark's own
-                ``duration_seconds``, which covers only the measured window.
         """
         self._variant_ordinal += 1
-        measurement = _as_dict(point)
-        rung = _int_or_none(conc)
-        if committed and rung is not None:
-            self._points.setdefault(_text(arm), {})[rung] = dict(measurement)
+        measurement = _as_dict(rung.point)
+        conc = _int_or_none(rung.conc)
+        if rung.committed and conc is not None:
+            self._points.setdefault(_text(arm), {})[conc] = dict(measurement)
         self._sink.record(
             SECTION_VARIANT,
             {
                 "task_id": self._action_id,
                 "arm": _text(arm),
-                "conc": rung,
-                "stage": _text(stage),
+                "conc": conc,
+                "stage": _text(rung.stage),
                 "ordinal": self._variant_ordinal,
-                "committed": bool(committed),
-                "num_prompts": _int_or_none(num_prompts),
-                "start_time": _text(start_time),
+                "committed": bool(rung.committed),
+                "num_prompts": _int_or_none(rung.num_prompts),
+                "start_time": _text(rung.start_time),
                 "end_time": _now_iso(),
-                "wall_duration_sec": _float_or_none(wall_duration_sec),
-                "granted_cap_sec": _float_or_none(granted_cap_sec),
-                "budget_remaining_sec": _float_or_none(budget_remaining_sec),
+                "wall_duration_sec": _float_or_none(rung.wall_duration_sec),
+                "granted_cap_sec": _float_or_none(rung.granted_cap_sec),
+                "budget_remaining_sec": _float_or_none(rung.budget_remaining_sec),
                 "measurement": measurement,
             },
             row_type=ROW_VARIANT,
-            natural_ids=(self._action_id, _text(arm), _text(stage), _text(rung)),
+            natural_ids=(self._action_id, _text(arm), _text(rung.stage), _text(conc)),
         )
 
     def commit_variant(self, arm: str, *, stage: str, conc: Any, point: Mapping[str, Any] | None = None) -> None:
@@ -824,19 +846,18 @@ class ConcSweepEventRecorder:
                 "duration_sec": round(time.monotonic() - self._t0, 3),
             }
         )
-        from .assembler import conc_sweep_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_conc_sweep_ext(conc_sweep_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_conc_sweep_ext(
+                event_parts(CONC_SWEEP_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:
@@ -903,6 +924,26 @@ def _assemble_arm(
     }
 
 
+def _status_for(row: Mapping[str, Any], ext: Mapping[str, Any]) -> str:
+    """The status a sweep event reports, read off its action row and its assembled ``ext``."""
+    status = _text(row.get("status")) or "running"
+    if status == "cancelled":
+        # The timeline has no word for a sweep stopped from outside. It ran and fell short of its ladder without
+        # anything failing, which is what degraded says; ``result.status`` keeps the sweep's own word.
+        status = "degraded"
+    if status == "succeeded" and ext["result"].get("budget_exhausted"):
+        # A curve cut short by the time budget still produced usable pairs,
+        # but not the ladder that was asked for.
+        status = "degraded"
+    ladders_run = [arm for arm in ext["arms"].values() if _text(arm.get("start_time"))]
+    if status == "succeeded" and any(_text(arm.get("status")) != "succeeded" for arm in ladders_run):
+        # A ladder that lost rungs is the same shortfall one level down, and
+        # the sweep cannot read as whole while an arm under it does not. An arm
+        # with no row never ran, which is not the same as falling short.
+        status = "degraded"
+    return status
+
+
 def assemble_conc_sweep_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -920,20 +961,19 @@ def assemble_conc_sweep_ext(
     row = action_rows[-1]
     variants = group_rows(
         sort_rows(
-            rows_for_event(parts.get(SECTION_VARIANT) or [], event),
+            rows_for_event(parts[SECTION_VARIANT], event),
             keys=("ordinal", "arm", "conc"),
         ),
         "arm",
     )
     arm_rows = {
         _text(arm_row.get("arm")): arm_row
-        for arm_row in sort_rows(rows_for_event(parts.get(SECTION_ARM) or [], event), keys=("ordinal", "arm"))
+        for arm_row in sort_rows(rows_for_event(parts[SECTION_ARM], event), keys=("ordinal", "arm"))
     }
     pairs = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PAIR) or [], event), keys=("conc",)),
+        sort_rows(rows_for_event(parts[SECTION_PAIR], event), keys=("conc",)),
         drop=("event_id", "task_id", "ordinal"),
     )
-    result = _as_dict(row.get("result"))
     ext: dict[str, Any] = {
         "schema_version": _text(row.get("schema_version")),
         "request": _as_dict(row.get("request")),
@@ -947,7 +987,7 @@ def assemble_conc_sweep_ext(
             for arm in (ARM_BASELINE, ARM_OPTIMIZED)
         },
         "comparison": pairs,
-        "result": result,
+        "result": _as_dict(row.get("result")),
         "roofline_ceiling": row.get("roofline_ceiling"),
         "runtime": {
             **_as_dict(row.get("runtime")),
@@ -964,29 +1004,12 @@ def assemble_conc_sweep_ext(
     if len(action_rows) > 1:
         # One phase and cycle enqueue one sweep, so this cannot happen through
         # the dispatcher; saying so is cheaper than a silent drop if it does.
-        ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1] if other is not row]
-    ext["arms"][ARM_BASELINE]["arm"] = ARM_BASELINE
-    ext["arms"][ARM_OPTIMIZED]["arm"] = ARM_OPTIMIZED
-    status = _text(row.get("status")) or "running"
-    if status == "cancelled":
-        # The timeline has no word for a sweep stopped from outside. It ran and fell short of its ladder without
-        # anything failing, which is what degraded says; ``result.status`` keeps the sweep's own word.
-        status = "degraded"
-    if status == "succeeded" and result.get("budget_exhausted"):
-        # A curve cut short by the time budget still produced usable pairs,
-        # but not the ladder that was asked for.
-        status = "degraded"
-    ladders_run = [arm for arm in ext["arms"].values() if _text(arm.get("start_time"))]
-    if status == "succeeded" and any(_text(arm.get("status")) != "succeeded" for arm in ladders_run):
-        # A ladder that lost rungs is the same shortfall one level down, and
-        # the sweep cannot read as whole while an arm under it does not. An arm
-        # with no row never ran, which is not the same as falling short.
-        status = "degraded"
-    return ext, status
+        ext["superseded_sweeps"] = [_text(other.get("task_id")) for other in action_rows[:-1]]
+    return ext, _status_for(row, ext)
 
 
 def make_conc_sweep_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     *,
     task_id: str = "",
     task_kind: str = "",

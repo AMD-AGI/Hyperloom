@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import dis
-from types import FunctionType
+from types import FunctionType, SimpleNamespace
 
 import pytest
 
@@ -27,6 +27,7 @@ from hyperloom.orchestrator.state.round_store import (
     EXCLUDED,
     EXPIRED_REAPED,
     EXPIRED_UNREAPED,
+    RoundRequest,
     RoundStore,
 )
 
@@ -59,7 +60,7 @@ def _baseline() -> Intent:
 
 async def _reread(store: RoundStore, facts: ResourceFacts, now: float) -> None:
     """Re-read the facts, as the repair pass does at the top of a tick."""
-    facts.update(None, rounds=await store.excluding(now))
+    facts.update(SimpleNamespace(tp=0), rounds=await store.excluding(now))
 
 
 @pytest.mark.asyncio
@@ -69,10 +70,9 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     gate = _gate(facts)
     opened = await store.open(
         "round-1",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     assert opened.ok
 
@@ -84,10 +84,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
 
     clock.advance(120.0)
     settled = await store.settle(
-        await store.get("round-1"),
-        outcome=BOOTED,
-        now_unix=clock.wall(),
-        request_id="req-settle",
+        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=BOOTED
     )
     assert settled.ok
 
@@ -103,17 +100,13 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
     gate = _gate(facts)
     await store.open(
         "round-1",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     clock.advance(_LEASE + 1.0)
     await store.settle(
-        await store.get("round-1"),
-        outcome=outcome,
-        now_unix=clock.wall(),
-        request_id="req-settle",
+        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=outcome
     )
 
     await _reread(store, facts, clock.wall())
@@ -122,10 +115,9 @@ async def test_a_settled_round_denies_nothing_however_it_ended(store, clock, out
     # And the acquire agrees, which is the answer that counts.
     opened = await store.open(
         "round-next",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open-2"),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open-2",
     )
     assert opened.ok
 
@@ -138,10 +130,9 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     gate = _gate(facts)
     opened = await store.open(
         "round-1",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     assert opened.ok
 
@@ -158,19 +149,15 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
 
     blocked = await store.open(
         "round-next",
+        RoundRequest(now_unix=clock.wall(), request_id="req-blocked"),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-blocked",
     )
     assert not blocked.ok
     assert blocked.reason == EXCLUDED
 
     settled = await store.settle(
-        await store.get("round-1"),
-        outcome=BOOTED,
-        now_unix=clock.wall(),
-        request_id="req-settle",
+        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=BOOTED
     )
     assert settled.ok
 
@@ -178,10 +165,9 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     gate.validate_intent("orchestration", _baseline())
     acquired = await store.open(
         "round-next",
+        RoundRequest(now_unix=clock.wall(), request_id="req-after-settle"),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-after-settle",
     )
     assert acquired.ok
 
@@ -193,10 +179,9 @@ async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock)
     gate = _gate(facts)
     await store.open(
         "round-1",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     await _reread(store, facts, clock.wall())
 
@@ -213,10 +198,9 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
     gate = _gate(facts)
     held = await store.open(
         "round-held",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="baseline-holder",
         lease_sec=_LEASE * 100,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     assert held.ok
 
@@ -229,10 +213,9 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
         # And the acquire agrees, for the attempt the gate stopped short of.
         attempt = await store.open(
             f"round-{tick}",
+            RoundRequest(now_unix=clock.wall(), request_id=f"req-{tick}"),
             holder_task_id=f"baseline-{tick}",
             lease_sec=_LEASE,
-            now_unix=clock.wall(),
-            request_id=f"req-{tick}",
         )
         assert not attempt.ok
         assert attempt.reason == EXCLUDED
@@ -249,10 +232,9 @@ async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store,
     gate = _gate(facts)
     opened = await store.open(
         "revalidation-1",
+        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
         holder_task_id="reval-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="req-open",
     )
     assert opened.ok
 
@@ -335,7 +317,7 @@ def test_the_resource_rules_refuse_nothing_until_the_facts_are_read():
 
     # Once read, the same request is judged against what was found.
     facts = ResourceFacts()
-    facts.update(None)
+    facts.update(SimpleNamespace(tp=0))
     with pytest.raises(PolicyDenied) as denied:
         _gate(facts)._validate_specialist_gpu_request(request)
     assert denied.value.rule == RULE_GPU_POOL_DISABLED

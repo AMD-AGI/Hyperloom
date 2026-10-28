@@ -50,6 +50,12 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Release notes naming the retired console script, so an operator whose script "
         "still invokes it recognises the spelling that now fails.",
     ),
+    (
+        "docs/release-notes.md",
+        r"kernel_agents\.agent_providers|KERNEL_AGENTS_MAX_TURNS",
+        "Release notes naming the retired entry-point group and env var, so a plugin "
+        "author or operator still using them recognises what is no longer read.",
+    ),
 )
 
 
@@ -82,6 +88,25 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"FORGE_DISABLE_COMPILED_FELLOWS",
         "The retired environment-variable spelling, named so a migrating operator can "
         "find it; it is forwarded then ignored, and silently re-enables the backends.",
+    ),
+)
+
+
+# The fourth move: ``kernelforge.llm`` dissolved into the packages that own each of its modules -- the gateway into
+# ``kernelforge.agent_backends``, git and process reaping into ``kernelforge.tools``, the edit policy into
+# ``kernelforge.workspace``.
+_LLM_PATTERN = re.compile(r"\bkernelforge[./]llm\b")
+
+_LLM_ALLOWED: tuple[tuple[str, str, str], ...] = (
+    (
+        ".claude/skills/review-pr/rules.md",
+        r"src/kernelforge/llm/gateway\.py",
+        "A review rule's record of what an earlier PR added, cited at the path it had then.",
+    ),
+    (
+        "src/kernelforge/tests/test_rename_completeness.py",
+        r".",
+        "This file names the old spelling in order to forbid it.",
     ),
 )
 
@@ -127,6 +152,7 @@ def test_every_allowlist_entry_still_exempts_something() -> None:
         ("_ALLOWED", _ALLOWED, _PATTERN),
         ("_COLLAPSE_ALLOWED", _COLLAPSE_ALLOWED, _COLLAPSE_PATTERN),
         ("_FELLOW_ALLOWED", _FELLOW_ALLOWED, _FELLOW_PATTERN),
+        ("_LLM_ALLOWED", _LLM_ALLOWED, _LLM_PATTERN),
     ):
         hits = _tracked_hits(root, pattern)
         for glob, line_re, _why in allowed:
@@ -178,6 +204,22 @@ def test_no_stray_fellow_references() -> None:
     assert not stray, (
         "unrenamed 'fellow' references; rename them to kernel_backend, or add a "
         "justified entry to _FELLOW_ALLOWED:\n  " + "\n  ".join(stray[:40])
+    )
+
+
+def test_no_stray_llm_package_references() -> None:
+    """Nothing may still import from, or point at, the dissolved ``kernelforge.llm`` package."""
+    root = _repo_root()
+    if root is None:
+        pytest.skip("not a source checkout")
+    stray = [
+        f"{rel}:{lineno}: {line}"
+        for rel, lineno, line in _tracked_hits(root, _LLM_PATTERN)
+        if not _is_allowed(rel, line, _LLM_ALLOWED)
+    ]
+    assert not stray, (
+        "references to kernelforge.llm, whose modules now live in kernelforge.agent_backends, "
+        "kernelforge.tools and kernelforge.workspace:\n  " + "\n  ".join(stray[:40])
     )
 
 

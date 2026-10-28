@@ -115,22 +115,16 @@ def test_the_fresh_launch_anchors_stay_in_order():
     for another: resolving the ladder late left the projection publishing a default over a pin, and moving the
     projection after the ladder carried it past ``_preflight``, whose ``check_gpu_visibility`` reads ``$TP``.
     """
-    import ast
-    import inspect
-    import textwrap
+    from .conftest import cli_call_sequence
 
-    from hyperloom.inference_optimizer.cli import _run_optimize
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(_run_optimize)))
     calls: dict[str, list[int]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            calls.setdefault(node.func.id, []).append(node.lineno)
-    first = {name: min(lines) for name, lines in calls.items()}
+    for position, name in enumerate(cli_call_sequence("_run_optimize")):
+        calls.setdefault(name, []).append(position)
+    first = {name: min(positions) for name, positions in calls.items()}
     # The ladder runs on both branches; the resume anchor needs that branch's call, not the fresh one. -1 when the
     # seeding has drifted past every ladder call, so the comparison below fails rather than skipping.
     if "_seed_env_from_resumed_state" in first:
-        after = [ln for ln in calls.get("_resolve_workload_knobs", []) if ln > first["_seed_env_from_resumed_state"]]
+        after = [at for at in calls.get("_resolve_workload_knobs", []) if at > first["_seed_env_from_resumed_state"]]
         first["_resolve_workload_knobs_resume"] = min(after) if after else -1
 
     # (earlier, later, why the order matters)
@@ -162,10 +156,11 @@ def test_the_fresh_launch_anchors_stay_in_order():
         ),
     ]
     for earlier, later, why in anchors:
-        assert earlier in first, f"{earlier} is no longer called by _run_optimize"
-        assert later in first, f"{later} is no longer called by _run_optimize"
+        assert earlier in first, f"{earlier} is no longer reached from _run_optimize"
+        assert later in first, f"{later} is no longer reached from _run_optimize"
         assert first[earlier] < first[later], (
-            f"{earlier} (line {first[earlier]} of _run_optimize) must come before {later} (line {first[later]}): {why}"
+            f"{earlier} (call {first[earlier]} on the optimize path) must come before "
+            f"{later} (call {first[later]}): {why}"
         )
 
 
@@ -439,14 +434,18 @@ def test_restore_operator_paths_fills_env_from_state(monkeypatch):
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "")
+    monkeypatch.setenv("SGLANG_REPO_PATH", "")
+    monkeypatch.setenv("SGLANG_DIR", "")
     state = SharedState(
         session_id="s",
+        framework="sglang",
         framework_repo_path="/archived/fw",
         bypass_scripts_dir="/archived/scripts",
         benchmark_backend="bypass",
     )
     _restore_operator_supplied_paths_from_state(_ns(framework_path=None, benchmark_scripts_dir=None), state)
     assert os.environ["FRAMEWORK_REPO_PATH"] == "/archived/fw"
+    assert os.environ["SGLANG_REPO_PATH"] == "/archived/fw"
     assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == "/archived/scripts"
     assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
 

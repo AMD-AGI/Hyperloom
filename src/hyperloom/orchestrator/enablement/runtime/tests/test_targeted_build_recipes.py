@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,8 @@ import pytest
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     _driver_main,
+    _load_result_json,
+    _read_build_system_requires,
     run_aiter_build,
     run_sgl_kernel_build,
     run_vllm_source_build,
@@ -139,10 +143,8 @@ def _make_aiter_run(
             return _completed(stdout=str(root) + "\n")
         if "sys.exit(0" in cmd:
             return _completed(returncode=0 if hip_ok else 2)
-        if "argv[1]" in cmd:
-            if argv and argv[-1] == "triton":
-                return _completed(stdout=triton_ver + "\n" if triton_ver else "")
-            return _completed(stdout=torch_ver + "\n")
+        if "named={'torch'" in cmd:
+            return _completed(stdout=f"torch=={torch_ver}\n" + (f"triton=={triton_ver}\n" if triton_ver else ""))
         if "pip" in cmd and "install" in cmd:
             return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed")
         if "import aiter" in cmd:
@@ -189,6 +191,16 @@ def _vllm_action(**kw):
     return TargetedBuildAction(**base)
 
 
+def _sglang_python_dir(worktree):
+    """An SGLang checkout's ``python/``, whose pyproject declares a ROCm extra."""
+    python_dir = worktree / "python"
+    python_dir.mkdir(parents=True, exist_ok=True)
+    (python_dir / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch']\n", encoding="utf-8"
+    )
+    return python_dir
+
+
 def _patch_isolation(monkeypatch, worktree, venv):
     import hyperloom.agents.framework.isolation as iso_mod
 
@@ -230,10 +242,8 @@ def _make_rocm_run(
             return _completed(stdout="/opt/rocm\n")
         if "sys.exit(0" in cmd:
             return _completed(returncode=0 if hip_ok else 2)
-        if "argv[1]" in cmd:
-            if argv and argv[-1] == "triton":
-                return _completed(stdout=triton_ver + "\n" if triton_ver else "")
-            return _completed(stdout=torch_ver + "\n")
+        if "named={'torch'" in cmd:
+            return _completed(stdout=f"torch=={torch_ver}\n" + (f"triton=={triton_ver}\n" if triton_ver else ""))
         if "pip" in cmd and "install" in cmd:
             return _completed(returncode=0 if pip_ok else 1, stderr="" if pip_ok else "error: compile failed\n")
         if "setup_rocm.py" in cmd:
@@ -500,6 +510,35 @@ def test_driver_main_writes_result_json(monkeypatch, tmp_path):
     assert data["ok"] is True
 
 
+def test_driver_main_records_a_recipe_that_raises_in_result_json(monkeypatch, tmp_path, caplog):
+    root = tmp_path / "attempt"
+    root.mkdir()
+    (root / "plan.json").write_text(json.dumps(_aiter_action(ref="v0.1.0").to_state()), encoding="utf-8")
+
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
+
+    full = OSError(28, "No space left on device")
+
+    def _recipe_whose_log_write_fails(action, attempt_root, **kw):
+        raise full
+
+    monkeypatch.setattr(tb, "run_aiter_build", _recipe_whose_log_write_fails)
+    with caplog.at_level(logging.WARNING, logger=tb.log.name):
+        rc = _driver_main(["--attempt-root", str(root)])
+
+    assert rc == 1
+    data = json.loads((root / "result.json").read_text())
+    assert (data["ok"], data["attempt_root"], data["failure_class"], data["failure_summary"], data["error"]) == (
+        False,
+        str(root),
+        "compile_error",
+        "recipe raised: OSError(28, 'No space left on device')",
+        "OSError(28, 'No space left on device')",
+    )
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("targeted build driver: recipe raised: ")]
+    assert record.exc_info[1] is full
+
+
 def test_driver_main_missing_plan_writes_error(tmp_path):
     root = tmp_path / "attempt_no_plan"
     root.mkdir()
@@ -516,7 +555,7 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
 def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -538,7 +577,7 @@ def test_sgl_kernel_build_success(monkeypatch, tmp_path):
 def test_sgl_kernel_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -557,7 +596,7 @@ def test_sgl_kernel_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
 def test_sgl_kernel_build_compile_error(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -575,7 +614,7 @@ def test_sgl_kernel_build_compile_error(monkeypatch, tmp_path):
 def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -590,32 +629,32 @@ def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
-def test_sgl_kernel_build_pyproject_toml_copied(monkeypatch, tmp_path):
-    """setup_rocm.py install must not fail when pyproject_other.toml is present."""
+def test_sgl_kernel_build_installs_sglang_with_its_rocm_extra(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
-    (wt / "python" / "pyproject_other.toml").write_text("[project]\nname='sglang'\n")
+    python_dir = _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"ELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
+    installed: list[str] = []
+    rocm_run = _make_rocm_run()
 
-    result = run_sgl_kernel_build(
-        _sgl_action(),
-        str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
-        disk_preflight_fn=_noop_disk,
-    )
+    def _run(argv, **kw):
+        if argv[1:4] == ["-m", "pip", "install"]:
+            installed.append(argv[-1])
+        return rocm_run(argv, **kw)
+
+    result = run_sgl_kernel_build(_sgl_action(), str(tmp_path / "attempt"), run=_run, disk_preflight_fn=_noop_disk)
     assert result.ok
-    assert (wt / "python" / "pyproject.toml").exists()
+    assert installed == [f"{python_dir}[srt_hip]"]
 
 
 def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):
     """An sgl-kernel install that does not import is not a successful build."""
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -640,7 +679,7 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     """sgl-kernel build must set runtime_python_exe and entrypoint_bin_dir."""
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -661,7 +700,7 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
 def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -690,10 +729,17 @@ def test_vllm_source_build_success(monkeypatch, tmp_path):
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
 
+    calls: list[list[str]] = []
+    rocm_run = _make_rocm_run()
+
+    def _run(argv, **kw):
+        calls.append([str(a) for a in argv])
+        return rocm_run(argv, **kw)
+
     result = run_vllm_source_build(
         _vllm_action(),
         str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
+        run=_run,
         disk_preflight_fn=_noop_disk,
     )
     assert result.ok is True
@@ -701,6 +747,11 @@ def test_vllm_source_build_success(monkeypatch, tmp_path):
     assert result.installed_versions.get("arch") == "gfx950"
     assert result.runtime.pythonpath_prefixes
     assert result.runtime.entrypoint_bin_dir
+    # The image's vLLM carries a ROCm label; pinning it would forbid the build it is replaced by.
+    (pin_probe,) = [c for c in calls if any("named={'torch'" in a for a in c)]
+    assert pin_probe[-1] == "vllm"
+    install = next(c for c in calls if "pip" in c and "install" in c)
+    assert str(tmp_path / "attempt" / "rocm_constraints.txt") in install
 
 
 def test_vllm_source_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
@@ -1080,3 +1131,160 @@ def test_a_requirement_string_still_resolves_to_its_distribution():
 
     assert sorted(resolved) == ["pytest"], resolved
     assert resolved["pytest"]["version"]
+
+
+# Failure handling: expected conditions fail the build; anything else propagates
+
+_RECIPES = {
+    "aiter": (run_aiter_build, _aiter_action, _make_aiter_run),
+    "sgl_kernel": (run_sgl_kernel_build, _sgl_action, _make_rocm_run),
+    "vllm_source": (run_vllm_source_build, _vllm_action, _make_rocm_run),
+}
+
+# stage -> (failure_class, summary prefix, expected exception instances)
+_STAGES = {
+    "disk": (
+        "preflight_disk",
+        "disk preflight raised: ",
+        (OSError("no space"), ValueError("bad disk floor")),
+    ),
+    "workspace": (
+        "compile_error",
+        "workspace preparation failed: ",
+        (
+            OSError("no space"),
+            subprocess.CalledProcessError(128, ["git", "clone"]),
+            subprocess.TimeoutExpired(cmd="git clone", timeout=1800),
+        ),
+    ),
+    "constraints": (
+        "preflight_toolchain",
+        "ROCm constraint probe failed: ",
+        (
+            OSError("python vanished"),
+            subprocess.TimeoutExpired(cmd="probe", timeout=30),
+            RuntimeError("could not determine torch version"),
+        ),
+    ),
+}
+_EXPECTED = [(stage, exc) for stage, (_, _, excs) in _STAGES.items() for exc in excs]
+_EXPECTED_IDS = [f"{stage}-{type(exc).__name__}" for stage, exc in _EXPECTED]
+
+
+def _failing_on(needle, exc, ok_run):
+    def _run(argv, **kw):
+        if needle in " ".join(str(a) for a in argv):
+            raise exc
+        return ok_run(argv, **kw)
+
+    return _run
+
+
+def _run_recipe(recipe, monkeypatch, tmp_path, *, stage, exc):
+    """Run a recipe with ``exc`` injected at ``stage`` (a ``_STAGES`` key or the vLLM build-requires pre-install)."""
+    import hyperloom.agents.framework.isolation as iso_mod
+
+    build, make_action, make_run = _RECIPES[recipe]
+    wt = tmp_path / "wt"
+    (wt / "sgl-kernel").mkdir(parents=True)
+    (wt / "python").mkdir()
+    (wt / "vllm").mkdir()
+    (wt / "vllm" / "_C.so").write_bytes(b"\x7fELF")
+    (wt / "pyproject.toml").write_text('[build-system]\nrequires = ["setuptools>=61"]\n', encoding="utf-8")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+
+    def _raise(*_a, **_kw):
+        raise exc
+
+    disk, run = _noop_disk, make_run()
+    if stage == "disk":
+        disk = _raise
+    elif stage == "workspace":
+        monkeypatch.setattr(iso_mod, "prepare_repo_cache", _raise)
+    elif stage == "constraints":
+        run = _failing_on("named={'torch'", exc, run)
+    elif stage == "build_requires":
+        run = _failing_on("pip install setuptools>=61", exc, run)
+    return build(make_action(), str(tmp_path / "attempt"), run=run, git=_make_git(), disk_preflight_fn=disk)
+
+
+@pytest.mark.parametrize("recipe", list(_RECIPES))
+@pytest.mark.parametrize(("stage", "failure"), _EXPECTED, ids=_EXPECTED_IDS)
+def test_an_expected_setup_failure_fails_the_build(monkeypatch, tmp_path, recipe, stage, failure):
+    failure_class, prefix, _ = _STAGES[stage]
+    result = _run_recipe(recipe, monkeypatch, tmp_path, stage=stage, exc=failure)
+    assert result.ok is False
+    assert result.failure_class == failure_class
+    assert result.failure_summary == f"{prefix}{failure!r}"
+
+
+_UNEXPECTED = [(r, s) for r in _RECIPES for s in _STAGES] + [("vllm_source", "build_requires")]
+
+
+@pytest.mark.parametrize(("recipe", "stage"), _UNEXPECTED)
+def test_an_unexpected_setup_failure_propagates(monkeypatch, tmp_path, recipe, stage):
+    if stage == "build_requires":
+        pytest.importorskip("tomllib")
+    with pytest.raises(TypeError, match="unexpected setup failure"):
+        _run_recipe(recipe, monkeypatch, tmp_path, stage=stage, exc=TypeError("unexpected setup failure"))
+
+
+def test_a_build_requires_pre_install_that_cannot_spawn_is_skipped(monkeypatch, tmp_path):
+    pytest.importorskip("tomllib")
+    result = _run_recipe("vllm_source", monkeypatch, tmp_path, stage="build_requires", exc=OSError("no pip"))
+    assert result.ok is True
+    assert result.failure_class == "ok"
+
+
+# Build artifacts read back from disk
+
+
+@pytest.mark.parametrize("content", [None, b"{not json", b"\xff\xfe\x00"], ids=["missing", "corrupt", "not-utf8"])
+def test_load_result_json_is_none_when_the_result_cannot_be_read(tmp_path, content):
+    if content is not None:
+        (tmp_path / "result.json").write_bytes(content)
+    loaded = _load_result_json(str(tmp_path))
+    assert loaded is None
+
+
+def test_load_result_json_propagates_a_result_of_the_wrong_shape(tmp_path):
+    (tmp_path / "result.json").write_text("[1]", encoding="utf-8")
+    with pytest.raises(AttributeError, match="'list' object has no attribute 'get'"):
+        _load_result_json(str(tmp_path))
+
+
+_PINNED = b'[build-system]\nrequires = ["setuptools>=61", "torch==2.9", "torchvision"]\n'
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [(_PINNED, ["setuptools>=61", "torchvision"]), (None, []), (b"[build-system", []), (b"\xff\xfe\x00", [])],
+    ids=["torch-pins-dropped", "missing", "invalid-toml", "not-utf8"],
+)
+def test_build_system_requires_reads_the_pyproject_or_is_empty(tmp_path, content, expected):
+    pytest.importorskip("tomllib")
+    if content is not None:
+        (tmp_path / "pyproject.toml").write_bytes(content)
+    requires = _read_build_system_requires(tmp_path)
+    assert requires == expected
+
+
+def test_build_system_requires_is_empty_without_tomllib(monkeypatch, tmp_path):
+    (tmp_path / "pyproject.toml").write_bytes(_PINNED)
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    requires = _read_build_system_requires(tmp_path)
+    assert requires == []
+
+
+def test_build_system_requires_propagates_an_unexpected_parser_failure(monkeypatch, tmp_path):
+    tomllib = pytest.importorskip("tomllib")
+    (tmp_path / "pyproject.toml").write_bytes(_PINNED)
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(tomllib, "loads", _explode)
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        _read_build_system_requires(tmp_path)

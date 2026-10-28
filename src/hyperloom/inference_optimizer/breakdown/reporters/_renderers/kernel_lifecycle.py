@@ -14,6 +14,7 @@ kernels were detected (implies the profile phase never ran).
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from ..base import (
@@ -25,6 +26,16 @@ from ..base import (
 from ._kernels import kernel_rows
 
 _MAX_NAME_LEN = 70
+
+#: The decision each settled verdict reads as: its kind, its subject, and what
+#: the count of kernels that reached it says.
+_VERDICT_DECISIONS = (
+    ("kept", "kernel_lifecycle:adopted", "kernel patches adopted"),
+    ("reverted", "kernel_lifecycle:reverted", "kernel patches reverted after integrate"),
+    ("rejected", "kernel_lifecycle:rejected", "kernel patches rejected outright"),
+)
+#: The utilisation columns, each dropped when no detected kernel reports it.
+_UTIL_COLUMNS = {"bw%": "bandwidth_util_pct", "compute%": "compute_util_pct"}
 
 
 def _short_name(name: str) -> str:
@@ -62,6 +73,65 @@ def _lane_summary(lane: dict[str, Any] | None) -> str:
     if dec:
         parts.append(f"[{dec}]")
     return " ".join(parts)
+
+
+def _kernel_tables(detected: list[dict[str, Any]]) -> str:
+    """The table of the kernels the pipeline acted on, then the residual long tail folded into ``<details>``."""
+    util = {header: field for header, field in _UTIL_COLUMNS.items() if any(d.get(field) for d in detected)}
+    headers = ["kernel_id", "name", "gpu%", "duration_us", "calls", *util]
+    headers += ["selected", "GEAK", "Forge", "adopted_by", "final"]
+
+    def _row_for(d: dict[str, Any]) -> list[Any]:
+        """Build one table row for a detected kernel record."""
+        return [
+            d.get("kernel_id"),
+            _short_name(d.get("name")),
+            d.get("gpu_pct"),
+            d.get("duration_us"),
+            d.get("call_count"),
+            *(d.get(field) for field in util.values()),
+            "yes" if d.get("selected_for_optimization") else "no",
+            _lane_summary(d.get("geak")),
+            _lane_summary(d.get("forge")),
+            d.get("adopted_by") or "—",
+            d.get("final_decision"),
+        ]
+
+    # The rollup marks every kernel a route dispatched against as selected, so
+    # an unselected kernel is actionable only through a gate verdict.
+    actionable: list[dict[str, Any]] = []
+    residual: list[dict[str, Any]] = []
+    for d in detected:
+        if d.get("selected_for_optimization") or d.get("final_decision") != "not_optimized":
+            actionable.append(d)
+        else:
+            residual.append(d)
+
+    parts: list[str] = []
+    if actionable:
+        parts.append(md_table(headers, [_row_for(d) for d in actionable]))
+    else:
+        parts.append(
+            "_No kernel was selected for optimization, and neither "
+            "GEAK nor Forge recorded an attempt. The kernel optimization "
+            "pipeline did not run on this session._"
+        )
+    if residual:
+        total_dur = sum((d.get("duration_us") or 0.0) for d in residual)
+        total_gpu = sum((d.get("gpu_pct") or 0.0) for d in residual)
+        # Inner blank lines needed so the table inside <details> parses as markdown.
+        parts += [
+            "",
+            f"<details><summary>Show {len(residual)} residual kernels "
+            f"not selected for optimization "
+            f"(Σ duration_us={total_dur:.0f}, Σ gpu%={total_gpu:.2f}%)"
+            "</summary>",
+            "",
+            md_table(headers, [_row_for(d) for d in residual]),
+            "",
+            "</details>",
+        ]
+    return "\n".join(parts)
 
 
 @register_renderer("kernel_lifecycle")
@@ -102,18 +172,15 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     selected = sum(1 for d in detected if d.get("selected_for_optimization"))
     geak_touched = sum(1 for d in detected if d.get("geak"))
     forge_touched = sum(1 for d in detected if d.get("forge"))
+    verdicts = Counter(d.get("final_decision") for d in detected)
     adopted = [d for d in detected if d.get("final_decision") == "kept"]
-    reverted = [d for d in detected if d.get("final_decision") == "reverted"]
-    rejected = [d for d in detected if d.get("final_decision") == "rejected"]
-    attempted = [d for d in detected if d.get("final_decision") == "attempted"]
 
-    facts: list[str] = []
-    facts.append(
+    facts = [
         f"{len(detected)} kernel(s) detected, {selected} selected for "
         f"optimization, GEAK touched {geak_touched}, Forge touched "
-        f"{forge_touched}, adopted={len(adopted)}, reverted={len(reverted)}, "
-        f"rejected={len(rejected)}, attempted-no-decision={len(attempted)}."
-    )
+        f"{forge_touched}, adopted={verdicts['kept']}, reverted={verdicts['reverted']}, "
+        f"rejected={verdicts['rejected']}, attempted-no-decision={verdicts['attempted']}."
+    ]
     if selected and not (geak_touched or forge_touched):
         facts.append(
             "Kernels were selected for optimization but neither GEAK nor "
@@ -124,120 +191,25 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         names = ", ".join(f"`{d.get('kernel_id')}`→{d.get('adopted_by') or '?'}" for d in adopted[:5])
         facts.append(f"Adopted kernels: {names}.")
 
-    decisions: list[Decision] = []
-    if adopted:
-        decisions.append(
-            Decision(
-                kind="kept",
-                subject="kernel_lifecycle:adopted",
-                rationale=f"{len(adopted)} kernel patches adopted",
-            )
-        )
-    if reverted:
-        decisions.append(
-            Decision(
-                kind="reverted",
-                subject="kernel_lifecycle:reverted",
-                rationale=f"{len(reverted)} kernel patches reverted after integrate",
-            )
-        )
-    if rejected:
-        decisions.append(
-            Decision(
-                kind="rejected",
-                subject="kernel_lifecycle:rejected",
-                rationale=f"{len(rejected)} kernel patches rejected outright",
-            )
-        )
-    if not adopted and not reverted and not rejected and not attempted:
+    decisions = [
+        Decision(kind=kind, subject=subject, rationale=f"{verdicts[kind]} {said}")
+        for kind, subject, said in _VERDICT_DECISIONS
+        if verdicts[kind]
+    ]
+    if verdicts["not_optimized"] == len(detected):
         decisions.append(
             Decision(
                 kind="not_attempted",
                 subject="kernel_lifecycle",
-                rationale=(
-                    f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)"
-                ),
+                rationale=f"all {len(detected)} detected kernels left un-optimized (neither GEAK nor Forge attempted)",
             )
         )
-
-    # Drop bw% / compute% columns when every entry is None/0.
-    show_bw = any(d.get("bandwidth_util_pct") for d in detected)
-    show_compute = any(d.get("compute_util_pct") for d in detected)
-
-    headers: list[str] = ["kernel_id", "name", "gpu%", "duration_us", "calls"]
-    if show_bw:
-        headers.append("bw%")
-    if show_compute:
-        headers.append("compute%")
-    headers += ["selected", "GEAK", "Forge", "adopted_by", "final"]
-
-    def _row_for(d: dict[str, Any]) -> list[Any]:
-        """Build one table row for a detected kernel record."""
-        row: list[Any] = [
-            d.get("kernel_id") or "—",
-            _short_name(d.get("name") or ""),
-            d.get("gpu_pct"),
-            d.get("duration_us"),
-            d.get("call_count"),
-        ]
-        if show_bw:
-            row.append(d.get("bandwidth_util_pct"))
-        if show_compute:
-            row.append(d.get("compute_util_pct"))
-        row += [
-            "yes" if d.get("selected_for_optimization") else "no",
-            _lane_summary(d.get("geak")),
-            _lane_summary(d.get("forge")),
-            d.get("adopted_by") or "—",
-            d.get("final_decision") or "—",
-        ]
-        return row
-
-    # Partition into actionable vs residual long-tail kernels.
-    actionable: list[dict[str, Any]] = []
-    residual: list[dict[str, Any]] = []
-    for d in detected:
-        if (
-            d.get("selected_for_optimization")
-            or d.get("geak")
-            or d.get("forge")
-            or (d.get("final_decision") and d["final_decision"] != "not_optimized")
-        ):
-            actionable.append(d)
-        else:
-            residual.append(d)
-
-    parts: list[str] = []
-    if actionable:
-        parts.append(md_table(headers, [_row_for(d) for d in actionable]))
-    else:
-        parts.append(
-            "_No kernel was selected for optimization, and neither "
-            "GEAK nor Forge recorded an attempt. The kernel optimization "
-            "pipeline did not run on this session._"
-        )
-    if residual:
-        total_dur = sum((d.get("duration_us") or 0.0) for d in residual)
-        total_gpu = sum((d.get("gpu_pct") or 0.0) for d in residual)
-        # Inner blank lines needed so the table inside <details> parses as markdown.
-        parts.append("")
-        parts.append(
-            f"<details><summary>Show {len(residual)} residual kernels "
-            f"not selected for optimization "
-            f"(Σ duration_us={total_dur:.0f}, Σ gpu%={total_gpu:.2f}%)"
-            "</summary>"
-        )
-        parts.append("")
-        parts.append(md_table(headers, [_row_for(d) for d in residual]))
-        parts.append("")
-        parts.append("</details>")
-    md = "\n".join(parts)
 
     return RenderedSection(
         section_id="kernel_lifecycle",
         title="Kernel Lifecycle",
         key_facts=facts,
-        markdown_block=md,
+        markdown_block=_kernel_tables(detected),
         decisions=decisions,
         warnings=[],
         skipped=False,

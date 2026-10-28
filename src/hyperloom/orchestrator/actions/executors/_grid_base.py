@@ -22,7 +22,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # Terminal outcomes that ended a grid variant without a graded comparison, so
 # they are neither a KEEP nor a REVERT.
 TS_FAILED = "FAILED"
-TS_KILLED_OVERTIME = "KILLED_OVERTIME"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
 
 
@@ -32,40 +31,29 @@ class GridVariant:
 
     name: str
     extra_server_args: str = ""
-    extra_envs: dict[str, str] = field(default_factory=dict)
-    remove_args: list[str] = field(default_factory=list)
-    unset_envs: list[str] = field(default_factory=list)
-    args_mode: str = "append"
+    extra_envs: dict[str, str] | None = None
+    remove_args: list[str] | tuple[str, ...] | set[str] | str | None = field(default=None, kw_only=True)
+    unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = field(default=None, kw_only=True)
+    args_mode: str = field(default="append", kw_only=True)
     note: str = ""
 
-    def __init__(
-        self,
-        name: str,
-        extra_server_args: str = "",
-        extra_envs: dict[str, str] | None = None,
-        note: str = "",
-        *,
-        remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None,
-        unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None,
-        args_mode: str = "append",
-    ) -> None:
-        """Initialize a grid variant descriptor."""
-        self.name = name
-        self.extra_server_args = extra_server_args
+    def __post_init__(self) -> None:
+        """Drop unsafe envs and normalize the removal and args-mode controls."""
         self.extra_envs, dropped_envs = filter_untrusted_env_mapping(
-            extra_envs,
+            self.extra_envs,
             allow_predicate=is_allowed_variant_env_key,
         )
         if dropped_envs:
-            log.warning("Variant %s: dropping unsafe extra_envs %s", name, ", ".join(sorted(dropped_envs)))
-        self.remove_args = to_str_list(remove_args)
-        self.unset_envs = to_str_list(unset_envs)
-        mode = str(args_mode or "append").strip().lower()
+            log.warning("Variant %s: dropping unsafe extra_envs %s", self.name, ", ".join(sorted(dropped_envs)))
+        self.remove_args = to_str_list(self.remove_args)
+        self.unset_envs = to_str_list(self.unset_envs)
+        mode = str(self.args_mode or "append").strip().lower()
         self.args_mode = mode if mode in {"append", "replace"} else "append"
-        self.note = note
         # Optional runtime override; injected into materialized YAML benchmark.envs by _build_variant_yaml so the
         # server subprocess resolves the attempt runtime.
         self.runtime_override: dict[str, str] = {}
+        self.source_patches: list[dict[str, str]] = []
+        self.overlay_pythonpath: str = ""
 
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
@@ -116,6 +104,10 @@ class VariantResult:
     extra_server_args: str
     extra_envs: dict[str, str]
     status: str
+    benchmark_backend: str | None = None
+    benchmark_valid: bool | None = None
+    diagnostic_only: bool | None = None
+    workload_identity: str | None = None
     output_throughput: float | None = None
     request_throughput: float | None = None
     total_token_throughput: float | None = None
@@ -123,6 +115,8 @@ class VariantResult:
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
+    gpu_power_avg_w: float | None = None
+    gpu_power_by_gpu_w: dict[str, float] | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
     tpot_p90_ms: float | None = None
@@ -153,6 +147,10 @@ class VariantResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
+            "benchmark_backend": self.benchmark_backend,
+            "benchmark_valid": self.benchmark_valid,
+            "diagnostic_only": self.diagnostic_only,
+            "workload_identity": self.workload_identity,
             "name": self.name,
             "extra_server_args": self.extra_server_args,
             "extra_envs": self.extra_envs,
@@ -164,6 +162,8 @@ class VariantResult:
             "duration_seconds": self.duration_seconds,
             "ttft_mean_ms": self.ttft_mean_ms,
             "e2el_mean_ms": self.e2el_mean_ms,
+            "gpu_power_avg_w": self.gpu_power_avg_w,
+            "gpu_power_by_gpu_w": self.gpu_power_by_gpu_w,
             "tpot_mean_ms": self.tpot_mean_ms,
             "input_throughput": self.input_throughput,
             "tpot_p90_ms": self.tpot_p90_ms,

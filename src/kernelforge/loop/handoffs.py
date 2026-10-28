@@ -7,7 +7,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.loop.experiments_layout import ExperimentsLayout, tagged_iteration
+from kernelforge.tools.durable_io import atomic_write_text
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,11 @@ class IterationHandoff:
     lesson_path: str = ""
     orchestration_artifacts: str = ""
     candidate_archive: str = ""
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
+    intervention_kind: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
@@ -60,6 +66,11 @@ class IterationHandoff:
             "lesson_path": self.lesson_path,
             "orchestration_artifacts": self.orchestration_artifacts,
             "candidate_archive": self.candidate_archive,
+            "agent_profile_id": self.agent_profile_id,
+            "agent_provider": self.agent_provider,
+            "agent_model": self.agent_model,
+            "blockage_epoch": self.blockage_epoch,
+            "intervention_kind": self.intervention_kind,
         }
 
 
@@ -68,11 +79,12 @@ class HandoffStore:
 
     def __init__(self, workspace_dir: str) -> None:
         self.workspace = Path(workspace_dir).resolve()
-        self.root = self.workspace / "forge_experiments" / "handoffs"
+        self._layout = ExperimentsLayout.of(self.workspace)
+        self.root = self._layout.handoffs
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path(self, iteration: int) -> Path:
-        return self.root / f"iter_{iteration:03d}.json"
+        return self._layout.handoff(iteration)
 
     @staticmethod
     def _without_timestamp(payload: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +123,23 @@ class HandoffStore:
             raise ValueError(f"handoff must be an object: {path}")
         if payload.get("complete") is not True:
             raise ValueError(f"incomplete handoff: {path}")
+        relay_fields = {
+            "agent_profile_id",
+            "agent_provider",
+            "agent_model",
+            "blockage_epoch",
+            "intervention_kind",
+        }
+        if not relay_fields & set(payload):
+            payload.update(
+                {
+                    "agent_profile_id": "",
+                    "agent_provider": "",
+                    "agent_model": "",
+                    "blockage_epoch": 0,
+                    "intervention_kind": "",
+                }
+            )
         expected = {
             "complete",
             "iteration",
@@ -123,6 +152,11 @@ class HandoffStore:
             "lesson_path",
             "orchestration_artifacts",
             "candidate_archive",
+            "agent_profile_id",
+            "agent_provider",
+            "agent_model",
+            "blockage_epoch",
+            "intervention_kind",
             "created_at",
         }
         missing = expected - set(payload)
@@ -135,11 +169,11 @@ class HandoffStore:
 
     def latest(self) -> tuple[Path, dict[str, Any]] | None:
         """Return the latest complete handoff."""
-        for path in sorted(self.root.glob("iter_*.json"), reverse=True):
-            stem = path.stem.removeprefix("iter_")
-            if not stem.isdigit():
+        for path in sorted(self.root.glob("*.json"), reverse=True):
+            iteration = tagged_iteration(path.stem)
+            if iteration is None:
                 continue
-            payload = self.read(int(stem))
+            payload = self.read(iteration)
             if payload:
                 return path, payload
         return None

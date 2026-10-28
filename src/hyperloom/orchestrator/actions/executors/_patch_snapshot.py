@@ -71,63 +71,6 @@ def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tup
     return upserted, deleted
 
 
-def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, str]:
-    """Return ``{rel: "upsert" | "delete"}`` as the patches themselves declare it.
-
-    The operation comes from the diff headers -- a ``/dev/null`` post-image is a
-    deletion, any other post-image is an upsert, and a rename declares both --
-    and never from whether the path happens to exist in the tree at capture
-    time. :func:`_patch_touched_paths_split` asks the tree instead, which is the
-    wrong question twice over for the accepted-stack capture:
-
-    * A KEEP reached with its mutation inputs stripped still finds the *base*
-      file present, so a tree probe declares a satisfied upsert over content
-      that contains none of the stack's changes -- the exact case
-      ``declared_targets`` exists to refuse.
-    * Across a multi-round stack the tree only shows the final state, and the
-      two accumulated lists are merged with deletions applied last. A file an
-      early round deleted and a later round recreated therefore lands in both
-      lists and is declared ``delete``, so the replay removes a file the
-      accepted stack requires.
-
-    Ordering is the caller's: later patches override earlier ones for the same
-    path, which is the order ``kept_patches`` records and the order a consumer
-    replays them in.
-
-    Args:
-        framework_root: Tree the patches were bound to; read only to choose the
-            ``-p`` strip level.
-        patches: The accepted stack's patch files for that root, in apply order.
-
-    Returns:
-        The declared operation per repo-relative path. Unreadable patches are
-        skipped, which leaves their targets undeclared and therefore uncaptured,
-        and the decision refuses the recipe rather than certifying a gap.
-    """
-    ops: dict[str, str] = {}
-    for patch in patches:
-        try:
-            text = patch.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        pairs = patch_file_targets(text)
-        if not pairs:
-            continue
-        lvl = _commit_strip_level(framework_root, pairs)
-        for old, new in pairs:
-            rel_new = strip_path_components(new, lvl) if new and new != _PATCH_DEV_NULL else None
-            rel_old = strip_path_components(old, lvl) if old and old != _PATCH_DEV_NULL else None
-            if rel_new:
-                ops[rel_new] = "upsert"
-                # A rename declares its source gone; a plain modify has old == new
-                # and must not declare a deletion of the file it just wrote.
-                if rel_old and rel_old != rel_new:
-                    ops[rel_old] = "delete"
-            elif rel_old:
-                ops[rel_old] = "delete"
-    return ops
-
-
 #: Git's own identity for the throwaway replay commits; the source repository's
 #: config is never read or written.
 _REPLAY_IDENTITY: tuple[str, ...] = ("-c", "user.email=replay@hyperloom.invalid", "-c", "user.name=hyperloom")
@@ -645,7 +588,7 @@ def overlay_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | 
             ops[rel] = "upsert"
         else:
             return None
-    if not ops or all(op == "delete" for op in ops.values()):
+    if all(op == "delete" for op in ops.values()):
         return None
     return ops
 
@@ -816,6 +759,72 @@ def _create_patch_snapshot(
     return manifest
 
 
+def _snapshot_backup_bytes(row: dict[str, Any]) -> bytes:
+    """The content a snapshot row backed up for its path."""
+    return Path(str(row.get("backup") or "")).read_bytes()
+
+
+def _restore_worktree_path(target: Path, row: dict[str, Any]) -> None:
+    """Put one snapshotted path back on disk: its backed-up bytes and mode, or absent when it did not exist."""
+    if row.get("existed"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_snapshot_backup_bytes(row))
+        if row.get("mode") is not None:
+            target.chmod(int(row["mode"]))
+    elif target.exists() or target.is_symlink():
+        target.unlink()
+
+
+def _restore_index_entry(repo: str, rel: str, entry: str) -> None:
+    """Put ``rel``'s git index entry back to ``entry``, removing it when the snapshot recorded none."""
+    if not entry:
+        subprocess.run(
+            ["git", "update-index", "--force-remove", "--", rel],
+            cwd=repo,
+            capture_output=True,
+            timeout=15,
+            check=True,
+        )
+        return
+    metadata, entry_path = entry.split("\t", 1)
+    mode, blob, stage = metadata.split()
+    if stage != "0" or entry_path != rel:
+        raise ValueError("unsupported pre-existing unmerged index entry")
+    subprocess.run(
+        ["git", "update-index", "--cacheinfo", mode, blob, rel],
+        cwd=repo,
+        capture_output=True,
+        timeout=15,
+        check=True,
+    )
+
+
+def _verify_restored_row(repo: str, row: dict[str, Any], entry: str) -> None:
+    """Raise unless the worktree bytes and the index entry came back exactly as the snapshot recorded them."""
+    rel = str(row.get("path") or "")
+    target = Path(repo) / rel
+    if row.get("existed"):
+        if not target.is_file() or target.read_bytes() != _snapshot_backup_bytes(row):
+            raise OSError("worktree restore verification failed")
+    elif target.exists() or target.is_symlink():
+        raise OSError("removed path still exists after restore")
+    if _index_entries(repo, [rel]).get(rel, "") != entry:
+        raise OSError("index restore verification failed")
+
+
+def _restore_snapshot_row(repo: str, row: dict[str, Any]) -> str:
+    """Restore one snapshotted path and its index entry; return why it failed, or ``""`` when it took."""
+    rel = str(row.get("path") or "")
+    entry = str(row.get("index_entry") or "").strip()
+    try:
+        _restore_worktree_path(Path(repo) / rel, row)
+        _restore_index_entry(repo, rel, entry)
+        _verify_restored_row(repo, row, entry)
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        return f"{rel}:{type(exc).__name__}:{exc}"
+    return ""
+
+
 def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
     """Restore exact touched paths/index entries; never reset unrelated work."""
     if isinstance(manifest, (str, Path)):
@@ -830,48 +839,9 @@ def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
     for row in manifest.get("paths") or []:
         if not isinstance(row, dict):
             continue
-        rel = str(row.get("path") or "")
-        target = Path(repo) / rel
-        try:
-            if row.get("existed"):
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(Path(str(row.get("backup") or "")).read_bytes())
-                if row.get("mode") is not None:
-                    target.chmod(int(row["mode"]))
-            elif target.exists() or target.is_symlink():
-                target.unlink()
-            entry = str(row.get("index_entry") or "").strip()
-            if entry:
-                metadata, entry_path = entry.split("\t", 1)
-                mode, blob, stage = metadata.split()
-                if stage != "0" or entry_path != rel:
-                    raise ValueError("unsupported pre-existing unmerged index entry")
-                subprocess.run(
-                    ["git", "update-index", "--cacheinfo", mode, blob, rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            else:
-                subprocess.run(
-                    ["git", "update-index", "--force-remove", "--", rel],
-                    cwd=repo,
-                    capture_output=True,
-                    timeout=15,
-                    check=True,
-                )
-            if row.get("existed"):
-                expected = Path(str(row.get("backup") or "")).read_bytes()
-                if not target.is_file() or target.read_bytes() != expected:
-                    raise OSError("worktree restore verification failed")
-            elif target.exists() or target.is_symlink():
-                raise OSError("removed path still exists after restore")
-            actual_index = _index_entries(repo, [rel]).get(rel, "")
-            if actual_index != entry:
-                raise OSError("index restore verification failed")
-        except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            errors.append(f"{rel}:{type(exc).__name__}:{exc}")
+        failure = _restore_snapshot_row(repo, row)
+        if failure:
+            errors.append(failure)
     return {"ok": not errors, "errors": errors}
 
 
@@ -946,7 +916,6 @@ __all__ = [
     "_patch_touched_paths_from_text",
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
-    "patch_declared_ops",
     "overlay_inventory_without_base",
     "replayed_stack_ops",
     "harvest_realized_diff",

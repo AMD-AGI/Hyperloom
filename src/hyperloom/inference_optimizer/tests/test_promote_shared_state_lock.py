@@ -23,15 +23,17 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE, OUTCOME_RECORDED, Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
-from hyperloom.orchestrator.loop import writeback as wb
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
+from hyperloom.orchestrator.loop import _keep_patch_column as keep_patch_column
+from hyperloom.orchestrator.loop import _promote_outcome as promote_outcome
+from hyperloom.orchestrator.loop._keep_patch_column import _is_patch_column_keep
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.orchestrator.state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
 
 @pytest.fixture
@@ -89,14 +91,13 @@ def _task(kind: str, *, task_id: str = "t1", params: dict | None = None) -> Task
 
 
 def _count_record_attempt(coord: Coordinator, monkeypatch) -> list[dict]:
-    """Spy that records every record_action_attempt call's kwargs, forwarding to the real impl."""
+    """Spy that records every record_action_attempt call's arguments, forwarding to the real impl."""
     calls: list[dict] = []
     real = coord.shared_state.record_action_attempt
 
-    def spy(*args, **kwargs):
-        # record_action_attempt is called as (action=..., ...) keyword in prod code.
-        calls.append(dict(kwargs))
-        return real(*args, **kwargs)
+    def spy(action, attempt):
+        calls.append({"action": action, "attempt": attempt})
+        return real(action, attempt)
 
     monkeypatch.setattr(coord.shared_state, "record_action_attempt", spy)
     return calls
@@ -297,27 +298,29 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_roofline_succeeded_writes_audit(session_dir):
+@pytest.mark.parametrize("status", ["succeeded", "recovered"])
+async def test_promote_roofline_with_a_trace_writes_audit(session_dir, status):
+    """A trace salvaged from a failed profile run is analysed like any other."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.roofline_failure_streak = 2
     s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_path": "/tmp/a.md"}
 
     await coord.writeback.promote_to_shared_state(
         "roofline",
         {
-            "status": "succeeded",
+            "status": status,
             "snapshot_id": 5,
             "last_profile_trace": "/tmp/trace.gz",
         },
         task=_task("roofline"),
     )
 
-    # roofline resets its failure streak on a succeeded snapshot.
+    # roofline resets its failure streak on an analysed snapshot.
     assert s.roofline_failure_streak == 0
     # Audit row: promoted; snapshot_id taken from last_trace_analyze snapshot.
     assert s.last_roofline["decision"] == "promoted"
-    assert s.last_roofline["status"] == "succeeded"
     assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 
@@ -586,7 +589,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         await coord.writeback.record_integrate_keep(result)
     else:
         await coord.writeback._promote_integrate_patch(
-            result, _task("integrate_patch"), wb._PromoteOutcome(verdict=Verdict.RECORDED)
+            result, _task("integrate_patch"), promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED)
         )
 
     if vetoed:
@@ -705,7 +708,7 @@ async def test_a_lift_refused_integrate_patch_is_not_journalled_keep(session_dir
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
     settled: list[dict] = []
-    monkeypatch.setattr(phase_event, "record_settle", lambda **kwargs: settled.append(kwargs))
+    monkeypatch.setattr(phase_event, "record_settle", lambda settlement: settled.append(vars(settlement)))
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
@@ -1285,7 +1288,7 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: events.append("stage") or True,
+        lambda _row: events.append("stage") or True,
     )
 
     await coord.writeback.promote_to_shared_state(
@@ -1322,7 +1325,7 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
     monkeypatch.setattr(
         coord.writeback,
         "_stage_agent_keep",
-        lambda **_kwargs: False,
+        lambda _row: False,
     )
 
     coord.writeback._drain_agent_keep_outbox()
@@ -1411,7 +1414,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
     def _save(_session_dir):
         events.append("save")
 
-    def _stage(**_kwargs):
+    def _stage(_row):
         events.append("stage")
         staged.append(dict(coord.shared_state.current_best))
         return True
@@ -1913,14 +1916,20 @@ async def test_drain_cancels_queued_baselines_but_spares_revalidation(session_di
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 2195.86
 
-    stale_a = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-a")
-    stale_b = await coord.tasks.create(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
-    reval = await coord.tasks.create(
-        kind="baseline",
-        params={"reason": ENABLEMENT_REVALIDATION_REASON},
-        idempotency_key="bl-reval",
+    stale_a, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-a")
     )
-    other = await coord.tasks.create(kind="explore", params={}, idempotency_key="ex-a")
+    stale_b, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
+    )
+    reval, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="baseline",
+            params={"reason": ENABLEMENT_REVALIDATION_REASON},
+            idempotency_key="bl-reval",
+        ),
+    )
+    other, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="ex-a"))
 
     cancelled = await coord.writeback.drain_queued_baselines(reason="baseline_established")
 
@@ -1935,7 +1944,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     """The tracked id is honoured even when params carry no revalidation reason."""
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
-    reval = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-tracked")
+    reval, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-tracked")
+    )
     coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord.writeback.drain_queued_baselines(reason="baseline_established") == []
@@ -1946,7 +1957,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
 async def test_promote_baseline_drains_the_backlog(session_dir):
     """The drain is wired into promotion, not just available as a helper."""
     coord = _coord(session_dir)
-    stale = await coord.tasks.create(kind="baseline", params={}, idempotency_key="bl-stale")
+    stale, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-stale")
+    )
 
     await coord.writeback.promote_to_shared_state(
         "baseline",
@@ -2181,7 +2194,7 @@ class TestWritebackRequiredAxes:
         monkeypatch.setattr(stack_event, "record_validation", record)
         monkeypatch.setattr(coord.phase_kernel, "maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
-        outcome = wb._PromoteOutcome(verdict=Verdict.RECORDED)
+        outcome = promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED)
         if lane == "integrate":
             await coord.writeback.record_integrate_keep(
                 {
@@ -2209,7 +2222,7 @@ class TestWritebackRequiredAxes:
         else:
             await coord.writeback._promote_explore(
                 {
-                    "winners": [candidate],
+                    "winners": [{**candidate, "fingerprint": "fp-next"}],
                     "best_variant": candidate,
                     "output_throughput": 150.0,
                     "round_id": "r-local-win",
@@ -2259,7 +2272,7 @@ class TestWritebackRequiredAxes:
         await coord.writeback._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
             _task("explore", params={"source": "stack_revalidate"}),
-            wb._PromoteOutcome(verdict=Verdict.RECORDED),
+            promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED),
         )
 
         assert _resume_pending(state) is True
@@ -2321,8 +2334,8 @@ class TestWritebackRequiredAxes:
         assert state.validated_recipe_generation == state.working_recipe_generation == 1
         assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
-        assert record.call_args.kwargs["baseline_tput"] == 100.0
-        assert record.call_args.kwargs["validated_tput"] == 150.0
+        assert record.call_args.args[0].graded.reference == 100.0
+        assert record.call_args.args[0].graded.candidate == 150.0
 
 
 def test_lift_does_not_double_append_same_fingerprint(session_dir):
@@ -2708,7 +2721,7 @@ def _keep_result(tmp_path: Path, *, import_root: str, complete: bool = True) -> 
 
 def test_source_layer_handles_carry_every_field_the_stack_entry_needs(tmp_path):
     """A lift path that forwards a subset silently degrades the GEAK overlay."""
-    handles = wb._source_layer_handles(_keep_result(tmp_path, import_root="python"))
+    handles = keep_patch_column._source_layer_handles(_keep_result(tmp_path, import_root="python"))
 
     assert handles["source_import_root"] == "python"
     assert handles["source_snapshot_complete"] is True
@@ -2720,7 +2733,7 @@ def test_source_layer_handles_carry_every_field_the_stack_entry_needs(tmp_path):
 
 def test_source_layer_handles_omit_a_completeness_the_result_never_recorded():
     """Absent must stay absent so legacy entries still read their manifest."""
-    handles = wb._source_layer_handles({"source_snapshot": "/snap"})
+    handles = keep_patch_column._source_layer_handles({"source_snapshot": "/snap"})
 
     assert "source_snapshot_complete" not in handles
 
@@ -2734,7 +2747,7 @@ def test_env_spec_hands_geak_the_import_root_not_the_snapshot_top(session_dir, t
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 
@@ -2752,7 +2765,7 @@ def test_env_spec_overlay_stops_at_files_for_a_dist_packages_install(session_dir
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 
@@ -2769,7 +2782,7 @@ def test_env_spec_refuses_an_incomplete_snapshot(session_dir, tmp_path):
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 

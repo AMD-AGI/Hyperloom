@@ -15,9 +15,10 @@ import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     infer_source_owner_framework,
     resolve_operation,
 )
@@ -25,10 +26,12 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
+from kernelforge.loop.experiments_layout import ExperimentsLayout
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
-from kernelforge.mcp_server.tools.pmc import derive_kernel_names
-from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.loop.agent_relay import AgentRelayPolicy
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 # The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
@@ -74,6 +77,7 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    agent_relay: AgentRelayPolicy | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -116,6 +120,9 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            agent_relay=(
+                AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+            ),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -210,8 +217,9 @@ class CampaignConfigStore:
 
     def __init__(self, workspace_dir: str):
         self.workspace = Path(workspace_dir).resolve()
-        self.root = self.workspace / "forge_experiments"
-        self.path = self.root / "campaign_config.json"
+        layout = ExperimentsLayout.of(self.workspace)
+        self.root = layout.root
+        self.path = layout.campaign_config
         self.program_path = self.root / "program.md"
 
     def exists(self) -> bool:
@@ -226,6 +234,8 @@ class CampaignConfigStore:
             raise ValueError(f"invalid campaign config: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
+        if "agent_relay" not in payload:
+            payload["agent_relay"] = None
         return CampaignConfig.from_dict(payload)
 
     def save(
@@ -352,6 +362,18 @@ def resolve_kernel_backend_override(kernel_backend: str) -> str:
     return name
 
 
+# Source-text markers in precedence order, each naming the backend whose sources carry them.
+_BACKEND_TEXT_MARKERS = (
+    # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
+    # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
+    # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
+    # path nor the presence of Triton markers distinguishes the two.
+    ("gluon", ("triton.experimental.gluon", "@gluon.jit", "gluon.language")),
+    ("triton", ("@triton.jit", "triton.language")),
+    ("ck", ("composable_kernel", "ck::")),
+)
+
+
 def infer_kernel_backend(source_paths: list[Path]) -> str:
     """Infer the backend expertise prompt from configuration or source files."""
     override = env_backend_override()
@@ -373,16 +395,9 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             return "aiter"
         if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
             return "flydsl"
-        # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
-        # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
-        # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
-        # path nor the presence of Triton markers distinguishes the two.
-        if "triton.experimental.gluon" in text or "@gluon.jit" in text or "gluon.language" in text:
-            return "gluon"
-        if "@triton.jit" in text or "triton.language" in text:
-            return "triton"
-        if "composable_kernel" in text or "ck::" in text:
-            return "ck"
+        for backend, markers in _BACKEND_TEXT_MARKERS:
+            if any(marker in text for marker in markers):
+                return backend
         if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
             return "hip"
     raise ValueError(f"could not infer the kernel backend; set {_ENV_OVERRIDE} to a known backend")
@@ -419,86 +434,105 @@ def validate_pending_campaign_head(workspace_dir: str, base_commit: str) -> None
     )
 
 
+def parse_list(raw: str) -> list[str]:
+    """Split a comma-or-newline-separated string into a stripped list."""
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[,\n]", raw) if p.strip()]
+
+
+@dataclass(frozen=True)
+class CampaignInputs:
+    """What the operator asked a fresh campaign to be; lists are comma-or-newline separated as given."""
+
+    kernel: str | None
+    driver: str | None
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    source_files: str = ""
+    program_md_file: str | None = None
+    target_functions: str = ""
+    operator_name: str = ""
+    producer: str = ""
+    kernel_backend: str = ""
+    git_branch: str = ""
+    gpu_target: str = ""
+    gpu_type: str | None = None
+    task_type: str = ""
+    framework: str = ""
+    # Measurement semantics and what a KEEP may ship beyond the tracked diff belong to the campaign, not one session.
+    nproc_per_node: int = 1
+    bench_repeat: int = 1
+    commit_new_paths: tuple[str, ...] = ()
+    # The Agent profiles a blockage may relay between, fixed when the campaign is created.
+    agent_relay: AgentRelayPolicy | None = None
+
+
+def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
+    """Workspace-relative source files, kernel first, without duplicates."""
+    normalized: list[str] = []
+    for raw_path in [kernel, *parse_list(source_files)]:
+        relative = _relative_file(workspace, raw_path, "source file")
+        if relative not in normalized:
+            normalized.append(relative)
+    return normalized
+
+
+def _require_dev_branch(workspace: Path) -> str:
+    """Current non-main branch of a clean forge workspace, or raise."""
+    if _git_value(workspace, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise ValueError("workspace has uncommitted tracked changes")
+    branch = _git_value(workspace, "branch", "--show-current")
+    if branch in {"", "main", "master"}:
+        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    return branch
+
+
+def _program_md_sha256(program_md_file: str | None) -> str:
+    """sha256 of an optional program.md's text, or blank when the campaign has none."""
+    if not program_md_file:
+        return ""
+    source_program = Path(program_md_file).expanduser().resolve()
+    if not source_program.is_file():
+        raise ValueError(f"program context is not a file: {source_program}")
+    return hashlib.sha256(source_program.read_text(errors="replace").encode()).hexdigest()
+
+
 def create_campaign_config(
-    *,
     workspace_dir: str,
-    kernel: str,
-    driver: str,
-    source_files: list[str],
-    program_md_file: str | None,
+    inputs: CampaignInputs,
+    *,
     base_commit: str | None = None,
-    target_functions: list[str] | None = None,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    gpu_target: str | None = None,
-    gpu_type: str | None = None,
-    git_branch: str | None = None,
-    kernel_backend: str | None = None,
-    task_type: str | None = None,
-    framework: str | None = None,
-    operator_name: str | None = None,
-    producer: str | None = None,
-    nproc_per_node: int = 1,
-    bench_repeat: int = 1,
-    commit_new_paths: list[str] | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
     workspace = Path(workspace_dir).resolve()
-    kernel_path = _relative_file(workspace, kernel, "kernel")
-    driver_path = _driver_reference(workspace, driver)
-
-    normalized_sources: list[str] = []
-    for raw_path in [kernel, *source_files]:
-        relative = _relative_file(workspace, raw_path, "source file")
-        if relative not in normalized_sources:
-            normalized_sources.append(relative)
-
-    dirty = _git_value(
-        workspace,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    )
-    if dirty:
-        raise ValueError("workspace has uncommitted tracked changes")
-
-    branch = _git_value(workspace, "branch", "--show-current")
-    if not branch or branch in {"main", "master"}:
-        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
+    driver_path = _driver_reference(workspace, inputs.driver)
+    normalized_sources = _normalized_sources(workspace, inputs.kernel, inputs.source_files)
+    branch = _require_dev_branch(workspace)
     resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
-    raw_source_paths = _campaign_source_paths(
-        workspace,
-        kernel_path,
-        normalized_sources,
-    )
-    pristine_sources = _read_pristine_sources(
-        workspace,
-        raw_source_paths,
-        base_commit=resolved_base_commit,
-    )
-    resolved_branch = (git_branch or "").strip() or branch
-    kernel_backend_override = (kernel_backend or "").strip()
+    raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
+    pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
+    backend_override = inputs.kernel_backend.strip()
     resolved_kernel_backend = (
-        resolve_kernel_backend_override(kernel_backend_override)
-        if kernel_backend_override
+        resolve_kernel_backend_override(backend_override)
+        if backend_override
         else infer_kernel_backend([workspace / path for path in normalized_sources])
     )
-    resolved_targets = (
-        list(target_functions)
-        if target_functions
-        else _derive_target_functions(
-            workspace,
-            normalized_sources,
-            source_contents=pristine_sources,
-        )
+    resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
+        workspace,
+        normalized_sources,
+        source_contents=pristine_sources,
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
     resolved_framework = infer_source_owner_framework(
-        kernel_path=kernel_absolute,
-        kernel_source=pristine_sources.get(kernel_absolute, ""),
+        KernelSources(
+            kernel_absolute,
+            pristine_sources.get(kernel_absolute, ""),
+            raw_source_paths,
+            source_contents=pristine_sources,
+        ),
         target_functions=resolved_targets,
-        source_files=raw_source_paths,
-        framework_override=(framework or "").strip(),
-        source_contents=pristine_sources,
+        framework_override=inputs.framework.strip(),
     )
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(workspace),
@@ -509,47 +543,37 @@ def create_campaign_config(
     )
     # Settled once, from the pristine sources, because it is part of the address the campaign's experience is filed
     # under.
-    resolved_operator = (operator_name or "").strip() or resolve_operation(
+    resolved_operator = inputs.operator_name.strip() or resolve_operation(
         pristine_sources.get(kernel_absolute, ""),
         kernel_absolute,
         target_functions=resolved_targets,
     )
-    program_md_path = ""
-    program_md_sha256 = ""
-    if program_md_file:
-        source_program = Path(program_md_file).expanduser().resolve()
-        if not source_program.is_file():
-            raise ValueError(f"program context is not a file: {source_program}")
-        program_md_path = "forge_experiments/program.md"
-        program_text = source_program.read_text(errors="replace")
-        program_md_sha256 = hashlib.sha256(program_text.encode()).hexdigest()
-
-    resolved_task_type = (task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
-    resolved_snr_threshold = float(snr_threshold)
+    program_md_sha256 = _program_md_sha256(inputs.program_md_file)
+    resolved_snr_threshold = float(inputs.snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")
-    canonical_driver = workspace / driver_path
     return CampaignConfig(
         kernel_path=kernel_path,
         driver_path=driver_path,
-        driver_sha256=hashlib.sha256(canonical_driver.read_bytes()).hexdigest(),
+        driver_sha256=hashlib.sha256((workspace / driver_path).read_bytes()).hexdigest(),
         source_files=normalized_sources,
-        program_md_path=program_md_path,
+        program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
-        gpu_target=(gpu_target or "").strip() or detect_gpu_target(),
-        gpu_type=str("mi355x" if gpu_type is None else gpu_type).strip().lower(),
+        gpu_target=inputs.gpu_target.strip() or detect_gpu_target(),
+        gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
         kernel_backend=resolved_kernel_backend,
-        task_type=resolved_task_type,
+        task_type=inputs.task_type.strip() or ("repository" if len(normalized_sources) > 1 else ""),
         target_functions=resolved_targets,
-        git_branch=resolved_branch,
+        git_branch=inputs.git_branch.strip() or branch,
         base_commit=resolved_base_commit,
         framework=resolved_framework,
         operator_name=resolved_operator,
-        producer=str(producer or "").strip().lower(),
+        producer=inputs.producer.strip().lower(),
         implementation_signature=pristine_signature,
         implementation_identity=pristine_identity,
-        nproc_per_node=max(1, int(nproc_per_node or 1)),
-        bench_repeat=max(1, int(bench_repeat or 1)),
-        commit_new_paths=normalize_commit_new_paths(commit_new_paths or []),
+        nproc_per_node=max(1, int(inputs.nproc_per_node)),
+        bench_repeat=max(1, int(inputs.bench_repeat)),
+        commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
+        agent_relay=inputs.agent_relay,
     )

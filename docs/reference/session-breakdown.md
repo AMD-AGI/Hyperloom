@@ -34,10 +34,62 @@ The top-level `schema_version` field is a stable string. New exports use the
 recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v6.0"
+"schema_version": "hyperloom.session_breakdown.v6.1"
 ```
 
-V6 is a breaking cutover for the timeline: each action records its own event
+6.1 changes three things inside the 6 major, an exception to the compatibility
+rules below: it renames one key, removes keys no producer populated or that
+only carried a constant, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
+`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
+now `output_throughput`, and the old key is no longer written. The value is
+unchanged: the whole-server output throughput, not a per-GPU figure. Archived
+6.0 documents and documents exported by 1.1.x carry the old key, so readers must
+accept both keys or migrate. Within 6.1, `perf.output_tput_per_gpu` also carries
+its value on the `baseline` event and on stack validation rows.
+
+6.1 also removes keys that no producer ever populated. Each carries the
+disposition `removed in 6.1, never populated`:
+
+- `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
+  and `policy.overtime_kill_ratio`
+- `kernel_agent` `trace_analyze_runs[].trace_validate_ref`
+- `critic_review.iteration` on framework proposals
+- `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
+- `kernel_agent` `entry.budget_remaining_sec`
+- `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
+- `framework_agent` `policy.source.authoring_enabled`
+- `kernel_agent` `geak.rebench.max_attempts`
+- `kernel_agent` `rebench[].source_ref`, `rebench[].dispatched_at` and
+  `rebench[].settled_at`
+- `conc_sweep` `budget.session_soft_deadline_sec`
+
+The `event_id` and `ordinal` row-scope declarations are removed from the schema
+types: they were already stripped before export and never appeared on the wire.
+`conc_sweep` `points[].budget_remaining_sec` is unchanged.
+
+Four keys that only ever carried a constant are removed with the disposition
+`removed in 6.1, constant`: `roofline` event
+`ext.actions[].kernel_roofline.kernels[].roofline_measured` (always `false`;
+`roofline_source` states whether a row's bound is analytical or a placeholder),
+`baseline` event `ext.actions[].convergence` (always `insufficient_rounds`), and
+`conc_sweep` `budget.raised` (always `false`) and `budget.granted_total_sec`
+(always equal to `budget.declared_total_sec`).
+
+Two figures are null instead of a fabricated default when they were not
+measured or not provided. `outcome.validation.attributed_gain_pct` and
+`unattributed_gain_pct` are null when no adoption could be measured, rather than
+`0.0`, and `empty` on `framework_agent` runs is null when the producer did not
+report it, rather than `false`. `kernel_agent` `entry.snapshot_staleness` is the
+string `"absent"` or `"fresh"`.
+
+Re-exporting a 6.0 session directory reads its old `baseline`
+event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
+the gain keep their values, and `metadata.workflow.contract_digest` keeps the
+digest recorded at session creation rather than the one pinned by the packaged
+workflow-evaluation schema. The default output path overwrites the archived
+`<session_dir>/session_breakdown.json`; pass `--output` to keep it.
+
+V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
 when its artefacts were written, and the KERNEL and BASELINE projections are no
 longer emitted. Consumers that ordered events around the old collapsed windows
@@ -69,8 +121,12 @@ Compatibility rules:
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
   require a major bump; `enablement` is outside that rule, as the stability
-  guarantee below records. Only one version is written per session; there is
-  no parallel write of the previous version's file.
+  guarantee below records, and so are the 6.1 changes declared above: the
+  rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+  keys no producer populated, and the null reporting of unmeasured
+  `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`. Only one
+  version is written per session; there is no parallel write of the previous
+  version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -89,7 +145,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -97,12 +153,11 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "outcome":            { /* terminal result — SaFE contract core */ },
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
-  "critic":             { /* the critic agent's own run, iteration by iteration */ },
-  "robustness":         { "turns": [] /* historical turns remain readable */ },
+  "critic":             { /* the critic agent's own run, iteration by iteration */ }
 }
 ```
 
-Those nine keys are the whole of the export. Every key is always present; a
+Those eight keys are the whole of the export. Every key is always present; a
 section the run produced nothing for is `{}` or `[]` rather than absent.
 
 Two things a reader of an older export will look for and not find. The flat
@@ -112,8 +167,7 @@ per-topic sections (`baseline`, `final`, `phase_timeline`,
 each was a projection of the run rather than a fact of it, and they now come
 out of `timeline`, whose events carry the same facts attached to the stage
 that produced them. The old combined `critic_robustness` key is absent. Critic
-activity lives under `critic`; `robustness` is retained for V6 wire compatibility
-and historical artifact readers, not as a live agent surface.
+activity lives under `critic`.
 
 How the export itself went is reported once, on `metadata.warnings`. An
 earlier shape also carried a top-level `warnings`, taken partway through the
@@ -121,7 +175,7 @@ export; it was a strict subset and so disagreed with `metadata.warnings`
 about the same export.
 
 The V6 surface is identified by
-`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"`. Startup
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.1"`. Startup
 source events are stored in execution order under `reports/sbd_v6/timeline/`;
 writer failures are reported through `metadata.warnings` rather than being
 indistinguishable from a stage that never ran.
@@ -178,7 +232,7 @@ keep their values, with any recognizable credential inside a value masked.
 Replaying a session takes credentials from its own environment, never from the
 breakdown.
 
-`metadata.grading` — which axis this session was configured to grade on:
+`metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
@@ -190,12 +244,14 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What a promotion was actually decided on
-is `outcome.validation.graded_on`, read off the promotion itself. On a session
-that promoted anything the two agree, because a comparison that cannot supply
-the configured axis pair fails rather than settling for another axis — nothing
-is ever promoted off-objective. Neither field resolves the other even so: a
-session can be configured for an axis and promote nothing on it.
+`grading.objective` is a mode marker written when the session starts: an
+interactivity session always carries `e2e_norm_intvty_p90`, which is not the
+axis promotions are decided on. The deciding axis is
+`outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
+promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
+adopted nothing has no `graded_on`; one that adopted but never validated
+reports the adoption axis.
+
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.
 
@@ -217,6 +273,8 @@ benchmark config path, attempt history (in case the baseline required
 retries), and the `BenchmarkInvocation` record needed to **replay**
 the exact baseline benchmark.
 
+Disposition: `baseline.throughput_tok_s_per_gpu` (6.0) → `baseline.output_throughput` (6.1).
+
 `baseline.invocation.framework_args_source` is one of:
 
 * `log_non_default_args`: Most authoritative (parsed from the
@@ -236,9 +294,11 @@ breakdown. Do not assume it contains every env var the session ran with.
 `baseline.perf` and `final.perf` carry the AgentX axes the measurement
 reported, each an explicit `null` where nothing measured it. Absent would
 be indistinguishable from an axis the framework failed to report, and zero
-reads as "measured, and it was zero", so a synthetic run publishes nulls
-throughout. The set is `common/perf_metric.py:GRADED_AXIS_KEYS`, which both
-publishing projections read, and it is grouped as:
+reads as "measured, and it was zero", so the AgentX-only axes stay `null`
+in a synthetic run, while `output_tput_per_gpu` carries a value whenever the
+tensor-parallel degree is known. The set is
+`common/perf_metric.py:GRADED_AXIS_KEYS`, which both publishing projections
+read, and it is grouped as:
 
 * the objective and its two guards — `e2e_norm_intvty_p50`,
   `e2e_norm_intvty_p90`, `output_tput_per_gpu`;
@@ -272,20 +332,21 @@ downstream consumers:
 
 | Field                              | Meaning                                                                                   |
 |------------------------------------|-------------------------------------------------------------------------------------------|
-| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number. See the scope note below.        |
-| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.          |
+| `output_throughput`                | Validated end-of-session output throughput. The headline number. See the scope note below. |
+| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.output_throughput`. The headline %.                   |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
 | `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
 
-> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
-> The key name is a misnomer held fixed by this contract; do not divide it by a GPU count.
+> **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
+> Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
+> Disposition: `throughput_tok_s_per_gpu` (6.0) → `output_throughput` (6.1).
 
 > Consumer best practice: index on
-> `(session.session_id, final.throughput_tok_s_per_gpu,
+> `(session.session_id, final.output_throughput,
 > final.cumulative_gain_pct_validated, workload.model_name,
 > workload.gpu_type)`. Everything else is detail.
 
@@ -302,6 +363,16 @@ the gap meaningless. Every adoption in that sum is on the named axis by
 construction — a comparison that could not supply the configured axis pair
 failed instead of being graded on another one.
 
+`outcome.variants` counts what the framework phase benched: `bench_runs`
+configuration variants and source patches, of which `kept` were adopted into
+the stack, `reverted` were measured and not adopted, and `failed` reached the
+bench without a measurement; the `distinct` changes among them; and
+`keep_rate_pct`, kept per bench run. Each attempt row says whether it reached
+the bench (`benched`), so a patch that never applied is not counted, and a
+change benched again on a later stack is one distinct change and two bench
+runs. Kernel candidates are not variants: the kernel lane reports its own
+funnel.
+
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its
 span, its `status`, and an `ext` block holding what that kind of stage
@@ -309,9 +380,7 @@ records. This is where the facts the older flat sections projected now live,
 attached to the stage that produced them.
 
 `close` is what the session settled at close: the `steps` the close sequencer
-ran and the `artifacts` it published. Its `robustness` field retains the
-`escalated` verdict and recorded `stop_reason`. Historical findings remain
-readable; new sessions do not run a Robustness agent to produce them.
+ran and the `artifacts` it published.
 
 `V6Outcome`, `V6TimelineEvent` and `V6Close` in
 `src/hyperloom/inference_optimizer/breakdown/schema.py` are the authority on
@@ -349,39 +418,23 @@ reporting either alone misreads the round.
 
 ---
 
-## `robustness`
-
-New sessions emit `{"turns": []}`. No Robustness agent, runtime RCA, monitor, or
-supervisor runs, and new report UI omits this section. The V6 key and historical
-readers remain so archived sessions can still be inspected without inventing
-activity. `close.robustness` separately retains `escalated` and `stop_reason`,
-plus any findings recorded in historical sessions.
-
-Historical `turns` rows may contain `turn_idx`, `tick_index`, `ts`, `intents`,
-`parse_warnings`, and `outcome`. In those records, `invalid_envelope` or
-`no_envelope` indicates an incomplete turn, whereas `intents` with an empty list
-indicates a completed turn with nothing raised. These are archived facts, not
-live recovery instructions.
-
----
-
 ## Worked example
 
 The following example shows a complete `session_breakdown.json` for a finished GLM-5 session.
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v6.1",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
   "metadata": {
     "exported_at_utc": "2026-05-17T14:02:15.001Z",
     "versions": {
-      "schema_version": "hyperloom.session_breakdown.v6.0",
+      "schema_version": "hyperloom.session_breakdown.v6.1",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
-      "framework_version": "0.5.21",
+      "framework_version": "0.5.22",
       "tools": {
         "geak": { "tool": "geak", "root_dir": "/opt/geak", "commit": "9f8e7d6", "version": "0.4.2" }
       }
@@ -401,8 +454,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
-      "image_id": "sglang-rocm:v0.5.21-rocm10-mi30x-20261008",
+      "image": "lmsysorg/sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
+      "image_id": "sglang-rocm:v0.5.22-rocm10-mi30x-20261022",
       "recovery": {
         "recovered": false,
         "crash_count": 0,
@@ -414,7 +467,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
     "task_config": {
       "framework_name": "sglang",
-      "framework_version": "0.5.21",
+      "framework_version": "0.5.22",
       "model_name": "GLM-5-FP8",
       "model_path": "/models/GLM-5-FP8",
       "gpu_type": "mi355x",
@@ -444,14 +497,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "stage_reached": "CLOSE",
 
     "baseline": {
-        "throughput_tok_s_per_gpu": 100.0,
+        "output_throughput": 100.0,
       "accuracy": 0.812,
       "ttft_mean_ms": 0.0,
       "e2el_mean_ms": 0.0,
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 25.0,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
@@ -486,12 +539,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
     },
 
     "final": {
-      "throughput_tok_s_per_gpu": 150.0,
+      "output_throughput": 150.0,
       "graded_on": "output_throughput",
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 37.5,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
@@ -526,7 +579,9 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "closing_phase_entered": true,
       "closing_started_unix": 1747487201.0,
       "closing_report_task_id": "t-close-final"
-    }
+    },
+
+    "variants": { "bench_runs": 12, "distinct": 10, "kept": 3, "reverted": 8, "failed": 1, "keep_rate_pct": 25.0 }
   },
 
   "timeline": [
@@ -548,8 +603,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "start_time": "2026-05-17T13:48:10Z",
     "end_time": "2026-05-17T13:58:42Z",
     "steps": [],
-    "artifacts": {},
-    "robustness": { "escalated": false, "stop_reason": "time_exhausted" }
+    "artifacts": {}
   },
 
   "critic": {
@@ -579,9 +633,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
         ]
       }
     ]
-  },
-
-  "robustness": { "turns": [] }
+  }
 }
 ```
 
@@ -614,7 +666,11 @@ The Hyperloom team commits to the following compatibility guarantees.
 1. Never removing or renaming a documented field of a result section within
    a major `schema_version`. Such changes require a major bump, as the `v5.0`
    optimization cutover did, and every removed or renamed field is given a
-   disposition in the section it left. `enablement` is outside this guarantee:
+   disposition in the section it left. The 6.1 changes (the
+   rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+   keys no producer populated, and null reporting of unmeasured
+   `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`) are a
+   declared exception to this rule, recorded under Versioning. `enablement` is outside this guarantee:
    it reports on the runtime a session built rather than on its results, is
    emitted as `{}` whenever no enablement ran, and its fields move with the
    runtime they describe — every field the round ledger replaced is still given

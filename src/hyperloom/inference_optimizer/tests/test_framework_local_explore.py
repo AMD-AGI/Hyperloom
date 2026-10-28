@@ -20,6 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
+from hyperloom.orchestrator.phases.framework import AuthoringRetry
 
 
 def test_the_capped_phases_spend_the_session_on_the_work_phases():
@@ -64,16 +65,16 @@ class _Tasks:
     async def running(self) -> list[Any]:
         return list(self._running)
 
-    async def create_or_return_existing(self, **kwargs: Any) -> tuple[Any, bool]:
-        self.created.append(kwargs)
-        key = str(kwargs.get("idempotency_key") or "")
+    async def create_or_return_existing(self, spec) -> tuple[Any, bool]:
+        self.created.append(vars(spec))
+        key = str(spec.idempotency_key or "")
         existing = self._by_idem.get(key)
         if existing is not None:
             return existing, True
         task = SimpleNamespace(
-            kind=kwargs.get("kind"),
+            kind=spec.kind,
             task_id=f"t-{len(self.created)}",
-            params=kwargs.get("params") or {},
+            params=spec.params or {},
             state="queued",
         )
         self._queued.append(task)
@@ -109,17 +110,6 @@ def _stub(tmp_path: Path, *, local_explore: bool = True) -> Coordinator:
 
 
 # --------------------------------------------------------------------------- # 3.
-def test_arm_disabled_dispatch_is_noop(tmp_path: Path):
-    """When the arm flag is off the local-explore dispatch returns empty."""
-    disabled_arm = _stub(tmp_path, local_explore=False)
-    assert disabled_arm.phase_framework._framework_local_explore_arm_enabled() is False
-
-
-def test_arm_enabled_when_flag_on(tmp_path: Path):
-    stub = _stub(tmp_path, local_explore=True)
-    assert stub.phase_framework._framework_local_explore_arm_enabled() is True
-
-
 def test_gap_compose_includes_framework_and_gpu(tmp_path: Path):
     """_compose_framework_local_explore_gap returns a gap string and keywords."""
     stub = _stub(tmp_path, local_explore=True)
@@ -244,6 +234,23 @@ def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
     assert stub.tasks.created[0]["params"]["framework_agent_candidate_id"] == "local_explore:0"
 
 
+def test_the_arm_stops_once_its_rounds_run_the_source_lever_dry(tmp_path: Path):
+    """Its round id advances on every settled round, so dryness, not a per-key retry cap, is what bounds it."""
+    from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
+
+    stub = _stub(tmp_path, local_explore=True)
+    state = stub.shared_state
+    state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    state.attempts = [
+        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "author_empty", "adopted": False, "cycle": state.macro_cycle}
+    ] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert state.framework_agent_phase_done is True
+
+
 def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     """No candidates, no discovery to be had, arm off -> the source arm is dry."""
     stub = _stub(tmp_path, local_explore=False)
@@ -288,7 +295,7 @@ def test_forward_enablement_carriers_boot_origin_noop():
 def test_dispatched_verdict_reaches_the_integrate_task():
     """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
     from hyperloom.common.failure_signature import classify_failure
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _enablement_gap
+    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
     from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")
@@ -298,6 +305,16 @@ def test_dispatched_verdict_reaches_the_integrate_task():
     gap = _enablement_gap(dst)
     assert gap is not None
     assert gap.kind == "missing_model_arch"
+
+
+def test_a_resource_constraint_verdict_acquires_no_code():
+    """An OOM is the host being too small, so the integrate task has no gap to acquire code for."""
+    from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, classify_failure
+    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
+
+    signature = classify_failure("RuntimeError: Out of memory on GPU. Tried to allocate 80 GiB")
+    assert signature.kind == RESOURCE_CONSTRAINT
+    assert _enablement_gap({"enablement": True, "enablement_failure_signature": signature.to_dict()}) is None
 
 
 # --------------------------------------------------------------------------- # Stage-3 guard: local_explore gap is
@@ -362,6 +379,20 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     # Budget spent: the lane declines so the rungs below it are reachable.
     stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+
+
+def test_a_discovery_specialist_orchestration_dispatched_does_not_hold_back_the_phase_round(tmp_path: Path):
+    """Only rounds this phase dispatched are harvested into the pool, so only they make the next round wait."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.tasks._queued.append(
+        SimpleNamespace(
+            kind="specialist", task_id="o-1", params={"domain": "candidate_discovery_specialist"}, state="queued"
+        )
+    )
+
+    assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+    assert len(stub.tasks.created) == 1
+    assert stub.tasks.created[0]["params"]["candidate_discovery"] is True
 
 
 def test_a_failed_discovery_round_is_not_an_empty_one(tmp_path: Path):
@@ -471,9 +502,13 @@ async def test_an_apply_retry_is_scoped_to_the_cycle_that_queued_it(tmp_path: Pa
     """The gap id and the attempt number both repeat across macro-cycles."""
     stub = _stub(tmp_path, local_explore=True)
 
-    await stub.phase_framework._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    await stub.phase_framework._enqueue_author_specialist(
+        AuthoringRetry(lane="perf_explore", specialist_task_id="t-spec")
+    )
     stub.shared_state.macro_cycle = 2
-    await stub.phase_framework._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    await stub.phase_framework._enqueue_author_specialist(
+        AuthoringRetry(lane="perf_explore", specialist_task_id="t-spec")
+    )
 
     keys = [c["idempotency_key"] for c in stub.tasks.created]
     assert len(set(keys)) == 2
@@ -509,22 +544,25 @@ def test_the_arms_deliverable_decides_its_lever():
     from hyperloom.orchestrator.lever import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
+        patch_lever_kind,
     )
-    from hyperloom.orchestrator.state.attempt_ledger import record_patch_attempt
+    from hyperloom.orchestrator.state.attempt_ledger import AttemptRow, record_attempt_row
 
     def _lever(**deliverable: Any) -> str:
         state = SharedState()
-        record_patch_attempt(
+        evidence = {"framework_agent_candidate_id": "local_explore:0", **deliverable}
+        record_attempt_row(
             state,
-            task_id="t-1",
-            specialist_task_id="spec-1",
-            outcome="reverted",
-            adopted=False,
-            gain_pct=None,
-            before_tput=5000.0,
-            after_tput=4900.0,
-            error_class="",
-            evidence={"framework_agent_candidate_id": "local_explore:0", **deliverable},
+            AttemptRow(
+                lever_kind=patch_lever_kind(evidence),
+                task_id="t-1",
+                specialist_task_id="spec-1",
+                outcome="reverted",
+                adopted=False,
+                gain_pct=None,
+                before_tput=5000.0,
+                after_tput=4900.0,
+            ),
         )
         return str(state.attempts[0]["lever_kind"])
 

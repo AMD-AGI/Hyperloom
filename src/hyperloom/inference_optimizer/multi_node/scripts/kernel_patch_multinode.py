@@ -264,7 +264,7 @@ def _do_apply(args: argparse.Namespace) -> int:
             res = ray.get(ref, timeout=args.timeout_sec)
             per_node.append({"node_id": short_id, **res})
             successful_nodes.append((node_id, res))
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
             _log(f"node {short_id}: apply FAILED: {type(exc).__name__}: {exc}")
             failures.append({"node_id": short_id, "error": str(exc), "error_class": type(exc).__name__})
 
@@ -286,7 +286,8 @@ def _do_apply(args: argparse.Namespace) -> int:
         for node_id, ref in rollback_refs:
             try:
                 rollback.append({"node_id": node_id[:16], **ray.get(ref, timeout=args.timeout_sec)})
-            except Exception as exc:  # noqa: BLE001
+            except (ray.exceptions.RayError, OSError) as exc:
+                _log(f"node {node_id[:16]}: rollback FAILED: {type(exc).__name__}: {exc}")
                 rollback.append(
                     {
                         "node_id": node_id[:16],
@@ -397,7 +398,7 @@ def _do_revert(args: argparse.Namespace) -> int:
         try:
             res = ray.get(ref, timeout=args.timeout_sec)
             per_node.append({"host": host, **res})
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
             _log(f"host {host}: revert FAILED: {type(exc).__name__}: {exc}")
             failures.append({"host": host, "error": str(exc), "error_class": type(exc).__name__})
 
@@ -454,7 +455,8 @@ def _do_finalize(args: argparse.Namespace) -> int:
     for host, ref in refs:
         try:
             per_node.append({"host": host, **ray.get(ref, timeout=args.timeout_sec)})
-        except Exception as exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as exc:
+            _log(f"host {host}: finalize FAILED: {type(exc).__name__}: {exc}")
             failures.append({"host": host, "error": str(exc)})
     payload = {
         "command": "finalize",

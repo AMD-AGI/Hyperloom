@@ -10,10 +10,11 @@ from dataclasses import replace
 import pytest
 
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
-from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
+    CampaignInputs,
     create_campaign_config,
     derive_campaign_implementation_contract,
     detect_gpu_target,
@@ -21,7 +22,8 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
-from kernelforge.llm.git import GitError
+from kernelforge.loop.agent_relay import AgentProfileSpec, AgentRelayPolicy
+from kernelforge.tools.git import GitError
 
 
 def _git_workspace(tmp_path, name="workspace"):
@@ -68,13 +70,15 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[str(kernel), str(helper)],
-        program_md_file=str(program),
-        operator_name="fused",
-        gpu_type="MI300X",
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel),
+            driver=str(driver),
+            source_files=",".join([str(kernel), str(helper)]),
+            program_md_file=str(program),
+            operator_name="fused",
+            gpu_type="MI300X",
+        ),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(config, program_md=program.read_text())
@@ -100,6 +104,28 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     assert store.read_program_md(loaded) == program.read_text()
 
 
+def test_campaign_persists_the_relay_policy_but_no_model(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    relay = AgentRelayPolicy(
+        primary_profile_id="claude",
+        profiles=(AgentProfileSpec("claude", "claude"), AgentProfileSpec("codex", "codex")),
+    )
+
+    config = create_campaign_config(
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files=str(kernel), agent_relay=relay),
+    )
+    store = CampaignConfigStore(str(workspace))
+    store.save(config)
+
+    assert store.load().agent_relay == relay
+    assert list(config.to_dict()["agent_relay"]["profiles"]) == [
+        {"profile_id": "claude", "provider": "claude"},
+        {"profile_id": "codex", "provider": "codex"},
+    ]
+
+
 def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeypatch):
     """The address must not move when the loop writes its first GPU kernel."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path, "eager")
@@ -111,13 +137,15 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[str(kernel)],
-        program_md_file=str(program),
-        target_functions=["dynamic_quant"],
-        kernel_backend="triton",
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel),
+            driver=str(driver),
+            source_files=",".join([str(kernel)]),
+            program_md_file=str(program),
+            target_functions=",".join(["dynamic_quant"]),
+            kernel_backend="triton",
+        ),
     )
 
     assert config.operator_name == "dynamic_quant"
@@ -132,13 +160,15 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
 
     def address(source: str) -> str:
         identity, _op, _fw = resolve_loop_identity(
-            kernel_path=str(kernel),
-            kernel_source=source,
-            kernel_backend="triton",
+            LoopKernel(
+                kernel_path=str(kernel),
+                kernel_backend="triton",
+                kernel_source=source,
+                target_functions=list(config.target_functions),
+                framework=config.framework,
+                operator_name=config.operator_name,
+            ),
             gpu_type="mi355x",
-            target_functions=list(config.target_functions),
-            framework=config.framework,
-            operator_name=config.operator_name,
         )
         return kernel_recipe_canonical_id(identity)
 
@@ -166,11 +196,7 @@ def test_campaign_infers_direct_source_owner_before_signature(tmp_path, monkeypa
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
 
     assert config.framework == "vllm"
@@ -192,11 +218,10 @@ def test_campaign_infers_owner_from_cross_package_defining_file(
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(anchor),
-        driver=str(driver),
-        source_files=[str(defining)],
-        program_md_file=None,
+        str(workspace),
+        CampaignInputs(
+            kernel=str(anchor), driver=str(driver), source_files=",".join([str(defining)]), program_md_file=None
+        ),
     )
 
     assert config.framework == "aiter"
@@ -217,12 +242,8 @@ def test_campaign_explicit_framework_overrides_defining_path(
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-        framework="vllm",
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, framework="vllm"),
     )
 
     assert config.framework == "vllm"
@@ -237,11 +258,7 @@ def test_campaign_persists_unknown_when_source_owner_is_unrecognized(
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     store = CampaignConfigStore(str(workspace))
     store.save(config)
@@ -265,19 +282,17 @@ def test_fresh_campaign_rejects_tracked_changes_before_recording_base(
 
     with pytest.raises(ValueError, match="uncommitted tracked changes"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[str(helper)],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel), driver=str(driver), source_files=",".join([str(helper)]), program_md_file=None
+            ),
         )
     with pytest.raises(ValueError, match="uncommitted tracked changes"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[str(helper)],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel), driver=str(driver), source_files=",".join([str(helper)]), program_md_file=None
+            ),
             base_commit="legacy-base",
         )
 
@@ -293,11 +308,8 @@ def test_program_context_must_match_persisted_digest(
     program.write_text("# Optimize fused kernel\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=str(program),
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=str(program)),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(config, program_md=program.read_text())
@@ -315,11 +327,7 @@ def test_store_rejects_replacing_immutable_campaign_config(tmp_path, monkeypatch
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     store = CampaignConfigStore(str(workspace))
     store.save(config)
@@ -341,11 +349,7 @@ def test_store_rejects_unknown_campaign_fields(tmp_path, monkeypatch):
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     store = CampaignConfigStore(str(workspace))
     store.root.mkdir()
@@ -402,12 +406,10 @@ def test_create_campaign_falls_back_from_unsupported_kernel_backend(
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-        kernel_backend=kernel_backend,
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, kernel_backend=kernel_backend
+        ),
     )
 
     assert config.kernel_backend == "flydsl"
@@ -423,11 +425,10 @@ def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(external),
-        source_files=[str(kernel)],
-        program_md_file=None,
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel), driver=str(external), source_files=",".join([str(kernel)]), program_md_file=None
+        ),
     )
 
     assert config.driver_path == external.resolve().as_posix()
@@ -444,11 +445,13 @@ def test_missing_external_driver_still_fails(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="driver is not a file"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(tmp_path / "nope" / "driver.py"),
-            source_files=[str(kernel)],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel),
+                driver=str(tmp_path / "nope" / "driver.py"),
+                source_files=",".join([str(kernel)]),
+                program_md_file=None,
+            ),
         )
 
 
@@ -462,11 +465,13 @@ def test_external_source_file_is_still_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="source file must be inside workspace"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[str(kernel), str(outside)],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel),
+                driver=str(driver),
+                source_files=",".join([str(kernel), str(outside)]),
+                program_md_file=None,
+            ),
         )
 
 
@@ -476,11 +481,7 @@ def _campaign_payload(tmp_path, monkeypatch, name="payload"):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     return config.to_dict()
 
@@ -593,11 +594,8 @@ def test_save_refuses_to_bind_the_wrong_program_context(
     program.write_text("# Optimize fused kernel\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=str(program),
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=str(program)),
     )
     store = CampaignConfigStore(str(workspace))
     if preexisting is not None:
@@ -622,11 +620,7 @@ def test_read_program_md_rejects_a_path_escaping_the_workspace(
     outside.write_text("# Elsewhere\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     escaping = replace(
         config,
@@ -724,11 +718,8 @@ def test_fresh_campaign_requires_a_development_branch(tmp_path, monkeypatch, bra
 
     with pytest.raises(ValueError, match="non-main development branch"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None),
         )
 
 
@@ -743,12 +734,10 @@ def test_fresh_campaign_rejects_a_meaningless_snr_threshold(
 
     with pytest.raises(ValueError, match="positive finite float"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[],
-            program_md_file=None,
-            snr_threshold=threshold,
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel), driver=str(driver), snr_threshold=threshold, source_files="", program_md_file=None
+            ),
         )
 
 
@@ -761,11 +750,13 @@ def test_fresh_campaign_rejects_a_program_context_that_is_not_a_file(
 
     with pytest.raises(ValueError, match="program context is not a file"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[],
-            program_md_file=str(tmp_path / "absent-program.md"),
+            str(workspace),
+            CampaignInputs(
+                kernel=str(kernel),
+                driver=str(driver),
+                source_files="",
+                program_md_file=str(tmp_path / "absent-program.md"),
+            ),
         )
 
 
@@ -776,29 +767,23 @@ def test_workspace_relative_inputs_resolve_like_absolute_ones(tmp_path, monkeypa
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     relative = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel="src/kernel.py",
-        driver="driver.py",
-        source_files=["src/helper.py"],
-        program_md_file=None,
+        str(workspace),
+        CampaignInputs(
+            kernel="src/kernel.py", driver="driver.py", source_files=",".join(["src/helper.py"]), program_md_file=None
+        ),
     )
     absolute = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[str(helper)],
-        program_md_file=None,
+        str(workspace),
+        CampaignInputs(
+            kernel=str(kernel), driver=str(driver), source_files=",".join([str(helper)]), program_md_file=None
+        ),
     )
 
     assert relative == absolute
     assert relative.source_files == ["src/kernel.py", "src/helper.py"]
     with pytest.raises(ValueError, match="kernel is not a file"):
         create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel="src",
-            driver="driver.py",
-            source_files=[],
-            program_md_file=None,
+            str(workspace), CampaignInputs(kernel="src", driver="driver.py", source_files="", program_md_file=None)
         )
 
 
@@ -847,11 +832,7 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     # The loop does its job and rewrites the kernel under a brand-new symbol.
     kernel.write_text("import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n")
@@ -883,11 +864,7 @@ def test_an_unreachable_base_commit_is_not_signed_as_pristine(tmp_path, monkeypa
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     kernel.write_text("import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n")
 

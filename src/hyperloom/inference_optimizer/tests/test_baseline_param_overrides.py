@@ -20,9 +20,13 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_config_with_envs,
+    BenchmarkTarget,
+    LaunchLayer,
+    MaterializeOptions,
 )
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
+    _with_cuda_graph_disabled,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -144,9 +148,9 @@ def test_materialize_config_with_envs_pins_benchmark_script_after_gpu_pop(
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/DeepSeek-R1",
-        gpu_type="mi300x",
-        benchmark_script="sglang_mi300x.sh",
+        target=BenchmarkTarget(
+            model_path="/path/models/DeepSeek-R1", gpu_type="mi300x", benchmark_script="sglang_mi300x.sh"
+        ),
     )
     cfg = yaml.safe_load(materialized.read_text())
     # Override re-pins benchmark_script after the gpu_type pop.
@@ -164,7 +168,7 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        gpu_type="mi300x",
+        target=BenchmarkTarget(gpu_type="mi300x"),
     )
     cfg = yaml.safe_load(materialized.read_text())
     # framework in the _write_yaml fixture is "sglang".
@@ -180,7 +184,9 @@ def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypa
     _write_yaml(base, framework="vllm")
     out = tmp_path / "out"
     out.mkdir()
-    envs = yaml.safe_load(materialize_config_with_envs(base, out, gpu_type="mi355x").read_text())["benchmark"]["envs"]
+    envs = yaml.safe_load(
+        materialize_config_with_envs(base, out, target=BenchmarkTarget(gpu_type="mi355x")).read_text()
+    )["benchmark"]["envs"]
     assert envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
 
 
@@ -194,8 +200,7 @@ def test_kimi_materialize_enables_remote_client_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/path/models/moonshotai-Kimi-K2.6",
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path="/path/models/moonshotai-Kimi-K2.6", gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -226,8 +231,7 @@ def test_custom_tokenizer_auto_map_enables_client_and_server_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path=str(model),
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path=str(model), gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -251,8 +255,7 @@ def test_qwen36_materialize_enables_client_and_server_trust(tmp_path):
         materialized = materialize_config_with_envs(
             base,
             out,
-            model_path="/path/models/Qwen-Qwen3.6-35B-A3B",
-            gpu_type="mi300x",
+            target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3.6-35B-A3B", gpu_type="mi300x"),
         )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -309,9 +312,8 @@ def test_materialize_dedups_duplicate_vllm_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/Qwen-Qwen3-8B",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend ROCM_FLASH",
+        launch=LaunchLayer(extra_server_args="--attention-backend ROCM_FLASH"),
+        target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3-8B", gpu_type="mi300x"),
     )
     vllm_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
 
@@ -336,9 +338,8 @@ def test_materialize_keeps_sglang_repeated_attention_backend(tmp_path):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/Qwen-Qwen3-8B",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend triton",
+        launch=LaunchLayer(extra_server_args="--attention-backend triton"),
+        target=BenchmarkTarget(model_path="/path/models/Qwen-Qwen3-8B", gpu_type="mi300x"),
     )
     sglang_args = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
 
@@ -567,8 +568,25 @@ def test_baseline_eager_fallback_records_effective_task_args(tmp_path):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert "--enforce-eager" in ctx.task.params["extra_server_args"]
+    assert "--compilation-config.cudagraph_mode NONE" in ctx.task.params["extra_server_args"]
     assert shared_state.baseline_eager_fallback is False
+
+
+def test_baseline_eager_fallback_save_failure_is_not_reported_as_unarmed(tmp_path, monkeypatch):
+    shared_state = SharedState(baseline_eager_fallback=True, model_path="/models/qwen")
+
+    def _disk_full(session_dir):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(shared_state, "save", _disk_full)
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=tmp_path / "base.yaml",
+        session_dir=tmp_path,
+        shared_state=shared_state,
+    )
+    with pytest.raises(OSError, match="No space left on device"):
+        executor._consume_eager_fallback(shared_state)
 
 
 def test_baseline_executor_falls_back_to_shared_state_model_path(tmp_path, monkeypatch):
@@ -690,7 +708,10 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
-    monkeypatch.setenv("INFERENCEX_PATH", "/path/hyperloom/InferenceX")
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
     base = tmp_path / "base.yaml"
     _write_yaml(base)
     output_dir = tmp_path / "ws"
@@ -710,14 +731,17 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == ("/path/hyperloom/InferenceX"), (
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == str(inferencex), (
         "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie loads the patched checkout (#210 root cause)"
     )
 
@@ -816,8 +840,7 @@ def test_reference_base_seeds_lowest_priority(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     assert "--block-size 128" in args
@@ -840,9 +863,8 @@ def test_reference_base_reaches_a_caller_that_renders_its_own_yaml(tmp_path, mon
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        out_name="explore_base.with_envs.yaml",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
+        options=MaterializeOptions(out_name="explore_base.with_envs.yaml"),
     )
 
     assert "--enable-prefix-caching" in _fw_args(materialized)
@@ -861,9 +883,8 @@ def test_reference_base_extra_args_override_wins(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_server_args="--attention-backend ROCM_FLASH",
+        launch=LaunchLayer(extra_server_args="--attention-backend ROCM_FLASH"),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     # reference-only flag survives
@@ -885,9 +906,8 @@ def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path, mon
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97",
+        launch=LaunchLayer(extra_server_args="--kv-cache-dtype fp8 --gpu-memory-utilization 0.97"),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     args = _fw_args(materialized)
     assert args.count("--gpu-memory-utilization") == 1
@@ -905,9 +925,8 @@ def test_reference_envs_do_not_clobber_existing(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+        launch=LaunchLayer(extra_envs={"VLLM_ROCM_USE_AITER": "1"}),
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
     )
     envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
     # extra_envs (CLI) wins over reference; the new reference key still lands.
@@ -926,9 +945,90 @@ def test_no_reference_recipe_is_a_no_op(tmp_path, monkeypatch):
     materialized = materialize_config_with_envs(
         base,
         out,
-        model_path="/path/models/X",
-        gpu_type="mi300x",
-        out_name="x.yaml",
+        target=BenchmarkTarget(model_path="/path/models/X", gpu_type="mi300x"),
+        options=MaterializeOptions(out_name="x.yaml"),
     )
 
     assert _fw_args(materialized) == ""
+
+
+class TestWithCudaGraphDisabled:
+    """Turning capture off must not cost the operator the rest of their compilation config.
+
+    vLLM merges every dotted ``--compilation-config.<field>`` into one dict and appends it to
+    argv last, so a dotted arg replaces a JSON-form ``--compilation-config`` outright.
+    """
+
+    @pytest.mark.parametrize(
+        "args,expected",
+        [
+            ("", "--compilation-config.cudagraph_mode NONE"),
+            (
+                "--max-model-len 4096",
+                "--max-model-len 4096 --compilation-config.cudagraph_mode NONE",
+            ),
+            # The capture modes grid variants and KEEP candidates actually carry.
+            (
+                '--compilation-config {"cudagraph_mode":"FULL"}',
+                '--compilation-config {"cudagraph_mode":"NONE"}',
+            ),
+            (
+                '--compilation-config={"cudagraph_mode":"PIECEWISE"}',
+                '--compilation-config={"cudagraph_mode":"NONE"}',
+            ),
+            # Every sibling field survives the merge.
+            (
+                '--compilation-config {"level":3,"cudagraph_mode":"FULL","cudagraph_capture_sizes":[1,2]}',
+                '--compilation-config {"level":3,"cudagraph_mode":"NONE","cudagraph_capture_sizes":[1,2]}',
+            ),
+            (
+                '--compilation-config {"cudagraph_capture_sizes":[17,34]} --port 8888',
+                '--compilation-config {"cudagraph_capture_sizes":[17,34],"cudagraph_mode":"NONE"} --port 8888',
+            ),
+            # Dotted args merge with each other, so appending is safe there.
+            (
+                "--compilation-config.level 3",
+                "--compilation-config.level 3 --compilation-config.cudagraph_mode NONE",
+            ),
+            ("--compilation-config.cudagraph_mode FULL", "--compilation-config.cudagraph_mode NONE"),
+            ("--compilation-config.cudagraph_mode=FULL", "--compilation-config.cudagraph_mode=NONE"),
+        ],
+    )
+    def test_vllm_capture_is_disabled_without_dropping_fields(self, args, expected):
+        assert _with_cuda_graph_disabled(args, "vllm") == expected
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            '--compilation-config {"cudagraph_mode":"NONE"}',
+            "--compilation-config.cudagraph_mode NONE",
+            # --enforce-eager forces cudagraph_mode=NONE in vLLM, so capture is already off.
+            '--enforce-eager --compilation-config {"level":3}',
+        ],
+    )
+    def test_vllm_leaves_already_captureless_args_alone(self, args):
+        assert _with_cuda_graph_disabled(args, "vllm") == args
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            "",
+            "--max-model-len 4096",
+            '--compilation-config {"cudagraph_mode":"FULL"}',
+            "--compilation-config.level 3",
+            '--compilation-config {"level":3} --compilation-config.cudagraph_mode FULL',
+        ],
+    )
+    def test_is_idempotent(self, args):
+        once = _with_cuda_graph_disabled(args, "vllm")
+        assert _with_cuda_graph_disabled(once, "vllm") == once
+
+    def test_sglang_flag_is_appended_once(self):
+        assert _with_cuda_graph_disabled("", "sglang") == "--disable-cuda-graph"
+        assert _with_cuda_graph_disabled("--disable-cuda-graph", "sglang") == "--disable-cuda-graph"
+
+    def test_sglang_longer_flag_is_not_mistaken_for_the_flag(self):
+        assert (
+            _with_cuda_graph_disabled("--disable-cuda-graph-extra", "sglang")
+            == "--disable-cuda-graph-extra --disable-cuda-graph"
+        )

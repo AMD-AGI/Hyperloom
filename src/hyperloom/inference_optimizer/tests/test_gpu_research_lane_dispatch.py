@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -25,6 +25,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
 
     state = SharedState(session_id="ws2-lane")
     state.gpu_specialist_capacity = gpu_capacity
+    state.phase = "FRAMEWORK_AGENT"  # where the orchestrator may delegate a specialist
     state.save(tmp_path)
 
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -33,7 +34,7 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -73,7 +74,7 @@ async def test_needs_gpu_specialist_acquires_gpu_research_lane(tmp_path):
     # TTL re-sourced to the time left on the specialist deadline × (1 + grace).
     budget = coord.dispatcher._specialist_wall_budget_sec(params={"needs_gpu": True})
     assert task.lease_ttl_sec == pytest.approx(max(1800, int(budget * (1.0 + GPU_LEASE_TTL_GRACE))), abs=2)
-    # Iron law: the lane TTL outlives the kill the reaper performs at the deadline.
+    # The lane TTL covers the specialist's deadline.
     assert task.lease_ttl_sec >= int(budget)
 
 

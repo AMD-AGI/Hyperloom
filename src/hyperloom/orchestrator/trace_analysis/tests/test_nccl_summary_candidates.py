@@ -19,7 +19,6 @@ from hyperloom.orchestrator.trace_analysis._nccl_summary_candidates import (
     collective_symbol,
     extract_collective_candidates,
     index_device_symbols,
-    locate_device_symbol,
 )
 
 
@@ -64,6 +63,11 @@ class CollectiveSymbolTests(unittest.TestCase):
         self.assertEqual(collective_symbol("   "), "")
 
 
+def _locate_device_symbol(symbol: str, roots: list[str]) -> tuple[str, int, str] | None:
+    index, _ = index_device_symbols([symbol], roots)
+    return index.get(symbol)
+
+
 class SymbolLocationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -83,7 +87,7 @@ class SymbolLocationTests(unittest.TestCase):
             "__global__ void cross_device_reduce_2stage_naive(RankData* d) {}\n"
             "__global__ void cross_device_reduce_2stage(RankData* d) {}\n",
         )
-        located = locate_device_symbol("cross_device_reduce_2stage", [str(self.root)])
+        located = _locate_device_symbol("cross_device_reduce_2stage", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertEqual(located[1], 2)
@@ -94,7 +98,7 @@ class SymbolLocationTests(unittest.TestCase):
             "include/k.cuh",
             "__global__ void __launch_bounds__(512, 1)\n    my_collective(int* p) {}\n",
         )
-        located = locate_device_symbol("my_collective", [str(self.root)])
+        located = _locate_device_symbol("my_collective", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertEqual(located[1], 2)
@@ -102,24 +106,24 @@ class SymbolLocationTests(unittest.TestCase):
     def test_global_definition_preferred_over_call_site(self) -> None:
         self._write("a/call.cu", "void host() { my_collective(p); }\n")
         self._write("b/def.cuh", "__global__ void my_collective(int* p) {}\n")
-        located = locate_device_symbol("my_collective", [str(self.root)])
+        located = _locate_device_symbol("my_collective", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertTrue(located[0].endswith("def.cuh"))
 
     def test_call_site_is_not_a_device_definition(self) -> None:
         self._write("a/call.cu", "void host() { my_collective(p); }\n")
-        self.assertIsNone(locate_device_symbol("my_collective", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("my_collective", [str(self.root)]))
 
     def test_unknown_symbol_returns_none(self) -> None:
         self._write("a/def.cuh", "__global__ void other(int* p) {}\n")
-        self.assertIsNone(locate_device_symbol("missing_kernel", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("missing_kernel", [str(self.root)]))
 
     def test_empty_symbol_returns_none(self) -> None:
-        self.assertIsNone(locate_device_symbol("", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("", [str(self.root)]))
 
     def test_missing_root_is_skipped(self) -> None:
-        self.assertIsNone(locate_device_symbol("x", [str(self.root / "nope")]))
+        self.assertIsNone(_locate_device_symbol("x", [str(self.root / "nope")]))
 
     def test_multiple_symbols_read_each_source_once(self) -> None:
         """One index pass must not reread a file for each requested symbol."""
@@ -224,6 +228,12 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "__global__ void cross_device_reduce_2stage(RankData* d) {}\n"
         )
         self.addCleanup(self._tmp.cleanup)
+        aiter_root = unittest.mock.patch(
+            "hyperloom.orchestrator.trace_analysis._collective_candidates_inject._aiter_csrc_root",
+            return_value=str(self.src_root),
+        )
+        aiter_root.start()
+        self.addCleanup(aiter_root.stop)
 
     def _write_metrics(self, payload: object) -> None:
         (self.tl / "category_data" / "multi_kernel_metrics.json").write_text(json.dumps(payload))
@@ -306,20 +316,19 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_main_flow_injection_skips_candidate_without_workload(self) -> None:
         """A source-only summary row is not a runnable candidate."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         existing = [{"name": "compute_kernel", "duration_us": 1000.0}]
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(out, existing)
 
     def test_nonmatching_workload_shapes_are_not_borrowed_by_default(self) -> None:
         """A different all-reduce row must not supply an unobserved workload."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         donor = {
@@ -336,7 +345,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, [donor])
@@ -345,7 +353,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self,
     ) -> None:
         """A resolved row must not hide that another symbol exceeded the cap."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         (self.src_root / "include" / "late.cuh").write_text("__global__ void late_collective(int* p) {}\n")
         self._write_metrics(
@@ -371,7 +379,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [exact],
-                source_roots=[str(self.src_root)],
                 health_warnings=warnings,
             )
 
@@ -385,7 +392,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_a_skipped_injection_is_reported_as_a_trace_health_warning(self) -> None:
         """A dirty summary must not look like a workload with no collective."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary(total_time_ms="not-a-number"))
         warnings: list[dict] = []
@@ -393,7 +400,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             [{"name": "compute_kernel", "duration_us": 1000.0}],
-            source_roots=[str(self.src_root)],
             health_warnings=warnings,
         )
 
@@ -404,16 +410,15 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_injection_without_a_source_root_is_also_reported(self) -> None:
         """The other skip path needs the same visibility."""
-        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+        from hyperloom.orchestrator.trace_analysis import _collective_candidates_inject as collective_candidates_inject
 
         self._write_metrics(self._summary())
         warnings: list[dict] = []
 
-        with unittest.mock.patch.object(tla, "_aiter_csrc_root", return_value=""):
-            tla._inject_collective_candidates(
+        with unittest.mock.patch.object(collective_candidates_inject, "_aiter_csrc_root", return_value=""):
+            collective_candidates_inject._inject_collective_candidates(
                 self.tl,
                 [],
-                source_roots=[],
                 health_warnings=warnings,
             )
 
@@ -424,7 +429,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_opt_in_attaches_unique_all_reduce_workload(self) -> None:
         """The compatibility flag permits explicitly requested shape inference."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         donor = {
@@ -440,7 +445,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 2)
@@ -457,7 +461,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_opt_in_merges_one_profiled_workload_family(self) -> None:
         """Opted-in prefill and decode rows remain separate driver cases."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         donors = [
@@ -482,7 +486,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 3)
@@ -503,7 +506,7 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_main_flow_injection_rejects_ambiguous_workload_families(self) -> None:
         """Unrelated all-reduce wrappers must not donate an arbitrary shape."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         donors = [
@@ -526,14 +529,13 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, donors)
 
     def test_main_flow_isolates_invalid_summary(self) -> None:
         """Invalid NCCL metrics must not abort the full trace analysis."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         (self.tl / "category_data" / "multi_kernel_metrics.json").write_text("{not json")
         existing = [{"name": "compute_kernel", "duration_us": 1000.0}]
@@ -542,7 +544,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
             log_path=log_path,
         )
 
@@ -551,14 +552,13 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
 
     def test_main_flow_injection_merges_exact_candidate(self) -> None:
         """Exact trace rows receive source metadata without duplication."""
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _inject_collective_candidates
+        from hyperloom.orchestrator.trace_analysis._collective_candidates_inject import _inject_collective_candidates
 
         self._write_metrics(self._summary())
         existing = [{"name": AITER_2STAGE, "duration_us": 1000.0}]
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["name"], AITER_2STAGE)
@@ -570,7 +570,7 @@ class CollectiveContractTests(unittest.TestCase):
     """The contract must name all-reduce semantics for aiter's custom kernels."""
 
     def setUp(self) -> None:
-        from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _enrich_kernel_contract
+        from hyperloom.orchestrator.trace_analysis._kernel_roofline import _enrich_kernel_contract
 
         self.enrich = _enrich_kernel_contract
 

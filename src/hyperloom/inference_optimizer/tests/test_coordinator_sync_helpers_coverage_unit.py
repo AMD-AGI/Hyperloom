@@ -15,6 +15,10 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    workload_kb_tags,
+)
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
 def _heartbeat() -> Intent:
@@ -95,6 +99,46 @@ def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinato
     assert ample.remaining() < fresh.remaining()
 
 
+def _phase_with_minutes_left(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, phase: str, minutes: float) -> None:
+    from hyperloom.orchestrator.phases import machine_state
+
+    coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes * 60.0)
+
+
+def test_a_specialist_dispatched_in_a_gated_phase_stops_at_the_phase_end(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither its dispatch deadline nor a later lease extension carries a specialist past its phase's end."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.specialists import wall_budget
+
+    _phase_with_minutes_left(coord, monkeypatch, "FRAMEWORK_AGENT", 15)
+    task = SimpleNamespace(task_id="spec-phase-end", kind="specialist", params={"mode": "patch"})
+
+    context = coord.dispatcher._dispatch_context(task)
+
+    try:
+        assert context["specialist_deadline"].remaining() == pytest.approx(15 * 60, abs=2)
+        assert wall_budget.grant_wall_budget_extension(task.task_id, 600) == 0.0
+    finally:
+        wall_budget.limit_wall_budget_extension(task.task_id, None)
+        wall_budget.clear_wall_budget_extension(task.task_id)
+
+
+def test_a_specialist_is_admitted_when_its_shortest_run_fits_the_phase(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission asks for a mode's base budget, not the full wall budget the dispatch then tightens."""
+    _phase_with_minutes_left(coord, monkeypatch, "FRAMEWORK_AGENT", 30)
+
+    assert coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "research"}) is None
+    denied = coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "patch"})
+    assert denied is not None and denied.rule == "phase_time_budget"
+
+
 # -- GPU lease TTL re-source + structured-finally release -------------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); lease must outlive the kill.
@@ -130,10 +174,7 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     sentinel_lease = object()
     out = asyncio.run(
         coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=sentinel_lease,
+            _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
         )
     )
     assert out == "RESULT"
@@ -165,10 +206,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
             coord.dispatcher.run_task_registered(
-                _Task(),
-                prebound_lease=None,
-                extra_context={},
-                gpu_lease=sentinel_lease,
+                _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
             )
         )
     # lease released via finally even though run_task raised.
@@ -195,12 +233,7 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.sub.run_task = _fake_run_task
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
-        coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=None,
-        )
+        coord.dispatcher.run_task_registered(_Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={})
     )
     assert out == "CPU"
     assert called == []  # no GPU lease → release never called
@@ -500,6 +533,7 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
 
 
 def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
+    """The whole tag dict, because these keys are the warm-start reader's filter."""
     monkeypatch.delenv("EP", raising=False)
     monkeypatch.delenv("PP", raising=False)
     ss = coord.shared_state
@@ -508,57 +542,106 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     ss.model_name = "Qwen3-32B"
     ss.precision = "fp8"
     ss.tp = 8
+    ss.ep = 4
     ss.conc = 64
-    tags = coord.recipe_journal._collect_workload_tags()
-    assert tags["framework"] == "sglang"
-    assert tags["model_class"] == "moe"
-    assert tags["tp"] == 8
-    assert tags["conc"] == 64
-    assert tags["precision"] == "fp8"
+    ss.isl = 1024
+    ss.osl = 128
+    ss.max_model_len = 8192
+    ss.stack_fingerprint_meta = {
+        "sglang": "0.4.6",
+        "rocm": "6.3.1",
+        "aiter": "0.1.2",
+        "image_digest": "sha256:abc",
+    }
+    ss.baseline_workload_extra = {
+        "max_running_requests": 256,
+        "max_num_seqs": 128,
+        # A disabled toggle is a tag, not an absence.
+        "chunked_prefill_enabled": False,
+        "enable_torch_compile": True,
+        "quant_scheme": "  fp8_block  ",
+        "workload_mode": "serving",
+    }
+
+    assert workload_kb_tags(coord.shared_state) == {
+        "framework": "sglang",
+        "model_class": "moe",
+        "model_name": "Qwen3-32B",
+        "precision": "fp8",
+        "tp": 8,
+        "ep": 4,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 128,
+        "max_model_len": 8192,
+        "framework_version": "0.4.6",
+        "rocm_version": "6.3.1",
+        "aiter_version": "0.1.2",
+        "image_digest": "sha256:abc",
+        "max_running_requests": 256,
+        "max_num_seqs": 128,
+        "chunked_prefill_enabled": False,
+        "enable_torch_compile": True,
+        "quant_scheme": "fp8_block",
+        "workload_mode": "serving",
+    }
 
 
-def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
+def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(coord: Coordinator, monkeypatch) -> None:
+    """``$EP`` is the legacy-SDK fallback; ``$PP`` is the only source there is for ``pp``."""
+    monkeypatch.setenv("EP", "2")
+    monkeypatch.setenv("PP", " 3 ")
     ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k1": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.3,
-            "last_source_file": "a.py",
-            "last_artifact_path": "a.so",
-        },
-        "k2": {"last_decision": "REVERT", "last_micro_speedup": 1.1},
+    ss.ep = 8
+
+    tags = workload_kb_tags(coord.shared_state)
+    assert tags["ep"] == 8
+    assert tags["pp"] == 3
+
+    ss.ep = 0
+    assert workload_kb_tags(coord.shared_state)["ep"] == 2
+
+
+def test_an_unparseable_or_non_positive_parallelism_env_is_not_tagged(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setenv("EP", "two")
+    monkeypatch.setenv("PP", "0")
+
+    tags = workload_kb_tags(coord.shared_state)
+    assert "ep" not in tags
+    assert "pp" not in tags
+
+
+def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinator, monkeypatch) -> None:
+    """``state.json`` is a system boundary: a null where a dict is declared must not raise here."""
+    monkeypatch.delenv("EP", raising=False)
+    monkeypatch.delenv("PP", raising=False)
+    ss = coord.shared_state
+    ss.framework = "vllm"
+    ss.model_class = ""
+    ss.stack_fingerprint_meta = None
+    ss.baseline_workload_extra = None
+
+    assert workload_kb_tags(coord.shared_state) == {"framework": "vllm"}
+
+
+def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.delenv("EP", raising=False)
+    monkeypatch.delenv("PP", raising=False)
+    ss = coord.shared_state
+    ss.framework = "vllm"
+    ss.model_class = ""
+    ss.stack_fingerprint_meta = {
+        "vllm": "unknown",
+        "rocm": "",
+        "aiter": "unknown",
+        "image_digest": "sha256:abc",
     }
-    ss.kernel_integrate_attempts = {
-        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
-    }
-    out = coord.recipe_journal._build_kernel_optimizations_from_state()
-    assert len(out) == 1  # only the KEEP'd k1
-    row = out[0]
-    assert row["kernel_id"] == "k1"
-    assert row["integrated"] is True
-    assert row["e2e_gain_pct"] == 5.0
-    assert row["e2e_tput"] == 210.0
+
+    tags = workload_kb_tags(coord.shared_state)
+    assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
 
 
 # -- phase denial gate -----------------------------------------------------
-def test_phase_denial_for_action(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.phase = "PRELUDE"
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
-    # agent asking for one is refused.
-    ss.phase = "ENABLEMENT"
-    denied = coord.dispatcher._phase_denial_for_action("baseline")
-    assert denied is not None and denied.rule == "phase_incompatible"
-    assert coord.dispatcher._phase_denial_for_action("specialist") is None
-    assert coord.dispatcher._phase_denial_for_action("integrate_patch") is None
-    # The gate reserves named actions only; it is not a phase-membership check.
-    assert coord.dispatcher._phase_denial_for_action("explore") is None
-    # An unknown phase reserves nothing, so the gate abstains.
-    ss.phase = ""
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-
-
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"
@@ -583,16 +666,26 @@ def test_sequence_denial_for_action(coord: Coordinator) -> None:
     assert coord.dispatcher._sequence_denial_for_action("explore") is None
 
 
-def test_sequence_denial_for_request(coord: Coordinator) -> None:
+def test_admission_denial_for_request(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.stop_reason = ""
     ss.baseline_tput = 0.0
     # non-kernel target -> not gated
-    assert coord.dispatcher.sequence_denial_for_request("orchestration", "anything") is None
+    assert coord.dispatcher.admission_denial_for_request("orchestration", "anything") is None
     # trace_analyze always allowed
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
     # unknown handler kind -> not gated
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "no_such_kind") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "no_such_kind") is None
+
+
+def test_a_kernel_request_the_phase_cannot_fit_is_refused(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request runs its handler inline, so admission is the only point the phase budget can refuse it."""
+    _phase_with_minutes_left(coord, monkeypatch, "KERNEL_AGENT", 10)
+
+    denied = coord.dispatcher.admission_denial_for_request("kernel_agent", "apply_patch")
+
+    assert denied is not None and denied.rule == "phase_time_budget"
+    assert "action='integrate'" in str(denied)
 
 
 def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
@@ -604,10 +697,9 @@ def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     ss = coord.shared_state
     ss.last_gemm_tuning = {}
-    # forge backend: any precision on a supported framework is eligible.
+    # Any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
     assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
@@ -715,10 +807,10 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+    from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 
-    assert _lifecycle_paths("not-a-dict") == {}
-    out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
+    assert lifecycle_paths("not-a-dict") == {}
+    out = lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
     assert out == {"patch_path": "/a/p.diff"}
 
 
