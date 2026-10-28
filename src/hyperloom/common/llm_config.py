@@ -862,9 +862,9 @@ def _observe_anthropic(observation: RequestObservation, body: Mapping[str, objec
 
 
 def _dial_anthropic_messages(
-    dial: ExitStack, client: object, params: dict[str, object], tag: dict[str, object]
+    dial: ExitStack, client: object, params: dict[str, object], tag: dict[str, object], deadline: float | None = None
 ) -> object:
-    """Open the Messages stream, dialling again while the connection never came up."""
+    """Open the Messages stream, dialling again while the connection never came up and ``deadline`` is still ahead."""
     # httpx re-dials only on its unproxied branch, so the re-dial lives here instead, where both routes pass.
     connect_failures = _anthropic_connect_failures()
     delay = _ANTHROPIC_CONNECT_BACKOFF_S
@@ -873,6 +873,9 @@ def _dial_anthropic_messages(
         try:
             return dial.enter_context(client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag))  # type: ignore[union-attr]
         except connect_failures:
+            # A dial begun at or past the deadline would send a POST the reader is already bound to drop.
+            if deadline is not None and time.monotonic() + delay >= deadline:
+                raise
             time.sleep(delay)
             delay *= 2
     # The last dial speaks for itself: its failure reaches the caller.
@@ -913,9 +916,10 @@ def anthropic_messages(
     tag = _attribution_tag_kwargs(component, operation)
     # Inside the observation: the re-dials belong to the one request the ledger records.
     with _observed_messages(component, operation, params) as observation:
-        stream = AnthropicStream(observation, None if timeout_s is None else time.monotonic() + timeout_s)
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        stream = AnthropicStream(observation, deadline)
         with ExitStack() as dial:
-            resp = _dial_anthropic_messages(dial, client, params, tag)
+            resp = _dial_anthropic_messages(dial, client, params, tag, deadline)
             if resp.status_code >= 400:
                 raise _anthropic_failure(resp.status_code, resp.read())
             for chunk in resp.iter_bytes():

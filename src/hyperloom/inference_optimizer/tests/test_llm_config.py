@@ -7,6 +7,7 @@ import ast
 import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -1037,6 +1038,8 @@ def _record_dials(
 
 
 _GATEWAY_ENV = {_ANTHROPIC_KEY: "k", "ANTHROPIC_BASE_URL": "https://gw.invalid"}
+# A whole-call budget short enough that one connect timeout spends it, as a real one does when ``timeout`` is unset.
+_BUDGET_S = 0.05
 
 
 @pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
@@ -1083,6 +1086,33 @@ def test_anthropic_messages_never_redials_a_request_that_was_sent(monkeypatch):
     with pytest.raises(httpx.ReadTimeout):
         llm_config.anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
     assert len(dials) == 1
+
+
+def test_anthropic_messages_stops_redialling_at_its_deadline(monkeypatch):
+    """``timeout_s`` bounds the whole call: with ``timeout`` unset one connect timeout spends the budget, and a POST
+    sent after it would bill a completion the reader is already bound to drop."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials: list[Any] = []
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        time.sleep(_BUDGET_S)
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    started = time.monotonic()
+    with pytest.raises(httpx.ConnectTimeout):
+        llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model="claude", messages=[], max_tokens=16, timeout_s=_BUDGET_S
+            ),
+            env=_GATEWAY_ENV,
+        )
+    # The connect failure reaches the caller instead of a late dial, so no second POST goes out and the backoff
+    # never runs.
+    assert len(dials) == 1
+    assert time.monotonic() - started < llm_config._ANTHROPIC_CONNECT_BACKOFF_S
 
 
 # ---- build_http_timeout ----
