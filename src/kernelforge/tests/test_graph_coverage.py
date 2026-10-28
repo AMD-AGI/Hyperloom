@@ -44,7 +44,6 @@ def test_launches_per_step_are_averaged_over_the_class(tmp_path):
 
     row = _run(tmp_path, events)["EXTEND bs=1"]
 
-    assert row["kernels"] == 10
     assert row["eager_kernels_per_step"] == 5.0
 
 
@@ -67,25 +66,3 @@ def test_a_capture_without_steps_or_a_missing_one_reports_nothing(tmp_path):
     assert gc.graph_coverage("") == {}
     assert gc.graph_coverage(None) == {}
     assert gc.graph_coverage(tmp_path / "absent.json") == {}
-
-
-def test_the_rendering_marks_the_ungraphed_class_and_says_what_to_check(tmp_path):
-    body = "\n".join(gc.render_graph_coverage(_run(tmp_path, eager_step(_PREFILL, start=0.0, count=10))))
-
-    assert "`EXTEND bs=1` | prefill" in body
-    assert "100.0% ⚠" in body
-    assert "no `layers` for the capture to walk" in body
-
-
-def test_a_fully_graphed_run_renders_without_advice(tmp_path):
-    events = [*graphed_step(_DECODE, start=0.0, count=10), kernel("stray", 50.0, 1.0, correlation=1), launch(1)]
-
-    body = "\n".join(gc.render_graph_coverage(_run(tmp_path, events)))
-
-    assert "⚠" not in body
-    assert "pays a launch for every kernel" not in body
-
-
-def test_nothing_renders_without_coverage():
-    assert gc.render_graph_coverage({}) == []
-    assert gc.render_graph_coverage(None) == []

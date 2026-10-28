@@ -19,7 +19,6 @@ from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositorie
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
 from hyperloom.orchestrator.measurement.jit_variants import render_jit_variants, variant_counts
 from kernelforge.foldable_launches import foldable_launches, render_foldable_launches
-from kernelforge.graph_coverage import graph_coverage, render_graph_coverage
 from kernelforge.trace_events import resolve_capture
 from kernelforge.serving_windows import (
     OBSERVED_DECODE_HEADING,
@@ -228,15 +227,7 @@ def build_trace_evidence_md(state: Any, *, session_dir: Path | None = None) -> s
     lines.extend(_hot_kernel_lines(by_class))
     lines.extend(["", "## Launch-Bound Kernels", ""])
     lines.extend(_foldable_lines(capture))
-    lines.extend(["", "## Graph Coverage", ""])
-    lines.extend(_graph_coverage_lines(capture))
     return "\n".join(lines) + "\n"
-
-
-def _graph_coverage_lines(capture: str) -> list[str]:
-    """Which step classes replay a captured graph and which still launch every kernel."""
-    rendered = render_graph_coverage(graph_coverage(capture))
-    return rendered or ["- the capture records no kernel-launch calls, so graph coverage cannot be read from it"]
 
 
 def _foldable_lines(capture: str) -> list[str]:
