@@ -716,11 +716,11 @@ def _service_sandboxes(monkeypatch: pytest.MonkeyPatch, asked: list[tuple[Path, 
     """The host's idle sandbox service as a session's backend, which records in ``asked`` the toolbox directory and TP
     it is asked for inputs of and refuses to read this machine's cards."""
 
-    def inputs(session_dir: Path, tp: int) -> HostedToolboxInputs:
-        asked.append((session_dir, tp))
+    def inputs(layout: SessionLayout, tp: int) -> HostedToolboxInputs:
+        asked.append((layout.toolbox, tp))
         return HostedToolboxInputs(
             run_id="run-1",
-            session_dir=session_dir,
+            session_dir=layout.toolbox,
             api_url="http://service.invalid",
             sandbox_url="http://sandboxes.invalid",
             measurement_key="m-key",
