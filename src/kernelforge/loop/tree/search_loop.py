@@ -300,7 +300,8 @@ def _lost_attempt(iteration: int, slot, reason: str) -> Attempt:
         score=None,
         node="",
         archive_path="",
-        reason=f"{slot.reason} [{reason}]",
+        reason=slot.reason,
+        detail=reason,
     )
 
 

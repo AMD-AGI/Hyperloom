@@ -146,6 +146,7 @@ def test_a_lane_that_reproduces_an_existing_node_adds_nothing(tmp_path):
     outcome = asyncio.run(host._measure_slot(tree, 2, SlotPlan(slot, "plan", ""), LaneResult("1", "plan", diff)))
 
     assert outcome.node is None and outcome.attempt.outcome is AttemptOutcome.NO_CHANGES
+    assert outcome.attempt.detail == f"the candidate is node {ids.grandchild}"
     assert host.measured == [] and len(tree.nodes) == 5
 
 

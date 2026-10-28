@@ -299,8 +299,8 @@ def test_a_resume_records_the_round_a_killed_session_left_open_and_carries_on(tm
 
     # The killed iteration's number is the one the resumed session runs next, as in the linear loop.
     second = [attempt for attempt in resumed.attempts if attempt.iteration == 2]
-    assert [item.reason for item in second if item.outcome is AttemptOutcome.ERROR] == [
-        "interrupted branch [the session ended before this round finished]"
+    assert [(item.reason, item.detail) for item in second if item.outcome is AttemptOutcome.ERROR] == [
+        ("interrupted branch", "the session ended before this round finished")
     ]
     assert [item.outcome for item in second if item.outcome is not AttemptOutcome.ERROR] == [AttemptOutcome.NODE] * 2
     assert resumed.round is None

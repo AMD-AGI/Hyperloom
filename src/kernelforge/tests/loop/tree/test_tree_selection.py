@@ -179,3 +179,18 @@ def test_the_facts_carry_directions_nodes_case_standing_and_earlier_rounds():
     assert "iteration 3: DEEPEN at 333333333333 (keep going) -> INCORRECT" in facts
     assert "333333333333 onto 222222222222" in facts
     assert "about 2 round(s)" in facts
+
+
+def test_the_selector_reads_why_a_slot_came_to_nothing():
+    tree = _tree()
+    reason = "keep going along the tile table, which the last round left two steps short of its ceiling"
+    tree.open_round(Round(iteration=3, slots=(Slot(1, SlotType.DEEPEN, N3, reason, direction="d002"),)))
+    lost = "no analysis read the epilogue's store"
+    tree.close_round([Attempt(3, 1, SlotType.DEEPEN, N3, "d002", AttemptOutcome.ERROR, None, "", "", reason, lost)])
+
+    facts = render_facts(
+        tree, outlook=RoundOutlook(lanes=3, remaining_sec=3600, rounds_left=2), sources=FactSources("/a", "/l", "/s")
+    )
+
+    assert f"iter 3 slot 1 DEEPEN d002 ERROR: {lost}" in facts
+    assert f"-> ERROR: {lost}" in facts

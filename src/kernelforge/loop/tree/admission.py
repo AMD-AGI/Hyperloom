@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
@@ -286,7 +286,7 @@ class TreeAdmissionMixin:
     def _unmeasured(self, iteration: int, slot: Slot, outcome: AttemptOutcome, reason: str) -> SlotOutcome:
         print(f"  [tree] slot {slot.index} ({slot.slot_type.value} at {slot.start[:12]}): {reason}")
         self._write_slot_record(iteration, slot, "outcome.txt", reason)
-        return SlotOutcome(self._attempt(iteration, slot, outcome, None, ""), None, None)
+        return SlotOutcome(replace(self._attempt(iteration, slot, outcome, None, ""), detail=reason), None, None)
 
     def _slot_dir(self, iteration: int, slot: Slot) -> Path:
         return self._tree_round_dir(iteration) / f"slot_{slot.index:02d}"

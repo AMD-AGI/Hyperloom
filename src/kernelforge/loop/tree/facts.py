@@ -182,9 +182,13 @@ def _attempts(attempts: list[Attempt], indent: str) -> list[str]:
         child = f" -> {_short(attempt.node)}" if attempt.node else ""
         lines.append(
             f"{indent}    iter {attempt.iteration} slot {attempt.slot} {attempt.slot_type.value} "
-            f"{attempt.direction or 'new'} {attempt.outcome.value}{score}{child}"
+            f"{attempt.direction or 'new'} {attempt.outcome.value}{score}{child}{_detail(attempt)}"
         )
     return lines
+
+
+def _detail(attempt: Attempt) -> str:
+    return f": {_one_line(attempt.detail, _RECORD_CHARS)}" if attempt.detail else ""
 
 
 def _compose_failures(failures: tuple[tuple[str, str], ...]) -> list[str]:
@@ -204,7 +208,8 @@ def _previous_selections(tree: SearchTree) -> list[str]:
     lines = ["## Your earlier rounds"]
     for iteration in sorted(by_iteration):
         slots = "; ".join(
-            f"{item.slot_type.value} at {_short(item.start)} ({_one_line(item.reason, 80)}) -> {item.outcome.value}"
+            f"{item.slot_type.value} at {_short(item.start)} ({_one_line(item.reason, 80)}) -> "
+            f"{item.outcome.value}{_detail(item)}"
             for item in by_iteration[iteration]
         )
         lines.append(f"- iteration {iteration}: {slots}")

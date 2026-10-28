@@ -130,6 +130,8 @@ class Attempt:
     node: str
     archive_path: str
     reason: str
+    # Why the slot came to nothing without being measured: never planned, lost, or a copy of an existing node.
+    detail: str = ""
 
 
 @dataclass(frozen=True)

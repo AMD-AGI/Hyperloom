@@ -173,6 +173,7 @@ def _attempt(payload: object) -> Attempt:
         node=str(data["node"]),
         archive_path=str(data["archive_path"]),
         reason=str(data["reason"]),
+        detail=str(data["detail"]),
     )
 
 
