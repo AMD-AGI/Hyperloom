@@ -183,6 +183,24 @@ def test_a_server_on_one_gpu_is_offered_no_parallelism_or_communication_on_any_l
     assert parallel in {item.family for item in on_eight.items}
 
 
+def test_an_op_family_the_commits_profile_shows_no_op_of_is_on_no_line(snapshot: NotebookSnapshot) -> None:
+    moe = Family("moe", Mechanism.KERNEL_TUNING, KERNEL)
+    evidence = MenuEvidence({moe: FamilyStat(10.0, 10.0, (50.0,))}, {})
+    dense = OpShares("c1", "j1", "p1", {"paged_attention_ll4mi": 40.0, "gemm_a16w16": 30.0})
+    sparse = OpShares("c1", "j1", "p1", {**dense.shares, "fused_moe_kernel": 20.0})
+
+    on_dense = direction_menu(
+        dataclasses.replace(snapshot, op_shares={"c1": dense}), "s1", "c1", evidence, metric=METRIC
+    )
+    on_sparse = direction_menu(
+        dataclasses.replace(snapshot, op_shares={"c1": sparse}), "s1", "c1", evidence, metric=METRIC
+    )
+    unprofiled = direction_menu(snapshot, "s1", "c1", evidence, metric=METRIC)
+
+    assert not any(item.family.target == "moe" for item in on_dense.items)
+    assert moe in {item.family for item in on_sparse.items} and moe in {item.family for item in unprofiled.items}
+
+
 def test_the_untried_line_offers_no_warm_start_replay_as_replays_come_from_the_kb(snapshot: NotebookSnapshot) -> None:
     every = _tested().archived
     evidence = MenuEvidence({family: stat for family, stat in every.items() if family.target != _REPLAY}, {})

@@ -23,9 +23,9 @@ model type and the most within reach, so exploring never stops, then the untried
 claim has acted on, each a target at one layer with its mechanism open, every component but the warm start replay and
 each op family whose ops take :data:`HOT_OP_SHARE_PCT` of the commit's profile, the one of the highest score, so a
 direction no one has tested yet still comes up. No line offers a family that cannot act on the session's task:
-parallelism and communication on a server of one GPU. One branch in four gets no menu (:func:`in_control`): its tests
-are the menu's control. Every menu given is logged (:class:`MenuLog`), for CLOSE to read what the specialists chose
-from it.
+parallelism and communication on a server of one GPU, or an op family none of whose ops the commit's profile shows,
+such as moe on a dense model. One branch in four gets no menu (:func:`in_control`): its tests are the menu's control.
+Every menu given is logged (:class:`MenuLog`), for CLOSE to read what the specialists chose from it.
 """
 
 from __future__ import annotations
@@ -189,11 +189,16 @@ def _within_reach(family: Family, typical: float, shares: OpShares | None, headr
     return min(typical, headroom) if headroom is not None else typical
 
 
-def _applies(family: Family, profile: SessionProfile | None) -> bool:
+def _applies(family: Family, profile: SessionProfile | None, shares: OpShares | None) -> bool:
     """Whether ``family`` can act on the session's task at all: a server on one GPU runs no collective, so it has no
-    parallelism or communication to change."""
+    parallelism or communication to change, and an op family none of whose ops the commit's profile shows, such as moe
+    on a dense model, has no op to change; with no profile of the commit, every op family may."""
 
-    return not (family.target == Component.PARALLEL.value and profile is not None and profile.tp == 1)
+    if family.target == Component.PARALLEL.value and profile is not None and profile.tp == 1:
+        return False
+    if family.target in _OP_FAMILIES and shares is not None:
+        return any(share > 0 and op_family(op) == family.target for op, share in shares.shares.items())
+    return True
 
 
 def _untouched(shares: OpShares | None, known: Iterable[Family]) -> dict[Family, str]:
@@ -338,7 +343,7 @@ def direction_menu(
     scored = [
         scoring.item(family, evidence.archived.get(family), seen.get(family), tuple(marks.get(family, ())))
         for family in sorted({*evidence.archived, *seen}, key=lambda item: item.label)
-        if _applies(family, snapshot.profile)
+        if _applies(family, snapshot.profile, shares)
     ]
     ranked = sorted(scored, key=lambda item: (-item.score, item.family.label))
     typed = {family: stat.tests for family, stat in evidence.typed.items()}
@@ -352,7 +357,7 @@ def direction_menu(
     fresh = [
         scoring.item(family, None, None, (mark,))
         for family, mark in sorted(untouched.items(), key=lambda item: item[0].label)
-        if _applies(family, snapshot.profile)
+        if _applies(family, snapshot.profile, shares)
     ]
     untried = [replace(max(fresh, key=lambda item: (item.score, item.family.label)), untried=True)] if fresh else []
     return DirectionMenu(
