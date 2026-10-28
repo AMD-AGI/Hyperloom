@@ -18,10 +18,9 @@ The GPU trace cannot show this. In that same run the device was 99.4% busy insid
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
-
-from hyperloom.orchestrator.measurement.intvty_samples import metric_values, profiling_records
 
 #: Requests below this cannot carry a slope worth reading.
 MIN_REQUESTS: int = 60
@@ -37,16 +36,27 @@ FLAG_MS_PER_100K: float = 20.0
 _TTFT = "time_to_first_token"
 _ISL = "input_sequence_length"
 
+#: aiperf writes warmup records to the same export; only the scored phase counts.
+_SCORED_PHASE = "profiling"
+
+
+def profiling_records(workspace: str | Path | None) -> list[dict[str, Any]]:
+    """Per-request metric blocks for the scored phase of the run under *workspace*, newest export wins."""
+    if not workspace:
+        return []
+    exports = sorted(Path(workspace).glob("**/aiperf_artifacts/profile_export.jsonl"), key=lambda p: p.stat().st_mtime)
+    if not exports:
+        return []
+    try:
+        records = [json.loads(line) for line in exports[-1].read_text(errors="replace").splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return []
+    return [r["metrics"] for r in records if r["metadata"]["benchmark_phase"] == _SCORED_PHASE]
+
 
 def _paired(records: list[dict[str, Any]]) -> list[tuple[float, float]]:
-    """``(input tokens, ttft ms)`` for requests that reported both."""
-    out: list[tuple[float, float]] = []
-    for metrics in records:
-        isl = metric_values([metrics], _ISL)
-        ttft = metric_values([metrics], _TTFT)
-        if isl and ttft:
-            out.append((isl[0], ttft[0]))
-    return out
+    """``(input tokens, ttft ms)`` for requests that reported both; a failed request reports neither."""
+    return [(m[_ISL]["value"], m[_TTFT]["value"]) for m in records if _ISL in m and _TTFT in m]
 
 
 def _median(values: list[float]) -> float:

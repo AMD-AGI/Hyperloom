@@ -83,3 +83,16 @@ def test_an_absent_run_reports_nothing(tmp_path):
     assert hic.input_cost(tmp_path / "absent") is None
     assert hic.input_cost(None) is None
     assert hic.input_cost("") is None
+
+
+def test_only_scored_requests_that_reported_both_are_paired(tmp_path):
+    ws = _workspace(tmp_path, [(1000, 10.0)])
+    export = ws / "benchmark_1" / "aiperf_artifacts" / "profile_export.jsonl"
+    warmup = {
+        "metadata": {"benchmark_phase": "warmup"},
+        "metrics": {"input_sequence_length": {"value": 9}, "time_to_first_token": {"value": 9.0}},
+    }
+    failed = {"metadata": {"benchmark_phase": "profiling"}, "metrics": {"error_isl": {"value": 5000}}}
+    export.write_text(export.read_text() + json.dumps(warmup) + "\n" + json.dumps(failed) + "\n")
+
+    assert hic._paired(hic.profiling_records(ws)) == [(1000, 10.0)]
