@@ -21,6 +21,7 @@ import pytest
 from hyperloom.measure import local
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.phases import SHORT_PROMPTS
+from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.measure.short_prompts.compare import compare_outputs
 from hyperloom.measure.socket import RoundPlan
 from hyperloom.measure.long_context.held import FLUSHED
@@ -43,12 +44,21 @@ NOT_HELD = "the test's server was not held up for the check"
 
 
 class _Servers:
-    """The servers of the check: one real HTTP server per boot-only round, defective in the launches in ``defective``."""
+    """The servers of the check: one real HTTP server per boot-only round, defective in the launches in ``defective``.
+
+    ``port`` is the lifecycle's own pick (a free port by default). The backend may not keep it, as it does not keep one a
+    dev sandbox serves on, so a server listens where the round's ``server_lifecycle`` says, as a real one would."""
 
     def __init__(
-        self, monkeypatch, *, defective: frozenset[int] = frozenset(), eligible: bool = True, framework: str = "sglang"
+        self,
+        monkeypatch,
+        *,
+        defective: frozenset[int] = frozenset(),
+        eligible: bool = True,
+        framework: str = "sglang",
+        port: int | None = None,
     ) -> None:
-        self.port, self.defective = free_port(), defective
+        self.port, self.defective = free_port() if port is None else port, defective
         self.live: FakeServer | None = None
         self.started: list[int] = []
         self.teardowns = 0
@@ -62,9 +72,9 @@ class _Servers:
 
         self.flushes = 0
 
-    def start(self, index: int) -> None:
+    def start(self, index: int, port: int) -> None:
         answer = short_prompts_wrong if index in self.defective else good_answer
-        self.live = FakeServer(answer, port=self.port).__enter__()
+        self.live = FakeServer(answer, port=port).__enter__()
         self.started.append(index)
 
     def stop(self) -> None:
@@ -88,8 +98,10 @@ class _CheckGrid(_Grid):
 
     async def __call__(self, **kwargs: Any):
         name = kwargs["grid"][0].name
-        if kwargs["launch"].server_lifecycle and self.servers.live is None and name not in self.answers:
-            self.servers.start(int(name.removeprefix(self.prefix)) if name.startswith(self.prefix) else 0)
+        lifecycle = kwargs["launch"].server_lifecycle
+        if lifecycle and self.servers.live is None and name not in self.answers:
+            index = int(name.removeprefix(self.prefix)) if name.startswith(self.prefix) else 0
+            self.servers.start(index, lifecycle["port"])
         return await super().__call__(**kwargs)
 
 
@@ -150,6 +162,19 @@ def test_the_extra_processes_boot_fresh_servers_after_the_tests_server_is_torn_d
     )
     assert grid.servers.started == [0, 1, 2] and grid.servers.teardowns == 3, "each server is stopped before the next"
     assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK] * 3
+
+
+def test_a_lifecycle_port_a_dev_sandbox_serves_on_is_replaced_and_the_check_asks_the_server_on_the_replacement(
+    monkeypatch, tmp_path, cache
+):
+    grid = _grid(monkeypatch, tmp_path, port=DEV_SANDBOX_PORTS.start)
+
+    outcome = _run(tmp_path, cache, processes=2)
+
+    ports = [c["launch"].server_lifecycle["port"] for c in grid.calls]
+    assert len(ports) == 2 and not set(ports) & set(DEV_SANDBOX_PORTS), "each server is given a replacement"
+    assert [e.status for e in read_outputs(tmp_path / "out").processes] == [OK, OK]
+    assert grid.servers.flushes == 1 and outcome.returncode == 0
 
 
 def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_directory_are_the_tests_own(

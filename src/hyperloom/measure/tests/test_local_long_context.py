@@ -41,8 +41,8 @@ class _Servers(_ShortServers):
         super().__init__(*args, **kwargs)
         self.asked: list[int] = []  # the requests each server had when it was stopped
 
-    def start(self, index: int) -> None:
-        self.live = FakeServer(port=self.port).__enter__()
+    def start(self, index: int, port: int) -> None:
+        self.live = FakeServer(port=port).__enter__()
         self.started.append(index)
 
     def stop(self) -> None:
