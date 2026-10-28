@@ -105,6 +105,9 @@ or an InferenceX `isl`/`osl` is absent or non-positive, warm start is disabled
 with `recipe_scope_invalid` and CLOSE publication records
 `invalid_recipe_scope` instead of failing the optimization run.
 
+Ave sessions do not support Remote Recipe KB warm start or publication;
+they use the unsupported-scope behavior above.
+
 Remote mode uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads
 the selected session's exact file manifest and replays one combined Recipe:
 the Config column, the ordered Patch column overlays, and the Kernel column's

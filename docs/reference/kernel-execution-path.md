@@ -82,18 +82,16 @@ if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optim
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
-# 2. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
-#    one shared tail, chosen by whether GEMM tuning is due.
-if not self._gemm_tuning_required_before_kernel_opt():
-    await self._finish_kernel_entry()
-    return
-result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
-...                                    # handle result, post the bus response
-await self._finish_kernel_entry()
+# 2. Forge branch — optional GEMM tuning, then the shared fusion/rewrite tail.
+if self.shared_state.kernel_optimizer != AVE_BACKEND:
+    return await self._run_forge_kernel_phase()
+
+# 3. Ave branch — only with KERNEL_OPT_BACKEND_ORDER=ave.
+return await self._run_ave_kernel_phase()
 ```
 
-Both routes end in `_finish_kernel_entry()`, and that is where the rest of the
-phase's own work happens:
+`_run_forge_kernel_phase()` runs GEMM tuning when required, then calls
+`_finish_kernel_entry()`. Without GEMM tuning it calls that shared tail directly:
 
 ```python
 async def _finish_kernel_entry(self) -> None:
@@ -155,8 +153,11 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 ## Backend selection
 
-GEAK owns the KERNEL phase by default for every framework, ATOM included, and
-decides kernel strategy internally:
+`KERNEL_OPT_BACKEND_ORDER=ave` selects the Ave loop. Only that route checks
+workload, trace and source evidence for an applicable AveLang kernel. Ave uses a
+built-in prompt string as one step; `AVE_PROMPTS_FILE` can replace it with ordered
+instructions. Without a match, or if preparation fails, the phase records the
+reason and finishes without invoking another optimizer.
 
 - **Framework default**: an unset or blank `KERNEL_OPT_BACKEND_ORDER` resolves
   to `geak`. No framework overrides it at CLI launch; ATOM's former `forge`
@@ -174,8 +175,8 @@ decides kernel strategy internally:
   shell variable. `.env.template` ships the line commented out.
 - **Slurm launchers**: still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` into
   the job / container environment; their behavior is unchanged.
-- **Explicit selection**: only an exact, case-insensitive `forge` enables
-  per-kernel Forge. Other nonblank values, including `forge,geak`, retain GEAK;
+- **Explicit selection**: an exact, case-insensitive `forge` enables
+  per-kernel Forge; `ave` enables Ave. Other nonblank values, including `forge,geak`, retain GEAK;
   `--backends` CLI flags and payload `backends` hints do not override this
   choice.
 
@@ -233,7 +234,8 @@ Required env vars:
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL` | operator | OpenAI-side key and endpoint; with only this side configured, TraceLens and Forge run on Codex and GEAK cannot start. The DeepSeek Harness (`INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) authenticates on this side too |
 | `INFERENCE_OPTIMIZER_AGENT_BACKEND` | operator | `claude`, `codex` or `deepseek`: the agent CLI orchestration, specialists, TraceLens and Forge run on, instead of the credential-ranked choice. Quantization honours only `deepseek`. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access` |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
-| `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
+| `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` selects per-kernel Forge; `ave` selects Ave. Existing `.env` choices are retained. |
+| `AVE_PROMPTS_FILE` | Unset (built-in prompt string) | Optional replacement steps for Ave's ordered prompt loop; saved in session state. Workload evidence selects the target kernel. |
 
 Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
 `FORGE_PATH` that used to be required here is removed and nothing reads it. The

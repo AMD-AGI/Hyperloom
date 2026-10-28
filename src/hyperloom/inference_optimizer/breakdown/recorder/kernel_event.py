@@ -22,12 +22,12 @@ projection that agrees with this one only until one of them is edited.
 
 The wire shape assembly produces has three layers, and which layer a fact
 belongs in is decided by what kind of fact it is rather than by who wrote it.
-``attempts`` holds every candidate either route produced, normalized to one
+``attempts`` holds every candidate any route produced, normalized to one
 shape. ``rebench``, ``integrate`` and ``measurements`` hold the evidence that
 ruled on them. ``forge`` and ``geak`` hold only what is peculiar to one route
 -- forge's trace analysis and re-profile, GEAK's handoff, delegation and
 product -- and ``outcome`` states how the whole visit ran, in one vocabulary
-both routes reach.
+all routes reach.
 
 Settlement stays in assembly because it is a join: an attempt is kept because
 an instrument measured it, and neither row exists when the other is written.
@@ -43,6 +43,9 @@ The visit therefore concludes on what it can measure itself, and a reader
 tracking a patch end to end follows ``delivered`` into the ``integrate`` rows
 of a later event rather than expecting this one to be amended.
 
+Ave records its candidates separately from Forge lanes and waits for the
+integrate verdict before reporting E2E acceptance.
+
 Every ``*_at`` argument in this module is an ISO timestamp.
 """
 
@@ -52,6 +55,8 @@ import logging
 import time
 from collections.abc import Mapping
 from typing import Any
+
+from ave import AVE_BACKEND
 
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_MATERIAL,
@@ -72,7 +77,14 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
-from .kernel_gain import claimed_gain, lane_gain_axis, lane_gain_pct, stamp_gate_gain, stamp_rebench_gain
+from .kernel_gain import (
+    GAIN_AXIS_KERNEL_MICRO,
+    claimed_gain,
+    lane_gain_axis,
+    lane_gain_pct,
+    stamp_gate_gain,
+    stamp_rebench_gain,
+)
 from .kernel_records import (
     LEDGER_GEAK,
     SOURCE_FUSION,
@@ -137,6 +149,7 @@ SECTION_DISCOVERED = "kernel_discovered"
 #: is retried on its own budget -- and because the settling can land in a
 #: later cycle than the rewrite it rules on.
 SECTION_INTEGRATE = "kernel_integrate"
+SECTION_AVE_ATTEMPT = "kernel_ave_attempt"
 
 ROW_LANE_RUN = "lane_run"
 ROW_REBENCH = "rebench"
@@ -156,6 +169,7 @@ ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
 
 SOURCE_GEAK_ENV_SELECTION = "geak_env_selection"
+SOURCE_AVE_KERNEL = "ave_kernel"
 
 #: What became of one candidate. ``failed`` is distinct from ``rejected``: the
 #: first never produced a candidate to judge, the second produced one that was
@@ -216,6 +230,7 @@ __all__ = [
     "PRODUCER_GEAK",
     "ROUTE_FORGE",
     "ROUTE_GEAK",
+    "SECTION_AVE_ATTEMPT",
     "SECTION_EVENT",
     "SECTION_GEAK_ACCEPTANCE",
     "SECTION_GEAK_ATTEMPT",
@@ -227,6 +242,7 @@ __all__ = [
     "SETTLED_BY_INTEGRATE",
     "SETTLED_BY_LANE",
     "SETTLED_BY_REBENCH",
+    "SOURCE_AVE_KERNEL",
     "SOURCE_FUSION",
     "SOURCE_GEAK_AUTHORED_KERNEL",
     "SOURCE_GEAK_ENV_SELECTION",
@@ -240,6 +256,7 @@ __all__ = [
     "assemble_kernel_ext",
     "kernel_event_id",
     "make_kernel_recorder",
+    "record_ave_attempt",
     "record_geak_attempts",
     "record_integrate_axis",
     "record_integrate_verdict",
@@ -399,6 +416,16 @@ def reject_geak_attempts(
             natural_ids=str(row["kernel_id"]),
         )
     _republish_closed_event(event)
+
+
+def record_ave_attempt(*, event: str, run_id: str, result: dict[str, Any]) -> None:
+    """Persist one campaign result under its kernel event, independently of Forge lanes."""
+    EventSink(event, producer=PRODUCER).record(
+        SECTION_AVE_ATTEMPT,
+        {"run_id": run_id, "result": result},
+        row_type="ave_attempt",
+        natural_ids=run_id,
+    )
 
 
 def record_integrate_verdict(*, macro_cycle: Any, verdict: IntegrateVerdict) -> None:
@@ -768,6 +795,37 @@ def _acceptance_attempt(entry: Mapping[str, Any], *, ordinal: int) -> dict[str, 
             for key, value in entry.items()
             if key not in {"event_id", "ordinal", "source_kind", "acceptance_kind", "kernel_id", "short_name"}
         },
+    )
+
+
+def _ave_attempt(row: Mapping[str, Any], integrate_by_id: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Project the verified candidate; the integrate ledger supplies its E2E verdict."""
+    result = row["result"]
+    optimization = result.get("optimization", {})
+    params = result.get("integrate_params", {})
+    integrate_ref = params.get("integration_id", "")
+    speedup = _float_or_none(optimization.get("mean_case_speedup"))
+    failed = result["status"] in {"failed", "timed_out"}
+    return _attempt(
+        attempt_id=row["run_id"],
+        route=AVE_BACKEND,
+        source_kind=SOURCE_AVE_KERNEL,
+        kernel_id=params.get("kernel_id", ""),
+        name=optimization.get("operator_id", ""),
+        status="completed" if params else "failed" if failed else result["status"],
+        backend=AVE_BACKEND,
+        backends_tried=[AVE_BACKEND],
+        correctness=optimization.get("correctness_passed"),
+        speedup=speedup,
+        gain_pct=round((speedup - 1.0) * 100.0, 4) if speedup is not None else None,
+        gain_axis=GAIN_AXIS_KERNEL_MICRO if speedup is not None else None,
+        artifact_path=params.get("patch_path", ""),
+        integrate_ref=integrate_ref,
+        e2e=_integrate_e2e(integrate_by_id.get(integrate_ref, [])),
+        micro_decision="KEEP" if params else "FAILED" if failed else "SKIPPED",
+        accepted=bool(params),
+        failure_reason=result.get("reason") or result.get("error") or optimization.get("reason", ""),
+        detail={"campaign_status": result["status"], "completed_steps": optimization.get("completed_steps", [])},
     )
 
 
@@ -1639,6 +1697,7 @@ _ROW_ORDER: dict[str, tuple[str, ...]] = {
     SECTION_GEAK_ACCEPTANCE: ("ordinal", "kernel_id", "selection"),
     SECTION_DISCOVERED: ("snapshot_id", "rank"),
     SECTION_INTEGRATE: ("settled_at", "integration_id"),
+    SECTION_AVE_ATTEMPT: ("run_id",),
 }
 
 
@@ -1659,6 +1718,7 @@ def assemble_kernel_ext(
     attempts = [_lane_attempt(row, integrate_by_id) for row in rows[SECTION_LANE_RUN]]
     attempts.extend(_geak_attempt(row) for row in wire_rows(rows[SECTION_GEAK_ATTEMPT]))
     attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=rebench["settled_against"]))
+    attempts.extend(_ave_attempt(row, integrate_by_id) for row in rows[SECTION_AVE_ATTEMPT])
     # A row whose producer stated no start time sorts after the ones that did,
     # rather than ahead of them where an empty string would put it.
     attempts.sort(

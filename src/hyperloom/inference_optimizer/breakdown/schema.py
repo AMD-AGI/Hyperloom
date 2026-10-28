@@ -224,7 +224,7 @@ class V6OutcomeGainBucket(TypedDict, total=False):
 
 
 class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
-    """Kernel gain with its authoritative GEAK and Forge backend split."""
+    """Kernel gain with its authoritative per-backend split."""
 
     by_backend: dict[str, V6OutcomeGainBucket]
 

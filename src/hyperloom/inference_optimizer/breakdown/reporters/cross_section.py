@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ave import AVE_BACKEND
+
 from hyperloom_common.coerce import to_float, to_int, to_mapping
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
@@ -151,7 +153,7 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     return {
         "detected": len(rows),
         "recommended": sum(1 for row in rows if row.get("selected_for_optimization")),
-        "attempted": sum(1 for row in rows if row.get("geak") or row.get("forge")),
+        "attempted": sum(1 for row in rows if row.get("geak") or row.get("forge") or row.get(AVE_BACKEND)),
         "adopted": decisions.count("kept"),
         # A candidate a route measured and nothing gated: the win is real at
         # the micro level and was never ruled on end to end.

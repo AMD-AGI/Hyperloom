@@ -31,6 +31,7 @@ Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 # ``openai-codex`` is the agent runtime for the OpenAI side: Hyperloom makes no
 # bare LLM API calls, so an OpenAI-only deployment needs it to run at all.
 llm = [
+    "pydantic>=2.0",
     "claude-agent-sdk>=0.2.110",
     "openai-codex>=0.144",
     "openai>=1.50",
@@ -240,6 +241,7 @@ exclude = [
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 
 [tool.setuptools.package-data]
+ave = ["knowledge/*.md", "instructions/*.md"]
 hyperloom = [
     "plugs/profiles/*.json",
     "contracts/*.json",
@@ -348,6 +350,7 @@ source = [
     "src/hyperloom_common",
     "src/hyperloom",
     "src/kernelforge",
+    "src/ave",
     "src/hyperloom_kb",
     "OOB",  # optional component; not always present in a clone
 ]

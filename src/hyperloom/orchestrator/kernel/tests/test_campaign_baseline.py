@@ -159,24 +159,31 @@ def test_a_repository_that_cannot_be_sealed_does_not_stop_the_others(tmp_path: P
     assert str(broken) not in pins
 
 
+@pytest.mark.parametrize(
+    "package_name, backend, discovered",
+    [("sglang", "forge", True), ("avelang", "ave", True), ("avelang", "forge", False), ("avelang", "geak", False)],
+)
 def test_the_framework_being_served_is_found_without_configuration(
     tmp_path: Path,
     monkeypatch,
+    package_name: str,
+    backend: str,
+    discovered: bool,
 ) -> None:
     """All three configured sources were empty in the GLM-5.2 session."""
-    repo = _repo(tmp_path, "sglang-checkout")
-    package = repo / "python" / "sglang"
+    repo = _repo(tmp_path, f"{package_name}-checkout")
+    package = repo / "python" / package_name
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(
         campaign_baseline,
         "_package_repository",
-        lambda name: repo.resolve() if name == "sglang" else None,
+        lambda name: repo.resolve() if name == package_name else None,
     )
 
-    roots = campaign_repositories(SimpleNamespace(framework_repo_path=""))
+    roots = campaign_repositories(SimpleNamespace(framework_repo_path="", kernel_optimizer=backend))
 
-    assert roots == (repo.resolve(),)
+    assert roots == ((repo.resolve(),) if discovered else ())
 
 
 def test_a_configured_root_is_added_to_what_the_runtime_found(

@@ -3,7 +3,7 @@
 
 """Capability summary renderer — status/attempts/keeps table + per-capability decisions.
 
-Each row is built from the events the capability recorded as it ran: the two
+Each row is built from the events the capability recorded as it ran: the
 kernel routes from the per-source tallies on the ``kernel`` events, the
 configuration arm and the specialists from the ``framework_agent`` events. The
 flat projection this replaces re-derived the same counts at export time by
@@ -19,11 +19,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ave import AVE_BACKEND
+
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 from ._framework import config_tally, specialist_tally
-from ._kernels import FORGE_SOURCES, GEAK_SOURCES, source_counters
+from ._kernels import AVE_SOURCES, FORGE_SOURCES, GEAK_SOURCES, source_counters
 
-_CAPABILITY_ORDER = ("explore", "geak", "specialist", "forge")
+_CAPABILITY_ORDER = ("explore", "geak", "specialist", "forge", AVE_BACKEND)
 
 
 def _status(*, keeps: int, attempts: int) -> str:
@@ -110,6 +112,7 @@ def capability_rows(breakdown: dict[str, Any]) -> dict[str, dict[str, Any]]:
         },
         "geak": _kernel_row(breakdown, GEAK_SOURCES),
         "forge": _kernel_row(breakdown, FORGE_SOURCES),
+        AVE_BACKEND: _kernel_row(breakdown, AVE_SOURCES),
     }
 
 
@@ -175,7 +178,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     if not any(row[2] or row[3] for row in rows):
         warnings.append(
-            "No capability measured a candidate this session — neither kernel "
+            "No capability measured a candidate this session — no kernel "
             "route produced one and the configuration arm ran no variant."
         )
 

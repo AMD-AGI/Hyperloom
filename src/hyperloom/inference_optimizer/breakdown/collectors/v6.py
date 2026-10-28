@@ -18,6 +18,7 @@ from hyperloom.common.env_safety import redact_secret_env_values
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_baseline_action, anchoring_eval_from_timeline
+from ..recorder.stack_event import BACKENDS
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ..variant_funnel import variants_from_timeline
@@ -500,10 +501,7 @@ def _attribution(buckets: dict[str, Any], available: bool) -> dict[str, Any]:
             "framework_agent": _bucket("framework_agent", "explore"),
             "kernel": {
                 **_bucket("kernel"),
-                "by_backend": {
-                    "geak": _bucket_of(kernel_backends, "geak", available),
-                    "forge": _bucket_of(kernel_backends, "forge", available),
-                },
+                "by_backend": {backend: _bucket_of(kernel_backends, backend, available) for backend in BACKENDS},
             },
         },
     }
