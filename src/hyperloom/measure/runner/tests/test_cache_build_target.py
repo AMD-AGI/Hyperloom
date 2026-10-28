@@ -11,6 +11,7 @@ The binary wheels are crafted into a local wheelhouse (``--no-index --find-links
 from __future__ import annotations
 
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -92,24 +93,27 @@ def test_the_wheels_are_those_of_the_named_interpreter_whatever_the_builder_runs
 def test_an_entry_whose_wheels_the_runner_cannot_install_is_refused_before_it_is_in_place(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheelhouse, digests = _binary_wheelhouse(rig, tmp_path, ("cp312",))
+    wheelhouse, digests = _binary_wheelhouse(rig, tmp_path, (_BUILDER,))
     commit = _commit_pinning(rig, tmp_path, list(digests.values()))
-    monkeypatch.setattr(cache_build, "_download_wheels", _downloaded_for(_CP312))
+    monkeypatch.setattr(cache_build, "_download_wheels", _downloaded_for(f"{_BUILDER}-manylinux_2_28_x86_64"))
     cache = tmp_path / "cache"
+    runner = "cp310" if _BUILDER != "cp310" else "cp311"
 
-    with pytest.raises(CacheBuildError, match=r"checking that the runner \(cp3\.10\) can install") as refused:
-        ensure_runner_cache(commit.repo, commit.sha, cache, _options("cp310-manylinux_2_28_x86_64", wheelhouse))
+    with pytest.raises(CacheBuildError, match=rf"checking that the runner \(Python 3\.{runner[3:]}\) can") as refused:
+        ensure_runner_cache(commit.repo, commit.sha, cache, _options(f"{runner}-manylinux_2_28_x86_64", wheelhouse))
 
     assert "bin-pkg" in str(refused.value).lower().replace("_", "-")
     assert sorted(path.name for path in cache.iterdir()) == [f".{commit.sha}.lock"]
 
 
-_CP312 = "cp312-manylinux_2_28_x86_64"
+#: The interpreter running the test: its wheels are what a builder that ignored the target would have fetched, and
+#: what pip would accept were the check made for the builder instead of the runner.
+_BUILDER = f"cp3{sys.version_info.minor}"
 _REAL_DOWNLOAD = cache_build._download_wheels
 
 
 def _downloaded_for(tag: str) -> Callable[..., dict[str, str]]:
-    """The real download, but of the wheels of ``tag``: what a builder that used its own cp312 interpreter fetched."""
+    """The real download, but of the wheels of ``tag``: what a builder that used its own interpreter fetched."""
 
     def download(lock: Path, wheels: Path, pins: list[LockPin], options: BuildOptions) -> dict[str, str]:
         return _REAL_DOWNLOAD(

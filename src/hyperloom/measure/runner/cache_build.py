@@ -345,7 +345,7 @@ def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> 
         install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
         install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
         install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
-        interpreter = f"{target.implementation or ''}{target.python_version or ''}" or "the builder's interpreter"
+        interpreter = f"Python {target.python_version}" if target.python_version else "the builder's interpreter"
         _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
 
 
