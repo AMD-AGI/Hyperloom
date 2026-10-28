@@ -1640,13 +1640,9 @@ async def test_single_lane_without_critic_does_not_publish_a_draft() -> None:
     assert result.plan_critic is None
 
 
-@pytest.mark.asyncio
-async def test_plan_critic_accepts_draft_without_revision() -> None:
-    plan_markdown = "# Optimization plan\nImplement vector loads."
-    orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
-    specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
-    critic_backend = _StaticBackend("VERDICT: ACCEPT\n\nThe plan is worth executing.")
-    service = OrchestrationService(
+def _reviewed_memory_service(orchestration_backend, specialist_backend, critic_backend) -> OrchestrationService:
+    """One memory specialist and a plan critic, each on its own backend."""
+    return OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
             timeout_sec=1,
@@ -1671,6 +1667,15 @@ async def test_plan_critic_accepts_draft_without_revision() -> None:
         ),
     )
 
+
+@pytest.mark.asyncio
+async def test_plan_critic_accepts_draft_without_revision() -> None:
+    plan_markdown = "# Optimization plan\nImplement vector loads."
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
+    specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
+    critic_backend = _StaticBackend("VERDICT: ACCEPT\n\nThe plan is worth executing.")
+    service = _reviewed_memory_service(orchestration_backend, specialist_backend, critic_backend)
+
     result = await service.run(_context())
 
     assert result.optimization_plans[0] == plan_markdown
@@ -1681,6 +1686,26 @@ async def test_plan_critic_accepts_draft_without_revision() -> None:
     assert len(orchestration_backend.specs) == 2
     assert specialist_backend.calls == 1
     assert critic_backend.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_round_the_loop_does_not_send_for_review_publishes_its_draft_unreviewed() -> None:
+    plan_markdown = "# Optimization plan\nImplement vector loads."
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
+    specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
+    critic_backend = _StaticBackend("VERDICT: REVISE\n\nRework the plan.")
+    service = _reviewed_memory_service(orchestration_backend, specialist_backend, critic_backend)
+
+    result = await service.run(replace(_context(), review_plan=False))
+
+    assert result.optimization_plans == (plan_markdown,)
+    assert result.optimization_plan_executable is True
+    assert result.plan_critic is None
+    assert result.plan_revised is False
+    assert result.structured_output_diagnostics["plan_critic"] == {"status": "not_requested"}
+    assert "plan_critic" not in result.structured_output_diagnostics["phase_durations_sec"]
+    assert critic_backend.calls == 0
+    assert len(orchestration_backend.specs) == 2
 
 
 def _width_block(*drops: dict) -> str:

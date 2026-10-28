@@ -64,6 +64,7 @@ from kernelforge.loop.knowledge_integration import (
     mark_kb_reference_rejected,
     write_experience_to_kb,
 )
+from kernelforge.loop.plan_critic_policy import PlanCriticSetting
 from kernelforge.loop.recovery import (
     CallerRecovery,
     load_published_best,
@@ -1680,9 +1681,9 @@ def forge_loop(request: ForgeLoopRequest):
     max_hours = request.budget.max_hours
     result_json = request.artifacts.result_json
     long_horizon = _is_long_horizon(max_hours)
-    critic_enabled = bool(long_horizon)
     try:
         knowledge_config = KnowledgeConfig.from_env()
+        plan_critic = PlanCriticSetting.from_env(long_horizon=long_horizon)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1786,6 +1787,7 @@ def forge_loop(request: ForgeLoopRequest):
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=bench_repeat,
         lanes=request.loop_shape.lanes,
+        plan_critic_mode=plan_critic.loop_mode,
         merge_stacking=request.loop_shape.merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
@@ -1914,7 +1916,7 @@ def forge_loop(request: ForgeLoopRequest):
         lanes=request.loop_shape.lanes,
         program_md=program_md,
         specialist_definitions=specialist_definitions,
-        critic_enabled=critic_enabled,
+        critic_enabled=plan_critic.enabled,
         usage=usage,
         supervisor_backend=request.roles.supervisor_backend,
     )
@@ -1941,10 +1943,7 @@ def forge_loop(request: ForgeLoopRequest):
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
-    print(
-        "  Plan Critic: "
-        + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
-    )
+    print("  Plan Critic: " + plan_critic.describe())
 
     reporter = _RunReporter(
         run=run,

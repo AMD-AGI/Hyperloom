@@ -1127,8 +1127,8 @@ class OrchestrationService:
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
-        # Every round a synthesis produced is reviewed, at any width.
-        if self._plan_critic is not None and optimization_plan_executable:
+        # Every round the loop sends for review is reviewed once a synthesis produced it, at any width.
+        if self._plan_critic is not None and context.review_plan and optimization_plan_executable:
             critic_outcome = await self._plan_critic.review(
                 context=context,
                 drafts=synthesized_plans,
@@ -1166,10 +1166,10 @@ class OrchestrationService:
                 if revision_diagnostics["status"] == "framework_fallback":
                     optimization_plan_executable = False
                 diagnostics["plan_revision"] = revision_diagnostics
+        elif self._plan_critic is not None and context.review_plan:
+            diagnostics["plan_critic"] = {"status": "skipped_synthesis_unavailable"}
         elif self._plan_critic is not None:
-            diagnostics["plan_critic"] = {
-                "status": "skipped_synthesis_unavailable",
-            }
+            diagnostics["plan_critic"] = {"status": "not_requested"}
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,

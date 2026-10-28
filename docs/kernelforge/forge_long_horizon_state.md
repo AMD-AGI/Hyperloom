@@ -199,7 +199,15 @@ The same `max_hours > 2` long-horizon gate enables both the Plan Critic and
 hardware profiling. Shorter sessions keep Analysis static-only and do not
 inject self-profiling guidance into the Implementer.
 
-The Plan Critic reviews every round a synthesis produced, at any width. A wide
+By default the Plan Critic reviews every round a synthesis produced, at any
+width. `FORGE_PLAN_CRITIC=after-blocked-round` reviews the first round, and a
+later one only when the previous round kept no candidate, the search is in
+DIVERSIFY mode, or the last critic asked for a challenger lane; a round that
+continues a route its predecessor kept a candidate on publishes its drafts
+unreviewed, and records `plan_critic.status = "not_requested"` and a
+`plan_review` event naming the rule. Admission then prices the next round's
+planning without the review time observed rounds spent, since that round may
+skip it. `FORGE_PLAN_CRITIC=off` builds no critic. A wide
 round is reviewed once, with its division in view: whether any lane's ground is
 worth an Implementer session, whether two lanes are one change described twice,
 whether a lane would have to edit code another lane owns, and whether the round

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from kernelforge.loop.run_state import RoundCost
 from kernelforge.orchestrator.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
@@ -83,6 +83,11 @@ def estimate_measurement_sec(history: list[RoundCost]) -> float:
     return max(observed)
 
 
+def _without_review(history: list[RoundCost]) -> list[RoundCost]:
+    """The same rounds as if none had sent its plans to the plan critic."""
+    return [replace(cost, planning_sec=cost.planning_sec - cost.review_sec, review_sec=0.0) for cost in history]
+
+
 def estimate_planning_sec(history: list[RoundCost], *, lanes: int) -> float:
     """A LOWER bound on what a round of ``lanes`` lanes will spend planning."""
     observed = [cost.planning_sec for cost in history if cost.lanes == lanes]
@@ -110,9 +115,16 @@ def admit_round(
     requested_lanes: int,
     history: list[RoundCost],
     measurement_sec: float,
+    review_optional: bool = False,
 ) -> RoundAdmission:
-    """Decide whether -- and how wide -- the next round may be PLANNED."""
+    """Decide whether -- and how wide -- the next round may be PLANNED.
+
+    With ``review_optional`` the round may skip the plan critic, so its planning is bounded by what the observed
+    rounds spent outside their reviews.
+    """
     requested = max(1, int(requested_lanes))
+    if review_optional:
+        history = _without_review(history)
     # What a round costs once its plans exist: the least a session can be given and still return something, and the
     # canonical measurement that judges it.
     execution_sec = ADMISSION_SESSION_SEC + max(0.0, measurement_sec)

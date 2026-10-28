@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
+from kernelforge.loop.plan_critic_policy import PlanCriticMode, decide_plan_review, review_seconds
 from kernelforge.loop.round_budget import admit_dispatch, admit_round, estimate_measurement_sec
 from kernelforge.loop.run_state import RoundCost, StallPolicy, apply_round_cost, make_event
 from kernelforge.loop.search_policy import (
@@ -18,10 +20,14 @@ from kernelforge.loop.search_policy import (
     SearchPolicyDecision,
     SearchState,
 )
+from kernelforge.orchestrator.contracts import OrchestrationContext
 
 
 class RoundAdmissionMixin:
     """Charge the campaign for the wall-clock a round spends, and decide how many lanes the next one may plan and dispatch."""
+
+    # What the open round spent on the plan critic and its revision; part of the round's planning.
+    _round_review_sec: float = 0.0
 
     def _time_remaining(self) -> float:
         """Seconds remaining in the budget."""
@@ -59,15 +65,18 @@ class RoundAdmissionMixin:
         self._round_lanes = max(1, int(lanes))
         self._round_planning_sec = 0.0
         self._round_measurement_sec = 0.0
+        self._round_review_sec = 0.0
 
     def _close_round(self) -> None:
         """Record what the open round cost, if it bought any planning."""
         started_at = self._round_started_at
         planning_sec = self._round_planning_sec
         measurement_sec = self._round_measurement_sec
+        review_sec = self._round_review_sec
         self._round_started_at = None
         self._round_planning_sec = 0.0
         self._round_measurement_sec = 0.0
+        self._round_review_sec = 0.0
         if started_at is None or planning_sec <= 0:
             return
         total_sec = max(planning_sec, time.time() - started_at)
@@ -79,6 +88,7 @@ class RoundAdmissionMixin:
                 planning_sec=planning_sec,
                 total_sec=total_sec,
                 measurement_sec=measurement_sec,
+                review_sec=review_sec,
             ),
             campaign_sec=self._advance_campaign_clock(),
         )
@@ -90,6 +100,7 @@ class RoundAdmissionMixin:
                 planning_sec=round(planning_sec, 3),
                 total_sec=round(total_sec, 3),
                 measurement_sec=round(measurement_sec, 3),
+                review_sec=round(review_sec, 3),
             )
         )
         self.state_store.save(self.run_state)
@@ -129,6 +140,7 @@ class RoundAdmissionMixin:
             requested_lanes=self.ic.lanes,
             history=list(self.run_state.round_costs.recent),
             measurement_sec=self._measurement_estimate_sec(),
+            review_optional=self.ic.plan_critic_mode is PlanCriticMode.AFTER_BLOCKED_ROUND,
         )
         if decision.admitted and not decision.narrowed:
             return decision.lanes
@@ -265,6 +277,31 @@ class RoundAdmissionMixin:
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
+
+    def _with_plan_review(self, iteration: int, context: OrchestrationContext) -> OrchestrationContext:
+        """The round's context, carrying whether its plans go to the plan critic."""
+        mode = self.ic.plan_critic_mode
+        recent = self.run_state.round_costs.recent
+        decision = decide_plan_review(
+            mode,
+            previous_round_iteration=recent[-1].iteration if recent else None,
+            best_iteration=self.run_state.best.iteration,
+            search_mode=context.search_mode,
+            last_critic_verdict=context.last_critic_verdict,
+        )
+        if mode is PlanCriticMode.AFTER_BLOCKED_ROUND:
+            print(f"  [plan-critic] {'reviewing' if decision.review else 'skipping'} this round: {decision.reason}")
+            self.state_store.append_event(
+                make_event("plan_review", iteration, review=decision.review, reason=decision.reason)
+            )
+        return replace(context, review_plan=decision.review)
+
+    def _charge_plan_review(self, result) -> None:
+        """Charge the open round for what its plan critic and revision took."""
+        if self._round_started_at is None:
+            return
+        durations = result.structured_output_diagnostics.get("phase_durations_sec") or {}
+        self._round_review_sec += review_seconds(durations)
 
     async def _plan_round(
         self,
