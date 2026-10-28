@@ -762,8 +762,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         )
     lines.extend(
         [
-            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …'."
+            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` or `'magpie_nonzero_invalid_measurement'`"
+            " on `baseline` → stop retrying baseline; send observation 'blocked: …' quoting the failure excerpt."
             " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",

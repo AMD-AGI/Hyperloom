@@ -616,10 +616,10 @@ module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1346
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 1973
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1591
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
-module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3995
+module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3973
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1733
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1384
-module-lines src/hyperloom/orchestrator/actions/executors/report.py 1262
+module-lines src/hyperloom/orchestrator/actions/executors/report.py 1239
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1277
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2644
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1449

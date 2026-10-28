@@ -12,7 +12,6 @@ from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
 import asyncio
 import gzip
-import hashlib
 import json
 import logging
 import os
@@ -60,6 +59,12 @@ from ...measurement.integrate_performance import assess_integrate_performance
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
+from ...state.failure_evidence import (
+    KV_CACHE_OOM_MARKERS,
+    MAGPIE_NONZERO_INVALID_MEASUREMENT,
+    SUBPROCESS_NONZERO,
+    nonzero_output_signature,
+)
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
@@ -199,8 +204,6 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 
 # Time limit for heuristic CLI-error matching; explicit configuration validation is independent of runtime.
 FAST_EXIT_THRESHOLD_SEC = 30.0
-# The error class of a subprocess that exited nonzero for no recognised cause.
-_SUBPROCESS_NONZERO = "subprocess_nonzero"
 _ARG_ERROR_CLASS = "fast_exit_arg_error"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
@@ -218,13 +221,6 @@ _ARG_ERROR_CONTEXT_PATTERNS = (
     "option",
     "flag",
     "unknown",
-)
-
-# KV-cache OOM: weights loaded but no room left for the KV cache.
-_KV_CACHE_OOM_MARKERS = (
-    "no gpu memory for the kv cache",
-    "leave no gpu memory",
-    "raise --mem-fraction-static above",
 )
 
 
@@ -691,51 +687,18 @@ def _classify_subprocess_error(elapsed_sec: float, stderr_tail: str) -> str:
     """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
-    if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
+    if any(m in tail for m in KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
     # Config validation can follow slow framework imports; elapsed time does not change its cause.
     if re.search(r"\bvalidation errors? for cacheconfig\b", tail):
         return _ARG_ERROR_CLASS
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return _SUBPROCESS_NONZERO
+        return SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
         return _ARG_ERROR_CLASS
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
         return _ARG_ERROR_CLASS
-    return _SUBPROCESS_NONZERO
-
-
-_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
-
-
-def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
-    """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
-
-    The result's ``error`` is only the last 2000 characters of one stream, and two
-    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
-    traceback that long, or differ only in the stream ``error`` leaves out, so the
-    signature is taken from both full, redacted streams instead. Numbers (pids,
-    ports, timestamps, durations) and hex ids differ between two attempts that failed
-    for the same reason, so they are folded away.
-
-    Args:
-        err_class: The class the failure was given; only ``subprocess_nonzero`` gets a
-            signature, because other classes carry a fixed sentence that unrelated
-            failures share.
-        proc_stdout: The process's whole stdout.
-        proc_stderr: The process's whole stderr.
-
-    Returns:
-        ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
-        no output: two failures that said nothing are not known to be the same failure).
-    """
-    if err_class != _SUBPROCESS_NONZERO:
-        return ""
-    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
-    if not text:
-        return ""
-    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
-    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+    return SUBPROCESS_NONZERO
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -3588,6 +3551,30 @@ class BenchmarkRunExecutor:
             **failure_extras,
         }
 
+    def _unmeasured_round_failure(
+        self,
+        finished: _BenchProcess,
+        boot: tuple[str, str] | None,
+        measurement: dict[str, Any],
+        report_path: Path,
+        tail: str,
+    ) -> tuple[str, str]:
+        """Name a round that left no usable measurement, from the strongest evidence it has."""
+        if boot is not None:
+            return boot
+        if finished.returncode != 0:
+            error_class = _classify_subprocess_error(finished.runtime_sec, tail)
+            if error_class == SUBPROCESS_NONZERO and served_complete_protocol(measurement):
+                # The run's own artifact records every requested request as served, so the exit
+                # happened after the workload rather than during it. That is what the exit code
+                # cannot say on its own, and it is the difference between a harness that refused
+                # the result and a process that died mid-round.
+                error_class = MAGPIE_NONZERO_INVALID_MEASUREMENT
+            return error_class, tail
+        if not report_path.exists():
+            return "no_report", f"{_BENCHMARK_REPORT_NAME} missing under {report_path.parent}"
+        return "invalid_measurement", "benchmark report did not contain positive throughput and completed requests"
+
     def _failed_round_result(
         self,
         round_: _BenchmarkRound,
@@ -3611,16 +3598,7 @@ class BenchmarkRunExecutor:
             **round_.capture_meta,
         }
         if not self._measurement_succeeded(measurement):
-            if boot is not None:
-                error_class, error = boot
-            elif finished.returncode != 0:
-                error_class, error = _classify_subprocess_error(finished.runtime_sec, tail), tail
-            elif not report_path.exists():
-                error_class = "no_report"
-                error = f"{_BENCHMARK_REPORT_NAME} missing under {workspace}"
-            else:
-                error_class = "invalid_measurement"
-                error = "benchmark report did not contain positive throughput and completed requests"
+            error_class, error = self._unmeasured_round_failure(finished, boot, measurement, report_path, tail)
             return {
                 **failed,
                 "error_class": error_class,

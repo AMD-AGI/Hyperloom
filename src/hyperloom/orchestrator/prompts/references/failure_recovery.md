@@ -70,10 +70,15 @@ measurement, NOT a failure — do not retry it.
   Override `params.benchmark_script` to a script that respects
   `$RESULT_DIR` (Coordinator already exports `RESULT_DIR=<workspace>` by
   default).
-* **RULE F3 — repeated `error_class='subprocess_nonzero'` on `baseline`
-  ⇒ stop retrying baseline.** `send_message` with `body_md='blocked: subprocess
-  repeatedly nonzero baseline'`. Explore variants
-  may be re-proposed; read the failure log first.
+* **RULE F3 — repeated `error_class='subprocess_nonzero'` or
+  `'magpie_nonzero_invalid_measurement'` on `baseline` ⇒ stop retrying
+  baseline.** Both classes mean the benchmark exited nonzero for a cause
+  Hyperloom did not recognise — `magpie_nonzero_invalid_measurement` additionally
+  means the run served every request it asked for, so the exit came from the
+  harness around the benchmark and another identical attempt buys nothing.
+  `send_message` with `body_md='blocked: subprocess repeatedly nonzero
+  baseline'`, quoting the failure excerpt rather than a diagnosis. Explore
+  variants may be re-proposed; read the failure log first.
 * **RULE F4 — `policy_denial_streak` is a pure fact, not a lock.** The
   `why_denied` context tool (and the `Recent policy denials` block in the
   state projection) shows repeated (action, rule) collisions. The system no
