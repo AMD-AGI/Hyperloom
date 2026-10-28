@@ -114,6 +114,7 @@ _SCRIPT_MODE = 0o755
 _BOOTSTRAP_SHA256 = hashlib.sha256(BOOTSTRAP_SCRIPT.encode(_UTF8)).hexdigest()
 _BUILD_TOOLS = ("setuptools", "wheel")
 _NO_INDEX, _FIND_LINKS, _NO_DEPS = "--no-index", "--find-links", "--no-deps"
+_ISOLATED, _ONLY_BINARY, _REQUIRE_HASHES = "--isolated", "--only-binary=:all:", "--require-hashes"
 #: pip never asks a question and never checks for a newer pip.
 _PIP_QUIET = ("--disable-pip-version-check", "--no-input")
 #: The runner's interpreter and newest platform tag as one wheel tag, e.g. ``cp310-manylinux_2_28_x86_64``.
@@ -251,7 +252,7 @@ def _pip(*args: str, python: Path | None = None) -> list[str]:
 
 def _pip_download(requirements: Path, dest: Path, extra: Sequence[str], what: str, python: Path | None = None) -> None:
     dest.mkdir()
-    command = _pip("download", _NO_DEPS, "--require-hashes", *_PIP_QUIET, python=python)
+    command = _pip("download", _NO_DEPS, _REQUIRE_HASHES, *_PIP_QUIET, python=python)
     _run([*command, "--dest", str(dest), "-r", str(requirements), *extra], what)
 
 
@@ -264,12 +265,12 @@ def _build_environment(pins: list[LockPin], options: BuildOptions, scratch: Path
         raise CacheBuildError("the lock pins no setuptools, so a source distribution in it cannot be built")
     pinned = scratch / "build-tools.lock"
     pinned.write_text("".join(requirement_line(pin.name, pin.version, sorted(pin.hashes)) for pin in tools), _UTF8)
-    downloads = [*options.source.pip_args(), "--only-binary=:all:"]
+    downloads = [*options.source.pip_args(), _ONLY_BINARY]
     _pip_download(pinned, scratch / "tools", downloads, "pip download of the build tools the lock pins")
     _run([sys.executable, "-m", "venv", "--without-pip", str(scratch / "env")], "creating the build environment")
     python = scratch / "env" / "bin" / "python"
-    install = ["--isolated", "install", _NO_INDEX, _FIND_LINKS, str(scratch / "tools"), "--only-binary=:all:"]
-    install += ["--require-hashes", _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
+    install = [_ISOLATED, "install", _NO_INDEX, _FIND_LINKS, str(scratch / "tools"), _ONLY_BINARY]
+    install += [_REQUIRE_HASHES, _NO_DEPS, *_PIP_QUIET, "-r", str(pinned)]
     _run(_pip(*install, python=python), "installing the build tools the lock pins")
     return python
 
@@ -278,7 +279,7 @@ def _wheel_from_sdist(python: Path, sdist: Path, wheels: Path) -> str:
     """Build the pure-Python wheel of ``sdist`` into ``wheels`` with ``python``'s tools, remove the source distribution
     and return the wheel's file name."""
     with tempfile.TemporaryDirectory(dir=wheels.parent, prefix=".wheel-build-") as scratch:
-        build = ["--isolated", "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
+        build = [_ISOLATED, "wheel", "--no-build-isolation", _NO_INDEX, _NO_DEPS, "--no-cache-dir", *_PIP_QUIET]
         build += ["-w", scratch, str(sdist)]
         _run(_pip(*build, python=python), f"building a wheel from {sdist.name}")
         made = sorted(path.name for path in Path(scratch).iterdir())
@@ -341,8 +342,8 @@ def _check_installable(entry: Path, manifest: Manifest, target: WheelTarget) -> 
     with tempfile.TemporaryDirectory(dir=entry, prefix=".resolve-") as scratch:
         requirements = Path(scratch) / "runner-wheels.lock"
         requirements.write_text(requirements_text(manifest), encoding=_UTF8)
-        install = ["--isolated", "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
-        install += [_FIND_LINKS, str(entry / WHEELS_DIR), "--only-binary=:all:", "--require-hashes", _NO_DEPS]
+        install = [_ISOLATED, "install", "--dry-run", "--target", str(Path(scratch) / "site"), _NO_INDEX]
+        install += [_FIND_LINKS, str(entry / WHEELS_DIR), _ONLY_BINARY, _REQUIRE_HASHES, _NO_DEPS]
         install += [*_PIP_QUIET, *target.pip_args(), "-r", str(requirements)]
         interpreter = f"{target.implementation or ''}{target.python_version or ''}" or "the builder's interpreter"
         _run(_pip(*install), f"checking that the runner ({interpreter}) can install the entry's wheels")
