@@ -38,6 +38,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     RooflineConclusion,
     RooflineRequest,
     make_roofline_recorder,
+    roofline_arm,
     roofline_event_id,
 )
 
@@ -775,15 +776,14 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     """Build the trace_analyze request for the adopted trace.
 
     The arm is named explicitly so neither the snapshot's ceiling precision nor the recorded workload relies on a
-    transient current_best inference: PRELUDE measures the baseline arm, every other reason current_best. Each
-    roofline writes its own report so the PRELUDE baseline snapshot is never overwritten: prelude keeps the default
-    file, close_post_opt writes the "after" file, every other reason a rolling current one.
+    transient current_best inference. Each roofline writes its own report so the PRELUDE baseline snapshot is never
+    overwritten: prelude keeps the default file, close_post_opt the "after" file, every other reason a rolling one.
     """
     reason = str(task_params.get("reason") or "")
     payload: dict[str, Any] = {"trace_input": str(trace_path), "framework": framework}
     if task_params.get("workspace_path") not in (None, ""):
         payload["workspace_path"] = task_params["workspace_path"]
-    payload["roofline_arm"] = "baseline" if reason == "prelude_initial" else "current_best"
+    payload["roofline_arm"] = roofline_arm(reason)
     output_name = {"prelude_initial": "", "close_post_opt": "kernel_roofline_opt.json"}.get(
         reason, "kernel_roofline_current.json"
     )
@@ -907,7 +907,7 @@ class RooflineExecutor:
         self._record_lifecycle(session_dir, status="START", detail="auto-roofline: profile + TraceLens")
         arm = _ProfileArm.resolve(self._resolve_framework(ctx))
         if recorder is not None:
-            recorder.begin(max_profile_attempts=1)
+            recorder.begin()
         await _preflight(recorder, session_dir)
 
         profiled = await self._profile_until_usable(ctx, recorder, arm)

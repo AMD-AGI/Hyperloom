@@ -41,7 +41,6 @@ dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionD
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
 directory-entries src/hyperloom/common 56
 directory-entries src/hyperloom/orchestrator/actions/executors 84
-duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py 13
 duplicated-lines src/hyperloom/inference_optimizer/tests/conftest.py 54
@@ -148,12 +147,11 @@ function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::build 86
 function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::write_minimal_final_report 54
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/baseline_event.py::assemble_baseline_actions 53
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/critic_out.py::record_critic_iteration 58
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/roofline_event.py::assemble_roofline_actions 58
+function-lines src/hyperloom/inference_optimizer/breakdown/recorder/roofline_event.py::assemble_roofline_actions 57
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/stack_event.py::assemble_stack_ext 55
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 104
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/enablement.py::render 60
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 88
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 59
+function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/enablement.py::render 56
+function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 87
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/optimizations.py::render 52
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/phase_timeline.py::render 51
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 71
@@ -362,7 +360,6 @@ function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::re
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_tuned_config_coverage 61
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 71
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 57
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_kernel_rewrite_controller_timeline 56
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 52
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 64
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.record_geak_adopted_kernels 51
@@ -609,7 +606,7 @@ function-lines src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 61
 function-lines src/kernelforge/rewrite_by_flydsl/report.py::build_result 55
 function-lines src/kernelforge/rewrite_by_flydsl/runner.py::_Rewrite.finish 61
 function-lines src/kernelforge/tools/aiter_cache.py::prune_aiter_cache_shards 68
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1754
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 1744
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2612
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2708
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1748
@@ -631,7 +628,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1332
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
-module-lines src/hyperloom/orchestrator/phases/kernel.py 3984
+module-lines src/hyperloom/orchestrator/phases/kernel.py 3970
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1914
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
 module-lines src/hyperloom/orchestrator/policy/gate.py 1564
