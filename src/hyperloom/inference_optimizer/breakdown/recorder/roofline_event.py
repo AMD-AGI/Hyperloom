@@ -402,7 +402,6 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "production_selected_role": inventory.get("production_selected_role"),
         "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
-        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
         "verdict_measures": measures,
     }
 

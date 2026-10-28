@@ -15,9 +15,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import (
-    ExploreExecutor,
-)
+from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )

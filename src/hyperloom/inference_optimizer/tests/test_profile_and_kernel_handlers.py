@@ -23,6 +23,7 @@ from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_integrate_verdict, seed_kernel_keep
+from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -37,11 +38,12 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _preferred_main_trace_path,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
+    _trace_size_bytes,
 )
+from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -2483,7 +2485,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2658,7 +2660,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2712,7 +2714,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     async def fail_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         pytest.fail("invalid route must not launch a subprocess")
 
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(session_paths, "tracelens_root", fail_resolve_tracelens_root)
     monkeypatch.setattr(ta, "_run_subprocess", fail_run_subprocess)
     payload = {
         "trace_input": str(fake_trace),
@@ -2737,7 +2739,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
     """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -4157,10 +4159,9 @@ def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     rank_zero.write_bytes(b"x" * 100)
     rank_one.write_bytes(b"rank-one")
 
-    selected = _preferred_main_trace_path(
-        trace_dir,
+    selected = select_primary_trace(
         [rank_zero_warmup, merged, rank_one, rank_zero],
-        require_single_rank=True,
+        file_size=_trace_size_bytes,
         tensor_parallel_size=2,
     )
 
@@ -4172,10 +4173,9 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4187,10 +4187,9 @@ def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
     trace = trace_dir / "worker.pt.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=None,
         )
         == trace
@@ -4209,10 +4208,9 @@ def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_n
     trace = trace_dir / trace_name
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4224,10 +4222,9 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=1,
         )
         == merged

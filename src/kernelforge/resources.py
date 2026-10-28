@@ -101,3 +101,6 @@ def assert_sandbox_grant(path: str | Path, *, what: str) -> Path:
             "granting it to an agent sandbox would expose the whole installation"
         )
     return resolved
+
+
+__all__ = ["assert_sandbox_grant", "default_project_root", "resource_path"]

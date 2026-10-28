@@ -82,6 +82,7 @@ class MachinePhase(CoordinatorCollaborator):
                 _phase_state.normalize_budget_pct(budget_pct),
                 optimize_enabled=self.optimize_enabled(),
                 kernel_enabled=self.kernel_enabled(),
+                sweep_enabled=state.conc_sweep_enabled,
             )
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's

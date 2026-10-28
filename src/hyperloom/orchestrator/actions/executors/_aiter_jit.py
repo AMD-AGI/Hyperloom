@@ -27,8 +27,6 @@ log = logging.getLogger(__name__)
 
 # < N .so files under aiter jit/ ⇒ COLD start (first-time JIT compile pending).
 COLD_START_KERNEL_THRESHOLD = 20
-# COLD-start benchmark cap, including first-time compilation and graph capture.
-BASELINE_COLD_START_TIMEOUT_SEC = 9000
 
 # Fallback probe paths for aiter's JIT cache dir; first existing wins.
 AITER_JIT_PROBE_PATHS: tuple[str, ...] = (
@@ -66,6 +64,9 @@ COMPILER_PROCESS_NAMES = frozenset(
 _LOCK_NAMES = {"lock", ".ninja_lock"}
 _BATON_WAIT_MARKER = "waiting for baton release at"
 _BATON_LOG_NAMES = {"server.log", "benchmark_stderr.log", "benchmark_stdout.log"}
+# Bounds on the baton-wait scan: newest log files read, and bytes read from the end of each.
+_BATON_SCAN_MAX_FILES = 20
+_BATON_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def probe_aiter_jit_cache() -> dict[str, Any]:
@@ -249,19 +250,6 @@ def _resolve_lock_sweep_dirs(aiter_jit_dir: Path | None, unreadable: list[str] |
     return _dedupe_existing_dirs(candidates, unreadable)
 
 
-def _resolve_lock_sweep_dir(aiter_jit_dir: Path | None) -> Path | None:
-    """Compatibility wrapper returning the first resolved build tree."""
-    if aiter_jit_dir is None:
-        override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-        if override:
-            override_path = Path(override)
-            preferred = _dedupe_existing_dirs([override_path / "build", override_path])
-            if preferred:
-                return preferred[0]
-    resolved = _resolve_lock_sweep_dirs(aiter_jit_dir)
-    return resolved[0] if resolved else None
-
-
 def clean_stale_aiter_locks(
     aiter_jit_dir: Path | None = None,
     stale_minutes: int = AITER_LOCK_STALE_MINUTES,
@@ -283,8 +271,7 @@ def clean_stale_aiter_locks(
     if not resolved_dirs:
         return stats
 
-    primary = _resolve_lock_sweep_dir(None) if aiter_jit_dir is None else resolved_dirs[0]
-    stats["dir"] = str(primary or resolved_dirs[0])
+    stats["dir"] = str(resolved_dirs[0])
     stats["dirs"] = [str(path) for path in resolved_dirs]
 
     threshold_seconds = float(stale_minutes) * 60.0
@@ -345,13 +332,7 @@ def sweep_stale_aiter_locks_if_dead(
     return stats
 
 
-def find_aiter_baton_wait(
-    search_root: Path,
-    *,
-    since_unix: float | None = None,
-    max_files: int = 20,
-    tail_bytes: int = 256 * 1024,
-) -> dict[str, str] | None:
+def find_aiter_baton_wait(search_root: Path, *, since_unix: float | None = None) -> dict[str, str] | None:
     """Find bounded log evidence of an aiter process blocked on a FileBaton."""
     try:
         candidates = [path for path in search_root.rglob("*") if path.is_file() and path.name in _BATON_LOG_NAMES]
@@ -368,12 +349,12 @@ def find_aiter_baton_wait(
     if since_unix is not None:
         candidates = [path for path in candidates if _mtime(path) >= since_unix]
     marker_lower = _BATON_WAIT_MARKER.lower()
-    for path in candidates[:max_files]:
+    for path in candidates[:_BATON_SCAN_MAX_FILES]:
         try:
             with path.open("rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
-                handle.seek(max(0, size - tail_bytes))
+                handle.seek(max(0, size - _BATON_SCAN_TAIL_BYTES))
                 text = handle.read().decode(errors="replace")
         except OSError:
             continue
@@ -822,7 +803,6 @@ __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
     "AITER_PREWARM_MANIFEST",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
     "COMPILED_REGISTRY_MARKER",
