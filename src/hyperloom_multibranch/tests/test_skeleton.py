@@ -727,7 +727,9 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
     assert not [request for request in stage.toolbox.requests.values() if request.purpose is Purpose.BASELINE]
-    assert isinstance(stage.toolbox, LeasingToolbox) and stage.toolbox.leased == [] and stage.processes.env is None
+    assert isinstance(stage.toolbox, LeasingToolbox) and stage.toolbox.leased == []
+    child_env = stage.processes.env
+    assert child_env is not None and child_env.get(CHILD_CARDS_ENV) == os.environ.get(CHILD_CARDS_ENV)
     baseline = await stage.handle(Role.OBSERVER).baseline()
     assert (baseline.request_ids, baseline.values[GRADED_INTVTY_P50]) == ((), DEFAULT_BASELINE[GRADED_INTVTY_P50])
     assert baseline.source.startswith(f"prelude-child:{run} ")

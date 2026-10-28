@@ -55,11 +55,13 @@ from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
     CHILD_CARDS_ENV,
     CHILD_FIRST,
+    CHILD_TRACE_ANALYSIS_ROUTE,
     PREFLIGHT_OUT_OF_TIME,
     Prelude,
     PreludeFailed,
     PreludeResult,
     PreludeServices,
+    TRACE_ANALYSIS_ROUTE_ENV,
     WarmStartSource,
     prelude_argv,
     reused_prelude,
@@ -779,10 +781,14 @@ async def test_the_root_tests_run_while_the_child_runs_on_the_cards_leased_for_i
     assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
     assert peers.toolbox.leased == [("prelude", WORKLOAD.tp)] and peers.toolbox.released == ["lease-1"]
     assert processes.env is not None and processes.env[CHILD_CARDS_ENV] == "6"
+    assert processes.env[TRACE_ANALYSIS_ROUTE_ENV] == CHILD_TRACE_ANALYSIS_ROUTE
     assert processes.env.get("HIP_VISIBLE_DEVICES") == os.environ.get("HIP_VISIBLE_DEVICES")
 
 
-async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the_root_tests(tmp_path: Path) -> None:
+async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the_root_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(TRACE_ANALYSIS_ROUTE_ENV, "report")
     layout = _layout(tmp_path)
     processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
     peers.on_this_machine = True
@@ -792,7 +798,8 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
     await _run(_prelude(layout, processes, peers, recipe_kb=OneChampionKB()), SessionBudget.from_hours(2.0, NOW))
 
     assert exited == [True] * BASELINE_TESTS and peers.replays == [("inference:champion", True)]
-    assert processes.env is None and peers.toolbox.released == []
+    assert processes.env is not None and processes.env[TRACE_ANALYSIS_ROUTE_ENV] == CHILD_TRACE_ANALYSIS_ROUTE
+    assert processes.env.get(CHILD_CARDS_ENV) == os.environ.get(CHILD_CARDS_ENV) and peers.toolbox.released == []
     [first] = [entry for entry in _logged(layout) if entry["reason"] == CHILD_FIRST]
     assert first["detail"] == {"refusal": "one test needs both cards"}
 

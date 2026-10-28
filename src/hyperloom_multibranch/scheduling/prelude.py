@@ -3,18 +3,18 @@
 
 """PRELUDE: run the main flow once for the baseline and roofline, then root the session on its result.
 
-The child is ``hyperloom optimize`` with every optimization lever and enablement off, given the whole remaining session
-budget. It changes nothing of the framework checkout it is launched on, so the root recipe -- that checkout at its
-``HEAD`` on the toolbox's image -- is known before it starts: the experiment repository stores it as the root commit and
-the integration branch is opened on it with its K at once. The baseline every recorded value is anchored to is measured
-through the toolbox while the child runs: as many tests of the root as the rule gate asks for, from which the gate
-writes the baseline and its bar; on a toolbox that measures on this machine's cards, the child runs on cards leased for
-it. Either failing ends the other and PRELUDE. Where that lease would leave fewer cards than one test needs, the child
-runs first and the root tests after it. The longest of those tests, start to finish, is how long one test of this
-workload takes; it is FINAL's reserve. A gate that asks for none (AgentX, whose test takes over an hour) is given the
-child's own run of the root instead, once the child has ended: its report and per-request export are copied to
-``MB-prelude/baseline/``, the toolbox reads the copy as it reads a test's round, and that run's wall time is the
-reserve.
+The child is ``hyperloom optimize`` with every optimization lever and enablement off and its roofline trace analysed
+without a model session, given the whole remaining session budget. It changes nothing of the framework checkout it is
+launched on, so the root recipe -- that checkout at its ``HEAD`` on the toolbox's image -- is known before it starts:
+the experiment repository stores it as the root commit and the integration branch is opened on it with its K at once.
+The baseline every recorded value is anchored to is measured through the toolbox while the child runs: as many tests of
+the root as the rule gate asks for, from which the gate writes the baseline and its bar; on a toolbox that measures on
+this machine's cards, the child runs on cards leased for it. Either failing ends the other and PRELUDE. Where that lease
+would leave fewer cards than one test needs, the child runs first and the root tests after it. The longest of those
+tests, start to finish, is how long one test of this workload takes; it is FINAL's reserve. A gate that asks for none
+(AgentX, whose test takes over an hour) is given the child's own run of the root instead, once the child has ended: its
+report and per-request export are copied to ``MB-prelude/baseline/``, the toolbox reads the copy as it reads a test's
+round, and that run's wall time is the reserve.
 
 A baseline the child cannot establish ends it with the main flow's own baseline stop, and PRELUDE fails naming that
 stop; it never spends the session repairing the combo. Its session is read by
@@ -127,6 +127,12 @@ PRELUDE_BRANCH = "prelude"
 #: The cards the child runs on: the main flow keeps the ones it is given, and otherwise takes the machine's first TP
 #: (src/hyperloom/orchestrator/actions/executors/_workload_envs.py).
 CHILD_CARDS_ENV = "ROCR_VISIBLE_DEVICES"
+#: The child analyses its roofline trace on the main flow's route that starts no model session
+#: (src/hyperloom/orchestrator/actions/executors/trace_analyze.py): the session analyses the trace through the toolbox
+#: and never reads the child's own analysis. Set in the child's environment, it overrides a toolbox route of this
+#: process's environment that the main flow does not accept.
+TRACE_ANALYSIS_ROUTE_ENV = "HYPERLOOM_TRACE_ANALYSIS_ROUTE"
+CHILD_TRACE_ANALYSIS_ROUTE = "bypass"
 #: The child's lease is the lineage root's: its card time counts on the integration branch, not as a branch of its own.
 CHILD_LEASE_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
 #: The lease refusal that leaves the child to run before the root tests: its cards would leave fewer than one test's.
@@ -200,12 +206,12 @@ class _ChildCards:
     lease: BranchLease | None
     alongside: bool
 
-    def env(self) -> Mapping[str, str] | None:
-        """The child's environment: this process's, with the leased cards named in :data:`CHILD_CARDS_ENV`."""
+    def env(self) -> Mapping[str, str]:
+        """The child's environment: this process's, with :data:`CHILD_TRACE_ANALYSIS_ROUTE` and the leased cards
+        named in :data:`CHILD_CARDS_ENV`."""
 
-        if self.lease is None:
-            return None
-        return {**os.environ, CHILD_CARDS_ENV: ",".join(str(card) for card in self.lease.gpu_ids)}
+        cards = {} if self.lease is None else {CHILD_CARDS_ENV: ",".join(str(card) for card in self.lease.gpu_ids)}
+        return {**os.environ, TRACE_ANALYSIS_ROUTE_ENV: CHILD_TRACE_ANALYSIS_ROUTE, **cards}
 
 
 @dataclass(frozen=True)
