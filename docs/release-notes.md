@@ -45,9 +45,9 @@ Finish in-flight sessions under the build that started them. Every session's
 in-place migrations, so `optimize --resume-from` on a session started by 1.1.4
 or earlier exits `2` before it touches the session, with
 `coordinator.db is at schema version <N>, older than this build's 7: sessions created before this release cannot be resumed`.
-`kernelforge forge-loop --resume` likewise refuses a 1.1.4 checkpoint as an
-`invalid run state checkpoint`. See
-[Upgrade Hyperloom version](reference/upgrade.md).
+`kernelforge forge-loop --resume` likewise refuses a 1.1.4 checkpoint with
+`run state cumulative has unknown fields: api_errors, orchestration_errors`.
+See [Upgrade Hyperloom version](reference/upgrade.md).
 
 The workspace Experience KB starts over. Its service now keeps
 `database.sqlite3`, `<kb_id>/records/` and `<kb_id>/files/` in its data home
