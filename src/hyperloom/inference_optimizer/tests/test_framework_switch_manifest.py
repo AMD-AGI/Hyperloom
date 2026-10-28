@@ -376,6 +376,58 @@ def test_the_patch_set_is_read_as_one_change():
     assert manifest.unarmed_switch_gates([adds, reads_already]) == []
 
 
+def test_a_falsy_default_still_leaves_the_change_off():
+    """Unset and "0" reach the same branch, so the round still has to arm it."""
+    patch = _diff('    if os.environ.get("HL_FUSE", "0") == "1":')
+    assert manifest.unarmed_switch_gates([patch]) == ["HL_FUSE"]
+
+
+def test_a_read_that_defaults_the_change_on_is_not_a_gate():
+    """The rewrite ships enabled: the bench measures it whether or not anything sets the name."""
+    patch = _diff('    if os.environ.get("SGLANG_USE_NEW_PATH", "1") == "1":')
+    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_tuning_default_is_not_a_gate():
+    """A read that falls back to a usable value turns nothing on or off."""
+    patch = _diff(
+        '    root = os.getenv("ROCM_PATH", "/opt/rocm")',
+        '    streams = int(os.environ.get("HL_STREAMS", "4"))',
+    )
+    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_launcher_provided_name_is_not_a_gate():
+    """Rank and world topology come from the launch per process; no round can arm them."""
+    patch = _diff(
+        '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
+        '    size = os.environ["WORLD_SIZE"]',
+        '    node = os.getenv("SLURM_PROCID")',
+    )
+    assert manifest.unarmed_switch_gates([patch], armed={"PATH", "HOME"}) == []
+
+
+def test_a_benchmark_owned_name_is_not_a_switch():
+    """A manifest may not claim it either, so reading it is no reason to fail the round."""
+    patch = _diff('    out = os.environ["RESULT_DIR"]')
+    assert manifest.unarmed_switch_gates([patch]) == []
+
+
+def test_a_default_that_is_not_a_literal_is_not_refused():
+    """Nothing here shows the change is off when the name is unset, and a wrong refusal costs a round."""
+    patch = _diff('    mode = os.environ.get("HL_MODE", _DEFAULT_MODE)')
+    assert manifest.unarmed_switch_gates([patch]) == []
+
+
+def test_the_real_gate_is_reported_next_to_reads_that_are_not_gates():
+    """A patch that reads its rank and gates its rewrite owes the gate only."""
+    patch = _diff(
+        '    rank = int(os.environ.get("LOCAL_RANK", "0"))',
+        '    if os.environ.get("HL_FUSE_RMSNORM") == "1":',
+    )
+    assert manifest.unarmed_switch_gates([patch]) == ["HL_FUSE_RMSNORM"]
+
+
 # SharedState lever ledger
 
 

@@ -226,7 +226,7 @@ class ApplyStageMixin:
                     attempt,
                     params,
                     "framework_switch_gates_unarmed",
-                    [f"{name} is read by the patch but armed nowhere" for name in unarmed_gates],
+                    [f"{name} gates the patch's change off and is armed nowhere" for name in unarmed_gates],
                     unarmed_switch_gates=unarmed_gates,
                     **_reauthor_fields(
                         params,
