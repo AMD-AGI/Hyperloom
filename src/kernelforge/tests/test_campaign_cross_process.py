@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.tests.conftest import SRC_ROOT, silence_jit_rebuild
 
 import kernelforge.loop.runner as runner_module
@@ -131,7 +132,7 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
     assert state.cumulative.iterations == 4
 
     experiments = sorted(
-        tracker.list_experiments(),
+        persisted_experiments(tracker.dir),
         key=lambda experiment: experiment.segment_index,
     )
     assert [experiment.segment_index for experiment in experiments] == [1, 2]
@@ -277,7 +278,7 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
     final_report = (root / "optimization_report.md").read_text()
     history = (root / "optimization_history.md").read_text()
     experiments = sorted(
-        tracker.list_experiments(),
+        persisted_experiments(tracker.dir),
         key=lambda experiment: experiment.segment_index,
     )
 

@@ -223,7 +223,6 @@ class AttemptVerdictMixin:
                 snr_db=result.snr_db,
                 wall_ms=result.wall_ms,
                 mean_case_speedup=result.mean_case_speedup,
-                pmc_diagnosis=result.pmc_diagnosis,
                 vgpr=result.vgpr,
                 decision="KEEP" if result.kept else "REVERT",
                 notes=session_sink.get("plan", ""),

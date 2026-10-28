@@ -306,8 +306,6 @@ class KeepCheckpointMixin:
                 bench_detail=pending.get("benchmark") or {},
                 snr_db=pending.get("snr_db"),
                 vgpr=pending.get("vgpr"),
-                pmc_diagnosis=result.pmc_diagnosis,
-                profile_meta=result.profile_meta,
                 baseline_wall_ms=pending.get("baseline_wall_ms"),
                 best_wall_ms_before=pending.get("best_wall_ms_before"),
                 best_mean_case_speedup_before=pending.get("best_mean_case_speedup_before"),
@@ -323,7 +321,6 @@ class KeepCheckpointMixin:
                 shape=pending.get("shape") or {},
                 kernel_source=str(pending.get("kernel_source") or ""),
                 change_diff=str(pending.get("patch") or ""),
-                pmc_full=result.pmc_full,
                 validation_text=str(pending.get("validation_text") or ""),
             )
         )

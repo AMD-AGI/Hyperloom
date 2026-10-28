@@ -42,10 +42,6 @@ class CandidateRecord:
     bench_detail: dict | None = None  # raw bench_wallclock dict
     snr_db: float | None = None
     vgpr: int | None = None
-    pmc_diagnosis: str = ""
-    # Structured profile metadata (profile_backend, bottleneck, target_kernels, roofline dtype/AI, HBM/compute pct,
-    # SoL metrics) — consumed from meta.json.
-    profile_meta: dict | None = None
 
     # Comparison anchors
     baseline_wall_ms: float | None = None
@@ -71,7 +67,6 @@ class CandidateRecord:
     # Full blobs written to their own files (kept out of meta.json to keep it small)
     kernel_source: str = ""
     change_diff: str = ""
-    pmc_full: str = ""
     validation_text: str = ""
 
 
@@ -337,8 +332,6 @@ class CandidateArchive:
             "bench": rec.bench_detail or {},
             "snr_db": rec.snr_db,
             "vgpr": rec.vgpr,
-            "pmc_diagnosis": rec.pmc_diagnosis,
-            "profile": rec.profile_meta or {},
             "baseline_wall_ms": rec.baseline_wall_ms,
             "best_wall_ms_before": rec.best_wall_ms_before,
             "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
@@ -356,7 +349,6 @@ class CandidateArchive:
             "files": {
                 "kernel": self.kernel_basename if rec.kernel_source else None,
                 "diff": "change.diff" if rec.change_diff else None,
-                "profile": "profile.txt" if rec.pmc_full else None,
                 "validation": "validation.txt" if rec.validation_text else None,
             },
         }
@@ -403,14 +395,11 @@ class CandidateArchive:
             # 2) Full diff of the commit (captures sibling-file edits too).
             if rec.change_diff:
                 self._write_text(temp_dir / "change.diff", rec.change_diff)
-            # 3) Full profiling summary (rocprof-compute SoL or a PMC summary; profile_meta.backend says which).
-            if rec.pmc_full:
-                self._write_text(temp_dir / "profile.txt", rec.pmc_full)
-            # 4) Validation report / failure tail.
+            # 3) Validation report / failure tail.
             if rec.validation_text:
                 self._write_text(temp_dir / "validation.txt", rec.validation_text)
 
-            # 5) Structured metadata.
+            # 4) Structured metadata.
             meta = self._metadata(rec)
             self._write_text(temp_dir / CANDIDATE_META, json.dumps(meta, indent=2))
             fsync_directory(temp_dir)
