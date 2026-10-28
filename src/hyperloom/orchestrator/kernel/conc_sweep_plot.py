@@ -11,22 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from hyperloom.common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import GRADED_OUTPUT, is_agentx_mode
 
 log = logging.getLogger(__name__)
 
 
-def _positive(value: Any) -> float | None:
-    """Coerce to a strictly positive float, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value) if value > 0 else None
-
-
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """p90 interactivity against token throughput per chip."""
-    intvty = _positive(point.get("e2e_norm_intvty_p90"))
-    total = _positive(point.get("total_token_throughput"))
+    intvty = optional_positive_float(point.get("e2e_norm_intvty_p90"))
+    total = optional_positive_float(point.get("total_token_throughput"))
     if intvty is None or total is None:
         return None
     return intvty, total / tp_eff
@@ -34,8 +28,8 @@ def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] |
 
 def _synthetic_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
     """Output throughput per user against output throughput per GPU."""
-    tput = _positive(point.get("output_throughput"))
-    conc = _positive(point.get("conc"))
+    tput = optional_positive_float(point.get("output_throughput"))
+    conc = optional_positive_float(point.get("conc"))
     if tput is None or conc is None:
         return None
     return tput / conc, tput / tp_eff
@@ -125,7 +119,7 @@ def _arm_series(
     for pt in points:
         xy = axes.point_xy(pt, tp_eff)
         if xy is not None:
-            rows.append((_positive(pt.get("conc")), xy[0], xy[1]))
+            rows.append((optional_positive_float(pt.get("conc")), xy[0], xy[1]))
     rows.sort(key=lambda r: (r[0] is None, r[0] or 0.0, r[1]))
     return [r[1] for r in rows], [r[2] for r in rows], [r[0] for r in rows]
 

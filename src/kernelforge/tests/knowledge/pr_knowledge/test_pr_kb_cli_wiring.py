@@ -262,7 +262,7 @@ def test_the_event_append_cannot_abort_the_campaign():
 def test_result_is_emitted_before_provenance_is_written():
     source = inspect.getsource(forge_loop.callback)
     result = source.rindex("result = _build_result")
-    emitted = source.index('click.echo(f"__FORGE_RESULT__', result)
+    emitted = source.index("click.echo(format_forge_loop_result(result))", result)
     provenance = source.index("_write_pr_provenance(", emitted)
 
     assert emitted < provenance

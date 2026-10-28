@@ -32,21 +32,20 @@ def test_gain_math_branches() -> None:
 
 # --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
-def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_override(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "framework_optimization"
 
 
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
@@ -310,73 +309,3 @@ def test_paths_asset_root_missing_override(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv(paths.ENV_OVERRIDE_ASSET_ROOT, str(tmp_path / "nope"))
     with pytest.raises(paths.AssetRootNotFound):
         paths.asset_root()
-
-
-# --------------------------------------------------------------------------- # orchestrator.roles._runtime_bridge #
-# --------------------------------------------------------------------------- #
-def test_runtime_bridge_success(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run)
-    call = rb.RuntimeCall(
-        phase="tick",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={"X": "1"},
-    )
-    rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="robustness", timeout_sec=5.0)
-    assert "runtime.cli" in captured["cmd"]
-    assert "tick" in captured["cmd"]
-
-
-def test_runtime_bridge_timeout(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    def fake_run(cmd, **kwargs):
-        raise rb.subprocess.TimeoutExpired(cmd=cmd, timeout=5.0)
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run)
-    call = rb.RuntimeCall(
-        phase="prepare-review",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="critic", timeout_sec=5.0)
-
-
-def test_runtime_bridge_not_found_and_nonzero(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.roles import _runtime_bridge as rb
-    from hyperloom.orchestrator.roles.base import BackendError
-
-    call = rb.RuntimeCall(
-        phase="tick",
-        request_path=tmp_path / "req.json",
-        out_path=tmp_path / "out.json",
-        cwd=tmp_path,
-        env={},
-    )
-
-    def fake_run_missing(cmd, **kwargs):
-        raise FileNotFoundError("python gone")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_missing)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)
-
-    def fake_run_rc(cmd, **kwargs):
-        return SimpleNamespace(returncode=3, stderr="boom")
-
-    monkeypatch.setattr(rb.subprocess, "run", fake_run_rc)
-    with pytest.raises(BackendError):
-        rb.invoke_runtime_cli(call, module="runtime.cli", agent_label="a", timeout_sec=1.0)

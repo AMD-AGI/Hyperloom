@@ -100,16 +100,13 @@ def test_competitor_target_all_sourceless_writes_nothing(tmp_path: Path):
     assert not session_paths.competitor_target_json(tmp_path).exists()
 
 
-def test_scout_counters_and_seen_pr_roundtrip():
+def test_seen_pr_ids_roundtrip():
     s = SharedState()
     assert s.research_scout_enabled is True
-    assert s.research_scout_runs == 0
-    assert s.bump_research_scout_runs() == 1
     assert s.register_seen_pr_ids(["a", "b", "a", ""]) == 2
     assert "a" in s.research_scout_seen_pr_ids
     assert "zzz" not in s.research_scout_seen_pr_ids
     restored = SharedState.from_dict(s.to_dict())
-    assert restored.research_scout_runs == 1
     assert "b" in restored.research_scout_seen_pr_ids
 
 
@@ -157,7 +154,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
         round_id=0,
     )
 
-    assert task is not None
     assert task.params["mode"] == "research"
     assert task.params["source_phase"] == "PRELUDE"
     assert task.params["seen_pr_ids"] == ["https://pr/seen"]

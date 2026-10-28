@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import statistics
 
@@ -169,6 +169,14 @@ def keep_t_critical(sample_size: int) -> float:
     df = int(sample_size) - 1
     earned = [key for key in KEEP_T_CRITICAL if key <= df]
     return KEEP_T_CRITICAL[max(earned)] if earned else KEEP_T_CRITICAL[min(KEEP_T_CRITICAL)]
+
+
+@dataclass(frozen=True)
+class GateScoring:
+    """What the in-session gate scores a candidate against: the pristine per-case times and the current best."""
+
+    baseline_case_times: dict[str, float] = field(default_factory=dict)
+    best_mean_case_speedup: float | None = None
 
 
 def required_keep_speedup(

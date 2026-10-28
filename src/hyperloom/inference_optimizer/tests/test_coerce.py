@@ -13,6 +13,7 @@ from hyperloom.common.coerce import (
     first_float,
     first_int,
     first_str,
+    optional_positive_float,
     optional_positive_int,
     recorded_float,
     text_or_none,
@@ -162,6 +163,21 @@ class TestOptionalPositiveInt:
 
     def test_custom_default(self):
         assert optional_positive_int(0, default=1) == 1
+
+
+class TestOptionalPositiveFloat:
+    @pytest.mark.parametrize("value,expected", [(5, 5.0), (2.5, 2.5), ("5", 5.0), (" 0.25 ", 0.25)])
+    def test_positive(self, value, expected):
+        assert optional_positive_float(value) == expected
+
+    @pytest.mark.parametrize(
+        "value", [0, 0.0, -1.5, "0", "-2", None, True, False, "x", "", math.inf, -math.inf, math.nan, "inf"]
+    )
+    def test_non_positive_non_finite_or_invalid_to_default(self, value):
+        assert optional_positive_float(value) is None
+
+    def test_custom_default(self):
+        assert optional_positive_float(0, default=1.0) == 1.0
 
 
 class TestToUnix:

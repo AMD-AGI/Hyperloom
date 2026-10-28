@@ -23,6 +23,7 @@ from kernelforge.agent_backends import (
     register_agent_provider,
     resolve_agent_runtime,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 
 
@@ -135,6 +136,19 @@ def test_only_a_hook_running_provider_declares_stop_hooks() -> None:
     """
     assert get_agent_provider("claude").capabilities.stop_hooks
     assert not get_agent_provider("codex").capabilities.stop_hooks
+
+
+def test_only_claude_declares_a_shared_prompt_cache() -> None:
+    """The lane round starts its siblings after the first only when the provider reads a shared prefix back."""
+    assert get_agent_provider("claude").capabilities.shared_prompt_cache
+    assert not get_agent_provider("codex").capabilities.shared_prompt_cache
+
+
+def test_a_built_claude_backend_keeps_the_capabilities_its_class_declares() -> None:
+    """The registry replaces a built backend's capabilities with its own record, so the two must agree."""
+    from kernelforge.agent_backends.claude import ClaudeBackend
+
+    assert get_agent_provider("claude").capabilities == ClaudeBackend.capabilities
 
 
 def test_builtin_model_ownership_predicates() -> None:
@@ -467,13 +481,25 @@ def test_config_accepts_external_provider_without_core_choice_list() -> None:
         agent_fallback_provider="",
         agent_options={"temperature": 0},
     )
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
 
     assert runtime.provider == "configcli"
     assert runtime.model == "selected-model"
     assert runtime.executable == "/usr/bin/configcli"
     assert runtime.timeout_sec == 12
     assert runtime.options == {"temperature": 0}
+
+
+@pytest.mark.parametrize(
+    ("backend", "fallback"),
+    [("nosuchcli", ""), ("claude", "nosuchcli")],
+)
+def test_an_unregistered_provider_is_refused_when_its_runtime_is_resolved(backend, fallback) -> None:
+    """Config holds the names as data; resolving the runtime is where an unknown one is refused."""
+    config = Config(agent_backend=backend, agent_fallback_provider=fallback)
+
+    with pytest.raises(ValueError, match="unknown agent provider 'nosuchcli'"):
+        agent_runtime(config)
 
 
 def test_explicit_agent_options_do_not_parse_environment(monkeypatch) -> None:

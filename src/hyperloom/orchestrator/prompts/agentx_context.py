@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 from hyperloom.common.agentx_workload import BACKEND_ENV, agentic_backend, is_mlperf_backend
-from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
+from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT, is_agentx_mode
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.paths import magpie_dir
 
@@ -20,6 +20,20 @@ _RENDERED = ("p50", "p90", "p99")
 # The Magpie module that owns the native AgentX launch protocol: its protected server args and environment, and the
 # recipe-pinned speculative-decoding inputs.
 _MAGPIE_LAUNCH_MODULE = "Magpie.modes.benchmark.agentx_launch"
+
+# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's benchmark_mode, i.e.
+# HYPERLOOM_AGENTX) rather than by an orchestration.md rule, so a synthetic run never lists a doc it should not act on.
+AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
+
+
+def reference_out_of_mode(stem: str, benchmark_mode: str = "") -> bool:
+    """Return whether an AgentX-only reference doc is out of scope for *benchmark_mode*.
+
+    Only a concrete mode filters: an unscoped (``""``) render still lists every doc.
+    """
+    if stem not in AGENTX_ONLY_REFERENCES:
+        return False
+    return bool(str(benchmark_mode or "").strip()) and not is_agentx_mode(benchmark_mode)
 
 
 def _shape_row(label: str, dist: Mapping[str, Any] | None) -> str:
@@ -112,4 +126,19 @@ def launch_ownership_lines(backend: str = "") -> list[str]:
         f"and `_validate_golden_launch` in {source}.",
         "Magpie rejects a candidate that violates them before it is benchmarked, which wastes the",
         "variant and every other change bundled into it; spend variants on other knobs.",
+    ]
+
+
+def agentx_session_lines(shape: Mapping[str, Any] | None, grading: Mapping[str, Any] | None, backend: str) -> list[str]:
+    """The three blocks as one paragraph run, for the session context an orchestrator prompt opens with.
+
+    The blank lines are the separators that run renders with; a prompt that lays the blocks out itself calls the
+    three renderers.
+    """
+    return [
+        "",
+        *corpus_lines(shape),
+        "",
+        *grading_lines(grading, backend),
+        *launch_ownership_lines(backend),
     ]

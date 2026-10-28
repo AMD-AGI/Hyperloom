@@ -20,15 +20,18 @@ from kernelforge.agent_backends import (
     resolve_agent_runtime,
     StdioMcpServer,
 )
+from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_settings
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
+from kernelforge.orchestrator.gate_tag import gate_outcome_tag
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
+    GateScoring,
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
@@ -64,13 +67,48 @@ _PR_KB_CHILD_ENV_VARS = (
     "PR_KB_FALLBACK_MIN_WORTH",
 )
 
+_WORKSPACE_HYGIENE_RULE = (
+    "Do NOT create or leave new non-ignored files outside the campaign's "
+    "explicit --commit-new-path allowlist. Run "
+    "one-off checks inline; if a temporary file is unavoidable, place it "
+    "under forge_experiments/ and remove it before ending the turn."
+)
+
+# The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
+# are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
+_DELIVERABLE_HYGIENE_RULE = (
+    "What you submit is a finished operator, not a scratchpad: when you end "
+    "the turn it carries no `print` and reads no `os.environ` of its own. A "
+    "sweep knob or a probe print may live in the kernel while you search; "
+    "before ending the turn, replace each knob with the constant it selected, "
+    "delete each probe, and re-run the driver on the file you submit. A knob "
+    "left behind is indistinguishable, to everyone downstream, from live "
+    "configuration. The one exception is an option a library you call "
+    "exposes no other way: set that, and say in a comment why there is no "
+    "API for it."
+)
+
 
 def _pr_kb_child_env() -> dict[str, str]:
     """Collect the PR KB settings that must reach the position-C server."""
     return {name: os.environ[name] for name in _PR_KB_CHILD_ENV_VARS if os.environ.get(name, "").strip()}
 
 
-def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speedup: float | None) -> str:
+def _deadline_section(deadline_sec: int) -> str:
+    """Tell the session its own wall-clock bound."""
+    deadline_min = max(1, round(deadline_sec / 60))
+    return (
+        "## Session deadline\n"
+        f"You have about {deadline_min} minutes of wall-clock for "
+        "THIS session before it is cut off; a session cut off mid-turn hands "
+        "off nothing. Well before then, stop improving and submit the best "
+        "candidate you actually have through the clean handoff "
+        "(candidate_submitted) — do not reach for a larger gain you cannot "
+        "land in time.\n"
+    )
+
+
+def _gate_scoring_context(scoring: GateScoring) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
     return (
         "\n\n## Authoritative mean case scoring state\n"
@@ -84,8 +122,8 @@ def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speed
         f"{KEEP_MIN_MARGIN_FRACTION:.2%} of the current best. A "
         "quiet measurement therefore earns a small gain and a noisy "
         "one does not; repeatability is worth as much as speed.\n"
-        f"Fixed pristine per-case ms: {dict(baseline_case_times or {})}\n"
-        f"Current best pristine-relative score: {best_mean_case_speedup}.\n"
+        f"Fixed pristine per-case ms: {dict(scoring.baseline_case_times)}\n"
+        f"Current best pristine-relative score: {scoring.best_mean_case_speedup}.\n"
         "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
     )
 
@@ -147,7 +185,7 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
     They differ when the requested provider is unavailable and the registry
     falls back, which is said out loud rather than left for a later surprise.
     """
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             agent_backend,
@@ -156,7 +194,7 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
             # The executable and provider options, like the model, belong to the resolved provider.
-            settings=replace(config.agent_runtime_settings(), executable="", options={}),
+            settings=replace(agent_runtime_settings(config), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
@@ -174,6 +212,13 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             flush=True,
         )
     return backend, requested_backend
+
+
+def _session_cwd(kernel_path: str, workspace: Path | None, backend: Any) -> str:
+    """Where an implementer session runs: beside the kernel, or at the workspace root for a provider that needs it."""
+    if backend.capabilities.requires_workspace_cwd and workspace is not None and workspace.is_dir():
+        return str(workspace.resolve())
+    return str(Path(kernel_path).parent)
 
 
 def _bullet_list(items: list[str]) -> str:
@@ -339,18 +384,6 @@ def _session_end_reason(*, gate, run_result) -> str:
     return "agent_stopped"
 
 
-def _gate_outcome_tag(gate, end_reason: str, num_turns: int | None) -> str:
-    """The gate outcome, so the outer loop's commit message records whether the session self-converged."""
-    tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
-    if num_turns is not None:
-        tag += f" turns={num_turns}"
-    if gate.last_mean_case_speedup is not None:
-        tag += f" mean_case_speedup={gate.last_mean_case_speedup:.6f}x"
-    if gate.last_wall_ms is not None:
-        tag += f" raw_mean={gate.last_wall_ms:.4f}ms"
-    return tag + "]"
-
-
 def _fill_session_sink(
     session_sink: dict,
     *,
@@ -460,27 +493,6 @@ def make_agent_fn(
 
     prior_knowledge_section = f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""
 
-    workspace_hygiene_rule = (
-        "Do NOT create or leave new non-ignored files outside the campaign's "
-        "explicit --commit-new-path allowlist. Run "
-        "one-off checks inline; if a temporary file is unavoidable, place it "
-        "under forge_experiments/ and remove it before ending the turn."
-    )
-
-    # The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
-    # are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
-    deliverable_hygiene_rule = (
-        "What you submit is a finished operator, not a scratchpad: when you end "
-        "the turn it carries no `print` and reads no `os.environ` of its own. A "
-        "sweep knob or a probe print may live in the kernel while you search; "
-        "before ending the turn, replace each knob with the constant it selected, "
-        "delete each probe, and re-run the driver on the file you submit. A knob "
-        "left behind is indistinguishable, to everyone downstream, from live "
-        "configuration. The one exception is an option a library you call "
-        "exposes no other way: set that, and say in a comment why there is no "
-        "API for it."
-    )
-
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
     # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
@@ -570,8 +582,8 @@ explain your rationale in one sentence.
    refusing a mechanism because it would compromise the benchmark, read the
    harness — it is in the workspace — and cite the lines that say so. An
    assumption about what the harness does is not a reason.
-5. {workspace_hygiene_rule}
-6. {deliverable_hygiene_rule}
+5. {_WORKSPACE_HYGIENE_RULE}
+6. {_DELIVERABLE_HYGIENE_RULE}
 7. As your last output, output one line starting with `PLAN:` — a SHORT headline
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
@@ -677,8 +689,8 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   supplies. Before refusing a mechanism because it would compromise the
   benchmark, read the harness — it is in the workspace — and cite the lines that
   say so. An assumption about what the harness does is not a reason.
-- {workspace_hygiene_rule}
-- {deliverable_hygiene_rule}
+- {_WORKSPACE_HYGIENE_RULE}
+- {_DELIVERABLE_HYGIENE_RULE}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -705,25 +717,12 @@ Never `cat` a whole file — use the Read tool.
         if session.session_timeout_sec is not None
         else max(backend.runtime.timeout_sec, _DEFAULT_SESSION_TIMEOUT_SEC)
     )
-    session_deadline_min = max(1, round(session_deadline_sec / 60))
-
-    # Tell the session its own wall-clock bound.
-    deadline_section = (
-        "## Session deadline\n"
-        f"You have about {session_deadline_min} minutes of wall-clock for "
-        "THIS session before it is cut off; a session cut off mid-turn hands "
-        "off nothing. Well before then, stop improving and submit the best "
-        "candidate you actually have through the clean handoff "
-        "(candidate_submitted) — do not reach for a larger gain you cannot "
-        "land in time.\n"
-    )
 
     async def agent_fn(
         kernel_path: str,
         experiment_history: str,
         session_sink: dict | None = None,
-        baseline_case_times: dict | None = None,
-        best_mean_case_speedup: float | None = None,
+        gate_scoring: GateScoring = GateScoring(),
     ) -> str:
         # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
         if session_sink is None:
@@ -745,7 +744,7 @@ Never `cat` a whole file — use the Read tool.
 
         prompt = f"""\
 {target_section}
-{deadline_section}
+{_deadline_section(session_deadline_sec)}
 ## Prior experience (distilled constraints + recent iterations)
 {experiment_history if experiment_history else "(none — this is iteration 1)"}
 
@@ -754,15 +753,8 @@ Make your change(s) now.
 
         # One fixed interaction budget per candidate Session.
         turn_cap = config.max_turns
-        cwd = str(Path(kernel_path).parent)
-        run_cwd = cwd
         configured_workspace = Path(config.workspace) if config.workspace else None
-        if (
-            backend.capabilities.requires_workspace_cwd
-            and configured_workspace is not None
-            and configured_workspace.is_dir()
-        ):
-            run_cwd = str(configured_workspace.resolve())
+        run_cwd = _session_cwd(kernel_path, configured_workspace, backend)
 
         gate = None
         system_prompt = base_system_prompt
@@ -773,11 +765,11 @@ Make your change(s) now.
                 # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
                 # run's output dir, which is outside the workspace and is not a repository.
                 replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
-                baseline_case_times=baseline_case_times,
-                best_mean_case_speedup=best_mean_case_speedup,
+                baseline_case_times=gate_scoring.baseline_case_times,
+                best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
             )
             if gate_stop_check:
-                system_prompt = gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
+                system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
             # Built only for a provider that runs them. A backend which ignores
             # ``AgentRunSpec.hooks`` drops the whole group without a word, so
             # attaching one anyway makes this call site read as protection the
@@ -808,6 +800,7 @@ Make your change(s) now.
             target_files=(source_files or [kernel_path]),
             commit_new_paths=list(commit_new_paths),
             driver_script=driver_script or "",
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=list(gate_scope.extra_protected_globs),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
             # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
@@ -867,7 +860,7 @@ Make your change(s) now.
         text = run_result.text or "no rationale provided"
         if gate is not None:
             edit_count, passed = gate.edit_count, gate.passed
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
+            text = f"{gate_outcome_tag(gate, end_reason, num_turns)} {text}"
         # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
         # is analyzable without the LLM.
         print(
@@ -924,9 +917,15 @@ def _make_session_summarizer(
 
     from kernelforge.loop.lessons import SUMMARIZER_ROLE
 
+    implementer_policy = spec.tool_policy or AgentToolPolicy()
     summary_spec = replace(
         spec,
-        system_prompt=SUMMARIZER_ROLE,
+        # The implementer's system prompt and tool definitions open the cached prefix the whole session was billed
+        # against; changing either makes the summary rewrite that prefix instead of reading it. The summarizer role
+        # travels in the user turn, and a provider that describes tools beyond the narrower tool_policy below must
+        # refuse them whatever the permission mode or settings say (the Claude backend denies them in a PreToolUse
+        # hook).
+        declared_tool_policy=implementer_policy,
         writable=False,
         hooks=None,
         allow_dirty_targets=True,
@@ -935,18 +934,20 @@ def _make_session_summarizer(
         protected_globs=["*"],
         # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
-        tool_policy=AgentToolPolicy(
+        tool_policy=replace(
+            implementer_policy,
             read=True,
             search=True,
             write=False,
             shell=False,
+            extra_tools=(),
             # Enough turns to check a path or a number it half-remembers, not enough to start exploring the workspace.
             max_turns=4,
         ),
     )
 
     async def summarize(prompt: str) -> str:
-        result = await backend.resume(summary_spec, session_id, prompt, usage=usage)
+        result = await backend.resume(summary_spec, session_id, f"{SUMMARIZER_ROLE}\n\n{prompt}", usage=usage)
         return result.text or ""
 
     return summarize

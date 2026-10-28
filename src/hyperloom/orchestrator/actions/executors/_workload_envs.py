@@ -33,7 +33,7 @@ import yaml
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -66,29 +66,31 @@ from hyperloom.inference_optimizer.grid_server_args import (
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_watchdog_timeout,
-    server_args_env_name,
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
 from ._profile_setup import fit_capture_to_speculative
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
-    _load_model_config_dict,
+    load_model_config_dict,
     _sparse_kv_block_size,
 )
 
 log = logging.getLogger(__name__)
 
+_XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
+
 # The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
 # has no such kernel. The gate is the arch, so the board list is read off the
-# identity table rather than typed out beside it.
-_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
+# board table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(product for product, board in AMD_GPU_BOARDS.items() if board.gfx == "gfx942")
 
 
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
@@ -744,7 +746,7 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
     model = str(model_path or "").strip()
     if not model:
         return False
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     basename = Path(model).name.lower()
     if data is None:
         # Fallback for mounted model dirs whose config is unreadable.
@@ -786,7 +788,7 @@ def _client_tokenizer_mode(model_path: str | None) -> str:
     model = str(model_path or "").strip()
     if not model:
         return ""
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     if data is None:
         return ""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -895,7 +897,7 @@ def default_baseline_config() -> Path:
 
 
 def _finalize_framework_server_args(
-    bench: dict[str, Any], window: _RequestWindow, *, gpu_type: str | None, drop_moe_runner_backend: bool = False
+    bench: dict[str, Any], window: _RequestWindow, *, drop_moe_runner_backend: bool = False
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
@@ -934,7 +936,6 @@ def _finalize_framework_server_args(
         resolved_server_args,
         bench.get("framework"),
         bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
     )
     # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
     #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
@@ -952,11 +953,8 @@ def _finalize_framework_server_args(
     # 6. JSON-valued flags (--speculative-config / --compilation-config /
     #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
-    #    word. No-op for sglang and for arg strings with no JSON.
-    resolved_server_args = compact_json_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
+    #    word. No-op for arg strings with no JSON.
+    resolved_server_args = compact_json_server_args(resolved_server_args)
     resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
@@ -974,6 +972,7 @@ class _RequestWindow(NamedTuple):
     #: limit) a surviving ``max_iterations`` is rejected rather than trusted.
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
+    xdit_profiler_args: tuple[str, ...] = ()
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -1068,6 +1067,34 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
 
+def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
+    """Set xDiT profiler flags and write patch status; return the flags for restore."""
+    from ._server_patcher import ensure_xdit_patched_for_tracelens
+    from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
+
+    xdit_patch_attempted = _tracelens_patch_enabled()
+    xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+    needed = ["--profile_wait 1"]
+    if xdit_patched:
+        needed += ["--profile_capture_phase", "--profile_with_stack"]
+    existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
+    missing = [f for f in needed if f not in existing]
+    if missing:
+        envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
+    write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+    return tuple(needed)
+
+
+def num_prompts_per_conc(isl: int, osl: int) -> int:
+    """Requests a benchmark round sends per unit of concurrency: fewer waves the longer each sequence runs."""
+    seq_cost = isl + osl
+    if seq_cost <= 1024:
+        return 10
+    if seq_cost <= 4096:
+        return 5
+    return 3 if seq_cost <= 16384 else 2
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1094,6 +1121,8 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # Scriptable image frameworks (xDiT diffusion) have no LLM decode steady-state
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
+    _is_xdit_profile = is_profile and framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV
+    xdit_saved_args = _apply_xdit_profile(envs) if _is_xdit_profile else ()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1114,21 +1143,13 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # Profile mode: force-override NUM_PROMPTS to reach the steady-state
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
-        else:
-            seq_cost = isl_val + osl_val
-            if seq_cost <= 1024:
-                factor = 10
-            elif seq_cost <= 4096:
-                factor = 5
-            elif seq_cost <= 16384:
-                factor = 3
-            else:
-                factor = 2
-            if "NUM_PROMPTS" not in envs:
-                envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        elif "NUM_PROMPTS" not in envs:
+            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
-    return _RequestWindow(isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps)
+    return _RequestWindow(
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+    )
 
 
 def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1271,13 +1292,10 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
-    if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+    if framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV:
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1489,6 +1507,16 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
+        current = str(envs.get(framework_env, "")).strip()
+        missing = [f for f in window.xdit_profiler_args if f not in current]
+        if missing:
+            log.warning(
+                "profile server args lost xDiT profiler flags %r (replace_args=%s); restoring.",
+                missing,
+                bool(replace_args),
+            )
+            envs[framework_env] = merge_server_args(current, " ".join(missing))
     # After the restore, so a vLLM delay it re-added is divided like any other.
     if window.profiling and window.serves_requests:
         fit_capture_to_speculative(envs, framework_env)
@@ -1659,9 +1687,7 @@ def materialize_config_with_envs(
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
-    _finalize_framework_server_args(
-        bench, window, gpu_type=target.gpu_type, drop_moe_runner_backend=options.drop_moe_runner_backend
-    )
+    _finalize_framework_server_args(bench, window, drop_moe_runner_backend=options.drop_moe_runner_backend)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)

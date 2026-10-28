@@ -14,7 +14,9 @@ nothing else:
 * no ``exit.json``, or ``final: false`` -- the process died, or a watchdog ended a leg.  Restarted, and the entry
   resumes the same session.
 
-The session directory is a function of the run (see :func:`hyperloom.inference_optimizer.session.paths.hosted_session_dir`),
+Before ``optimize`` starts or resumes, on every leg, the entry runs the packaged ``install.sh`` -- the installer the
+legacy launchers run at every pod start -- with its output in ``$HYPERLOOM_STATE_DIR/install.log``; an installer that
+fails ends the run finally (return code 2).  The session directory is a function of the run (see :func:`hyperloom.inference_optimizer.session.paths.hosted_session_dir`),
 so a restart finds it again; a directory that holds every file of :data:`SESSION_FILES` is resumed, any other is
 started fresh, after the stray files of a session that never finished its first write are removed.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed, environment unchanged, to
 the ``hyperloom-multibranch`` command, which reads the host inputs itself.
@@ -26,6 +28,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator, Mapping
@@ -34,10 +37,12 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+from hyperloom.inference_optimizer.breakdown.session_package import ENV_PACKAGE_DEST_ROOT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 from hyperloom.inference_optimizer.session.paths import (
     ENV_USER_DATA_PATH,
@@ -46,6 +51,11 @@ from hyperloom.inference_optimizer.session.paths import (
     hosted_session_dir,
     stop_request_path,
 )
+from hyperloom.inference_optimizer.session.resume_guard import (
+    CleanupConfirmationError,
+    confirm_scope_gone,
+    foreign_owner_scopes,
+)
 from hyperloom.plugs.errors import ManifestError
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
@@ -53,6 +63,8 @@ EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 MULTIBRANCH_COMMAND = "hyperloom-multibranch"
 ENV_IMAGE = "HYPERLOOM_IMAGE"
+INSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "inference_optimizer" / "assets" / "install.sh"
+INSTALL_LOG = "install.log"
 #: ``stop_reason`` of a run ended by a stop request before it started; the coordinator's name for an operator stop.
 STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
@@ -82,7 +94,18 @@ def main(argv: list[str] | None = None) -> int:
         return RETURNCODE_REFUSED
 
 
+def _drop_cwd_from_sys_path() -> None:
+    """Keep the working directory off ``sys.path``: the host chooses it, and a ``python -m`` start puts it first.
+
+    A directory there named like an installed package (``sglang``) but without ``__init__.py`` is found as a namespace
+    package, which wins over an editable install's finder, so the package has no ``__file__`` for ``optimize``.
+    """
+    cwd = os.path.realpath(os.getcwd())
+    sys.path[:] = [item for item in sys.path if item and os.path.realpath(item) != cwd]
+
+
 def _run() -> int:
+    _drop_cwd_from_sys_path()
     info = _read_inputs()
     spec = _read_spec(info)
     if not Path(os.environ.get(ENV_USER_DATA_PATH, "")).is_absolute():
@@ -94,15 +117,91 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     session_dir = _prepare_session_dir(spec, info)
-    ensure_archive_root(session_dir)
+    os.environ[ENV_PACKAGE_DEST_ROOT] = str(ensure_archive_root(session_dir))  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
     if stop_request_path(session_dir).is_file():
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
         _write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
+    _put_interpreter_first_on_path()
+    _run_installer(info.state_dir)
+    _confirm_previous_containers_gone(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+SCOPE_GONE_REASON = "hosted resume: the host starts a leg only once the previous application container no longer exists"
+
+
+def _confirm_previous_containers_gone(session_dir: Path) -> None:
+    """On a resume in a new container, mark the work a previous container left running as interrupted.
+
+    The host runs one application container per run at a time and starts a new leg only after the previous container
+    is gone, so an owner scope in the session that is not this container's belongs to a container that no longer
+    exists.  This is ``hyperloom recover --confirm-scope-gone`` for each such scope, from the same code; a leg in the
+    container that wrote the session finds no other scope and goes through the preflight's own checks unchanged.
+    """
+    scope = local_owner_scope()
+    if not scope or not is_resumable(session_dir):
+        return
+    for gone in foreign_owner_scopes(session_dir, scope):
+        try:
+            confirm_scope_gone(session_dir, owner_scope=gone, reason=SCOPE_GONE_REASON, current_scope=scope)
+        except CleanupConfirmationError as exc:
+            raise Refused(f"the previous container's work cannot be confirmed gone: {exc}") from None
+        print(
+            "[hosted] the previous application container is gone; its unfinished work is marked interrupted", flush=True
+        )
+
+
+def _put_interpreter_first_on_path() -> None:
+    """Make the directory of the running interpreter the first entry of ``PATH`` for the installer and ``optimize``.
+
+    The console scripts the installer puts into the run's environment (the TraceLens CLIs) live there.
+    """
+    bin_dir = str(Path(sys.executable).parent)
+    entries = [item for item in os.environ.get("PATH", "").split(os.pathsep) if item and item != bin_dir]
+    os.environ["PATH"] = os.pathsep.join([bin_dir, *entries])
+
+
+def _installer_environment() -> dict[str, str]:
+    """The environment of ``install.sh``: the running interpreter and its environment are the ones it installs into.
+
+    Without ``INFERENCE_OPTIMIZER_FORCE_PYTHON`` the script prefers the image's ``/opt/venv`` over ``PYTHON``, where this
+    wheel is not installed.
+    """
+    environment = dict(os.environ)
+    environment["PYTHON"] = sys.executable
+    environment["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
+    if sys.prefix != sys.base_prefix:
+        environment["VIRTUAL_ENV"] = sys.prefix
+    return environment
+
+
+def _run_installer(state_dir: Path) -> None:
+    """Run the packaged ``install.sh`` (no flags, like the legacy launchers) and log its output; a failure ends the run.
+
+    The script comes from the installed wheel, so it is of the commit that runs.  It is idempotent and runs on every leg.
+    Its output goes to a file, never a pipe: the Ray daemon it starts would hold a pipe open.  The log is only the
+    script's own output; the entry adds nothing from the environment.
+    """
+    log_path = state_dir / INSTALL_LOG
+    print(f"[hosted] running {INSTALL_SCRIPT.name}; log {log_path}", flush=True)
+    try:
+        with log_path.open("wb") as log:
+            returncode = subprocess.run(
+                ["bash", str(INSTALL_SCRIPT)],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                env=_installer_environment(),
+                stderr=subprocess.STDOUT,
+                check=False,
+            ).returncode
+    except OSError as exc:
+        raise Refused(f"install.sh could not run: {exc.strerror or type(exc).__name__}; log {log_path}") from None
+    if returncode != 0:
+        raise Refused(f"install.sh failed with exit code {returncode}; see {log_path}")
 
 
 @contextmanager

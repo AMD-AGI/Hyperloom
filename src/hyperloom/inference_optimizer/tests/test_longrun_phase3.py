@@ -166,7 +166,6 @@ async def _noop_phase_side_effects(c):
 def _arm_explore_to_sweep(st):
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_FRAMEWORK_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60

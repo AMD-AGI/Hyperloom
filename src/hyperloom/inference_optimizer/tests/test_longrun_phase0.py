@@ -35,13 +35,11 @@ def conn(tmp_path):
 def test_intervention_mix_capped():
     st = SharedState()
     cap = ss_mod._INTERVENTION_MIX_CAP
-    for i in range(cap + 250):
-        st.record_intervention(change_type="config", action="explore", task_id=str(i))
+    for _ in range(cap + 250):
+        st.record_intervention(change_type="config")
+    st.record_intervention(change_type="code_patch")
     assert len(st.intervention_mix) == cap
-    # Most-recent retained, oldest evicted.
-    assert st.intervention_mix[-1]["task_id"] == str(cap + 250 - 1)
-    # Control counter is NOT trimmed.
-    assert st.consecutive_config_only_rounds == cap + 250
+    assert st.intervention_mix[-1]["change_type"] == "code_patch"
 
 
 def test_specialist_rounds_capped():
@@ -330,12 +328,11 @@ async def test_claude_backend_retries_transient_then_succeeds():
     backend = ClaudeBackend(
         sdk_query_factory=_factory,
         sdk_options_cls=_Options,
-        enable_mcp_emit_intent=False,
+        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
     )
     # Fast timeout so the first attempt's wait_for path is exercised.
     backend.call_timeout_s = 5.0
-    backend.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 
     result = await backend.run("hi")
     assert state["n"] == 2  # one transient failure, one success

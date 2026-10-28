@@ -40,8 +40,7 @@ def _log(tmp_path, lines):
 def parser(request, monkeypatch):
     """Run every case against a stand-in parser, and against forge when present."""
     if request.param == "real_forge":
-        # Skip on the submodule production actually imports, not the top-level package.
-        pytest.importorskip("kernelforge.gemm_tune.evidence", reason="real parser unavailable")
+        pytest.importorskip("kernelforge.gemm_tune", reason="real parser unavailable")
         return
 
     import re
@@ -69,11 +68,8 @@ def parser(request, monkeypatch):
         }
 
     fake = types.ModuleType("kernelforge.gemm_tune")
-    fake_ev = types.ModuleType("kernelforge.gemm_tune.evidence")
-    fake_ev.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
-    fake.evidence = fake_ev  # type: ignore[attr-defined]
+    fake.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
     return
 
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
+from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -18,14 +19,14 @@ from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
+from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -144,7 +145,8 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
         rows.append("  failure: " + render_failure_line(row, excerpt_chars=120))
     elided = len(failures) - max_variant_rows
     if elided > 0:
-        rows.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        pull = qualified_context_tool_name("get_variant_failures")
+        rows.append(f"  (+{elided} more failures; pull {pull})")
     return rows
 
 
@@ -240,8 +242,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 #: A prompt section: the heading it goes under, or ``None`` for a block that carries its own, and what renders it.
 _AdvisoryRow = tuple[str | None, Callable[["ConversationCollaborator"], str]]
 
-#: The orchestration advisories that precede the plateau pair. Row order is the order the model reads the
-#: sections in, so it is content.
+#: The orchestration advisories that hold for the session, so they ride in the cached context. Row order is the
+#: order the model reads the sections in, so it is content; the per-tick blocks follow them, in the turn.
 _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Warm start (Recipe KB T0) ===", lambda c: c.shared_state.to_warm_start_summary()),
     ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
@@ -250,10 +252,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
     ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
-)
-
-#: The orchestration advisories that follow the plateau pair; see :data:`_ADVISORY_BLOCKS`.
-_POST_PLATEAU_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
     ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
     ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
@@ -402,7 +400,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
             gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
-            started = parse_iso_unix_or_zero(task.updated_at)
+            started = to_unix(task.updated_at, 0.0)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
             parts = [
                 f"  - task_id={task.task_id}",
@@ -419,7 +417,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
             if expires_at:
-                exp_unix = parse_iso_unix_or_zero(expires_at)
+                exp_unix = to_unix(expires_at, 0.0)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
             if lanes:
@@ -473,17 +471,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text."""
-        blob = self.shared_state._format_analysis_md_full()
-        if blob and blob.strip():
-            return blob
-        # Fallback: read the path recorded on last_trace_analyze.
         lta = self.shared_state.last_trace_analyze or {}
+        text = lta.get("analysis_md_text") or ""
+        if text:
+            return strip_base64_data_urls(text)
         path = str(lta.get("analysis_md_path") or "")
         if path:
             try:
                 from pathlib import Path as _Path
 
-                return _Path(path).read_text(encoding="utf-8")
+                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
             except OSError as exc:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"
@@ -538,8 +535,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
             log.exception("Coordinator: trajectory review digest failed")
             return ""
 
-    async def _orchestration_sections(self) -> list[str]:
-        """The denial summary, proposal queue and advisories only the orchestration agent reads."""
+    def _orchestration_context_sections(self) -> list[str]:
+        """The advisories only the orchestration agent reads, all of them session-stable."""
+        return _advisory_sections(self, _ADVISORY_BLOCKS)
+
+    async def _orchestration_turn_sections(self) -> list[str]:
+        """The denial summary, proposal queue and plateau pair: only the orchestration agent reads them, and each
+        moves with the session, so they are rendered per tick.
+        """
         from ..predictor.prompt import queue_block
         from ..predictor.rows import PROVENANCE
 
@@ -560,7 +563,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             kb_block = await self._kb_prompt_block(untested_block)
             if kb_block:
                 sections.append(kb_block)
-        sections.extend(_advisory_sections(self, _ADVISORY_BLOCKS))
         plateau_block = self.plateau_advisory_block()
         if plateau_block:
             sections.append("=== Plateau advisory ===")
@@ -570,7 +572,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if trajectory_block:
                 sections.append("=== Trajectory review (advisory) ===")
                 sections.append(trajectory_block)
-        sections.extend(_advisory_sections(self, _POST_PLATEAU_ADVISORY_BLOCKS))
         return sections
 
     async def _render_inbox_sections(self, agent_name: str) -> list[str]:
@@ -634,10 +635,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     )
         turn.append("=== Tick ===")
         turn.append(self.shared_state.to_tick_summary())
+        # The session ledger moves with every action that lands, so it belongs to
+        # the turn: carried in ``context`` it would rewrite the cached prefix the
+        # stable blocks below sit in, on nearly every tick.
+        turn.append("=== Shared session state ===")
+        turn.append(self.shared_state.to_prompt_summary())
+        turn.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
 
-        context.append("=== Shared session state ===")
-        context.append(self.shared_state.to_prompt_summary())
-        context.append(f"target_gap_pct={self._coord.target_gap_pct():.2f}")
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.
@@ -645,7 +649,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append("=== Resource pools ===")
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
-            context.extend(await self._orchestration_sections())
+            context.extend(self._orchestration_context_sections())
+            # A denial, a proposal leaving the queue or a plateau count lands between
+            # two ticks, so these blocks follow the ledger into the turn: the cached
+            # prefix ends above them and holds for the session.
+            turn.extend(await self._orchestration_turn_sections())
 
         turn.extend(await self._render_inbox_sections(agent_name))
 

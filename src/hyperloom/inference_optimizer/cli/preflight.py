@@ -46,7 +46,7 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.llm_headers import expand_env_refs
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
 from hyperloom.common.provenance import (
@@ -628,7 +628,7 @@ def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ..
 
 def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it."""
-    ray_version = os.environ.get("RAY_VERSION") or ""
+    ray_version = os.environ.get("RAY_VERSION", "")
     ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
     check = _ray_smoke(python_exe, ray_version)
     if check.returncode == 0:
@@ -639,7 +639,7 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "target": "ray",
             "interpreter": python_exe,
             "spec": ray_spec,
-            "version_after": (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION,
+            "version_after": check.stdout.strip() or ray_version or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
@@ -1444,7 +1444,7 @@ def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
     """Warn when the GPU architecture cannot be resolved for provenance."""
     if detect_gfx_arch(os.environ, gpu_type=gpu_type):
         return
-    boards = "/".join(sorted(AMD_GPU_DISPATCH_IDENTITIES))
+    boards = "/".join(sorted(AMD_GPU_BOARDS))
     print(
         "Preflight: WARNING — GPU architecture could not be resolved; provenance "
         "will record gfx_arch as null, so an archived report will not say which "

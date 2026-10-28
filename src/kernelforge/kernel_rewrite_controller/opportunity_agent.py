@@ -27,12 +27,14 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     TERMINAL_END_REASONS,
     ResumePolicy,
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
@@ -638,6 +640,7 @@ class OpportunityAnalysisAgent:
             writable=True,
             timeout_sec=self.timeout_sec,
             additional_directories=_additional_directories(handoff),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_paths=[
                 str(handoff.root / "workload.md"),
                 str(handoff.root / "serving-context.md"),
@@ -709,7 +712,7 @@ def run_opportunity_analysis(
                 workspace=str(layout.agent_root),
                 agent_timeout_sec=timeout_sec,
             )
-            runtime = with_writable_sandbox(config.agent_runtime())
+            runtime = with_writable_sandbox(agent_runtime(config))
             selected_backend = create_registered_backend(
                 runtime,
                 probe_cwd=str(layout.agent_root),

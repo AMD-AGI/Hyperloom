@@ -39,9 +39,8 @@ failure, dangerous patch, robustness conflict, payload-shape /
 provenance violations).
 
 OPTIMIZE and KERNEL keep strict per-phase action contracts;
-`review_constraints.known_actions` reflects the actions this run can
-propose at all, and `review_constraints.action_verdict_policy` maps each
-one to its verdict class.
+`review_constraints.action_verdict_policy` maps each action this run can
+propose to its verdict class.
 
 A patch that mutates kernel source mid-OPTIMIZE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is

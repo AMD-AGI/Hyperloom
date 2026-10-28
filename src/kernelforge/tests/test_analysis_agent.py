@@ -18,8 +18,8 @@ from kernelforge.orchestrator.analysis import (
     AnalysisConfigurationError,
     AnalysisSources,
     IncrementalAnalysisInput,
-    _AnalysisProtection,
 )
+from kernelforge.orchestrator.analysis_protection import AnalysisProtection
 from kernelforge.orchestrator.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
@@ -337,7 +337,7 @@ async def test_analysis_protection_only_allows_artifact_writes(
     workspace, kernel, driver = _workspace(tmp_path)
     staging = workspace / "forge_experiments" / "analysis" / "work" / "abc"
     staging.mkdir(parents=True)
-    protection = _AnalysisProtection(
+    protection = AnalysisProtection(
         workspace=workspace,
         staging_root=staging,
         protected_paths=(kernel, driver),

@@ -14,13 +14,13 @@ from typing import Any
 
 from hyperloom.common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
-from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
 from ...bringup import load_boot_observation, observation_summary, verdict_of
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
 from ._accuracy_gate import enablement_correctness
+from ._enablement_config import _FRAMEWORK_KB_PROVENANCE_PREFIX
 from ._git import _git_head_sha
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _KbLesson, _PatchBench
@@ -51,7 +51,6 @@ class EnablementGateMixin:
         self,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
     ) -> dict[str, Any]:
         """Bench + enablement/perf KEEP/REVERT gate.
 
@@ -103,7 +102,6 @@ class EnablementGateMixin:
             verdict = await self._gate_enablement(
                 attempt=attempt,
                 params=params,
-                extra=extra,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
@@ -111,7 +109,6 @@ class EnablementGateMixin:
             verdict = await self._gate_perf(
                 attempt=attempt,
                 params=params,
-                extra=extra,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
             )
@@ -124,7 +121,6 @@ class EnablementGateMixin:
         *,
         attempt: IntegrateAttempt,
         params: dict[str, Any],
-        extra: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
@@ -197,7 +193,7 @@ class EnablementGateMixin:
         advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             await self._maybe_write_framework_kb_record(
-                _KbLesson("reverted_smoke_fail", 0.0), done_payload=done_payload, params=params, extra=extra
+                _KbLesson("reverted_smoke_fail", 0.0), attempt=attempt, params=params
             )
             return {
                 "status": "reverted",
@@ -232,9 +228,7 @@ class EnablementGateMixin:
             )
 
         if advanced:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
-            )
+            await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
             # round_advanced is only true for a recorded after-observation.
             assert after_loaded.observation is not None
             wall = after_loaded.observation.stage_failed
@@ -283,9 +277,7 @@ class EnablementGateMixin:
         reason = f"enablement runnable: {run_reason}"
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
-        await self._maybe_write_framework_kb_record(
-            _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
-        )
+        await self._maybe_write_framework_kb_record(_KbLesson("integrated", 0.0), attempt=attempt, params=params)
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
@@ -528,8 +520,6 @@ class EnablementGateMixin:
         Args:
             done_payload: The parsed ``specialist_done.json`` payload, or
                 ``None``.
-            params: Task params; the upstream-PR lane's PR identity lives on
-                ``params['candidate']`` rather than in a specialist proposal.
 
         Returns:
             The matching framework proposal dict, or ``None`` when absent.
@@ -543,7 +533,7 @@ class EnablementGateMixin:
             if not isinstance(proposal, dict):
                 continue
             provenance = str(proposal.get("provenance") or "")
-            if provenance.startswith("specialist:serving:framework"):
+            if provenance.startswith(_FRAMEWORK_KB_PROVENANCE_PREFIX):
                 return proposal
         return None
 
@@ -575,31 +565,22 @@ class EnablementGateMixin:
             "fa_pr_url": pr_url,
             "fa_pr_sha": pr_sha,
             "framework": candidate.get("framework") or "",
-            "gap_canonical_id": candidate.get("gap_canonical_id") or "",
-            "gap_keywords": candidate.get("gap_keywords") or [],
-            "changed_files": candidate.get("changed_files") or [],
             "applicability": candidate.get("applicability") or "",
-            # Names the lever, matching ``lever_kind``. No ledger reader filters
-            # on provenance; it is audit metadata.
-            "provenance": LEVER_UPSTREAM_PR,
-            "source_framework": candidate.get("source_framework") or "",
-            "target_framework": candidate.get("target_framework") or "",
         }
 
     async def _maybe_write_framework_kb_record(
         self,
         lesson: _KbLesson,
         *,
-        done_payload: dict[str, Any] | None,
+        attempt: IntegrateAttempt,
         params: Mapping[str, Any] | None = None,
-        extra: dict[str, Any],
     ) -> None:
         """Record this attempt's outcome against the patch's upstream PR identity.
 
         A patch with no such identity leaves no lesson: the ledger files every
         lesson under a PR URL or head SHA.
         """
-        proposal = self._find_framework_proposal(done_payload)
+        proposal = self._find_framework_proposal(attempt.done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
             # rather than in a specialist's ``fa_*`` markers.
@@ -616,8 +597,8 @@ class EnablementGateMixin:
             return
         # The ``if v`` filter is what makes the merge mean "the proposal's value,
         # or the payload's where the proposal left it empty".
-        fields = {**(done_payload or {}), **{k: v for k, v in proposal.items() if v}}
-        shared_state = extra.get("shared_state")
+        fields = {**(attempt.done_payload or {}), **{k: v for k, v in proposal.items() if v}}
+        shared_state = attempt.shared_state
         patches_written = to_str_list(proposal.get("patches_written"))
         accuracy_delta_pct = lesson.accuracy_delta_pct
         if accuracy_delta_pct is None:
@@ -634,17 +615,8 @@ class EnablementGateMixin:
                     tps_delta_pct=float(lesson.tps_delta_pct),
                     session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
                     framework=first_text(fields.get("framework")).lower(),
-                    gap_canonical_id=first_text(fields.get("gap_canonical_id")),
-                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
-                    model_class=first_text(getattr(shared_state, "model_class", "")),
-                    gpu_type=first_text(getattr(shared_state, "gpu_type", "")),
-                    precision=first_text(getattr(shared_state, "precision", "")),
                     applicability=lesson.config_fingerprint or first_text(fields.get("applicability")),
-                    provenance=first_text(fields.get("provenance")),
                     accuracy_delta_pct=accuracy_delta_pct,
-                    changed_files=to_str_list(fields.get("changed_files")),
-                    source_framework=first_text(fields.get("source_framework")).lower(),
-                    target_framework=first_text(fields.get("target_framework")).lower(),
                 )
             )
         except (OSError, ValueError, TypeError) as exc:

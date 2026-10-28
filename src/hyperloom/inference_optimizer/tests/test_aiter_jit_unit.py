@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -615,11 +617,11 @@ def test_serving_modules_cover_csv_ignores_asm_kernel_names(tmp_path):
     )
 
 
-def test_serving_modules_cover_csv_finds_cktile_in_blockscale_cktile_so(tmp_path):
+def test_serving_modules_cover_csv_finds_cktile_in_bpreshuffle_cktile_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
-    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so").write_bytes(
         b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
     )
     csv_path = tmp_path / "merged.csv"
@@ -640,7 +642,7 @@ def test_serving_modules_cover_csv_false_when_cktile_only_in_tune_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
-    (jit_dir / "module_gemm_a8w8_blockscale_cktile.so").write_bytes(b"other_cktile")
+    (jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so").write_bytes(b"other_cktile")
     (jit_dir / "module_gemm_a8w8_blockscale_cktile_tune.so").write_bytes(
         b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1"
     )
@@ -691,7 +693,7 @@ def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, m
 
 
 @pytest.mark.parametrize("override_leaf", ["jit", "jit/build"])
-def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_path, monkeypatch, override_leaf):
+def test_prepare_serving_so_skips_when_cktile_lives_in_bpreshuffle_cktile_so(tmp_path, monkeypatch, override_leaf):
     monkeypatch.chdir(tmp_path)
     ambient = tmp_path / "site" / "aiter"
     (ambient / "configs").mkdir(parents=True)
@@ -711,7 +713,7 @@ def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_
         encoding="utf-8",
     )
     bp = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
-    cktile = jit_dir / "module_gemm_a8w8_blockscale_cktile.so"
+    cktile = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle_cktile.so"
     bp.write_bytes(b"a8w8_blockscale_bpreshuffle_ck")
     cktile.write_bytes(b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_1")
     csv_path = tmp_path / "merged.csv"
@@ -1029,3 +1031,143 @@ def test_is_aiter_jit_registry_mismatch_inside_cuda_graph_blob():
     )
     assert aj.is_aiter_jit_registry_mismatch(blob)
     assert not aj.is_aiter_jit_registry_mismatch("Capture cuda graph failed: HIP error")
+
+
+_BP_VAR = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
+_BP_CK = "module_gemm_a8w8_blockscale_bpreshuffle"
+_BP_CKTILE = "module_gemm_a8w8_blockscale_bpreshuffle_cktile"
+_BP_MODULES = aj.AITER_ENV_TO_SERVING_MODULES[_BP_VAR]
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _write_prewarm_manifest(jit: Path, configs: Path, modules: tuple[str, ...]) -> None:
+    """The manifest hyperloom's prewarm writes (schema ``hyperloom.aiter_prewarm/1``), restated from its format."""
+    files = sorted((p.relative_to(configs).as_posix(), p) for p in configs.rglob("*") if p.is_file())
+    tables = _sha256("".join(f"{rel}\t{_sha256(p.read_bytes())}\n" for rel, p in files).encode())
+    entries = [{"name": m, "sha256": _sha256((jit / f"{m}.so").read_bytes()), "tables_sha256": tables} for m in modules]
+    (jit / "hyperloom-prewarm.json").write_text(
+        json.dumps({"schema": "hyperloom.aiter_prewarm/1", "modules": entries}), encoding="utf-8"
+    )
+
+
+@pytest.fixture
+def prewarmed(tmp_path, monkeypatch):
+    """A package whose bpreshuffle modules the prewarm built, from a table they do not cover byte-for-byte."""
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "aiter" / "jit"
+    (jit / "build").mkdir(parents=True)
+    configs = jit.parent / "configs"
+    configs.mkdir()
+    (configs / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
+        "libtype,kernelName\nck,a8w8_blockscale_bpreshuffle_k_new\n", encoding="utf-8"
+    )
+    for module in _BP_MODULES:
+        (jit / f"{module}.so").write_bytes(b"\x7fELF prewarm " + module.encode())
+    _write_prewarm_manifest(jit, configs, _BP_MODULES)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+    return jit
+
+
+def test_image_own_modules_are_the_manifest_s_unchanged_modules_of_unset_variables(prewarmed):
+    configs = prewarmed.parent / "configs"
+    assert aj.image_own_modules(prewarmed, configs, {}) == set(_BP_MODULES)
+    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: " "}) == set(_BP_MODULES)
+    # A round that sets the variable reads another table: none of its modules is the image's own.
+    assert aj.image_own_modules(prewarmed, configs, {_BP_VAR: "/x.csv"}) == frozenset()
+    (prewarmed / f"{_BP_CK}.so").write_bytes(b"\x7fELF session build")
+    assert aj.image_own_modules(prewarmed, configs, {}) == set(_BP_MODULES) - {_BP_CK}
+    (configs / "model_configs").mkdir()
+    (configs / "model_configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm_glm.csv").write_text("x\n", encoding="utf-8")
+    assert aj.image_own_modules(prewarmed, configs, {}) == frozenset()
+
+
+@pytest.mark.parametrize("manifest", ["missing", "not-json", "other-schema"])
+def test_image_own_modules_without_a_readable_manifest_is_empty(prewarmed, manifest):
+    path = prewarmed / "hyperloom-prewarm.json"
+    if manifest == "missing":
+        path.unlink()
+    elif manifest == "not-json":
+        path.write_text("{not json", encoding="utf-8")
+    else:
+        path.write_text(json.dumps({**json.loads(path.read_text()), "schema": "other/1"}), encoding="utf-8")
+    assert aj.image_own_modules(prewarmed, prewarmed.parent / "configs", {}) == frozenset()
+
+
+def test_prepare_keeps_the_prewarm_s_modules_and_moves_a_session_build_aside(prewarmed, tmp_path):
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup0")
+    assert result == {"action": "skip", "jit_dir": str(prewarmed), "kept_image_own": sorted(_BP_MODULES)}
+    assert all((prewarmed / f"{m}.so").is_file() for m in _BP_MODULES)
+
+    (prewarmed / f"{_BP_CK}.so").write_bytes(b"\x7fELF session build")
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup1")
+    assert result["action"] == "invalidate"
+    assert result["removed"] == [str(prewarmed / f"{_BP_CK}.so")]
+    assert (prewarmed / f"{_BP_CKTILE}.so").is_file()
+
+
+def test_prepare_without_a_manifest_moves_the_same_modules_aside(prewarmed, tmp_path):
+    (prewarmed / "hyperloom-prewarm.json").unlink()
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
+    assert result["action"] == "invalidate"
+    assert sorted(result["removed"]) == sorted(str(prewarmed / f"{m}.so") for m in _BP_MODULES)
+
+
+def test_drop_keeps_the_prewarm_s_modules_unless_a_registry_mismatch_names_them(prewarmed, tmp_path):
+    aj.drop_serving_so_for_envs(None, backup_dir=tmp_path / "backup0")
+    assert all((prewarmed / f"{m}.so").is_file() for m in _BP_MODULES)
+
+    result = aj.drop_serving_so_for_envs(None, backup_dir=tmp_path / "backup1", also_modules=(_BP_CK,))
+    assert result["removed"] == [str(prewarmed / f"{_BP_CK}.so")]
+    assert (prewarmed / f"{_BP_CKTILE}.so").is_file()
+
+
+#: A row of aiter's own bpreshuffle table: ``model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv``,
+#: sha256 8ec8ffce..., the same file the image ships.
+_DSV3_BPRESHUFFLE_CKTILE_ROW = (
+    "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
+    "gfx950,256,8192,7168,4608,cktile,27,0,299.1261,"
+    "a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2,1809.16,0.62923,0.0\n"
+)
+_DSV3_CKTILE_KERNEL = b"a8w8_blockscale_cktile_192x256x128_4x2x1_16x16x128_intrawave_0x1x0_2"
+
+
+def test_a_bpreshuffle_table_s_cktile_row_maps_to_the_bpreshuffle_cktile_module(tmp_path):
+    csv_path = tmp_path / "a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv"
+    csv_path.write_text(_DSV3_BPRESHUFFLE_CKTILE_ROW, encoding="utf-8")
+    [(name, libtype)] = aj.csv_jit_kernel_rows(csv_path)
+    assert aj.serving_module_for_kernel(name, libtype, _BP_MODULES) == _BP_CKTILE
+    plain = aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"]
+    assert aj.serving_module_for_kernel(name, libtype, plain) == "module_gemm_a8w8_blockscale_cktile"
+
+
+@pytest.mark.parametrize("built_into", [_BP_CKTILE, "module_gemm_a8w8_blockscale_cktile"])
+def test_prepare_reads_a_bpreshuffle_cktile_row_from_the_bpreshuffle_cktile_module(tmp_path, monkeypatch, built_into):
+    """The bpreshuffle build carrying the row is kept; one lacking it is moved aside, whatever the other module holds."""
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "aiter" / "jit"
+    (jit / "build").mkdir(parents=True)
+    (jit.parent / "configs").mkdir()
+    (jit.parent / "configs" / "a8w8_blockscale_bpreshuffle_tuned_gemm.csv").write_text(
+        _DSV3_BPRESHUFFLE_CKTILE_ROW, encoding="utf-8"
+    )
+    for module in (_BP_CKTILE, "module_gemm_a8w8_blockscale_cktile"):
+        (jit / f"{module}.so").write_bytes(_DSV3_CKTILE_KERNEL if module == built_into else b"other_cktile")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+
+    result = aj.prepare_serving_so_for_csvs({}, backup_dir=tmp_path / "backup")
+
+    assert (jit / "module_gemm_a8w8_blockscale_cktile.so").is_file()
+    if built_into == _BP_CKTILE:
+        assert result["action"] == "skip"
+        assert (jit / f"{_BP_CKTILE}.so").is_file()
+    else:
+        assert result["action"] == "invalidate"
+        assert result["removed"] == [str(jit / f"{_BP_CKTILE}.so")]
+
+
+def test_a_shared_cktile_name_in_a_registry_mismatch_names_both_blockscale_cktile_modules():
+    observed = f"gemm_a8w8_blockscale_cktile kernel '{_DSV3_CKTILE_KERNEL.decode()}' is not present"
+    assert set(aj.registry_mismatch_modules(observed)) == {"module_gemm_a8w8_blockscale_cktile", _BP_CKTILE}

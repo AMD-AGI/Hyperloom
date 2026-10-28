@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.roles import mcp_context_tools as mct
+from hyperloom.orchestrator.roles import mcp_sdk
 
 
 def _shared_state():
@@ -30,12 +31,26 @@ def _shared_state():
     )
 
 
+def _provider(shared_state, **readers):
+    """Build a ContextProvider whose readers are empty stubs unless overridden."""
+    stubs = {
+        "inbox_reader": lambda since_seq: "",
+        "analysis_reader": lambda: "",
+        "recent_outcomes_reader": lambda top_k: "",
+        "running_tasks_reader": lambda: "",
+        "reference_reader": lambda name: "",
+    }
+    return mct.ContextProvider(shared_state=shared_state, **{**stubs, **readers})
+
+
 def test_qualified():
-    assert mct._qualified("foo") == "mcp__inference_optimizer_context__foo"
+    assert mct.qualified_context_tool_name("get_gaps") == "mcp__inference_optimizer_context__get_gaps"
+    with pytest.raises(KeyError):
+        mct.qualified_context_tool_name("foo")
 
 
 def test_provider_projections():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     assert p.mission_status() == "mission"
     assert p.shared_state_summary() == "prompt"
     assert p.gaps() == "gaps"
@@ -48,55 +63,25 @@ def test_safe_handles_exception():
     def boom():
         raise RuntimeError("x")
 
-    p = mct.ContextProvider(shared_state=SimpleNamespace())
+    p = _provider(shared_state=SimpleNamespace())
     with pytest.raises(RuntimeError, match="x"):
         p._safe(boom, "lbl")
 
 
 def test_safe_empty_marker():
-    p = mct.ContextProvider(shared_state=SimpleNamespace())
+    p = _provider(shared_state=SimpleNamespace())
     assert p._safe(lambda: "", "lbl") == "(lbl: empty)"
     assert p._safe(lambda: None, "lbl") == "(lbl: empty)"
 
 
 def test_why_denied_via_shared_state():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     assert p.why_denied(top_k=3) == "denials(3)"
 
 
-def test_why_denied_via_reader():
-    p = mct.ContextProvider(
-        shared_state=_shared_state(),
-        denial_reader=lambda k: f"reader({k})",
-    )
-    assert p.why_denied(top_k=2) == "reader(2)"
-
-
-def test_analysis_md_not_wired():
-    p = mct.ContextProvider(shared_state=_shared_state())
-    assert "not wired" in p.analysis_md()
-
-
 def test_analysis_md_wired():
-    p = mct.ContextProvider(shared_state=_shared_state(), analysis_reader=lambda: "md")
+    p = _provider(shared_state=_shared_state(), analysis_reader=lambda: "md")
     assert p.analysis_md() == "md"
-
-
-def test_inbox_not_wired_and_wired():
-    p = mct.ContextProvider(shared_state=_shared_state())
-    assert "not wired" in p.inbox()
-    p2 = mct.ContextProvider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
-    assert p2.inbox(5) == "inbox(5)"
-
-
-def test_recent_outcomes_not_wired_and_wired():
-    p = mct.ContextProvider(shared_state=_shared_state())
-    assert "not wired" in p.recent_outcomes()
-    p2 = mct.ContextProvider(
-        shared_state=_shared_state(),
-        recent_outcomes_reader=lambda k: f"out({k})",
-    )
-    assert p2.recent_outcomes(4) == "out(4)"
 
 
 def test_runtime_findings_reads_current_best_slot(tmp_path):
@@ -106,7 +91,7 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
         json.dumps({"framework": "vllm", "log_path": "/s/server.log", "findings": []}), encoding="utf-8"
     )
     state = SimpleNamespace(current_best_measurement={"launch_evidence_path": str(slot / "launch_evidence.json")})
-    p = mct.ContextProvider(shared_state=state)
+    p = _provider(shared_state=state)
 
     assert p.runtime_findings() == "runtime findings for /s/server.log [vllm]"
     assert "get_runtime_findings" in mct.CONTEXT_TOOL_NAMES
@@ -118,41 +103,41 @@ def test_tool_name_tuples():
     assert len(mct.CONTEXT_TOOL_NAMES) == len(mct.CONTEXT_TOOL_SPECS)
 
 
-# ---- _resolve_sdk ----
+# ---- sdk resolution ----
 
 
 def test_resolve_sdk_explicit():
     sentinel = object()
-    assert mct._resolve_sdk(sentinel) is sentinel
+    assert mcp_sdk._resolve_sdk(sentinel) is sentinel
 
 
 def test_resolve_sdk_import_error(monkeypatch):
     def boom(_name):
         raise ImportError("no sdk")
 
-    monkeypatch.setattr(mct.importlib, "import_module", boom)
-    assert mct._resolve_sdk(None) is None
+    monkeypatch.setattr(mcp_sdk.importlib, "import_module", boom)
+    assert mcp_sdk._resolve_sdk(None) is None
 
 
 # ---- _make_handler ----
 
 
 async def test_make_handler_success():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     handler = mct._make_handler(p, "mission_status")
     out = await handler({})
     assert out["content"][0]["text"] == "mission"
 
 
 async def test_make_handler_forwards_kwargs():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     handler = mct._make_handler(p, "why_denied")
     out = await handler({"top_k": 2})
     assert out["content"][0]["text"] == "denials(2)"
 
 
 async def test_make_handler_forwards_since_seq():
-    p = mct.ContextProvider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
+    p = _provider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
     handler = mct._make_handler(p, "inbox")
     out = await handler({"since_seq": 9})
     assert out["content"][0]["text"] == "inbox(9)"
@@ -183,7 +168,7 @@ async def test_read_projection_stays_on_the_calling_thread():
         seen.append(threading.get_ident())
         return "mission"
 
-    p = mct.ContextProvider(shared_state=SimpleNamespace(to_mission_summary=read))
+    p = _provider(shared_state=SimpleNamespace(to_mission_summary=read))
     out = await mct._make_handler(p, "mission_status")({})
     assert seen == [owner_thread]
     assert out == {"content": [{"type": "text", "text": "mission"}]}
@@ -193,12 +178,12 @@ async def test_read_projection_stays_on_the_calling_thread():
 
 
 def test_build_server_unavailable_without_factories():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     assert mct.build_context_tools_server(p, sdk_module=object()) is None
 
 
 def test_build_server_with_fake_factories():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     created = {}
 
     def tool_factory(name, desc, schema):
@@ -232,7 +217,7 @@ def test_spec_methods_all_exist_on_provider():
 
 def test_get_failure_not_found_points_at_the_disk_mirror():
     """An evicted packet is still reachable, so the miss must say where."""
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     out = p.get_failure("fail.t1.abc")
     assert "reports/failures/fail.t1.abc.json" in out
 
@@ -243,20 +228,20 @@ def test_get_failure_returns_json():
     fe = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "x"}
     ss = _shared_state()
     ss.find_failure = lambda fid: fe if fid == "fail.t1.abc" else None
-    p = mct.ContextProvider(shared_state=ss)
+    p = _provider(shared_state=ss)
     out = p.get_failure("fail.t1.abc")
     data = json.loads(out)
     assert data["failure_id"] == "fail.t1.abc"
 
 
 def test_get_failure_requires_failure_id():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     out = p.get_failure("")
     assert "required" in out
 
 
 def test_get_variant_failures_empty():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     out = p.get_variant_failures()
     assert "no failure" in out
 
@@ -269,7 +254,7 @@ def test_get_variant_failures_returns_entries():
     ss = _shared_state()
     ss.failures = [fe1, fe2]
     ss.failures_for_task = lambda tid: [fe for fe in [fe1, fe2] if fe["task_id"] == tid]
-    p = mct.ContextProvider(shared_state=ss)
+    p = _provider(shared_state=ss)
     out = p.get_variant_failures(task_id="t1")
     lines = [l for l in out.splitlines() if l.strip()]
     assert len(lines) == 2
@@ -278,7 +263,7 @@ def test_get_variant_failures_returns_entries():
 
 
 async def test_make_handler_forwards_failure_id():
-    p = mct.ContextProvider(shared_state=_shared_state())
+    p = _provider(shared_state=_shared_state())
     handler = mct._make_handler(p, "get_failure")
     out = await handler({"failure_id": "fail.t1.abc"})
     assert "fail.t1.abc" in out["content"][0]["text"]

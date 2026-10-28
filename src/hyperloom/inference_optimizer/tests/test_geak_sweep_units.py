@@ -20,7 +20,6 @@ from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_env
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
-    _parse_server_arg_value,
     resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
@@ -533,13 +532,3 @@ def test_coerce_extra_envs_skips_malformed_tokens() -> None:
     # Token-list shape: dict item with a None key, a token without ``=``, a non-string item, and an empty-key ``=v``
     # are all skipped.
     assert coerce_extra_envs([{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]) == {"A": "1", "B": "2"}
-
-
-def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:
-    """The GEAK handoff recovers a flag value even when the server-args string is not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
-    got = _parse_server_arg_value('--max-model-len 4096 "unbalanced', "--max-model-len")
-    assert got == "4096"
-    # ``--flag=value`` form is also handled.
-    assert _parse_server_arg_value("--gpu-memory-utilization=0.9", "--gpu-memory-utilization") == "0.9"
-    # Absent flag -> None.
-    assert _parse_server_arg_value("--tp 8", "--max-model-len") is None

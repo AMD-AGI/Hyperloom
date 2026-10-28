@@ -53,12 +53,6 @@ _seen_lock = threading.Lock()
 _parking = threading.local()
 
 
-def reset_for_tests() -> None:
-    """Forget which failures were already noted."""
-    with _seen_lock:
-        _seen.clear()
-
-
 def _first_time(section: str, error_class: str) -> bool:
     """Whether this section has yet to report this class of failure."""
     with _seen_lock:
@@ -118,4 +112,4 @@ def note_failure(
         _parking.active = False
 
 
-__all__ = ["RECORDING_ERRORS", "note_failure", "reset_for_tests"]
+__all__ = ["RECORDING_ERRORS", "note_failure"]

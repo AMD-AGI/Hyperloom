@@ -118,6 +118,12 @@ def has_denoiser_config(framework: str | None) -> bool:
     return _spec_or_default(framework).has_denoiser_config
 
 
+def tracelens_analysis_mode(framework: str | None) -> str:
+    """Return the TraceLens analysis mode for ``framework``."""
+    spec = _spec_or_default(framework)
+    return "default" if spec.name == "custom" else "inference"
+
+
 def _registered_spec(framework: str) -> FrameworkSpec:
     """Return the spec for ``framework``; raises ``KeyError`` when it is not registered."""
     return FRAMEWORKS[framework.strip().lower()]

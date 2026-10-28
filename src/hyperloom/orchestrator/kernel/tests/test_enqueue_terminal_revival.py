@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.kernel import _kernel_decisions as kd
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import patch_landing as pl
 
 

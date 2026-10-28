@@ -35,7 +35,6 @@ def shapes(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         (
             AttributionHeader("x-combined", "combined", ("session", "component", "phase")),
             AttributionHeader("x-raw", "raw", ("session", "component")),
-            AttributionHeader("x-json", "json", ("session", "component")),
         ),
     )
     return {_ATTR: "shapes", _CLAW: "claw-abc"}
@@ -93,10 +92,6 @@ class TestValueShapes:
     def test_raw_falls_through_to_the_first_field_with_a_value(self, shapes: dict[str, str]) -> None:
         shapes[_CLAW] = ""
         assert llm_attribution.call_headers(component="geak", env=shapes)["x-raw"] == "geak"
-
-    def test_json_renders_a_parseable_object(self, shapes: dict[str, str]) -> None:
-        headers = llm_attribution.call_headers(component="geak", env=shapes)
-        assert json.loads(headers["x-json"]) == {"session": "claw-abc", "component": "geak"}
 
     def test_empty_fields_are_dropped(self, shapes: dict[str, str]) -> None:
         headers = llm_attribution.call_headers(component="geak", phase="", env=shapes)

@@ -49,15 +49,15 @@ from kernelforge.cli.publication import (
 )
 from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
-from kernelforge.config import Config
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.loop.api import format_forge_loop_result
+from kernelforge.agent_backends.runtime import agent_runtime
+from kernelforge.config import Config, KnowledgeConfig
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
     ExperiencePublication,
     WarmStartHarness,
     WarmStartRollbackError,
-    git_head,
     kb_reference_program_md,
     kb_read_status,
     kb_warmstart,
@@ -66,18 +66,20 @@ from kernelforge.loop.knowledge_integration import (
 )
 from kernelforge.loop.recovery import (
     CallerRecovery,
-    atomic_write_json,
     load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, warm_start_improvement_flags
+from kernelforge.tools.durable_io import atomic_write_json
+from kernelforge.tools.git import git_head
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.loop.campaign_setup import CampaignResolution
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.loop.iteration.iteration_types import IterationConfig
+    from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
@@ -548,10 +550,9 @@ def _exit_failed_preparation(prep: PrepareResult, result_json: str | None) -> No
     }
     if prep.audit_dir:
         err_result["task_preparation_audit_dir"] = prep.audit_dir
-    err_payload = json.dumps(err_result)
     if result_json:
         atomic_write_json(result_json, err_result)
-    click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
+    click.echo(format_forge_loop_result(err_result))
     sys.exit(2)
 
 
@@ -1755,8 +1756,7 @@ def forge_loop(request: ForgeLoopRequest):
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
     _isolate_aiter_cache(config.experiments_dir, request.artifacts.aiter_cache_max_gb, source_files_list)
 
-    from kernelforge.loop.runner import LoopAgents, LoopCallbacks
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration.iteration_types import IterationConfig, LoopAgents, LoopCallbacks
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions
@@ -1873,7 +1873,7 @@ def forge_loop(request: ForgeLoopRequest):
     # PR references are independent of the experience-KB lifecycle.
     pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
-    selected_runtime = config.agent_runtime()
+    selected_runtime = agent_runtime(config)
     implementer_setup = ImplementerSetup(
         ImplementerTask(
             program_md=program_md,
@@ -1989,11 +1989,9 @@ def forge_loop(request: ForgeLoopRequest):
 
     # Final result: full kb_experience.
     result = _build_result(kb_experience=kb_experience)
-    payload = json.dumps(result)
     if result_json:
         atomic_write_json(result_json, result)
-    # Sentinel-wrapped so the caller can extract it from mixed loop stdout.
-    click.echo(f"__FORGE_RESULT__{payload}__FORGE_RESULT__")
+    click.echo(format_forge_loop_result(result))
     _write_pr_provenance(
         workspace_dir=workspace_dir,
         surfaced=iter_config.pr_reference_labels,

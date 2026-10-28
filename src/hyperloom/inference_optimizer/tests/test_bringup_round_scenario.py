@@ -278,7 +278,7 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
         loaded = load_boot_observation(result.get("boot_observation_path"))
         assert loaded.observation is not None, loaded.degraded
         observations.append(loaded.observation)
-        if loaded.observation.booted:
+        if loaded.observation.stage_failed is None and loaded.observation.stage_reached >= LadderStage.HTTP_READY:
             break
 
         # The excerpt is what the round recorded off the server's own log, and
@@ -338,7 +338,8 @@ async def test_a_bringup_round_peels_two_blockers_and_lands_one_observation_per_
     assert stages == sorted(stages), stages
     assert stages[0] == LadderStage.ARGV_PARSE
     assert stages[1] == LadderStage.CONFIG_VALIDATE
-    assert observations[-1].booted
+    assert observations[-1].stage_failed is None
+    assert observations[-1].stage_reached >= LadderStage.HTTP_READY
 
     # Two repair dispatches under two different ids: the lane minted a fresh
     # idempotency key for the retry rather than reopening the crashed task,

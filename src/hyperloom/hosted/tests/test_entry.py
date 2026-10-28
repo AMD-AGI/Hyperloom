@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli.bootstrap import set_hosted_plug_inputs
 from hyperloom.plugs.manifest import LOCKABLE_SOCKETS, load_builtin_profile
 
+INSTALL_REAL = Path(entry.INSTALL_SCRIPT)
 _SECRETS = {name: f"sentinel-secret-{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _IMAGE = "registry.example/sglang:v0.5.4-rocm"
 
@@ -56,8 +57,14 @@ def run(tmp_path, monkeypatch):
         for name, value in values.items():
             monkeypatch.setenv(name, value)
 
+    monkeypatch.setattr(sys, "path", list(sys.path))  # the entry edits it
+    installer = tmp_path / "install.sh"
+    installer.write_text("#!/bin/bash\necho stub installer ran\n")
+    monkeypatch.setattr(entry, "INSTALL_SCRIPT", installer)  # the real installer is never run by a unit test
     inject()
-    yield type("Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject)})
+    yield type(
+        "Run", (), {"state": state, "work": work, "spec": spec, "restart": staticmethod(inject), "installer": installer}
+    )
     set_hosted_plug_inputs(None)
 
 
@@ -554,3 +561,231 @@ def test_a_host_token_shorter_than_the_server_minimum_refuses_the_run(run, monke
     assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
     assert fake.calls == [] and _exit(run)["final"] is True
     assert Var.MCP_TOKEN in _exit(run)["error"] and "x" * MIN_TOKEN_LENGTH not in _exit(run)["error"]
+
+
+# -- the installer -----------------------------------------------------------------------------------------------
+def _recording_installer(run, events, *, exit_code=0):
+    run.installer.write_text(
+        f'#!/bin/bash\necho "installer $#" >> {run.work}/order\necho install-output\necho install-error >&2\nexit {exit_code}\n'
+    )
+
+
+def _record_optimize(run, monkeypatch):
+    def fake(argv):
+        with (run.work / "order").open("a") as order:
+            order.write("optimize\n")
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", fake)
+
+
+def _order(run):
+    return (run.work / "order").read_text().split("\n")[:-1]
+
+
+def test_the_installer_runs_before_optimize_on_a_fresh_leg_and_on_a_resume_leg(run, monkeypatch):
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "optimize"]  # no flags, like the legacy launchers
+    session = Path(_session_json(run))
+    for name in entry.SESSION_FILES:
+        (session / name).write_text("{}")
+    run.restart()
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "optimize", "installer 0", "optimize"]
+
+
+def test_the_installer_output_goes_to_a_log_in_the_state_dir(run, monkeypatch):
+    _recording_installer(run, None)
+    _record_optimize(run, monkeypatch)
+    entry.main(["run"])
+    assert set((run.state / entry.INSTALL_LOG).read_text().split()) == {"install-output", "install-error"}
+
+
+def test_a_failing_installer_ends_the_run_finally_and_optimize_never_starts(run, monkeypatch, capsys):
+    _recording_installer(run, None, exit_code=7)
+    _record_optimize(run, monkeypatch)
+    assert entry.main(["run"]) == 2
+    assert _order(run) == ["installer 0"]
+    log = run.state / entry.INSTALL_LOG
+    assert _exit(run) == {
+        "final": True,
+        "returncode": 2,
+        "error": f"install.sh failed with exit code 7; see {log}",
+    }
+    assert "install-error" in log.read_text()
+
+
+def test_the_installer_sees_no_host_only_input(run, monkeypatch):
+    run.installer.write_text(f"#!/bin/bash\nenv > {run.work}/seen\n")
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    seen = (run.work / "seen").read_text()
+    assert "sentinel-secret" not in seen
+    assert not [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+
+
+def test_a_missing_installer_ends_the_run_finally(run, monkeypatch):
+    run.installer.unlink()
+    monkeypatch.setattr(entry, "INSTALL_SCRIPT", run.installer)
+    FakeOptimize(monkeypatch)
+    monkeypatch.setattr(
+        entry.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "No such file"))
+    )
+    assert entry.main(["run"]) == 2
+    assert _exit(run)["final"] is True
+    assert "install.sh" in _exit(run)["error"]
+
+
+def test_the_installer_the_entry_names_is_the_packaged_asset_beside_the_optimizer():
+    assert INSTALL_REAL.is_file()
+    assert INSTALL_REAL.parent.parts[-3:] == ("hyperloom", "inference_optimizer", "assets")
+
+
+def test_the_installer_installs_into_the_running_venv_and_optimize_finds_its_scripts(run, monkeypatch, tmp_path):
+    venv = tmp_path / "state-venv"
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}{venv}/bin")  # the venv is on PATH, but not first
+    run.installer.write_text(
+        "#!/bin/bash\n"
+        f'printf "%s\\n" "$PYTHON" "$VIRTUAL_ENV" "$INFERENCE_OPTIMIZER_FORCE_PYTHON" "${{PATH%%:*}}" > {run.work}/installer-env\n'
+    )
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    assert (run.work / "installer-env").read_text().split("\n")[:-1] == [
+        str(venv / "bin" / "python"),
+        str(venv),
+        "1",
+        str(venv / "bin"),
+    ]
+    assert fake.environments[0]["PATH"].split(os.pathsep)[0] == str(venv / "bin")
+    assert fake.environments[0]["PATH"].split(os.pathsep).count(str(venv / "bin")) == 1
+
+
+def test_a_package_the_working_directory_shadows_as_a_namespace_still_resolves_for_optimize(run, monkeypatch, tmp_path):
+    """The shape of the framework image: a directory without ``__init__.py`` in the working directory, the real package
+    reached by an editable install's finder, which the import system consults after ``sys.path``."""
+    import importlib.abc
+    import importlib.util
+
+    cwd, real = tmp_path / "cwd", tmp_path / "real" / "shadowed_pkg"
+    (cwd / "shadowed_pkg").mkdir(parents=True)
+    real.mkdir(parents=True)
+    (real / "__init__.py").write_text("")
+
+    class EditableFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name == "shadowed_pkg":
+                return importlib.util.spec_from_file_location(
+                    name, real / "__init__.py", submodule_search_locations=[str(real)]
+                )
+            return None
+
+    finder = EditableFinder()
+    monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, finder])
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(sys, "path", ["", str(cwd), *sys.path])  # what ``python -m`` leaves
+    monkeypatch.delitem(sys.modules, "shadowed_pkg", raising=False)
+    assert importlib.util.find_spec("shadowed_pkg").origin is None  # the defect, without the entry's guard
+    seen = []
+
+    def optimize(argv):
+        sys.modules.pop("shadowed_pkg", None)
+        importlib.invalidate_caches()
+        seen.append(importlib.util.find_spec("shadowed_pkg").origin)
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    entry.main(["run"])
+    assert seen == [str(real / "__init__.py")]
+
+
+# -- a leg in a new container ------------------------------------------------------------------------------------
+_THIS = "0b0b0b0b-2222-4222-8222-000000000002:4026531002"
+_GONE = "0a0a0a0a-1111-4111-8111-000000000001:4026531001"
+
+
+def _resume_rig(run, monkeypatch, *, scope_of_session):
+    """A session that a first leg started and left a running task in, resumed by an entry that runs in ``_THIS``.
+
+    The fake ``optimize`` runs the real resume preflight, as ``optimize --resume-from`` does.
+    """
+    from hyperloom.inference_optimizer.session import resume_guard
+    from hyperloom.inference_optimizer.tests.test_resume_scope_gone import _session
+
+    monkeypatch.setattr(entry, "local_owner_scope", lambda: _THIS)
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    _session(session, {"explore-1": ["benchmark_lane", "profile_lane"]}, scope=scope_of_session)
+    confirmations = []
+    real = resume_guard.confirm_scope_gone
+    monkeypatch.setattr(
+        entry, "confirm_scope_gone", lambda *a, **k: confirmations.append(k["owner_scope"]) or real(*a, **k)
+    )
+    preflight = []
+
+    def optimize(argv):
+        resume_guard.ensure_resume_safe(session, owner_scope=entry.local_owner_scope())
+        preflight.append(argv[1])
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    run.restart()
+    return session, confirmations, preflight
+
+
+def test_a_resume_in_the_same_container_confirms_nothing(run, monkeypatch):
+    _session_dir, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_THIS)
+    assert entry.main(["run"]) == 0
+    assert confirmations == [] and len(preflight) == 1
+
+
+def test_a_resume_in_a_new_container_confirms_the_old_one_gone_before_the_preflight(run, monkeypatch, capsys):
+    from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
+
+    session, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_GONE)
+    with pytest.raises(ResumeBlocked):  # without the confirmation the real preflight refuses
+        ensure_resume_safe(session, owner_scope=_THIS)
+    assert entry.main(["run"]) == 0
+    assert confirmations == [_GONE] and len(preflight) == 1
+    assert not (run.state / "exit.json").exists() or _exit(run)["returncode"] == 0
+    assert "marked interrupted" in capsys.readouterr().out
+
+
+def test_a_confirmation_that_is_refused_ends_the_run_finally_with_the_reason(run, monkeypatch):
+    from hyperloom.inference_optimizer.session.paths import db_path_for
+    from hyperloom.inference_optimizer.tests.test_resume_scope_gone import FUTURE, _lease
+    import sqlite3
+    from contextlib import closing
+
+    session, confirmations, preflight = _resume_rig(run, monkeypatch, scope_of_session=_GONE)
+    with closing(sqlite3.connect(db_path_for(session))) as db, db:
+        _lease(db, "other_lane", "explore-1", "0c0c0c0c-3333-4333-8333-000000000003:1", FUTURE)  # a live other owner
+    assert entry.main(["run"]) == 2
+    assert preflight == []
+    document = _exit(run)
+    assert document["final"] is True and document["returncode"] == 2
+    assert "previous container's work cannot be confirmed gone" in document["error"]
+
+
+# -- where the results go ----------------------------------------------------------------------------------------
+def test_the_session_package_is_written_into_the_archive_not_the_container(run, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_SUBDIR, package_session_artifacts
+
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", "/workspace")  # a host or image default must not win
+    packaged = []
+
+    def optimize(argv):
+        session = Path(_session_json(run))
+        (session / "state.json").write_text("{}")
+        packaged.append(package_session_artifacts(session, session_id="s1"))
+        return 0
+
+    monkeypatch.setattr(entry, "_optimize_main", optimize)
+    entry.main(["run"])
+    archive = Path(_session_json(run)) / "archive"
+    assert packaged == [archive / PACKAGE_SUBDIR / "s1.zip"] and packaged[0].is_file()

@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import pytest
 
+from hyperloom.inference_optimizer.roofline_ceiling import resolve_compute_peak_provenance
 from hyperloom.orchestrator.trace_analysis._bypass_roofline import KernelAggregate, compute_roofline
 
 
@@ -130,6 +132,27 @@ def test_r9700_uses_vendor_peak():
     assert r is not None
     assert r["compute_peak_convention"] == "vendor"
     assert r["compute_peak_tflops"] == 191.0
+
+
+@pytest.mark.parametrize("gpu", ["mi300x", "mi308x", "mi325x", "mi355x", "r9700"])
+def test_peak_is_the_session_roofline_compute_peak(gpu):
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type=gpu,
+    )
+    assert r is not None
+    provenance = resolve_compute_peak_provenance(gpu, "bf16")
+    assert {k: r[k] for k in provenance} == provenance
+
+
+def test_mi308x_uses_vendor_peak():
+    r = compute_roofline(
+        KernelAggregate(category="GEMM", shape_str="(128,128) bf16<br>(128,128) bf16", gpu_time_us=10.0),
+        gpu_type="mi308x",
+    )
+    assert r is not None
+    assert r["compute_peak_convention"] == "vendor"
+    assert r["compute_peak_tflops"] == 1307.4
 
 
 def test_unknown_gpu_returns_none():

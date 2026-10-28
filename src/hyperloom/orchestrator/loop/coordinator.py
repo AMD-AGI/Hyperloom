@@ -58,7 +58,7 @@ from ..bus.gpu_pool import (
     resolve_whole_machine_devices,
 )
 from ..bus.resource_lock import SqliteLeaseBackend
-from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
+from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -977,12 +977,10 @@ class Coordinator:
             self.shared_state.cumulative_gain_validated,
             max_minutes,
         )
-        with timed_teardown_step(self.shared_state, "close_backends"):
-            await self._close_backends()
+        await self._close_backends()
         # A server outliving the run holds every GPU it was given, so the
         # session's last act is to reap its own pidfiles.
-        with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-            await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
+        await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
         self.shared_state.save(self.session_dir)
         return stop_reason
 

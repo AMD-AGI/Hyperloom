@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import os
@@ -20,12 +19,15 @@ from pathlib import Path
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec, with_writable_sandbox
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.tools.git import ensure_commit_identity, git
+from kernelforge.agent_backends.runtime import agent_runtime
+from kernelforge.tools.git import ensure_commit_identity, git, git_head
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.task_preflight import DriverContract, PreflightResult, _preflight_async
+from kernelforge.loop.task_preparer_audit import PrepareAudit
 from kernelforge.loop.task_preparer_prompts import (
     DRIVER_CONTRACT_SPEC,
     REFERENCE_DRIVER_TEMPLATE,
@@ -141,11 +143,6 @@ def _git(workspace: Path, *args: str) -> tuple[int, str]:
     except OSError as exc:
         return 128, str(exc)
     return r.returncode, (r.stdout + r.stderr)
-
-
-def _git_head(workspace: Path) -> str:
-    code, out = _git(workspace, "rev-parse", "HEAD")
-    return out.strip() if code == 0 else ""
 
 
 def _git_diff_patch(workspace: Path, base_sha: str) -> str:
@@ -405,7 +402,7 @@ async def _run_prepare_agent(
     progress_log: list[str] | None = None,
 ) -> str:
     """Run one sandboxed driver-authoring turn through the selected backend."""
-    runtime = with_writable_sandbox(config.agent_runtime())
+    runtime = with_writable_sandbox(agent_runtime(config))
     backend = create_registered_backend(runtime)
     if backend.capabilities.requires_workspace_cwd:
         _ensure_agent_git_workspace(turn.workspace)
@@ -420,6 +417,7 @@ async def _run_prepare_agent(
         additional_directories=[directory for directory in (turn.additional_dirs or []) if directory],
         target_files=list(turn.target_files or []),
         # Deliberately no driver_script.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=protected_globs,
         allow_dirty_targets=True,
         allow_untracked=True,
@@ -650,7 +648,7 @@ async def prepare_task(
     # an ImportError.
     dist_harness_path = driver_access_dir / "dist_harness.py"
 
-    audit = _PrepareAudit(audit_dir, driver_path)
+    audit = PrepareAudit(audit_dir, driver_path)
 
     if preflight is not None:
         audit.json("initial_preflight.json", asdict(preflight))
@@ -936,65 +934,6 @@ def _stage_external_driver(
     return transaction, ""
 
 
-class _PrepareAudit:
-    """The audit trail one preparation writes, and the driver digest it compares attempts against.
-
-    Every artifact is best-effort: a snapshot that cannot be written never
-    affects whether the driver is valid.
-    """
-
-    def __init__(self, audit_dir: Path | None, driver_path: Path) -> None:
-        self._audit_dir = audit_dir
-        self._driver_path = driver_path
-
-    def text(self, relative: str, body: str) -> None:
-        """Write one audit artifact."""
-        if self._audit_dir is None:
-            return
-        try:
-            path = self._audit_dir / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
-        except OSError:
-            # Audit artifacts are best-effort and never affect driver validity.
-            pass
-
-    def json(self, relative: str, payload: dict) -> None:
-        """Write one audit artifact as JSON; metadata that will not serialize is dropped, not raised."""
-        try:
-            self.text(relative, json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
-        except (TypeError, ValueError):
-            # Non-serializable audit metadata must not block task preparation.
-            pass
-
-    def driver(self, relative: str) -> None:
-        """Snapshot the driver as it stands now."""
-        if self._audit_dir is None or not self._driver_path.is_file():
-            return
-        try:
-            path = self._audit_dir / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self._driver_path, path)
-            # copy2 carries the SOURCE mtime across, so every snapshot in the audit trail claimed the driver's own
-            # mtime rather than when it was captured — reconstructing a timeline from this directory (the obvious
-            # thing to do when a prep fails) then yields wildly wrong durations.
-            os.utime(path, None)
-        except OSError:
-            # A missing audit copy is non-fatal; the staged driver remains the authoritative preparation artifact.
-            pass
-
-    def driver_digest(self) -> str:
-        """The driver's current digest, or "" when it cannot be read."""
-        try:
-            return hashlib.sha256(self._driver_path.read_bytes()).hexdigest()
-        except OSError:
-            return ""
-
-    def driver_edited(self, digest_before: str) -> bool:
-        """Whether the driver changed since that digest."""
-        return self.driver_digest() != digest_before
-
-
 class _SourceGuard:
     """The source under optimization, and putting the workspace back exactly as preparation found it.
 
@@ -1007,7 +946,7 @@ class _SourceGuard:
     def __init__(self, workspace: Path, protected: set[Path]) -> None:
         self._workspace = workspace
         self._snapshot = _snapshot(list(protected))
-        self.base_sha = _git_head(workspace)
+        self.base_sha = git_head(workspace)
         self.pre_untracked = _git_untracked(workspace)
         # The caller's pre-prep uncommitted tracked modifications, captured so a failure rollback restores them
         # instead of resetting the whole tree to HEAD.
@@ -1411,8 +1350,8 @@ def _prepare_failure_message(guard: "_SourceGuard", failure: _PrepareFailure) ->
 def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int) -> PrepareResult:
     """Make the prepared driver, and everything it reads at runtime, part of pristine.
 
-    IterationLoop captures its base SHA from this commit, so anything left out
-    of it is not there for the measurements that follow.
+    IterationLoop captures its base SHA from this commit, so anything left out of it is not there for the measurements
+    that follow. Nothing staged is nothing to commit: a driver git ignores, as the controller stages one, runs in place.
     """
     workspace, guard, spec_path, audit_dir_str = layout.workspace, layout.guard, layout.spec_path, layout.audit_dir_str
     stage_code, stage_out = _stage_preparation_changes(workspace, guard.pre_untracked)
@@ -1455,7 +1394,7 @@ def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int)
     # a git cwd, and a commit with none to auto-detect cannot land.
     ensure_commit_identity(workspace)
     _, commit_out = _git(workspace, "commit", "-m", "forge prepass: prepared measurement driver")
-    if _git_head(workspace) == guard.base_sha:
+    if git_head(workspace) == guard.base_sha and _git(workspace, "diff-index", "--quiet", "--cached", "HEAD")[0]:
         guard.rollback()
         return PrepareResult(
             ok=False,

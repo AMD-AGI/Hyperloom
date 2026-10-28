@@ -25,6 +25,7 @@ from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.campaign_setup import resolve_campaign
 from kernelforge.tests.test_campaign_setup import _base_args, _git_workspace
 from kernelforge.tests.test_loop_runner import _make_loop, _unused_supervisor
+from kernelforge.loop.iteration import iteration_types
 
 
 def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None):
@@ -587,7 +588,7 @@ def test_keep_gate_sized_move_alone_no_longer_counts_as_coverage():
 def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
     from kernelforge.evaluation.scoring import KEEP_MIN_MARGIN_FRACTION
 
-    assert runner_module.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
+    assert iteration_types.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
     loop = _coverage_loop({"decode-t64": 10.0})
     loop.ic = replace(loop.ic, config_coverage_min_move_ratio=0.2)
     loop.results = [_keep(1, {"decode-t64": 9.0})]
@@ -721,7 +722,7 @@ def test_campaign_config_missing_a_field_names_it(tmp_path, monkeypatch):
 
 def test_matching_refuses_a_pattern_normalization_would_have_rejected():
     """Unreachable through the entry points, and a silent skip if it were not."""
-    from kernelforge.loop.new_path_allowlist import (
+    from kernelforge.tools.new_path_allowlist import (
         AllowlistPatternError,
         matches_commit_new_paths,
     )

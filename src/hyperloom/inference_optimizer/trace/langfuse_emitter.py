@@ -228,7 +228,7 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     """Load a JSONL file into a list of dict records."""
     from hyperloom.common.jsonio import read_jsonl
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True)
+    return read_jsonl(path)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -273,7 +273,6 @@ def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "wall_ms": row.get("wall_ms"),
         "snr_db": row.get("snr_db"),
         "validation_passed": row.get("validation_passed"),
-        "pmc_diagnosis": row.get("pmc_diagnosis"),
     }
 
 

@@ -13,8 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller.task import load_task
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.kernel_rewrite_controller import load_task, operator_directory_name
 
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (

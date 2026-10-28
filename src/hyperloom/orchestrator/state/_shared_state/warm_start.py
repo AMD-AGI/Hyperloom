@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import to_float
+
 # Pitfall rows rendered in full; the rest are counted.
 _PITFALLS_RENDERED = 5
 
@@ -22,14 +24,6 @@ FIRST_SESSION_LINES: dict[str, str] = {
 }
 
 
-def as_float(value: Any) -> float:
-    """Coerce a warm-start context number, 0.0 when absent or unparseable."""
-    try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def match_facts(match: Any) -> list[str]:
     """How good the match is: its tier and its confidence, each omitted when unset."""
     fields = match if isinstance(match, dict) else {}
@@ -37,7 +31,7 @@ def match_facts(match: Any) -> list[str]:
     tier = str(fields.get("tier") or "").strip()
     if tier:
         facts.append(f"tier={tier}")
-    confidence = as_float(fields.get("confidence"))
+    confidence = to_float(fields.get("confidence"), 0.0)
     if confidence > 0:
         facts.append(f"confidence={confidence:.2f}")
     return facts
@@ -53,7 +47,7 @@ def donor_attribution(replay: dict[str, Any]) -> str:
     if not config_tier or config_tier == "self":
         return ""
     donor = str(replay.get("donor_model") or replay.get("donor_canonical_id") or "?")
-    donor_conf = as_float(replay.get("config_confidence"))
+    donor_conf = to_float(replay.get("config_confidence"), 0.0)
     suffix = f", confidence={donor_conf:.2f}" if donor_conf > 0 else ""
     return f"  · borrowed from {donor} (config_tier={config_tier}{suffix})"
 
@@ -67,7 +61,7 @@ def replay_lines(ctx: dict[str, Any]) -> list[str]:
         # carries no config; the priors below are still real.
         return ["  · (no replayable config on this match)"]
     out: list[str] = []
-    best_tput = as_float(replay.get("best_throughput"))
+    best_tput = to_float(replay.get("best_throughput"), 0.0)
     if best_tput > 0:
         out.append(f"  · best_throughput={best_tput:.1f}")
     args = str(replay.get("extra_server_args") or "").strip()
@@ -77,7 +71,7 @@ def replay_lines(ctx: dict[str, Any]) -> list[str]:
     if isinstance(envs, dict) and envs:
         rendered = " ".join(f"{k}={v}" for k, v in envs.items())
         out.append(f"  · extra_envs={rendered[:_FIELD_CHARS]}")
-    gain = as_float(replay.get("expected_gain_pct"))
+    gain = to_float(replay.get("expected_gain_pct"), 0.0)
     if gain > 0:
         out.append(f"  · expected_gain={gain:.2f}%")
     donor = donor_attribution(replay)

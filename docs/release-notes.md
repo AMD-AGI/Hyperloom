@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.4, which makes `hyperloom <command>` the only entry point, runs every specialist as a Claude CLI subprocess, ships the Experience KB and GPU power measurement, and removes several options, environment variables and launch paths 1.1.3 accepted; plus the 1.1.3 patch release, the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.5, which runs AgentX optimization on Magpie's native AgentX contract, holds framework and kernel work to the phase budgets, adds GPU power budgets, an operable Experience KB and the PrimaTune predictor, and cannot resume sessions started by earlier releases; plus the 1.1.4 release, which makes `hyperloom <command>` the only entry point, runs every specialist as a Claude CLI subprocess, ships the Experience KB and GPU power measurement, and removes several options, environment variables and launch paths 1.1.3 accepted; the 1.1.3 patch release, the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.4 (`pyproject.toml`). For the
+The current packaged version is 1.1.5 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
@@ -38,12 +38,9 @@ it.
 - **`hyperloom hosted run` runs the legacy `optimize` flow for a hosting platform.** It reads the campaign spec and the host's
   inputs, runs `optimize` in a session directory derived from the run (a restart resumes it), and records how it ended in
   `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. Host-only inputs, including the
-  new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. `src/hyperloom/hosted/app_bootstrap.sh`
-  builds the wheel of a commit once and installs its hash-pinned `requirements/app.lock` into a venv.
-- **The accuracy eval can no longer be turned off.** `--no-eval`, the
-  `RUN_EVAL` process-environment override and the `disable_run_eval` task
-  param are removed, and a baseline whose eval fails stops the run instead of
-  retrying with `RUN_EVAL=false`.
+  new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. The entry runs the packaged `install.sh`
+  before `optimize` on every leg; a failing installer ends the run finally. `src/hyperloom/hosted/app_bootstrap.sh`
+  builds the wheel of a commit once and installs it, alone, into the image's framework Python environment; `install.sh` resolves the dependencies.
 - **A GEAK run no longer leaves processes running after KERNEL_AGENT.** The
   KERNEL phase marks every process its GEAK run starts and stops all of them
   when the run returns, times out or is cancelled, including A/B legs started
@@ -51,6 +48,1031 @@ it.
   `GEAK_TERM_GRACE_S` is removed: the outer kill is now only a backstop, and
   run_e2e's chance to flush `result.json` is the `GEAK_FLUSH_GRACE_S` window
   geak_runner already gives it before that kill.
+
+## Hyperloom 1.1.5 release
+
+The [1.1.5 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.5)
+follows 1.1.4. AgentX optimization runs on Magpie's native AgentX contract,
+new FRAMEWORK_AGENT and KERNEL_AGENT work must fit what is left of the phase
+budget, and a phase transition lets running work finish instead of cancelling
+it. The release adds GPU power budgets and opt-in power settings, an operable
+Experience KB with the `hyperloom-kb` command, an operator-defined specialist
+the Coordinator runs itself, the PrimaTune predictor, Radeon AI PRO R9700
+support with vLLM, a Claude–Codex relay for a stalled forge-loop search and a
+Claude subscription credential path, and explore no longer re-measures a
+launch whose answer the session already has. Sessions started by 1.1.4 or
+earlier cannot be resumed, a workspace Experience KB starts empty, the
+accuracy eval can no longer be turned off, and several options, environment
+variables and defaults move; see "Before upgrading from 1.1.4" below. The
+per-change history is on the
+[Releases](https://github.com/AMD-AGI/Hyperloom/releases) page.
+
+### Before upgrading from 1.1.4
+
+Finish in-flight sessions under the build that started them. Every session's
+`storage/coordinator.db` now records schema version 7 and there are no
+in-place migrations, so `optimize --resume-from` on a session started by 1.1.4
+or earlier exits `2` before it touches the session, with
+`coordinator.db is at schema version <N>, older than this build's 7: sessions created before this release cannot be resumed`.
+`kernelforge forge-loop --resume` likewise refuses a 1.1.4 checkpoint with
+`run state cumulative has unknown fields: api_errors, orchestration_errors`.
+See [Upgrade Hyperloom version](reference/upgrade.md).
+
+The workspace Experience KB starts over. Its service now keeps
+`database.sqlite3`, `<kb_id>/records/` and `<kb_id>/files/` in its data home
+and leaves a 1.1.4 home's `kb.sqlite3`, `sync.sqlite3` and `canonical/`
+unread, so the first launch or `ensure` after the upgrade restarts it on a
+new, empty KB and Experiences recorded under 1.1.4 stop reaching prompts.
+Experiences are now `schema_version` 2 (with `hyperloom-kb.collect.v2`
+mappings), which a 1.1.4 service rejects, as a 1.1.5 service rejects 1.1.4
+records, so upgrade a global KB together with the workspaces that sync with
+it; `POST /v1/pull` now requires a `schema_ref`. An attempt whose change
+content exceeds 32 KiB is skipped at collection with
+`schema validation failed`.
+
+Options and module paths 1.1.4 accepted are removed or refused. The parser is
+strict, so a launch, resume or install command that still carries one exits
+with `unrecognized arguments` (or exit `2`) before the session starts.
+
+| Removed | What to do |
+|---|---|
+| `--no-eval` | Delete it; the accuracy eval always runs (see *Removed*). |
+| `--pr-feed-window-days` | Delete it; nothing read it. |
+| `--local-kb-root` | Set `KNOWLEDGE_LOCAL_ROOT` instead; 1.1.4 already warned that the flag was deprecated. |
+| `kernelforge forge-loop --return-after-read-kb` | Delete it. forge-loop no longer has a warm-start-only mode that returns before iteration 1 when a KB solution applies and improves. |
+| `hyperloom multi-node kernel-bench` | Removed with no replacement; nothing in the optimizer called it. |
+| `install.sh --only-aiperf` | Delete it; the installer no longer installs the AIPerf client. |
+| Under native AgentX (`HYPERLOOM_AGENTX=1` without the MLPerf backend, or `--benchmark-config`): `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--reference-script`, `--quantize`, `--quantize-scheme`, `--enable-conc-sweep`, `--nodes` other than `1`, a framework other than `sglang` / `vllm`, and `--extra-env` pins of `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`, `EP_SIZE` or any `AIPERF_*` / `AGENTX_*` / `AGENTIC_*` key | **Exits 2** at launch. Request lengths come from the trace corpus: start one session per concurrency, pass expert parallelism as `--ep`, quantize the checkpoint beforehand, and put other Magpie settings in a `--benchmark-config` YAML. `--docker-image` without native AgentX also exits `2`. The MLPerf backend is unaffected. |
+| `python -m kernelforge.mcp_server.tools.bench`, `python -m kernelforge.mcp_server.pr_stdio_server`, `python -m kernelforge.mcp_server.probe_stdio_server` | Use `python -m kernelforge.evaluation.benchmark.runner`, `kernelforge.knowledge.pr_knowledge.mcp_server` and `kernelforge.orchestrator.specialist_probe_server`. KernelForge builds its own server commands, so only an MCP configuration written by hand needs the new paths. Code that imports a moved module (for example `kernelforge.loop.scoring` or `kernelforge.durable_io`) must import it from its new place under `kernelforge.evaluation`, `kernelforge.tools` or `kernelforge.knowledge`. |
+| `tools/kbmine` (`pip install -e tools/kbmine`, `python -m kbmine.cli`) | Nothing replaces it; a 1.1.4 checkout still carries it. It was never part of the `hyperloom` package and the optimizer never used it. |
+
+Environment variables fail differently: nothing refuses most of them, so a box
+that still exports one starts normally and behaves as though it were unset.
+Find them by reading launch scripts, `.env` and the kernel-agent env file. The
+settings that do stop the run are marked below.
+
+| Removed or changed variable | What to do |
+|---|---|
+| `RUN_EVAL` exported in the shell, pinned through `--extra-env` or set in a benchmark YAML template | Delete it; it is ignored, and the GSM8K eval runs wherever 1.1.4 ran it by default (an AgentX template keeps its own value). A box that set `RUN_EVAL=false` to get past a broken eval must fix the eval: a baseline whose eval fails can stop the run with `baseline_accuracy_failed`. |
+| `AGENTX_DATASET`, `AGENTX_CANONICAL_DATASET`, `AGENTX_PROFILE_WINDOW_S`, `AGENTX_TRACE_FIRST_FILE_TIMEOUT_S`, `AGENTX_TRACE_FLUSH_TIMEOUT_S`, `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Delete them; nothing reads them. Magpie's pinned InferenceX picks the AgentX corpus, the benchmark YAML sets profiling, and a native AgentX KEEP needs a valid Magpie report. Passed through `--extra-env` under native AgentX, the `AGENTX_*` names **exit 2**. |
+| `AIPERF_BIN`, `INSTALL_AIPERF` and the other `AIPERF_*` installer variables | Delete them; AIPerf is no longer installed or run. |
+| `HYPERLOOM_AGENTIC_BACKEND=aiperf` | Drop it: any value other than `mlperf` now selects native Magpie AgentX. |
+| `INFERENCEX_PATH`, `INFERENCEX_REF` on a native AgentX run | No longer used there: Magpie resolves its own pinned InferenceX and preflight skips the InferenceX clone. Set `benchmark.inferencex_path` in the YAML or `MAGPIE_INFERENCEX_PATH` to use your own checkout. Synthetic and MLPerf runs still read both. |
+| `HYPERLOOM_SGLANG_REPO_URL`, `HYPERLOOM_SGLANG_REF`, `HYPERLOOM_SGLANG_INDEX_URL`, `HYPERLOOM_VLLM_ROCM_INDEX_URL` | Delete them; nothing reads them. Enablement Rung 3 installs the runtime the specialist requests (see *Changed*). |
+| `HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST`, `HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST` | Delete them; nothing reads them. Rung 3 no longer restricts the git origins or pip indexes a specialist names, and no setting replaces the two allowlists; `--enablement off` keeps enablement from running at all. |
+| `HYPERLOOM_LOCAL_KB_ROOT` | Set `KNOWLEDGE_LOCAL_ROOT` instead. A box that still exports only the old name uses the default knowledge root. |
+| `TRACELENS_SOURCE_ROOT` | Delete it; nothing reads it. |
+
+Defaults and gates that move, so the same command behaves differently:
+
+- **Phase budgets are hard limits for FRAMEWORK_AGENT and KERNEL_AGENT work.**
+  Work that does not fit what is left of the phase is refused, skipped or
+  stopped at the phase end (see *Changed*), so a session with less than an hour
+  of usable time left no longer admits a patch specialist, and
+  `HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC` still sizes a GEMM tuning run but no
+  longer forces one into a KERNEL slice that cannot fund it. The LLM's
+  `extend_explore_budget` and `extend_kernel_budget` hints, each of which added
+  5 points to a phase's share up to 80% of the session, no longer move budget.
+- **The default Claude model is `claude-opus-5-5`.** A run that sets no
+  `CLAUDE_MODEL` or `--claude-model` now orchestrates, reviews and writes
+  reports on `claude-opus-5-5`, and preflight falls back to `claude-opus-5`
+  only where the gateway catalog lacks it
+  (`'claude-opus-5-5' not in gateway catalog; falling back to 'claude-opus-5'`),
+  so results and token cost can differ from the same command under 1.1.4. Set
+  `CLAUDE_MODEL=claude-opus-5` to keep the 1.1.4 model; the slurm
+  `proxy.env.template` still does.
+- **The default Codex model is `gpt-6-astra`.** A run that sets no
+  `CODEX_MODEL` (Hyperloom's `--codex-model`, the Codex critic, the TraceLens
+  Codex runner and KernelForge's Codex backend) now uses `gpt-6-astra`, with
+  `gpt-5.6-sol`, `gpt-5.5` and `gpt-5.4` as preflight fallbacks, where 1.1.4
+  used `gpt-5.6-sol`; the slurm templates set `CODEX_MODEL=gpt-6-astra` too.
+- **New forge-loop campaigns switch agent providers on a stall.** When a second
+  provider passes its startup check, a stalled search is handed to it instead
+  of to the Supervisor (see *Added*). `FORGE_AGENT_CLI` is used only when it
+  identifies as the selected provider's CLI and is otherwise ignored with a
+  warning, and `forge-loop --resume` refuses an `--agent-backend` or
+  `FORGE_AGENT_BACKEND` that differs from the campaign's primary.
+- **Variants keep the operator's `--no-enable-prefix-caching`.** A session
+  whose `--server-args` pass `--no-enable-prefix-caching` now measures every
+  explore and sweep variant with prefix caching off, as its baseline runs,
+  where 1.1.4 dropped the flag from every composed launch and credited the
+  variants with the cache; such a session reports lower gains than the same
+  command did under 1.1.4.
+- **AgentX baselines need the prefix cache on.** An AgentX run whose baseline
+  server runs with the prefix cache off now stops at the baseline with
+  `stop_reason=baseline_failed` (`agentx_baseline_prefix_cache_off`). Drop
+  `--disable-radix-cache` and `--no-enable-prefix-caching` from
+  `--server-args`, and on ATOM pass `--server-args "--enable_prefix_caching"`.
+- **Synthetic sessions no longer measure context-copying speculative drafts.**
+  Explore refuses before launch a variant that introduces or changes a vLLM
+  `ngram` / `ngram_gpu` / `suffix` or SGLang `NGRAM` draft
+  (`speculative_context_copy_on_synthetic`), so a synthetic-benchmark session
+  can no longer KEEP one, where 1.1.4 could keep it on a gain that does not
+  hold on real text. Model-based drafts, a base launch that already runs a
+  copying draft and AgentX sessions are unaffected.
+- **Explicit context and memory limits are checked before the first
+  baseline.** Preflight's new `validate_server_args` step stops a launch whose
+  `--max-model-len` or `$MAX_MODEL_LEN` exceeds the context the model's
+  `config.json` declares (`max_position_embeddings` or an equivalent key, read
+  without RoPE scaling, so a RoPE-scaled model run above its raw context is
+  refused), and on vLLM a `--server-args` `--gpu-memory-utilization` outside
+  `0 < value <= 1` or `--max-model-len` above that context (`auto`, `-1` and
+  unit suffixes still pass). It fails with
+  `<flag> must satisfy 0 < value <= <N>; got '<value>'`, where 1.1.4 launched
+  explicit values as given. `--tp` now takes only a positive integer.
+- **Quark and compressed-tensors sessions take the checkpoint's format as
+  their precision.** A new session started without `--precision` or
+  `PRECISION` on such a checkpoint records and exports the format the
+  checkpoint nests (for example `fp4` for Quark MXFP4, `fp8` for
+  compressed-tensors FP8), where 1.1.4 used `quark` or `compressed-tensors`,
+  so its workload fingerprint and Experience KB records no longer match those
+  of earlier sessions on the same checkpoint.
+- **GPU power checks and sampling follow the cards the mask names.** The
+  `--gpu-power-cap-w` / `--gpu-perf-level` assertion and the measured-phase
+  power sampler translate `ROCR_VISIBLE_DEVICES`, then `HIP_VISIBLE_DEVICES`
+  (or `CUDA_VISIBLE_DEVICES`), to amd-smi card numbers through each card's KFD
+  node, where 1.1.4 read mask numbers as amd-smi indices and so, on
+  MI300X/MI355X, checked and sampled other cards than the session's; 1.1.5
+  power readings are not comparable with those. A mask that is set but empty,
+  is not plain comma-separated numbers (for example GPU UUIDs), repeats a card
+  or names one that does not exist now makes a declared assertion exit `2`,
+  where 1.1.4 fell back to every card; the sampler then samples every card and
+  logs `gpu_power: <reason>; sampling every card`. `--gpu-perf-level` takes
+  only the levels `amd-smi set` accepts, so the
+  `AMDSMI_DEV_PERF_LEVEL_<LEVEL>` spelling 1.1.4 normalized now fails argument
+  parsing.
+
+Installation prerequisites move:
+
+- `install.sh` pins Magpie to `6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e` and
+  replaces an installed Magpie at any other revision unless `MAGPIE_PATH`
+  names your own tree, and preflight likewise reinstalls a Magpie whose
+  revision does not match (`Preflight: Magpie revision is missing; installing ...`),
+  where 1.1.4 reinstalled only one that would not import. The minimum
+  supported revision rises from `e6833b81` (Magpie v0.2.0) to
+  `1eb3df69de9cb26cb5c8109e43371dd1abb9bbed`, the first whose vLLM client
+  scripts carry the `--tokenizer-mode` hook: with an older `MAGPIE_REF` or
+  `MAGPIE_PATH`, a DeepSeek-V4 round whose checkpoint the installed
+  transformers cannot resolve fails with `client_tokenizer_unpatchable`. The
+  AIPerf client is no longer installed.
+- TraceLens is pinned to `614c597bc0c66cabf6a15152037324acc7386090`, and
+  preflight and the kernel-tool installer now require
+  `TraceLens_generate_perf_report_from_config` on `PATH` instead of
+  `TraceLens_generate_perf_report_pytorch_inference`. Rerun `install.sh`;
+  otherwise a session that runs kernel work or the roofline refuses to start
+  (`ERROR: TraceLens CLI(s) not on PATH`, exit `2`).
+- An interactivity-graded AgentX session that delegates to GEAK needs a GEAK
+  that accepts `E2E_METRIC=e2e_norm_intvty_p50`, and KERNEL's wait for the
+  handed-off GPUs relies on a GEAK that frees them on exit; GEAK `main`, the
+  default `GEAK_REF`, has both. Rerun `install.sh` and move a pinned
+  `GEAK_REF`: on an older GEAK every replay of such a session fails with
+  `measured <basis>, not the requested e2e_norm_intvty_p50` and the session
+  gets no GEAK candidate.
+- Multi-node preflight always probes `lm_eval[api]` and installs the pinned
+  build when it is missing, where 1.1.4 skipped that step for a session with
+  the eval off.
+
+Session and report consumers have to follow these changes:
+
+- `state.json` drops `custom_specialist_dispatched` and
+  `enablement.build_novelty`, and gains `custom_specialist_only`,
+  `analysis_failures` and `predictor_asked_keys`; roofline task params gain
+  `recipe_generation`.
+- For AgentX sessions, `manifest.json` `workload` keeps
+  `benchmark_mode: agentx` and records `benchmark_config` (the archived
+  `benchmark.yaml`) in place of `corpus_loader`, `corpus_entries`,
+  `corpus_duration_s`, `isl_distribution`, `osl_distribution` and
+  `prefix_cache_hit`.
+- `session_breakdown.json` drops the top-level `robustness` key and
+  `close.robustness`, and `robustness_escalated` leaves the stop-reason
+  vocabulary; all were always empty. On interactivity-graded AgentX sessions
+  the stack-ledger `baseline_tput`, `contribution_pct`, `cumulative_gain_pct`,
+  `attributed_gain_pct`, `chain_total_gain_pct` and `reconciliation_gap_pct`
+  are now measured on the graded axis (see *Fixed*) and are not comparable
+  with 1.1.4 exports.
+- Reports, summaries and the roofline snapshot label serving throughput
+  `tok/s` instead of `tok/s/GPU`; `throughput_tok_s_per_gpu` in
+  `session_breakdown.json` keeps its name and holds the same server aggregate
+  as in 1.1.4.
+- On a multi-node kernel apply, the apply result and `manifest.json` carry
+  `jit_build_backup` as the bare `{"status": "remote"}` marker, without
+  `per_node` / `per_host`, and `multinode` no longer carries `per_node`; read
+  `multinode.records_by_host` instead. Backup-ledger records for a rename
+  source carry `revert_action: "restore"` instead of `"restore_old"`, and
+  snapshot `manifest.json` entries no longer carry `binary`.
+- `forge_experiments/pr_refs/index.md` renames its `merged` column to `state`,
+  and new `snapshot.json` entries record `state`, `draft`, `merged_at` and
+  `base_ref` in place of `is_merged`.
+- The v1 workflow-evaluation contract and its schema are removed. The v2
+  contract gains the `baseline_over_power_budget` stop reason and drops
+  `robustness_escalated`, so its digest changes and new sessions stamp
+  `9887b33c30aeada4359b3b3d38b817b9dec1655df84e84a98911e5a1a08871c7`, and
+  the v2 schema's `hint` enum drops `extend_explore_budget` and
+  `extend_kernel_budget`.
+- The session breakdown's roofline trace-validation summary drops
+  `recommended_steady_state_mode`, `recommended_splitter_mode`,
+  `modes_that_would_fail`, `steady_state_forecast` and
+  `hot_kernel_list_would_be_suppressed`, trace self-certification
+  certificates (`<trace_dir>.selfcert.json`) no longer carry a split forecast,
+  and a selected chunk with no GPU work is reported as
+  `steady_state_chunk_low_quality` instead of `steady_state_chunk_empty`.
+- Provenance built from the environment reads the product from
+  `TARGET_GPU_TYPE`, so MI325X and MI308X sessions record `gpu_type`
+  `mi325x` / `mi308x` where 1.1.4 recorded the runner label `mi300x`, and a
+  session on a `setup.py develop` checkout or an isolated vLLM venv records
+  its real framework version (for example `0.29.0+rocm100`) instead of
+  `unknown_version`; their KB keys no longer match knowledge 1.1.4 filed for
+  the same setup.
+- Log lines and error classes that move:
+  `explore dedup: payload=N → runnable=N (round_dup=N baseline_noop=N)` is now
+  `explore grid: payload=N → runnable=N (leading baseline_noop=N)` and counts
+  only the restatements dropped before the round (read the result's
+  `skipped_dup` for every skip); KernelForge's
+  `[kb] experience write skipped (...)` is now
+  `experience KB publication failed for <commit>: ...`; and enablement no
+  longer emits `localization_rung5_deferred` or `localization_fetch_failed`.
+- The enablement constraints file is `rocm_constraints.txt` (was
+  `torch_constraints.txt`).
+- A Recipe KB still only in the legacy `$USER_DATA_PATH/kb` (or
+  `/workspace/hyperloom/kb`) location, which 1.1.4 copied into the knowledge
+  root on its first local start, is no longer read or migrated.
+
+### Added
+
+- **Power budgets: `--max-power-w` and `--max-per-gpu-power-w`.**
+  `--max-power-w N` caps the sum of the serving GPUs' measured-phase mean
+  power, and `--max-per-gpu-power-w GPU_ID W`, repeated per card, caps one
+  card. Every KEEP path (explore, `integrate_patch`, warm replay, the lift and
+  GEAK replays, which are now power-sampled) refuses a candidate over a budget
+  or without a per-card reading (`power_budget_exceeded`,
+  `gpu_power_budget_exceeded`, `power_unmeasured`), and a baseline that breaks
+  a budget or has no reading stops the run with `baseline_over_power_budget`.
+  A launch or resume exits `2` when a listed GPU is not one the session can
+  use, the per-GPU limits add up to more than `--max-power-w`, power cannot be
+  sampled (multi-node, `xdit` or `custom`, `HYPERLOOM_GPU_POWER_SAMPLING=0`,
+  no `amd-smi`), or a resume changes either value. Rounds record
+  `gpu_power_by_gpu_w` beside `gpu_power_avg_w`, and `gpu_power.json` lists
+  cards that may be serving but could not be read under `unread_gpus`.
+- **`--apply-gpu-power-settings`.** The session sets the declared
+  `--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch and only on
+  the cards of its integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES`
+  mask, and restores the originals when it ends, including on SIGTERM or
+  SIGHUP; the platform fingerprint records them as applied by Hyperloom. It
+  needs root, and refuses with exit `2` and nothing set without root, on
+  multi-node, without an integer mask, on a card not in SPX mode or already
+  holding more than 2 GB of VRAM, on a fractional cap, and on a perf-level
+  change from `determinism` or `manual`. The originals are kept under
+  `/var/tmp/hyperloom/gpu_power_settings/` (mount the host's
+  `/var/tmp/hyperloom` into each container): after a SIGKILL the next launch
+  with the flag restores those cards first, and a launch without it warns.
+  Pass the flag again on `--resume-from`; a resume without it refuses and says
+  so.
+- **Each round reports its power-throttle share and sustained clock.**
+  `gpu_power.json` gains per-card `sclk_mean_mhz` (mean graphics clock while
+  busy), `sclk_max_mhz` (the clock limit) and `power_throttle_fraction` (the
+  share of the measured phase held back by the power limit, from
+  `amd-smi metric --violation`), and top-level `power_throttled_gpus`,
+  `throttle_query_errors` and `throttle_last_error`. A round with a serving
+  card throttled for at least 10% of its measured phase logs
+  `gpu_power: GPU(s) <ids> were power throttled for <share> of the measured phase, at a mean clock of <MHz>`.
+  The fields are additive (`schema_version` stays `1`), a share not read
+  across every measured window is `null`, and no gate or decision reads them.
+- **Operable Experience KB state, and the `hyperloom-kb` command.** Each
+  Experience KB service has a `kb_id`, and the new `hyperloom-kb` console
+  script (`health`, `push`, `rebind`, `pull --schema`, `labels`, `label`,
+  `restore`, `exclude`, `include`, `exclusions`, `list`, `export`) operates
+  the service `HYPERLOOM_KB_URL` names, printing JSON and exiting `1` on a
+  refused request or an incomplete sync and `2` when the URL or token is
+  unset. `exclude --reason` hides an Experience from every read with the
+  reason kept in its history, `restore` returns to a labelled state, a pull
+  first labels the state it replaces (`before_pull`) so restoring that label
+  undoes it, and a sync with a URL that now answers as another KB is refused
+  until `rebind`. Every service answers `/livez`, `/readyz` and `/metrics`
+  without a token and logs JSON lines carrying the `X-Request-ID` it returns,
+  and prompts get only an Experience's knowledge fields, with a change's
+  content inline. `HYPERLOOM_KB_HOME` names the local service's data home
+  (unset, `$USER_DATA_PATH/experience-kb`), so runs on different hosts that
+  share a `USER_DATA_PATH` can each start their own service. The
+  `hyperloom-global-kb` skill is no longer installed and `hyperloom-setup` no
+  longer asks about a global KB, which stays opt-in through
+  `HYPERLOOM_GLOBAL_KB_URL` / `HYPERLOOM_GLOBAL_KB_TOKEN`.
+- **PrimaTune predictor for FRAMEWORK_AGENT.** `--primatune-endpoint URL` (or
+  `HYPERLOOM_PREDICTOR_ENDPOINT`) asks a PrimaTune service for launch
+  configurations once per decision point of an `sglang` or `vllm` session,
+  and `--primatune-mode` (`HYPERLOOM_PREDICTOR_MODE`) picks `shadow`, the
+  default once an endpoint is set, which only logs the answers, `active`,
+  which queues up to six rows per answer ahead of the specialists' proposals
+  under the same KEEP threshold and accuracy gate, or `off`. In active mode
+  FRAMEWORK's first orchestration turn waits up to five minutes for an
+  answer, a proposed source change becomes a patch-specialist mandate, and
+  credited variants carry provenance `primatune`; a request times out after
+  `HYPERLOOM_PREDICTOR_TIMEOUT_SEC` (default 900 s). The start-up banner
+  prints a `predictor` line with the mode and endpoint, and neither flag is
+  persisted, so a `--resume-from` relaunch needs them again unless the shell
+  exports the variables. Without an endpoint nothing changes. See
+  [PrimaTune predictor](reference/primatune-predictor.md).
+- **Radeon AI PRO R9700 (gfx1201) with vLLM.** An R9700, detected by its
+  product name or given as `r9700`, runs single-node vLLM through Magpie's
+  gfx12 runner (`runner_type: gfx12`, `vllm_gfx12.sh`), reusing one server
+  across rounds as the MI boards do; any other framework exits `2` at launch
+  with `Magpie runner 'gfx12' is currently validated only for vllm`. The
+  roofline and bypass roofline use AMD's published peaks, labelled `vendor`
+  (an MXFP4 model gets the memory ceiling only), no targeted build is
+  attempted on the board, and the GEAK hand-off carries `expected_target` /
+  `expected_gfx`. MI325X and MI308X runs now materialize
+  `runner_type: mi300x` and pin `vllm_mi300x.sh`, where 1.1.4 pinned a
+  per-board script Magpie does not ship.
+- **forge-loop relays a stalled search between agent profiles.** Every new
+  campaign builds one profile per registered provider (`claude`, `codex`),
+  with the `--agent-backend` provider as primary, and checks each with one
+  minimal model call before the `--max-hours` budget starts. After three
+  non-improving iterations from the active profile (infrastructure, API,
+  device-contention and integrity failures do not count), the next clean
+  iteration boundary hands the whole search to another available profile, so
+  with Claude and Codex both available the search alternates between them
+  until a KEEP; the Supervisor runs only when no other profile is available. A
+  profile without a gateway of its own borrows the other provider's (Codex
+  appends `/v1` to the `ANTHROPIC_*` URL), and the result's `agent_relay`
+  field and the `relay_*` events in `forge_experiments/events.jsonl` record
+  every switch.
+- **A Claude Pro or Max subscription can be the Anthropic credential.**
+  `hyperloom-setup` asks whether to use an Anthropic API key or a
+  subscription. The subscription path has you run `claude setup-token`
+  yourself, writes `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com` to `.env`, and warns that an
+  `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` already in `.env` or the shell
+  outranks the token and bills API credits. A launch whose only Anthropic
+  credential is `CLAUDE_CODE_OAUTH_TOKEN` now starts, where 1.1.4 stopped in
+  preflight with `critic model ... did not answer ... cannot run inside an active event loop`
+  (exit `2`) unless `--critic-mock` was passed.
+- **The session breakdown counts the framework phase's bench runs.**
+  `session_breakdown.json` gains `outcome.variants` (`bench_runs`,
+  `distinct`, `kept`, `reverted`, `failed`, `keep_rate_pct`), and each attempt
+  row on a `framework_agent` event carries `benched`. A run is kept when it
+  was adopted into the stack, reverted when it was measured and not adopted,
+  and failed when it reached the bench but failed or left no measurement; an
+  attempt that never reached the bench, such as a patch that did not apply,
+  is not counted, and neither are kernel candidates. `hyperloom session
+  report` shows the counts as a **Variants** line in its key facts and
+  executive summary, with the final stack and validated gain when known, and
+  derives the line from the timeline for a breakdown exported before this
+  release.
+- **Experience KB summaries carry each record's identity.** Every item in
+  `POST /v1/read` `experiences` and `GET /v1/list` `items`, and so in
+  `hyperloom-kb list` output and in the `experiences` of `state.json`
+  `experience_kb_injections` rows, gains an `identity` object: the conditions
+  the Experience was measured under. A reader can tell which records match its
+  own conditions without paging through `GET /v1/export`.
+
+### Removed
+
+- **The accuracy eval can no longer be turned off.** `--no-eval`, the
+  `RUN_EVAL` process-environment override and the `disable_run_eval` task
+  param are removed, so the eval runs on every round that ran it by default.
+  A kernel-stack validation, kernel-lane re-baseline or warm-recipe replay
+  whose eval fails now fails that round instead of being retried with
+  `RUN_EVAL=false`; a genuine baseline, which 1.1.4 already did not retry
+  that way, is unchanged.
+- **Resume of sessions started before 1.1.5, and several unused or deprecated
+  options.** Hyperloom no longer carries readers for session formats older
+  than this release and refuses those sessions up front instead of failing
+  mid-run (see "Before upgrading from 1.1.4"). `hyperloom multi-node
+  kernel-bench`, `--pr-feed-window-days`, `--local-kb-root`,
+  `forge-loop --return-after-read-kb` and the `robustness_escalated` stop
+  reason are gone, along with the always-empty `robustness` sections the
+  retired robustness agent left in `session_breakdown.json`.
+- **`kbmine`.** The standalone estimator under `tools/kbmine` that 1.1.4 added
+  is removed with its tests, docs and CA provisioning script. It was never
+  part of the `hyperloom` package, and nothing in the optimizer used it.
+
+### Changed
+
+- **AgentX optimization runs on Magpie's native AgentX contract.** Under
+  `HYPERLOOM_AGENTX=1` Hyperloom turns `--model`, `--framework`,
+  `--precision`, `--tp`, `--ep` and `--conc` into a Magpie AgentX config, or
+  takes one from `--benchmark-config PATH` (start from
+  `assets/configs/agentx_sglang.yaml` in the package), archives it as
+  `benchmark.yaml` in the session and resumes from that copy;
+  `--docker-image IMAGE` names the serving image to run inside. Magpie owns
+  server start, trace replay, profiling and cleanup, and a KEEP needs a valid,
+  unprofiled Magpie report for the session's own workload (otherwise
+  `agentx_evidence_invalid` or `agentx_workload_mismatch`). Native AgentX is
+  single-node SGLang or vLLM at one concurrency per session, takes request
+  lengths and context from the trace corpus, and exits `2` at launch on a flag
+  it cannot honour. Hyperloom's own AIPerf client, which drove 1.1.4's AgentX
+  replay, is removed with its installer and repair path; the MLPerf agentic
+  backend (`HYPERLOOM_AGENTIC_BACKEND=mlperf`) keeps its entry point.
+- **New FRAMEWORK_AGENT and KERNEL_AGENT work must fit the phase's remaining
+  budget, and the LLM can no longer lengthen a phase.** The
+  `extend_explore_budget` and `extend_kernel_budget` hints of
+  `escalate_strategy_change` are dropped like any unknown hint, and work whose
+  estimate does not fit what is left of the phase is refused as a policy
+  denial with `rule=phase_time_budget` (for example
+  `action='explore' denied: needs ~30 min but only 12 min of the FRAMEWORK_AGENT phase budget is left`),
+  or cancelled before dispatch with `reason: phase_time_budget` if it no
+  longer fits when its turn comes. Running work stops at the phase end:
+  explore starts no variant that cannot fit (a round that measured nothing
+  reports `phase_time_exhausted`), a specialist's hard stop is the earliest of
+  its shape budget, the session end and the phase end (`extend_lease` cannot
+  move it past), the rewrite Controller keeps one measurement round in
+  reserve and leaves later patches unapplied as `phase_time_exhausted`, and
+  GEMM E2E validation, vLLM shape capture and the KERNEL-entry re-profile
+  start nothing that cannot fit. In a bounded session, Forge GEMM tuning and
+  fusion return `skipped` with `error_class: insufficient_budget` when their
+  share of the KERNEL phase cannot fund one target, where 1.1.4 ran them on
+  their 5 h / 2 h defaults. A specialist is admitted only when its shortest
+  worthwhile run fits (10 min research, 60 min patch, a baseline round plus
+  10 min for a bench specialist), where 1.1.4 used a 6-minute catalogue cost,
+  and a kernel `integrate` / `apply_patch` request is refused when 25 min, or
+  one measured baseline round if longer, does not fit.
+- **A phase transition lets running work finish instead of cancelling it.**
+  The transition waits, logging
+  `phase_machine: holding phase_transition:<FROM>-><TO> (reason=<reason>) until <N> running task(s) finish and are booked`,
+  and the wait is charged to the phases that follow, so a phase can run past
+  its budget while its last running task finishes. A GEAK rebench still
+  running when KERNEL ends on `kernel_phase_budget_exhausted` or
+  `kernel_budget_cap` is kept or settled instead of ending as
+  `rebench_cancelled`. Session exhaustion, shutdown and a terminal move to
+  CLOSE (a recorded stop reason, `time_exhausted`, a skip-to-close escalation
+  or a failed PRELUDE baseline) still cancel running work, and only a terminal
+  move leaves `stopped_task_ids` non-empty in the
+  `tasks_cancelled_on_phase_transition` observation.
+- **The Coordinator runs the operator-defined specialist, and can run it
+  alone.** With `--custom-specialist-prompt-file` and
+  `--custom-specialist-description` set, the Coordinator queues
+  `custom_specialist` on every FRAMEWORK_AGENT entry, once per macro cycle and
+  ahead of other queued work, benches its proposals next in their own grid,
+  and holds a plateau exit, never a budget exit, until both have run; 1.1.4
+  left this to orchestration, so a session could end with the specialist never
+  run or its proposals never benched. Orchestration is no longer offered the
+  domain, a delegate naming it as domain or tag is refused with
+  `specialist_custom_coordinator_owned`, and `--orch-prompt` no longer
+  conflicts with the pair. `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` (by `export`
+  or `--extra-env`; it needs the pair, and a non-boolean value exits `2`)
+  makes FRAMEWORK_AGENT run only that specialist and the bench and review of
+  its output, with no orchestration turn and up to 4 h of wall budget, then
+  hand over to KERNEL_AGENT when enabled, else SWEEP; it is persisted, and a
+  resume can turn it on but not off.
+- **Explore skips a variant whose answer the session already has.** Before
+  each variant runs, explore skips one that only restates the launch it would
+  run on (`reason=baseline_noop`) or that already has a KEEP or REVERT in
+  `explore_search` on the same base launch, anchor throughput and workload
+  (`reason=already_measured`, logged as
+  `explore: skipping already-measured variant <name> (...)`), recording it as
+  `SKIPPED_DEDUP` and in the result's `skipped_dup` instead of spending a
+  benchmark round reproducing a known number. Restatements are judged against
+  the stack the variant would launch on, so one that restates the opening
+  launch's value of a setting an earlier KEEP in the same round changed now
+  runs, where 1.1.4 dropped it as `baseline_noop`; a throughput REVERT
+  (`gain_below_threshold`) runs again once the decaying KEEP bar no longer
+  exceeds its recorded gain; and FAILED rows, kernel-overlay variants and
+  stack revalidations always run. A delegated explore grid whose every variant
+  is already measured, queued or running on the current stack is refused with
+  a `policy_denied` observation, rule `explore_grid_already_covered`, and a
+  round whose every runnable variant was skipped at its turn ends `succeeded`
+  instead of `failed`. A PRELUDE warm replay without patches or kernel items
+  that only restates the baseline launch is skipped (`warm_replay_outcome`
+  reads `status=skipped`, `reason=restates_baseline`) unless the session has
+  reference launch controls.
+- **OPTIMIZE turns to source changes when configuration stops paying.** When
+  the configuration arm plateaus in FRAMEWORK_AGENT, a second read-only
+  `static_recon_specialist` pass runs once per macro cycle
+  (`reason=config_arm_plateau`, `gap_canonical_id=gap.static_recon.cycle<N>`)
+  and refreshes the `gap.static_recon.*` rows in `=== Current gaps ===`, where
+  1.1.4 ran recon only at PRELUDE; `--no-static-recon` turns off both passes.
+  On consecutive config-only rounds the orchestration prompt now points at a
+  `mode='patch'` specialist for a source change rather than another grid, and
+  patch-mode dispatches into the kernel-switch, comm, compiler and system
+  domains get the source-patch guidance 1.1.4 gave only the serving
+  specialist.
+- **Enablement Rung 3 provisions the runtime the specialist requests.** An
+  enablement specialist names it with `needs_runtime` in its done payload (a
+  git ref given as PR URL, `PR:N`, tag, branch or SHA, with optional packages
+  and index URL; packages only on vLLM), and Rung 3 builds it with no operator
+  setting; once a round keeps a runtime, later requests are logged as
+  `needs_runtime ignored` and the kept one stays. Rung 3, Rung 5 and selfcheck
+  installs pin torch, torchvision, torchaudio, triton and every ROCm-labelled
+  distribution through `rocm_constraints.txt`, so a request that needs a
+  different torch or triton ends the round `reverted` with `provision_failed`
+  and pip's conflict.
+- **Every framework's trace goes through the TraceLens splitter.** On the
+  TraceLens route, scriptable frameworks (`xdit`, `custom`) no longer skip
+  splitting: their traces are cut into one `steady_state_*` chunk with
+  `--steady-state-mode generic`, so their kernel breakdowns rest on a
+  steady-state chunk instead of the whole trace, and a trace that cannot be
+  split fails with `trace_split_no_steady_state` where 1.1.4 analysed it
+  unsplit. Serving frameworks run the splitter in its LLM-inference mode, so a
+  trace without serving annotations is still split into prefill and decode
+  phases by shape. The capture-time self-certification no longer lists
+  `too few step annotations for the splitter to cut a steady window` as a
+  blocking reason, and start-up warm-up is trimmed by the TraceLens splitter
+  itself.
+- **The TraceLens Agent runs from a checked YAML run config.** Hyperloom
+  writes the agent's inputs to `run.yaml` in the analysis output directory and
+  checks it with TraceLens's own validator before the agent starts, so a
+  config TraceLens rejects (an unknown platform with the internal extension
+  on, or a scriptable workload with a capture folder, which 1.1.4 ran with the
+  folder silently ignored) fails in seconds with the `ConfigError` text in the
+  failure JSON, instead of inside a paid agent session as a missing
+  `analysis.md`. The recorded `analysis_mode` now matches what TraceLens ran:
+  `inference` for serving and unknown frameworks, `default` for scriptable
+  ones, where 1.1.4 recorded `default` for ATOM runs the agent analysed as
+  `inference` and gave unknown frameworks `default`.
+- **KernelForge's evaluation tooling and MCP servers move.** The exploratory
+  sweep command is now `python -m kernelforge.evaluation.benchmark.runner`,
+  which the backend prompts and the shipped wiki card give. The specialist
+  probe and upstream-PR MCP servers start as
+  `python -m kernelforge.orchestrator.specialist_probe_server` and
+  `python -m kernelforge.knowledge.pr_knowledge.mcp_server`, keeping their
+  server names, tool names, schemas and replies, and the
+  `kernelforge.mcp_server` package is gone. KernelForge Click commands,
+  KEEP/REVERT scoring, persisted data and benchmark output are unchanged.
+- **Critic reviews over the Anthropic protocol reuse a cached prompt prefix.**
+  The Critic sends its fixed instructions as a cacheable block ahead of each
+  review's changing bundle, so reviews that follow each other within the
+  provider's cache window bill most of their input at the cached-read rate.
+  Review text, model choice, output limits and retries are unchanged, and the
+  OpenAI-protocol and CLI paths send the same prompt as before.
+- **Errors that 1.1.4 caught and stepped past now surface.** Handlers across
+  the optimizer and KernelForge that caught every exception now catch only
+  the errors their code can raise. Expected I/O, network, subprocess and
+  import failures behave as before; anything else reaches the task, tick or
+  CLOSE step above it and is recorded there instead of turning into a quiet
+  fallback, and outermost best-effort handlers (per-patch E2E validation, a
+  concurrency-sweep arm, task preflight stages, critic dead-letter replay, the
+  multi-node pod scripts) now log what they used to drop. In particular:
+  preflight stops on an exception in its eval-concurrency or multi-node
+  client-trust compat patch, where 1.1.4 printed `compat patch failed to run`
+  and went on; an `install-geak` that raises on the Infera multi-node backend
+  stops the launch instead of logging `install-geak skipped`; a target-analysis
+  crash fails its task instead of returning `status=succeeded` with
+  `reason=analyzer_crash`; `integrate_patch` provision, bench and parity still
+  turn environment failures into a reverted attempt, but any other error now
+  surfaces instead of counting as a revert; and a `state.json` save still logs
+  and continues on `OSError`, but a serialization error raises instead of
+  leaving `state.json` stale. At CLOSE, a recipe KB read or write that fails
+  leaves `recipe_finalize_status=failed` instead of overwriting the live
+  recipe from an empty read or reporting it `written`, a failed per-variant
+  write is logged as `recipe KB write for task <id> failed: <type>: <message>`
+  and later variants are still recorded, and a defect in the roofline-progress,
+  baseline-progress, stack-ledger or final-recipe step is recorded as a failed
+  close step, so the close reads `degraded`. In KernelForge, a failing aiter
+  preflight fails `gemm-tune` instead of reporting no blocking problems,
+  `forge-loop --resume` stops when it cannot restore its scoring state, a
+  kernel-backend prompt that cannot be built fails the forge agent's start-up
+  instead of falling back to the generic prompt, and a failed experience-KB
+  write is logged as `experience KB publication failed for <commit>: ...`.
+
+### Fixed
+
+Resume and recovery:
+
+- **A resumed session runs its rounds from the InferenceX checkout again.**
+  Only a tree that carries `benchmarks/benchmark_lib.sh` is recorded as the
+  session's InferenceX checkout or re-exported as `INFERENCEX_PATH` on
+  `--resume-from`, where 1.1.4 could record the patched framework tree that
+  PRELUDE's warm replay adopted, so every later sweep, explore and integrate
+  round of the resumed session failed as `magpie_nonzero_invalid_measurement`,
+  `detokenizer_stall` or `magpie_timeout`. A baseline or grid round whose
+  InferenceX root lacks that file now fails before launch with
+  `<path> is not an InferenceX checkout`, as `inferencex_checkout_invalid` on a
+  baseline and return code `-918` on a grid variant.
+- **A refused `--resume-from` names the confirmation that unblocks it.** The
+  `resume blocked` message now asks first for
+  `hyperloom recover --session-dir S --confirm-scope-gone OWNER_SCOPE --confirmation-reason TEXT`
+  when another owner scope's environment is gone, then for
+  `--confirm-stopped TASK_ID` for a listed task that names no owner scope
+  (such as a lane-less CLOSE-phase step), where 1.1.4 offered
+  `--confirm-stopped` for legacy empty-scope ownership only.
+  `hyperloom recover --help` now describes both confirmation modes and the
+  exit codes (`0` success, `1` breakdown rebuild failed, `2` invalid arguments
+  or a refused confirmation), and the crash-recovery runbook in
+  [Operations](reference/operations.md) follows the same order.
+
+Scheduling, phases and the LLM backend:
+
+- **An orchestrator `skip_to_close` that the session's own facts contradict no
+  longer ends the run.** While a baseline is measured and the remaining budget
+  still funds another macro cycle, the hint is refused with `policy_denied`
+  rule `skip_to_close_contradicted` (the reason names the measured baseline
+  and the minutes left against the minutes a cycle needs), recorded in
+  `state.json` `policy_denial_history`, and the run continues in its phase,
+  where 1.1.4 closed on the spot and booked it `global_converged`. A
+  `skip_to_close` with no measured baseline (`baseline_failed`) or below the
+  cycle floor (`time_exhausted`) closes as before. While PRELUDE or
+  ENABLEMENT waits for its initial roofline, the orchestration `=== Phase ===`
+  block carries a `hold` line naming the roofline and how long the hold can
+  last, so the agent no longer reads the phase's spent share
+  (`remaining_sec=0`) as a spent session. **Upgrade note:** a run whose
+  orchestrator asks to close early with a baseline measured and a cycle's
+  budget left now keeps optimizing, so its length, `stop_reason` and result
+  differ from a 1.1.4 run that closed at that point.
+- **Orchestration can no longer run an action its phase does not offer, and a
+  validated gain keeps its baseline.** A `propose_action` or `delegate`
+  outside the phase's proposable set (for example `baseline` in
+  FRAMEWORK_AGENT, `explore` in ENABLEMENT, KERNEL_AGENT or SWEEP, `report`
+  outside CLOSE, or an action name no phase offers) is refused before the
+  Critic sees it, with a `policy_denied` observation `rule=phase_incompatible`
+  and the hint `<PHASE> proposes: ...`, where 1.1.4 passed it to the Critic
+  and ran it once approved. Once a cumulative gain has been validated, a
+  higher re-baseline no longer replaces `baseline_tput`: the log reads
+  `baseline anchor: keeping <prior>; re-baseline measured <new> (task=<id> reason=anchor_load_bearing)`
+  and the baseline attempt record carries
+  `anchor_held: {reason, prior, measured}`, so the report no longer flags the
+  validated gain `inconsistent`. An ENABLEMENT revalidation still moves the
+  anchor.
+- **A `null` field in an agent's intent means "not supplied".** Hyperloom
+  drops JSON `null` values from an intent's payload and its `params` before
+  validating it, so a proposed action whose optional parameters the agent left
+  `null` runs on the session's defaults instead of failing the round with a
+  `TypeError`. A `delegate` or `propose_action` whose required field is `null`
+  is refused (`missing required payload field`), and on the Claude backend
+  `emit_intent` returns that refusal, and a bad `alert` severity,
+  `extend_lease` or `review_verdict`, as a tool error naming the field, where
+  1.1.4 answered `ok`. **Upgrade note:** an optional param sent as `null` now
+  inherits the stack's value instead of clearing it (`extra_server_args`,
+  `remove_args`, `unset_envs` and `args_mode` take `current_best`'s, and
+  `baseline_double_run` falls back to on), so the same proposal can launch a
+  different server command than under 1.1.4.
+- **Reviewed patches no longer starve behind explore grids in
+  FRAMEWORK_AGENT.** A queued `integrate_patch` dispatches ahead of tasks
+  queued earlier on the lanes it needs (explore grids and, through lane
+  expansion, queued `profile`, `roofline` and GPU specialists), oldest first
+  among patches; where 1.1.4 dispatched oldest-first, a Critic-approved patch
+  waited behind every earlier grid, and on AgentX, where a serving round takes
+  about an hour, the phase could end and cancel every queued patch unmeasured.
+  A running task is not preempted, and in ENABLEMENT a queued
+  `integrate_patch` still waits behind the revalidation `baseline` queued
+  before it.
+- **A specialist domain holds at most one queued or running single-domain
+  specialist.** A second `scope=domain` delegate for that domain is refused
+  with `policy_denied` rule `specialist_domain_in_flight`, whose hint names
+  the holding task, and an approved specialist proposal for it is dropped as
+  `proposal_materialize_skipped` with that reason, where 1.1.4 queued a fresh
+  copy whenever a later tick delegated the domain again and, on a one-GPU
+  host, the duplicates pushed other domains back by hours. Orchestration's
+  in-flight block gains a
+  `queued specialists (each holds its domain): <domain> task_id=<id>, ...`
+  line; `domains` and `freeform` dispatches hold no domain. A
+  `scope=domains` dispatch naming fewer than two tags is re-inferred from its
+  tags, so a one-tag one runs as a single-domain specialist.
+- **A specialist proposal whose `AITER_CONFIG_*` file is missing is refused
+  at admission.** A proposal whose `extra_envs` point an `AITER_CONFIG_*`
+  variable, or any element of its `:`-joined list, at a file that is not on
+  disk is dropped before it is benched, listed under
+  `proposals_env_ungrounded`, and recorded as a `proposal_env_file_missing`
+  specialist failure that the next SEED turn sees, with a pointer to the
+  `gemm_tuning` action. Where 1.1.4 booted the server, which died in aiter's
+  config loader and then timed out on `/health`, a grid variant that still
+  carries such a path now fails before boot with `capability_unsupported` on
+  every framework.
+- **Orchestration's `send_message` reaches every recipient in a list.** A
+  `to` holding several names writes one bus message per distinct name, in
+  order, and puts a copy in each `specialist:<task_id>` recipient's inbox. A
+  `to` that is an empty list, holds an empty or non-string name, or is any
+  other non-string value is refused with `policy_denied` rule `payload`; 1.1.4
+  passed it straight to the events insert, which raised
+  `sqlite3.ProgrammingError` and failed the running phase.
+- **KERNEL no longer keeps waiting on kernel work that a fusion KEEP already
+  landed.** A `fusion` row on `optimization_stack` counts as integrated work,
+  so KERNEL exits to SWEEP sooner and admits less work, and its exit evidence
+  reads `pending_work.kernel_work_pending: false` in those rounds. A
+  benchmark-round recorder that raises is logged as
+  `round recorder <name>.<method> failed` and the round still reports its
+  measurement, where 1.1.4 failed a single-recorder round over a good number,
+  and a multi-node restart that fails before the relaunch restores the
+  profiler trace path and forwarded-environment variables it set instead of
+  leaving them for the next round's launch.
+- **A specialist patch whose first proposal is malformed is still reviewed.**
+  When the first `proposal_set` entry of a specialist's patch deliverable is
+  not an object, its `integrate_patch` review is submitted with an empty patch
+  name, where 1.1.4 raised `AttributeError` before submitting it. The
+  `framework_config_autosubmitted_for_review` observation now carries
+  `patch_name`, as `specialist_patch_autosubmitted_for_review` does, and trace
+  analysis omits a boolean or non-finite `num_denoise_steps`,
+  `num_inference_steps` or tensor-parallel size instead of passing
+  `--num-denoise-steps 1` / `--tensor-parallel-size 1` or failing with
+  `OverflowError`.
+- **A gap row counts each failure once.** The gap ledger that orchestration
+  reads shows the real number of failures behind a gap (`attempts=1` for one
+  failure), where 1.1.4 counted the same failure again on every gap refresh
+  until the row reached its 20-attempt cap, so gap ranking by attempt count is
+  no longer skewed.
+- **Orchestration is offered only the built-in tools it may use.** The Claude
+  backend passes the declared built-ins (`Read`, `WebFetch`, `WebSearch`) as
+  the SDK tool set, so orchestration no longer sees Bash, Write or Edit and
+  stops spending turns on Bash calls that were denied while it inspected logs.
+  MCP tools (`emit_intent` among them), approval settings, filesystem
+  permissions and specialist permissions are unchanged.
+
+Measurement, profiling and AgentX:
+
+- **An AgentX baseline measured with the prefix cache off is refused.** When
+  the baseline server's own launch account shows the cache off (SGLang
+  `disable_radix_cache=True`, vLLM `enable_prefix_caching=False`, or ATOM
+  server args without `--enable_prefix_caching`), the baseline fails with
+  `error_class=agentx_baseline_prefix_cache_off` naming that evidence, and the
+  run stops with `stop_reason=baseline_failed` on the first occurrence,
+  re-baselines included, without opening enablement. In 1.1.4 such a
+  cold-cache baseline became the anchor, so any candidate that turned the
+  cache back on was credited with the cache itself as a gain. A launch whose
+  account cannot be read, synthetic baselines and candidates are not judged.
+- **A candidate can no longer change the draft under a simulated acceptance.**
+  When the base launch simulates speculative-decoding acceptance
+  (`SGLANG_SIMULATE_ACC_LEN`, a vLLM `--speculative-config` with
+  `rejection_sample_method: "synthetic"` or a `synthetic_acceptance_length`,
+  or an acceptance-length flag such as ATOM's
+  `--spec-decode-acceptance-length`), an explore variant, `integrate_patch`
+  bench or concurrency-sweep arm that changes the draft, its method or the
+  simulated acceptance fails before boot with
+  `error_class: speculative_decoding_pinned`, naming each changed setting,
+  where 1.1.4 benchmarked it against the stale acceptance and could KEEP a
+  gain that does not exist. A base that verifies a real draft may still tune
+  it but may not switch to simulated acceptance, and a base with no
+  speculative decoding may enable it either way. The check covers synthetic
+  and MLPerf-backend sessions; native Magpie AgentX candidates go through
+  Magpie's launch overrides and skip it.
+- **A context-copying speculative draft is no longer kept on a synthetic
+  benchmark.** In a synthetic session, explore refuses before launch any
+  variant that introduces, switches to or tunes a vLLM `ngram`, `ngram_gpu` or
+  `suffix` draft or an SGLang `--speculative-algorithm NGRAM` draft, recorded
+  as `SKIPPED_DEDUP` with `reason=speculative_context_copy_on_synthetic` and a
+  message naming the method: random prompts held to full length drive the
+  model into repetition loops such a draft accepts almost entirely, so its
+  gain does not carry over to real text. A round whose eval-start marker lands
+  in Magpie's nested `benchmark_*/benchmark_stderr.log` now gets its `eval`
+  phase in `kv_metrics.json`, so the measured phase's KV and GPU-power figures
+  no longer include eval traffic.
+- **A roofline or trace analysis that failed the same way on the same input
+  is not re-run.** After a roofline fails with `trace_split_no_steady_state`
+  or a TraceLens analysis timeout (`analysis_timeout`), the cycle-start,
+  gain-watermark, kernel-entry and CLOSE re-arms skip it until a KEEP changes
+  the recipe, logging
+  `internal-analysis (<reason>): not run -- the roofline on recipe-<N> already failed with <class> ...`
+  and leaving a `prelude_arm_dropped` marker, and a `trace_analyze` request
+  identical to one that already failed that way on the same trace returns at
+  once with `status=failed` and
+  `error_class=trace_analysis_failure_remembered`. 1.1.4 ran them again,
+  holding the benchmark, profile and server lanes for up to an hour each time
+  to fail the same way. Other failures, another trace or another
+  `budget_minutes` still run, and the kernel-entry `forge_reprofile` record
+  says `skipped_reason=repeated_failure` when a remembered failure declined
+  the analysis, instead of always `gpu_trace_unsupported`.
+- **Explore and sweep variants launch with the baseline's harness flags.** A
+  variant keeps `--no-enable-prefix-caching` when the operator's
+  `--server-args` carry it, where 1.1.4 dropped it from every composed launch
+  and compared prefix caching off in the baseline with it on in every variant;
+  persisted recipes still drop the flag. A specialist patch that matches
+  several identical copies of the source tree goes on to review and
+  integration when it applies cleanly to the session's own copy, instead of
+  being refused as ambiguous.
+- **vLLM runs with CUDA graphs off keep torch.compile.** When a baseline
+  retries after a CUDA-graph capture failure, or a roofline profile runs with
+  CUDA graphs disabled, vLLM gets `--compilation-config.cudagraph_mode NONE`
+  where 1.1.4 passed `--enforce-eager`, so inductor compilation stays on and a
+  profile shows the kernels the measured runs use. The mode is merged into a
+  JSON `--compilation-config` the server arguments already carry, and nothing
+  is added when they already pass `--enforce-eager`; SGLang keeps
+  `--disable-cuda-graph` and ATOM `--enforce-eager`. **Upgrade note:** such
+  vLLM baselines and profiles now run with inductor on, so their throughput
+  and kernel breakdowns differ from 1.1.4's.
+- **A quote-stripped spec-decode config whose draft is an absolute path
+  boots.** A recorded `--speculative-config` that lost its JSON quotes and
+  names its draft model by path (`{model:/models/X,...}`) is repaired into
+  valid JSON on every launch path, warm replay included. 1.1.4 left it
+  unparsable, so the server failed at boot with `server_argv_invalid`, the
+  warm replay was lost and the session fell back to cold exploration.
+- **A bypass boot-only round boots the server and stops.** Under
+  `HYPERLOOM_BENCHMARK_BACKEND=bypass` the round that boots a concurrency
+  sweep's server now starts it and runs no benchmark client or GSM8K eval,
+  where 1.1.4 ran a full round first (about 7 minutes per boot on GPU). The
+  round writes no `benchmark_report.json` and is filed as
+  `server_lifecycle_boot_only`; the boot concurrency is still measured by the
+  first reuse round.
+- **Rounds stop warning that the tokenizer-mode patch could not be applied.**
+  Hyperloom no longer rewrites Magpie's vLLM client scripts to add a
+  `--tokenizer-mode` hook, which the pinned Magpie ships, so the
+  `generic vLLM client block not found ... tokenizer-mode patch could not be applied`
+  warning logged for the multimodal `*_mm.sh` scripts is gone. A round for a
+  `deepseek_v4` checkpoint the installed transformers cannot resolve is still
+  refused with `client_tokenizer_unpatchable` when its client script lacks the
+  hook, and the message now names the Magpie revision to use.
+
+Enablement:
+
+- **Enablement no longer loses rounds, its kept stack or the session to its
+  own apply and revert.** Whether an integrate is an enablement round is
+  decided when it runs, so a stale one is graded as an ordinary integrate
+  instead of growing the enablement stack; a kept patch is no longer
+  duplicated by its harvested diff or removed by the low-disk `runs/` trim,
+  and a `kept_inert` result is committed so the next attempt keeps it. A
+  failed apply leaves the framework tree untouched (no `git apply -3` retry),
+  and the revert resets to the recorded HEAD and cleans the tree, so it no
+  longer ends the session with `patch_recovery_incomplete`. Rung 4 backports
+  only files under the framework package, with no file-count cap; a backport
+  that does not apply is dropped and logged as
+  `integrate_patch: localization ... skipped`, and the round runs on the
+  specialist's own patch, where 1.1.4 reverted the whole round. A switched
+  patch whose switch-off parity leg has no base throughput to compare against
+  reverts as `switch_off_parity_inconclusive`.
+- **After enablement promotes a runtime, later phases patch the tree the
+  bench imports.** The promoted checkout,
+  `enablement/stacks/<framework>/<task>/src`, becomes the session's framework
+  tree for specialists and `integrate_patch` (`state.json`
+  `framework_repo_path`, restored on `--resume-from` unless `--framework-path`
+  is given), where 1.1.4 kept patching the image's tree (for example
+  `/sgl-workspace/sglang`) to no effect; a runtime accepted by an advanced
+  round is re-activated like a kept one. Each attempt logs its git and pip
+  steps with exit codes to
+  `enablement/stacks/<framework>/<task>/provision.log`, kept after a failed
+  provision, and the round error carries pip's own error. Attempt venvs see
+  the image's eggs and editable installs (`sgl_kernel`, editable aiter), and
+  an SGLang checkout installs with the `srt_hip*` extra the image's ROCm torch
+  satisfies, keeping that torch. Orchestration naming `enablement_specialist`
+  is refused with `specialist_domain_coordinator_dispatched` instead of
+  crashing the dispatch.
+- **Enablement rounds finish what they start.** Rung 5 no longer fails with a
+  spurious `abi_mismatch` when the coordinator runs from a virtualenv, a
+  failed targeted build no longer ends the round that requested it,
+  ENABLEMENT exits once its initial roofline, run under the accepted launch
+  config, is booked, and Rung 4 localization covers every code gap on sglang
+  and vLLM.
+
+Kernel:
+
+- **A GEAK hand-off ends in a result the session can keep.** On an
+  interactivity-graded AgentX session the hand-off's `e2e_metric`, GEAK's
+  runner `E2E_METRIC` and `workload_spec.metric_basis` name
+  `e2e_norm_intvty_p50` where 1.1.4 handed total token throughput,
+  `workload_spec.acceptance` carries the session's KEEP rule (+3% on p50, with
+  the p90 tail and output throughput inside the noise band), and sweep rows
+  gain `measured_value` and `metric_basis`. Before delegating, KERNEL stops the
+  session's leftover servers, waits up to 120 s for the hand-off's cards to
+  fall below 1% VRAM and records `gpus_busy_at_handoff`, naming the busy cards
+  and up to eight serving process groups, instead of starting GEAK on cards
+  that stay busy. Each hand-off holds back the time its rebench needs (one
+  baseline round, its warm pass when the baseline ran one, and a quarter
+  pass), logged as
+  `GEAK: holding back <N>s of the KERNEL budget to re-measure GEAK's result`,
+  where 1.1.4 gave GEAK the rest of the KERNEL budget, and GEAK is skipped as
+  `insufficient_budget` when less than `GEAK_MIN_RUN_S` (default 600 s) would
+  remain. Before re-measuring a result GEAK has just returned, KERNEL again
+  stops any server the session left running and waits up to 2 minutes for the
+  handed-off GPUs to free their memory, then measures either way, logging
+  `geak rebench: GPUs still hold VRAM after GEAK returned: ...` if they stay
+  busy. A GEAK result is no longer refused its rebench for time or lost to a
+  server boot on occupied GPUs, which left the session at 0% validated gain.
+  **Upgrade note:** GEAK's deadline on every hand-off is shorter by the
+  rebench reserve, so GEAK outcomes are not comparable with 1.1.4 runs; see
+  "Installation prerequisites move" for the GEAK revision this needs.
+- **GEAK serves the engine an AgentX baseline ran.** Under AgentX with the
+  GEAK backend, `geak/handoff.json` names the session's server builtin as
+  `launch_server_script` and leaves `bench_launcher` unset, so GEAK boots its
+  benchmark server through Magpie with the baseline's engine flags and
+  environment, and the hand-off's `baseline_env_spec.config.server_launch_flags`
+  and `extra_envs` carry the launch the baseline recorded in
+  `server_command.txt` and `benchmark_stderr.log`. 1.1.4 forced
+  `bench_launcher: native`, so GEAK served its adapter's defaults instead of
+  the recipe's flags and exports; `native` remains only when the builtin
+  cannot be found on disk.
+- **GEMM tuning tunes the experts of Quark and compressed-tensors checkpoints
+  and reads aiter's fused-MoE dispatch lines again.** When the precision
+  handed to forge GEMM tuning is empty, `auto` or only the checkpoint's
+  toolkit name, the router reads the formats nested in `quantization_config`:
+  the routed experts' format picks the MoE tuner and the other linear layers'
+  format the dense one. `fmoe_ck` therefore runs on Quark MoE checkpoints,
+  which 1.1.4 skipped as `Unsupported MoE precision/quant combo: quark/none`,
+  and when no serving log names the dense kernel a GLM-5.3 MXFP4 checkpoint's
+  fp8 attention gets `a8w8_blockscale`. With `--quant-type auto` the MoE
+  tuners route first on the weight dtype and `QuantType` of the most-missed
+  fused-MoE dispatch in `--kernel-signature-log`, and fall back to the nested
+  format when the log shows none or one no tuner handles. From aiter commit
+  `e7d2453` on, which prints the activation unquoted, Hyperloom matched none of
+  aiter's fused-MoE dispatch log lines, so no untuned fused-MoE CSV came from
+  the serving log and gemm-shape coverage reported tuned MoE shapes as
+  untuned; Hyperloom now reads those lines with Forge's own parser. An
+  explicit `fp8`, `mxfp4` or `bf16` precision routes as before.
+- **Forge's upstream PR references report a PR closed without merging as
+  `closed`.** The "Upstream PR references" block Forge adds to kernel prompts
+  under `--pr-kb`, `forge_experiments/pr_refs/index.md` and the
+  `pr_find_references` / `pr_get_reference` tools label each PR `open`,
+  `closed`, `merged` or `unknown`, where 1.1.4 called every unmerged PR
+  `open`. Drafts read `open, draft`, and the tool rows also carry `draft`,
+  `merged_at` and `base_ref`, with `null` for anything the PR Monitor service
+  did not report.
+- **A multi-node kernel apply names the pods that did not invalidate the
+  AITER JIT cache.** The failure (error class `aiter_jit_invalidation_failed`,
+  unchanged) reads
+  `AITER JIT cache invalidation failed: pods ['<host>'] did not invalidate it exactly once`,
+  where 1.1.4 printed `one or more pods did not invalidate AITER JIT` or
+  `each pod must invalidate AITER JIT exactly once`, and it carries
+  `jit_build_backup` as a single-node failure does. The single-file and
+  snapshot apply paths hold every pod to the same rule: exactly one JIT backup
+  per pod.
+- **A kernel request whose `target_agent` carries surrounding whitespace
+  runs.** The router reads the name stripped, as the policy gate that admitted
+  the request does, so a request for `" kernel_agent "` reaches the kernel
+  agent's handler instead of failing with `unknown_target_agent` and being
+  recorded as a failed action.
+- **The workspace guard leaves forge-loop's own output tree alone.** The
+  protected-file inventory skips every `forge_experiments/` directory, as it
+  skips `.git`, so a profiling venv staged there no longer fails the analysis
+  phase with `protected ignored files changed`, and a plan revision or lesson
+  summary resumed read-only no longer fails with "the read-only session
+  changed the workspace" or rolls back the `llm_usage.json` spend ledger and
+  `events.jsonl` the loop wrote meanwhile. A read-only session that edits a
+  workspace file is still rejected and restored.
+
+Install, preflight and environment:
+
+- **vLLM source-overlay runs install, keep their framework version and start
+  under Ray.** `hyperloom setup` verifies an overlay by importing
+  `vllm.entrypoints.openai.api_server` where 1.1.4 ran `pip check`, which
+  reported the host image's own pin conflicts, so it never passed on SGLang
+  ROCm images, and missed a host `openai` the server could not import. The
+  framework version of a `setup.py develop` checkout or an isolated vLLM venv
+  is read from the serving interpreter, so the stack fingerprint and KB key
+  carry it instead of `unknown_version`. Ray worker and serving-actor
+  environments re-index a node-wide `HIP_VISIBLE_DEVICES` into the devices
+  Ray's `ROCR_VISIBLE_DEVICES` exposes, so Ray-launched servers start on such
+  hosts. A failed backend turn is logged at WARNING as
+  `Coordinator: <agent> backend turn failed (<n> in a row): <error>`.
+- **`--reference-script` reads an `sglang serve` command.** An SGLang
+  cookbook launch written as `sglang serve ...` now yields its server flags as
+  written. 1.1.4 found no flags in it, keeping only the script's exports or
+  exiting `2` with "yields neither a flag nor an export", unless it was
+  rewritten to `python3 -m sglang.launch_server`.
+- **A baseline that fails `CacheConfig` validation stops as an argument
+  error.** Server output carrying `validation error for CacheConfig` (or
+  `errors`) is classified as an argument failure however long the server ran
+  first, so the second such baseline stops the run with
+  `stop_reason=baseline_arg_error` and the failure is not used as enablement
+  evidence; 1.1.4 recognised argument errors only within 30 s of start and
+  treated a slower one as `subprocess_nonzero`. A KV-cache OOM is still
+  classified first.
+
+Reports and exports:
+
+- **Serving throughput is labelled `tok/s`, not `tok/s/GPU`.** Reports,
+  summaries and the roofline snapshot print vLLM, SGLang and ATOM throughput
+  as `tok/s`: the number is the server's aggregate over all its TP GPUs, so
+  1.1.4's label overstated per-GPU throughput by the TP degree. The values are
+  unchanged, and genuine per-GPU figures (InferenceX targets, the
+  concurrency-sweep efficiency plot) keep `/GPU`.
+- **AgentX stack-ledger adoptions are measured on the graded axis.** On an
+  AgentX session graded on interactivity (`e2e_norm_intvty_p50`), each
+  adoption row of the stack ledger in `session_breakdown.json` carries the
+  interactivity baseline as `baseline_tput` and computes `contribution_pct`
+  and `cumulative_gain_pct` against it, so the ledger reconciles with the
+  stack validation; 1.1.4 divided an interactivity gain by the
+  output-throughput baseline, which showed as a large
+  `reconciliation_gap_pct`. When that baseline was not measured the row
+  carries `null` and the ledger is `degraded`. Sessions graded on output
+  throughput are unchanged.
+- **The concurrency-sweep chart follows the concurrency ladder.**
+  `conc_sweep_curve.png` joins each arm's points in concurrency order, labels
+  each point `c=<conc> <value>`, and draws a concurrency only one arm measured
+  as a hollow marker with a "hollow: concurrency measured by one arm only"
+  legend entry. 1.1.4 joined the points in interactivity order, so a line
+  could run 8, 4, 14 and a rung the baseline never measured read as the
+  optimized arm doing worse.
+- **A failed remote Recipe KB publication keeps its cause.** The publish row
+  CLOSE appends to `runtime/recipe_snapshot/.audit.jsonl` now records, beside
+  `error.type`, the wrapped cause's type (`error.cause_type`) and, when known,
+  the HTTP status (`error.http_status`) or OS errno (`error.errno`, with
+  `error.reason_type` for a connection failure), where 1.1.4 recorded only the
+  exception class, such as `KBStoreError`. Exception messages, URLs and
+  response bodies stay out of the row.
+
+Other:
+
+- **The non-git patch channel reports and records what it actually did.**
+  When a patch is applied without git, the *Rejected hunks* section of the
+  apply feedback shows the hunks `patch` actually rejected, where 1.1.4 always
+  left it empty, and the apply leaves no `.orig` files behind and no longer
+  deletes the `.rej` files of a concurrent git-channel apply. A rename with no
+  content change is recorded and reverted whichever diff prefix style
+  produced it (`diff.noprefix`, `diff.mnemonicPrefix`), and a section with
+  `/dev/null` on both sides is refused.
+- **The low-disk trim of `runs/` no longer deletes live work.** It fires only
+  below 20 GB free and skips workspaces a live task still reads, where 1.1.4
+  also trimmed above 85% used and could delete a running specialist's
+  workspace. TraceLens falls back to `CLAUDE_MODEL` when `ANTHROPIC_MODEL` is
+  unset, and specialists receive `INFERENCEX_PATH`.
+
+### Known issues
+
+- **On a Magpie AgentX session, a KEEP that removes recipe options can make
+  every later bench fail.** Such a KEEP (one carrying `remove_args` or
+  `unset_envs`, for example an explore winner that drops the
+  hierarchical-cache flags) switches `current_best.args_mode` to `replace`, so
+  later candidates reach Magpie with `launch_overrides.replace_args: true` and
+  lose every recipe option Magpie does not protect. On a recipe that pins
+  golden acceptance, such as DeepSeek-V4-Pro with speculative decoding, every
+  later explore, roofline and `integrate_patch` bench then fails within
+  seconds as `magpie_nonzero_invalid_measurement`
+  (`Changing AgentX golden acceptance inputs requires a new resolved recipe`).
+  The fix is on `main` and ships in the next release.
 
 ## Hyperloom 1.1.4 release
 

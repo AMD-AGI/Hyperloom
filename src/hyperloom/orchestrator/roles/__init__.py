@@ -19,7 +19,6 @@ from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_QUALIFIED,
     MCP_SERVER_NAME,
     build_emit_intent_server,
-    coerce_emit_intent_input,
     is_unparsed_tool_wrapper,
     validate_emit_intent_input,
 )
@@ -58,7 +57,6 @@ __all__ = [
     "auto_approve_critic",
     "build_context_tools_server",
     "build_emit_intent_server",
-    "coerce_emit_intent_input",
     "is_unparsed_tool_wrapper",
     "validate_emit_intent_input",
 ]
