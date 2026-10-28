@@ -367,6 +367,20 @@ def test_a_session_batch_runs_the_current_best_stack_once_a_round_moved_it(tmp_p
     assert (spec.argv, spec.env, spec.weights) == (["kept"], {"HL_A": "1"}, {1: 0.0, 2: 0.0, 4: 1.0})
 
 
+def test_a_kept_stack_whose_round_kept_no_server_log_is_weighted_by_the_baselines(tmp_path):
+    """GLM-5.3: an AgentX integrate round keeps its launch but no server.log, so every moved stack's batch failed."""
+    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    state = _workspace(tmp_path, decode.format(n=2), {"effective_argv": ["base"]})
+    best = tmp_path / "runs" / "integrate_patch" / "variant_00" / "benchmark_sglang_4"
+    best.mkdir(parents=True)
+    (best / "agentx_server_launch.json").write_text(json.dumps({"effective_argv": ["kept"]}), encoding="utf-8")
+    state.current_best = {"workspace": str(best.parent.parent)}
+
+    spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
+
+    assert (spec.argv, spec.weights) == (["kept"], {1: 0.0, 2: 1.0, 4: 0.0})
+
+
 def test_a_session_batch_refuses_a_current_best_without_its_launch_rather_than_bench_the_baseline(tmp_path):
     decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
     state = _workspace(tmp_path, decode, {"effective_argv": ["base"]})

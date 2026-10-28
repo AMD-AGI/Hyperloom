@@ -83,6 +83,14 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"name": name, "envs": envs} for name, envs in arms.items()][:CYCLE_BATCH_MAX_ARMS]
 
 
+def _weighting_log(launch_dir: Path, baseline: str) -> Path:
+    """The server log to weight batch sizes by: the launch's own, else the baseline's, as one corpus drives both."""
+    own = launch_dir / _SERVER_LOG
+    if own.is_file() or not baseline:
+        return own
+    return next(iter(sorted(Path(baseline).rglob(_SERVER_LOG))), own)
+
+
 def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, out_dir: Path, port: int) -> BatchSpec:
     """A batch on the current best's own launch, weighted by where its replay ran and fed its corpus length.
 
@@ -97,10 +105,10 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
         where = "the current best" if best else "the baseline workspace"
         raise FileNotFoundError(f"no agentx_server_launch.json under {where} {root}")
     launch = json.loads(launch_file.read_text(encoding=_ENCODING))
-    log = (launch_file.parent / _SERVER_LOG).read_text(encoding=_ENCODING, errors="ignore").splitlines()
-    weights = cb.batch_weights(log, grid=BATCH_GRID)
+    log_path = _weighting_log(launch_file.parent, str(getattr(state, "baseline_workspace", "") or ""))
+    weights = cb.batch_weights(log_path.read_text(encoding=_ENCODING, errors="ignore").splitlines(), grid=BATCH_GRID)
     if not weights:
-        raise ValueError(f"no decode line in {launch_file.parent / _SERVER_LOG} to weight batch sizes by")
+        raise ValueError(f"no decode line in {log_path} to weight batch sizes by")
     config = json.loads((Path(str(state.model_path)) / "config.json").read_text(encoding=_ENCODING))
     isl = (getattr(state, "agentx_corpus_shape", None) or {}).get("isl") or {}
     return BatchSpec(
