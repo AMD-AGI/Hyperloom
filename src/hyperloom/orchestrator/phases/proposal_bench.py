@@ -15,6 +15,7 @@ from ..specialists.domains import CUSTOM_SPECIALIST_KEY
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TaskSpec
 from .dispatch_order import LEVER_BUNDLE_REASON, is_operator_work
+from .machine_state import PHASE_FRAMEWORK_AGENT
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -122,6 +123,11 @@ class ProposalBench(CoordinatorCollaborator):
                 "lever bundle: enqueued explore task_id=%s over %s", task.task_id, variant["framework_lever_bundle"]
             )
         return task is not None
+
+    async def on_stack_adopted(self) -> None:
+        """Queue the moved stack's cycle batch before the dispatcher's next pass hands the lanes to an integrate."""
+        if str(self.shared_state.phase or "").upper() == PHASE_FRAMEWORK_AGENT:
+            await self.enqueue_cycle_batch()
 
     async def enqueue_cycle_batch(self) -> bool:
         """Enqueue one cycle-bench batch over the patches whose levers await the screen; whether one was enqueued.

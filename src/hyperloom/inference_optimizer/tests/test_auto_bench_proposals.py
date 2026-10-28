@@ -237,6 +237,22 @@ async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases
     assert (batch["params"][CYCLE_ARMS_PARAM], batch["idempotency_key"]) == ([], "cycle-reference-c0-s1")
 
 
+async def test_a_moved_stack_gets_its_reference_batch_before_the_next_dispatch(monkeypatch):
+    """GLM-5.3: after a KEEP the next screened integrate was dispatched a second before the new reference was queued."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    moved = _agentx_phase()
+    moved._coord.shared_state.optimization_stack = [{"kind": "code_patch"}]
+    moved._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 16.7}}
+    elsewhere = _agentx_phase(phase="KERNEL_AGENT")
+    elsewhere._coord.shared_state.optimization_stack = [{"kind": "code_patch"}]
+
+    await moved.on_stack_adopted()
+    await elsewhere.on_stack_adopted()
+
+    assert [b["idempotency_key"] for b in _explores(moved)] == ["cycle-reference-c0-s1"]
+    assert _explores(elsewhere) == []
+
+
 async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(monkeypatch):
     """GLM-5.3: recover cancelled a preempted pod's reference batch, and its spent key kept the screen shut all cycle."""
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")

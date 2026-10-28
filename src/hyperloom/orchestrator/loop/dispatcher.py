@@ -1110,6 +1110,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return
         if task.kind == "integrate_patch":
             await self._coord.phase_framework.on_integrate_patch_settled(task, result, verdict)
+        if verdict is Verdict.ADOPTED:
+            await self._coord.phase_framework.on_stack_adopted()
         # replay_warm_recipe is excluded from the fact-write: it is verification, not a fact.
         if task.kind != _REPLAY_WARM_RECIPE:
             try:
