@@ -130,11 +130,23 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
     coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
 
 
+def _promote(coord: Coordinator, name: str, tput: float, args: str) -> None:
+    """Lift a KEEP into the session best the way the dispatcher does before the fact hook."""
+    state = coord.shared_state
+    if not state.current_best:
+        state.baseline_tput = tput / 2
+        state.current_best = {"action": "baseline", "tput": tput / 2, "extra_server_args": "", "extra_envs": {}}
+    assert coord.writeback.lift_to_current_best(
+        "explore", tput, {"name": name, "candidate_extra_server_args": args, "extra_server_args": args}
+    )
+
+
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
     """KEEP with structured variant args must write best_config for warm-replay."""
     from types import SimpleNamespace
 
     coord = _make_coordinator(tmp_path)
+    _promote(coord, "disable_radix", 6700.0, "--disable-radix-cache")
     task = SimpleNamespace(
         kind="explore",
         task_id="t-keep-bc",
@@ -201,6 +213,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             best_throughput=7000.0,
         )
     )
+    _promote(coord, "small_gain", 6600.0, "--disable-radix-cache")
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
     coord.recipe_journal._record_fact_per_variant(
         task=task,
@@ -995,3 +1008,40 @@ def test_fact_write_hook_lets_an_unexpected_recipe_store_error_propagate(tmp_pat
 
     with pytest.raises(TypeError, match="put_recipe signature drifted"):
         _fact_write_for_three_kept_variants(coord)
+
+
+def test_a_source_patch_keep_stamps_the_session_stack_not_its_own_empty_args(tmp_path: Path) -> None:
+    """An integrate_patch KEEP carries no launch args; the recipe must keep the stack it was measured on."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    mtp = '--speculative-config {"method":"mtp","num_speculative_tokens":1} --max-model-len 13312'
+    _promote(coord, "mtp", 1460.0, mtp)
+    coord.recipe_journal._record_fact_per_variant(
+        task=SimpleNamespace(kind="explore", task_id="t-mtp", params={}),
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "mtp",
+            "variant": {"extra_server_args": mtp},
+            "metrics": {"gain_pct": 40.0, "output_throughput": 1460.0},
+        },
+        adopted=True,
+    )
+    patch_result = {"output_throughput": 1535.0, "delta_pct": 5.1, "extra_envs": {"VLLM_ROCM_USE_AITER": "1"}}
+    assert coord.writeback.lift_to_current_best("integrate_patch", 1535.0, dict(patch_result))
+
+    coord.recipe_journal._record_fact_per_task(
+        task=SimpleNamespace(kind="integrate_patch", task_id="t-patch", params={}),
+        source_session_id="sess-1",
+        result_dict=patch_result,
+        verdict=Verdict.ADOPTED,
+    )
+
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["best_throughput"] == 1535.0
+    assert '--speculative-config {"method":"mtp","num_speculative_tokens":1}' in row["best_config"]["extra_server_args"]
+    assert "--max-model-len 13312" in row["best_config"]["extra_server_args"]
+    assert row["best_config"]["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}

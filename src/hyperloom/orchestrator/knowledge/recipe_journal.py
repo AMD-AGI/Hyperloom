@@ -36,7 +36,7 @@ from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from .config import KnowledgeStoreMode
 from ._config_timeline import _NON_ATTEMPT_OUTCOMES, _record_config_attempts
-from ._recipe_attrs import attempt_provenance, recipe_attrs_from_state, workload_kb_tags
+from ._recipe_attrs import attempt_provenance, recipe_attrs_from_state, session_best_config, workload_kb_tags
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -135,7 +135,6 @@ class FactRecord:
     change: str
     gain_pct: float | None
     throughput_after: float | None
-    best_config_candidate: dict[str, Any] | None
     evidence_refs: list[str]
     pitfall_severity_dict: dict[str, Any]
     variant_name: str | None = None
@@ -542,11 +541,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         try:
             if lesson is not None:
-                live = self.read_local_recipe_row()
+                # Promotion has already folded this KEEP into the session best; the task's own
+                # args are only its layer, and an integrate_patch KEEP has none at all.
                 recipe_overrides = self.kb_best_config_overrides_for_keep(
-                    live=live,
-                    best_config_candidate=fact.best_config_candidate,
-                    throughput_after=fact.throughput_after,
+                    live=self.read_local_recipe_row(),
+                    best_config=session_best_config(state.current_best or {}, state.optimization_stack or []),
                 )
                 self.kb_amend_recipe(
                     append_lesson=lesson,
@@ -625,10 +624,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
-                best_config_candidate=self.extract_kept_best_config(
-                    task=task,
-                    result_dict=result_dict,
-                ),
                 # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
                 evidence_refs=[f"log:task-{task.task_id}"],
                 pitfall_severity_dict=result_dict,
@@ -743,10 +738,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=measurement.gain_pct,
                 throughput_after=measurement.throughput_after,
-                best_config_candidate=self.extract_kept_best_config(
-                    task=task,
-                    variant_attrs=change_attrs,
-                ),
                 # Workload-shape tags — see _record_fact_per_task.
                 evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
                 pitfall_severity_dict={
@@ -1158,46 +1149,13 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         return row
 
     @staticmethod
-    def extract_kept_best_config(
-        *,
-        task: "Task",
-        variant_attrs: dict[str, Any] | None = None,
-        result_dict: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Build a replayable ``best_config`` from a KEEP'd task or explore variant."""
-        params = task.params if isinstance(getattr(task, "params", None), dict) else {}
-        attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
-
-        args = _extra_server_args(attrs)
-        if not args.strip():
-            args = _extra_server_args(params)
-        if not args.strip() and isinstance(result_dict, dict):
-            args = _extra_server_args(result_dict)
-
-        envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
-        if not envs_raw and isinstance(result_dict, dict):
-            envs_raw = result_dict.get("extra_envs") or {}
-        envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-
-        if not args.strip() and not envs:
-            return {}
-
-        best_config: dict[str, Any] = {}
-        if args.strip():
-            best_config["extra_server_args"] = args.strip()
-        if envs:
-            best_config["extra_envs"] = envs
-        return best_config
-
-    @staticmethod
     def kb_best_config_overrides_for_keep(
         *,
         live: Mapping[str, Any],
-        best_config_candidate: Mapping[str, Any],
-        throughput_after: float | None,
+        best_config: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Decide whether a KEEP amend should also stamp ``best_config`` on the recipe row."""
-        if not best_config_candidate:
+        """Decide whether a KEEP amend should also stamp the session ``best_config`` on the recipe row."""
+        if not best_config:
             return {}
 
         live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
@@ -1206,10 +1164,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
         )
         live_tput = recorded_float(live.get("best_throughput"))
-        new_tput = recorded_float(throughput_after)
+        new_tput = recorded_float(best_config.get("tput"))
         if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
             overrides: dict[str, Any] = {
-                "best_config": dict(best_config_candidate),
+                "best_config": dict(best_config),
             }
             if new_tput > 0.0:
                 overrides["best_throughput"] = new_tput
