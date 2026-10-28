@@ -89,7 +89,7 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     return not is_truthy(envs.get("RUN_EVAL"), default=True)
 
 
-def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> bool:
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> None:
     """Halt the run when the baseline accuracy test produced no result.
 
     ``cause`` names what actually went wrong, for the callers that can establish it.
@@ -97,18 +97,12 @@ def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: st
     nobody can explain *is* a broken baseline setup -- but asserting that next to an
     identified cause would tell the operator the opposite of what the caller just found.
     """
-    if shared_state is None:
-        return False
-    setter = getattr(shared_state, "set_stop_reason", None)
-    if not callable(setter):
-        return False
     log.warning(
         "baseline accuracy test produced no result (%s); stopping run (%s)",
         context,
         cause or "broken baseline setup",
     )
-    setter(BASELINE_ACCURACY_STOP_REASON)
-    return True
+    shared_state.set_stop_reason(BASELINE_ACCURACY_STOP_REASON)
 
 
 def require_kernel_accuracy_default() -> bool:
@@ -212,8 +206,6 @@ def eval_contract_fingerprint(
     config_path: str | Path | None,
     framework: str | None = None,
     model: str | None = None,
-    task: str | None = None,
-    metric: str | None = None,
 ) -> str:
     """Short stable digest of the eval contract (workload + eval definition)."""
     contract = _extract_eval_contract_fields(config_path)
