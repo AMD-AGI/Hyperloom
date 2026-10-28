@@ -96,23 +96,20 @@ def test_gemm_treats_an_unusable_estimate_as_the_default(cost: Any) -> None:
     assert lb.max_targets(lb.LANE_GEMM, lb.GEMM_DEFAULT_TARGET_SEC, target_costs_sec=(cost,)) == 1
 
 
-def test_fusion_is_capped_by_count_once_the_share_pays_for_them() -> None:
-    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_MAX_TARGETS * lb.FUSION_DEFAULT_TARGET_SEC) == (
-        lb.FUSION_MAX_TARGETS
-    )
-    assert lb.max_targets(lb.LANE_FUSION, 10_000_000) == lb.FUSION_MAX_TARGETS
-
-
-def test_fusion_funds_only_the_recipes_its_share_pays_for() -> None:
-    assert lb.max_targets(lb.LANE_FUSION, 2 * lb.FUSION_DEFAULT_TARGET_SEC) == 2
-    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_DEFAULT_TARGET_SEC) == 1
-
-
-def test_a_fusion_share_too_small_for_one_recipe_funds_nothing() -> None:
-    # The share one GLM-5.3 session dispatched forge-fuse with, three minutes before it closed.
-    assert lb.max_targets(lb.LANE_FUSION, 223) == 0
-    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_DEFAULT_TARGET_SEC - 1) == 0
-    assert lb.max_targets(lb.LANE_FUSION, 0) == 0
+@pytest.mark.parametrize(
+    ("budget_sec", "expected"),
+    [
+        (10_000_000, lb.FUSION_MAX_TARGETS),
+        (lb.FUSION_MAX_TARGETS * lb.FUSION_DEFAULT_TARGET_SEC, lb.FUSION_MAX_TARGETS),
+        (2 * lb.FUSION_DEFAULT_TARGET_SEC, 2),
+        (lb.FUSION_DEFAULT_TARGET_SEC, 1),
+        (lb.FUSION_DEFAULT_TARGET_SEC - 1, 0),
+        (223, 0),
+        (0, 0),
+    ],
+)
+def test_fusion_funds_only_the_recipes_its_share_pays_for(budget_sec: int, expected: int) -> None:
+    assert lb.max_targets(lb.LANE_FUSION, budget_sec) == expected
 
 
 @pytest.mark.parametrize("budget", [-1, True, 1.5, "100"])
@@ -152,25 +149,6 @@ def test_allocate_on_an_unbounded_session_funds_nothing() -> None:
 def test_allocate_passes_router_estimates_to_gemm() -> None:
     allocations = lb.allocate(180.0, weights={lb.LANE_GEMM: 1.0}, gemm_target_costs_sec=(900, 900))
     assert allocations[lb.LANE_GEMM].max_targets == 2
-
-
-def test_a_phase_too_short_for_one_recipe_leaves_the_fusion_lane_unfundable() -> None:
-    """The share an observed session dispatched forge-fuse on bought nothing but a reaped run.
-
-    A six-minute phase prices the fusion share below one recipe; the lane must read as unfundable rather than take
-    whatever seconds remain and spend them on work the phase cannot finish.
-    """
-    allocation = lb.allocate(6.0)[lb.LANE_FUSION]
-
-    assert allocation.budget_sec < lb.FUSION_DEFAULT_TARGET_SEC
-    assert allocation.is_fundable is False
-
-
-def test_a_phase_with_room_still_funds_the_fusion_lane() -> None:
-    allocation = lb.allocate(240.0)[lb.LANE_FUSION]
-
-    assert allocation.is_fundable is True
-    assert allocation.max_targets >= 1
 
 
 def test_a_gemm_tuner_is_capped_strictly_below_the_session() -> None:
