@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -327,8 +329,10 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # The Anthropic Messages API version, defined once for the whole repository.
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MESSAGES_PATH = "/v1/messages"
-# The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path the httpx transport owes the same.
+# The OpenAI path re-dials through the SDK (``max_retries``); on the Messages path this module owes the same.
 ANTHROPIC_CONNECT_RETRIES = 2
+# Waited before the second dial and doubled before the third, as the SDK's backoff does.
+_ANTHROPIC_CONNECT_BACKOFF_S = 0.5
 
 
 def _is_dual_protocol_host(url: str | None) -> bool:
@@ -558,14 +562,10 @@ def _httpx_module() -> object:
     return httpx
 
 
-def _anthropic_transports(cls: object) -> dict[str, object]:
-    """Client kwargs whose transports re-dial a connection that never came up, env-configured proxies included."""
-    # A client built with a ``transport`` stops reading the proxy environment, so its mounts are rebuilt here.
-    from httpx._utils import get_environment_proxies
-
-    proxies = get_environment_proxies().items()
-    mounts = {pat: None if url is None else cls(proxy=url, retries=ANTHROPIC_CONNECT_RETRIES) for pat, url in proxies}
-    return {"transport": cls(retries=ANTHROPIC_CONNECT_RETRIES), "mounts": mounts}
+def _anthropic_connect_failures() -> tuple[type[BaseException], ...]:
+    """The ``httpx`` failures that mean nothing was sent, so dialling again cannot duplicate a completion."""
+    httpx = _httpx_module()
+    return (httpx.ConnectError, httpx.ConnectTimeout)  # type: ignore[attr-defined]
 
 
 def _anthropic_client_kwargs(*, env: dict[str, str] | None, timeout: object | None) -> dict[str, object]:
@@ -603,7 +603,6 @@ def get_anthropic_client(
             env=env,
             timeout=timeout,
         ),
-        **_anthropic_transports(httpx.HTTPTransport),  # type: ignore[attr-defined]
     )
 
 
@@ -619,7 +618,6 @@ def get_async_anthropic_client(
             env=env,
             timeout=timeout,
         ),
-        **_anthropic_transports(httpx.AsyncHTTPTransport),  # type: ignore[attr-defined]
     )
 
 
@@ -860,6 +858,34 @@ def _observe_anthropic(observation: RequestObservation, resp: object) -> Anthrop
     return result
 
 
+def _post_anthropic_messages(client: object, params: dict[str, object], tag: dict[str, object]) -> object:
+    """POST the Messages request, dialling again while the connection never came up."""
+    # httpx re-dials only on its unproxied branch, so the re-dial lives here instead, where both routes pass.
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        except connect_failures:
+            time.sleep(delay)
+            delay *= 2
+    # The last dial speaks for itself: its failure reaches the caller.
+    return client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+
+
+async def _apost_anthropic_messages(client: object, params: dict[str, object], tag: dict[str, object]) -> object:
+    """Async twin of :func:`_post_anthropic_messages`."""
+    connect_failures = _anthropic_connect_failures()
+    delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    for _ in range(ANTHROPIC_CONNECT_RETRIES):
+        try:
+            return await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        except connect_failures:
+            await asyncio.sleep(delay)
+            delay *= 2
+    return await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+
+
 def anthropic_messages(
     client: object,
     *,
@@ -872,7 +898,8 @@ def anthropic_messages(
     with observed_request(
         protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        # Inside the observation: the re-dials belong to the one request the ledger records.
+        resp = _post_anthropic_messages(client, params, tag)
         return _observe_anthropic(observation, resp)
 
 
@@ -888,7 +915,7 @@ async def aanthropic_messages(
     with observed_request(
         protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
     ) as observation:
-        resp = await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+        resp = await _apost_anthropic_messages(client, params, tag)
         return _observe_anthropic(observation, resp)
 
 

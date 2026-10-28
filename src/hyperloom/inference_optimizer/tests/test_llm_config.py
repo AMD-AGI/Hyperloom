@@ -768,29 +768,12 @@ class _FakeAsyncHttpxClient(_FakeHttpxClient):
     kind = "AsyncClient"
 
 
-class _FakeSyncHttpxTransport(_FakeHttpxClient):
-    kind = "HTTPTransport"
-
-
-class _FakeAsyncHttpxTransport(_FakeHttpxClient):
-    kind = "AsyncHTTPTransport"
-
-
-def _install_fake_httpx(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    proxies: dict[str, str | None] | None = None,
-) -> None:
-    """Point the lazy ``import httpx`` at recording stand-ins, with ``proxies`` as the environment's proxy map."""
+def _install_fake_httpx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the lazy ``import httpx`` at recording stand-ins."""
     module = types.ModuleType("httpx")
     module.Client = _FakeSyncHttpxClient
     module.AsyncClient = _FakeAsyncHttpxClient
-    module.HTTPTransport = _FakeSyncHttpxTransport
-    module.AsyncHTTPTransport = _FakeAsyncHttpxTransport
-    utils = types.ModuleType("httpx._utils")
-    utils.get_environment_proxies = lambda: dict(proxies or {})
     monkeypatch.setitem(sys.modules, "httpx", module)
-    monkeypatch.setitem(sys.modules, "httpx._utils", utils)
 
 
 _ANTHROPIC_KEY = "_".join(("ANTHROPIC", "API", "KEY"))
@@ -850,36 +833,6 @@ def test_get_anthropic_client_timeout_plumbing(monkeypatch):
     assert "timeout" not in get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs
     sentinel = object()
     assert get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}, timeout=sentinel).kwargs["timeout"] is sentinel
-
-
-def test_anthropic_clients_redial_a_connection_that_never_came_up(monkeypatch):
-    """The OpenAI protocol path gets its re-dial from the SDK; the Messages path gets it from its transport."""
-    _install_fake_httpx(monkeypatch)
-    retries = {"retries": llm_config.ANTHROPIC_CONNECT_RETRIES}
-    transport = get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["transport"]
-    assert (transport.kind, transport.kwargs) == ("HTTPTransport", retries)
-    transport = get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["transport"]
-    assert (transport.kind, transport.kwargs) == ("AsyncHTTPTransport", retries)
-
-
-def test_anthropic_clients_redial_through_env_configured_proxies(monkeypatch):
-    """A client given a ``transport`` stops mounting env proxies itself, so the mounts are rebuilt with the retries."""
-    _install_fake_httpx(monkeypatch, proxies={"https://": "http://proxy.invalid:8080", "all://gw.invalid": None})
-    mounts = get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"]
-    assert mounts["https://"].kind == "HTTPTransport"
-    assert mounts["https://"].kwargs == {
-        "proxy": "http://proxy.invalid:8080",
-        "retries": llm_config.ANTHROPIC_CONNECT_RETRIES,
-    }
-    # ``None`` is httpx's "reach this one directly"; turning it into a transport would proxy a bypassed host.
-    assert mounts["all://gw.invalid"] is None
-    amounts = get_async_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"]
-    assert amounts["https://"].kind == "AsyncHTTPTransport"
-
-
-def test_anthropic_clients_mount_nothing_when_no_proxy_is_configured(monkeypatch):
-    _install_fake_httpx(monkeypatch)
-    assert get_anthropic_client(env={_ANTHROPIC_KEY: "k"}).kwargs["mounts"] == {}
 
 
 def test_get_anthropic_client_is_never_cached(monkeypatch):
@@ -1018,6 +971,94 @@ async def test_aanthropic_messages_raises_on_non_dict_body():
     client = _FakeAsyncAnthropicTransport(_FakeAnthropicResponse(body=["not", "a", "dict"]))
     with pytest.raises(RuntimeError, match="non-object"):
         await aanthropic_messages(client, model="claude")
+
+
+# ---- re-dialling a connection that never came up ----
+_PROXY_ENVS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+
+
+def _proxy_env(monkeypatch: pytest.MonkeyPatch, proxy: str | None) -> None:
+    """Leave exactly ``proxy`` in the environment, so the client's route is the one the test names."""
+    for name in _PROXY_ENVS:
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+    if proxy is not None:
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+
+
+def _record_dials(
+    monkeypatch: pytest.MonkeyPatch,
+    httpx: Any,
+    *,
+    failures: int,
+    failure: type[BaseException] | None = None,
+) -> list[Any]:
+    """Fail the first ``failures`` dials of a real transport, then answer; returns the requests as they arrive."""
+    dials: list[Any] = []
+    error = failure or httpx.ConnectError
+
+    def handle_request(self: Any, request: Any) -> Any:
+        dials.append(request)
+        if len(dials) <= failures:
+            raise error("connection refused", request=request)
+        return httpx.Response(200, json=_MESSAGE_BODY)
+
+    async def handle_async_request(self: Any, request: Any) -> Any:
+        return handle_request(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async_request)
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+    return dials
+
+
+_GATEWAY_ENV = {_ANTHROPIC_KEY: "k", "ANTHROPIC_BASE_URL": "https://gw.invalid"}
+
+
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+def test_anthropic_messages_redials_a_connection_that_never_came_up(monkeypatch, proxy):
+    """``httpx`` re-dials only on its unproxied branch, so the re-dial sits here, above the route."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_anthropic_client(env=_GATEWAY_ENV)
+    # The proxied client routes through its env-configured mount; the direct one has none.
+    assert bool(client._mounts) is (proxy is not None)
+    result = anthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://proxy.invalid:8080"])
+async def test_aanthropic_messages_redials_the_same_way(monkeypatch, proxy):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, proxy)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES)
+    client = get_async_anthropic_client(env=_GATEWAY_ENV)
+    assert bool(client._mounts) is (proxy is not None)
+    result = await aanthropic_messages(client, model="claude")
+    assert result.text == "hello world"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_lets_the_last_connect_failure_through(monkeypatch):
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=llm_config.ANTHROPIC_CONNECT_RETRIES + 1)
+    with pytest.raises(httpx.ConnectError):
+        anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+
+
+def test_anthropic_messages_never_redials_a_request_that_was_sent(monkeypatch):
+    """A read timeout may have reached the model; replaying it would bill and run a second completion."""
+    httpx = pytest.importorskip("httpx")
+    _proxy_env(monkeypatch, None)
+    dials = _record_dials(monkeypatch, httpx, failures=1, failure=httpx.ReadTimeout)
+    with pytest.raises(httpx.ReadTimeout):
+        anthropic_messages(get_anthropic_client(env=_GATEWAY_ENV), model="claude")
+    assert len(dials) == 1
 
 
 class _FakeClosingTransport(_FakeAnthropicTransport):

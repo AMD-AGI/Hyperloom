@@ -153,6 +153,34 @@ def test_an_anthropic_messages_post_is_one_request(tmp_path):
     assert attributes["cache_creation_input_tokens"] == 0
 
 
+def test_the_redials_of_one_messages_post_stay_in_one_request(tmp_path, monkeypatch):
+    """A connection that came up only on the third dial is still one call: one row, covering every attempt."""
+    httpx = pytest.importorskip("httpx")
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+    body = {
+        "id": "msg_02",
+        "model": "claude-x",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 5, "output_tokens": 3},
+    }
+    dials: list[int] = []
+
+    def post(*_a, **_k):
+        dials.append(1)
+        if len(dials) <= llm_config.ANTHROPIC_CONNECT_RETRIES:
+            raise httpx.ConnectError("connection refused")
+        return SimpleNamespace(status_code=200, json=lambda: body)
+
+    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
+        result = llm_config.anthropic_messages(SimpleNamespace(post=post), component="breakdown", model="claude-x")
+
+    assert result.text == "ok"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+    (row,) = _requests(tmp_path)
+    assert row["attributes"]["message_id"] == "msg_02"
+
+
 def test_an_observer_fault_never_reaches_the_request(tmp_path, monkeypatch):
     def broken(_record):
         raise ValueError("observer bug")
