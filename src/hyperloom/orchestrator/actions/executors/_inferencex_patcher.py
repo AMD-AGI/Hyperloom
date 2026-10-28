@@ -1021,8 +1021,6 @@ def _apply_eval_unbound_outputs_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
-    if _is_eval_unbound_outputs_patched(src):
-        return True
     patched = original + _EVAL_UNBOUND_OUTPUTS_PY
     if not atomic_write_text(
         src,

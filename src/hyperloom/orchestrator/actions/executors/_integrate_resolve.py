@@ -22,7 +22,7 @@ from ._enablement_config import _enablement_gap, _stamp_framework_kb_provenance
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _enforce_critic_gate
 from ._patch_git import _detect_p_level
-from ._patch_source_pr import DEFAULT_DIFF_FETCH_TIMEOUT_SEC, _candidate_slug, materialize_candidate_patches
+from ._patch_source_pr import _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ._patch_sources import (
     _acquiring_round,
@@ -238,7 +238,6 @@ class ResolveStageMixin:
             params=params,
             framework_root=framework_root,
             dest=scratch / f"{_candidate_slug(candidate)}.patch",
-            diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
         )
         if materialized.failure is not None:
             return {

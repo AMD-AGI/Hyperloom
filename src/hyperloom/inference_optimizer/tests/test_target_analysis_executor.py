@@ -207,7 +207,7 @@ async def test_happy_path_writes_files(session_dir, monkeypatch):
 @pytest.mark.asyncio
 async def test_report_executor_renders_external_baseline_section(tmp_path: Path, monkeypatch):
     """ReportExecutor reads target_baseline.json and injects an advisory section without touching SharedState."""
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
@@ -411,7 +411,7 @@ async def test_analyzer_exception_propagates_and_clears_target_without_replacing
 @pytest.mark.parametrize("competitor_write_failure", [False, True])
 async def test_agentx_state_to_external_reference_and_final_report(session_dir, monkeypatch, competitor_write_failure):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
-    from hyperloom.orchestrator.actions.executors import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
     from hyperloom.inference_optimizer.baseline_comparison import research_hints
     from hyperloom.orchestrator.state.shared_state import SharedState
 

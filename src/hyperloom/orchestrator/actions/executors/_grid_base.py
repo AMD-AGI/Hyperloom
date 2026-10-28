@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -54,46 +53,6 @@ class GridVariant:
         self.runtime_override: dict[str, str] = {}
         self.source_patches: list[dict[str, str]] = []
         self.overlay_pythonpath: str = ""
-
-
-def coerce_extra_envs(value: Any) -> dict[str, str]:
-    """Normalize Orchestration-supplied ``extra_envs`` to ``dict[str,str]``."""
-    if isinstance(value, dict):
-        return {str(k): str(v) for k, v in value.items() if k is not None}
-    if isinstance(value, str):
-        out: dict[str, str] = {}
-        # Split on the first ``=`` only to preserve URL-style assignments like ``HF_ENDPOINT=https://...``.
-        tokens = re.split(r"[\s;]+", value.strip())
-        for tok in tokens:
-            if not tok:
-                continue
-            if "=" not in tok:
-                continue
-            k, v = tok.split("=", 1)
-            k = k.strip()
-            if not k:
-                continue
-            out[k] = v.strip()
-        return out
-    if isinstance(value, (list, tuple)):
-        out_l: dict[str, str] = {}
-        for item in value:
-            if isinstance(item, dict):
-                # ``[{"FOO": "1"}, {"BAR": "2"}]`` — later entries win.
-                for k, v in item.items():
-                    if k is None:
-                        continue
-                    out_l[str(k)] = str(v)
-                continue
-            if not isinstance(item, str) or "=" not in item:
-                continue
-            k, v = item.split("=", 1)
-            k = k.strip()
-            if not k:
-                continue
-            out_l[k] = v.strip()
-        return out_l
-    return {}
 
 
 @dataclass

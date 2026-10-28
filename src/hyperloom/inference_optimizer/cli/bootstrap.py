@@ -21,7 +21,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.plugs import (
     ManifestSources,
@@ -33,9 +33,6 @@ from hyperloom.plugs import (
     resolve_manifest,
 )
 from hyperloom.plugs.resolved import read_resolved, write_resolved
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.workload_defaults import (

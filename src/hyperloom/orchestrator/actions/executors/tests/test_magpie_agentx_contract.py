@@ -141,6 +141,24 @@ def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_p
     assert overrides["remove_args"] == ["--cuda-graph-max-bs"]
 
 
+def test_removal_carrying_a_value_reaches_agentx_as_a_bare_option_name(source, tmp_path):
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    candidate = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base),
+        GridVariant(
+            "uncapped_decode",
+            "",
+            {},
+            remove_args=["--cuda-graph-max-bs-decode 64", "--cuda-graph-max-bs=128"],
+        ),
+        output_subdir=tmp_path / "candidate",
+    )
+    removals = load_benchmark(candidate)["agentx"]["launch_overrides"]["remove_args"]
+    # AgentX rejects a configuration whose removal carries its value, so each entry is one bare long option name.
+    assert removals == ["--cuda-graph-max-bs", "--cuda-graph-max-bs-decode"]
+    assert all(entry == entry.strip() and " " not in entry and entry.startswith("--") for entry in removals)
+
+
 def test_source_evidence_is_taken_after_application_and_survives_materialization(source, tmp_path):
     root = tmp_path / "framework"
     root.mkdir()
