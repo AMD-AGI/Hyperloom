@@ -13,7 +13,7 @@ from typing import Any
 
 from hyperloom.common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, agentx_enabled
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, agentx_active
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
@@ -66,10 +66,7 @@ def _error_names_added_code(error: str, patches: list[Path]) -> bool:
     """Whether the bench error quotes a name an applied patch adds: the server crashed in the patch's own code."""
     names = set(_QUOTED_NAME.findall(error))
     for patch in patches if names else ():
-        try:
-            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
+        lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
         added = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
         if any(name in line for line in added for name in names):
             return True
@@ -462,7 +459,7 @@ class PerfGateMixin:
         band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
-        if agentx_enabled():
+        if agentx_active(benchmark_mode=bench.benchmark_mode):
             return {"ran": False, "ok": True, "reason": _AGENTIC_PARITY_NOT_BENCHED}
         if base_tput <= 0:
             return {

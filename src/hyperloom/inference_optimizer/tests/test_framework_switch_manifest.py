@@ -973,7 +973,7 @@ async def test_an_agentic_replay_keeps_a_switched_patch_dormant_without_a_parity
     """There the parity leg is a whole replay hour, judged in a band narrower than the replay's own drift."""
     from hyperloom.orchestrator.actions.executors import _integrate_perf_gate
 
-    monkeypatch.setattr(_integrate_perf_gate, "agentx_enabled", lambda: True)
+    monkeypatch.setattr(_integrate_perf_gate, "agentx_active", lambda **_k: True)
     result, _, _, legs = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2, parity_delta_pct=-5.0)
 
     assert [leg for leg in legs if leg.get("unset_envs")] == []
