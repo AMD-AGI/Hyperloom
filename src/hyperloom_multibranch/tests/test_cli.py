@@ -173,6 +173,18 @@ def test_run_options_override_the_defaults() -> None:
     assert settings.judge_interval_seconds == 120.0
 
 
+def test_a_gpu_type_names_the_same_board_in_any_case() -> None:
+    assert _settings("--gpu-type", "MI355X").workload.gpu_type == "mi355x"
+
+
+def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI325X"])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "invalid choice: 'mi325x' (choose from 'mi300x', 'mi355x')" in capsys.readouterr().err
+
+
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
     workload = _settings(workload=AGENTX_ARGS).workload
 
@@ -1072,6 +1084,19 @@ def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
 
     assert agent_cli == [on_the_command_line]
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a host credential"
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_names_its_gpu_type_in_any_case(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(hardware={"gpu_type": "MI355X", "tp": 2})
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--gpu-type", "mi355x")
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
 
 
 def _no_local_cards() -> tuple[int, ...]:
