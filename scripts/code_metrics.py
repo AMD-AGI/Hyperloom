@@ -52,7 +52,7 @@ file name for a module; value no worse) keeps the baseline entry it left; see
 
 Usage::
 
-    pip install ruff==0.16.2 complexipy==8.0.1 vulture==2.16
+    pip install ruff==0.16.2 complexipy==8.0.1 radon==6.0.1 vulture==2.16
     npm install -g jscpd@5.4.1      # or CODE_METRICS_JSCPD="npx --yes jscpd@5.4.1"
 
     python scripts/code_metrics.py                         # judge every file
@@ -98,6 +98,7 @@ from code_metrics_collect import (
     jscpd_findings,
     list_files,
     module_line_findings,
+    radon_findings,
     module_lines,
     ruff_findings,
     tool_version,
@@ -129,6 +130,7 @@ _BASELINE_HEADER = f"""\
 _TOOL_COMMANDS = {
     "ruff": ["ruff"],
     "complexipy": ["complexipy"],
+    "radon": ["radon"],
     "vulture": ["vulture"],
 }
 #: Scalar parameters where a larger value makes the gate see less.
@@ -337,24 +339,31 @@ def compare(findings: dict[Key, Finding], baseline: dict[Key, int], outcome: Out
     moves = match_moves(gone, {key: f.value for key, f in new.items()})
     moved_from = {old: findings[key] for key, old in moves.items()}
     fresh = [f for key, f in sorted(new.items()) if key not in moves]
-    worsened = [
-        (f, baseline[key])
-        for key, f in sorted(findings.items())
-        if key in baseline and worse(f.metric, f.value, baseline[key])
-    ]
+    worsened: list[tuple[Finding, int]] = []
     stale = [(key, value, moved_from.get(key)) for key, value in sorted(gone.items())]
-    stale += [
-        (key, value, findings[key])
-        for key, value in sorted(baseline.items())
-        if key in findings and worse(key[0], value, findings[key].value)
-    ]
-    judged = outcome.judged
-    outcome.new = [f for f in fresh if judged(f.path)]
-    outcome.worsened = [(f, was) for f, was in worsened if judged(f.path)]
-    outcome.stale = [entry for entry in stale if judged(entry[0][1])]
-    outcome.untouched = [(f.key, None, f) for f in fresh if not judged(f.path)]
-    outcome.untouched += [(f.key, was, f) for f, was in worsened if not judged(f.path)]
-    outcome.untouched += [entry for entry in stale if not judged(entry[0][1])]
+    for key, value in sorted(baseline.items()):
+        if key not in findings:
+            continue
+        finding = findings[key]
+        if worse(finding.metric, finding.value, value):
+            worsened.append((finding, value))
+        elif worse(finding.metric, value, finding.value):
+            stale.append((key, value, finding))
+    for finding in fresh:
+        if outcome.judged(finding.path):
+            outcome.new.append(finding)
+        else:
+            outcome.untouched.append((finding.key, None, finding))
+    for finding, was in worsened:
+        if outcome.judged(finding.path):
+            outcome.worsened.append((finding, was))
+        else:
+            outcome.untouched.append((finding.key, was, finding))
+    for entry in stale:
+        if outcome.judged(entry[0][1]):
+            outcome.stale.append(entry)
+        else:
+            outcome.untouched.append(entry)
 
 
 def growth(
@@ -404,6 +413,7 @@ def per_file_findings(root: Path, files: list[str], limits: dict[str, int], unit
     if not files:
         return []
     findings = ruff_findings(root, files, limits, units)
+    findings += radon_findings(root, files, limits["cyclomatic-complexity"], units)
     findings += complexipy_findings(root, files, limits["cognitive-complexity"], units)
     findings += function_line_findings(files, limits["function-lines"], units)
     findings += module_line_findings(root, files, limits["module-lines"])
@@ -434,6 +444,18 @@ def base_values(root: Path, since: str, paths: Iterable[str], config: Config) ->
                 present.append(path)
         found = worst_per_unit(per_file_findings(tree, present, config.thresholds, Units(tree)))
     return {key: f.value for key, f in found.items()}
+
+
+def base_paths(outcome: Outcome) -> set[str]:
+    """The files of new, worse and out-of-date :data:`PER_FILE` findings, to measure at the base.
+
+    PER_FILE only, in all three directions: :func:`base_values` measures files, and the path of a
+    directory-entries finding is a directory.
+    """
+    paths = {f.path for f in outcome.new if f.metric in PER_FILE}
+    paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
+    paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
+    return paths
 
 
 def excuse_base_backlog(outcome: Outcome, base: dict[Key, int]) -> None:
@@ -569,12 +591,7 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.touched = checks.touched_files(root, since)
     compare(findings, outcome.baseline, outcome)
     if since:
-        # PER_FILE only, in all three directions: base_values measures files, and the path of a
-        # directory-entries finding is a directory.
-        paths = {f.path for f in outcome.new if f.metric in PER_FILE}
-        paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
-        paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
-        at_base = base_values(root, since, paths, config)
+        at_base = base_values(root, since, base_paths(outcome), config)
         excuse_base_backlog(outcome, at_base)
         excuse_base_drift(outcome, at_base)
         compare_with_base(root, args.base_ref, config, outcome, findings)
@@ -582,9 +599,11 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
     outcome.module_warnings = module_warnings(root, filter(outcome.judged, production), config)
     outcome.problems = checks.run_all(root, config.roots, config.exclude, units, since)
     if since:
-        found = design.design_problems(root, design_scope(root, config, since), units, since)
-        outcome.design = [p for p in found if p.check not in design.ADVISORY]
-        outcome.advisories = [p for p in found if p.check in design.ADVISORY]
+        for problem in design.design_problems(root, design_scope(root, config, since), units, since):
+            if problem.check in design.ADVISORY:
+                outcome.advisories.append(problem)
+            else:
+                outcome.design.append(problem)
     pull_request = read_pull_request(args, outcome)
     if pull_request is not None:
         outcome.problems += checks.pull_request_cjk(pull_request)

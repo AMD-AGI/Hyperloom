@@ -342,7 +342,8 @@ async def _replay_sweep_point(plan: _ReplayPlan, out_dir: Path, *, conc: int, is
         else:
             err = failure["error"]
             entry.update(failure)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # isolation boundary: one GEAK replay sweep point
+        log.warning("GEAK replay failed for sweep point %s", out_dir.name, exc_info=True)
         err = repr(exc)
         entry.update({"status": "failed", "error": err})
 

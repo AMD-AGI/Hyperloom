@@ -28,7 +28,7 @@ from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 
 if TYPE_CHECKING:
     from kernelforge.config import Config
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration.iteration_types import IterationConfig
     from kernelforge.evaluation.correctness.canonical import CanonicalCorrectnessResult
     from kernelforge.evaluation.correctness.pipeline import ValidationReport
 
@@ -409,11 +409,14 @@ async def prepare_assembly(
             raise AssemblyPreparationError("assembly manifest already exists; start from the original source")
         export_source = bind_compile(original.decode(), relative_assembly, config.gpu_target, export=True)
         candidate_source = bind_compile(original.decode(), relative_assembly, config.gpu_target, export=False)
-    original_assembly = None if capture else assembly.read_bytes()
+        original_assembly = None
+        bound = [kernel_path, assembly, manifest]
+    else:
+        original_assembly = assembly.read_bytes()
+        bound = [kernel_path, assembly]
     root.mkdir(parents=True, exist_ok=True)
     (root / ("source" + kernel_path.suffix)).write_bytes(original)
     committed = False
-    bound = [kernel_path, assembly, manifest] if capture else [kernel_path, assembly]
     paths = list(dict.fromkeys(path.relative_to(workspace).as_posix() for path in bound))
     checkpoint = _Checkpoint(binding, start_commit, paths, original, original_assembly, manifest)
     try:

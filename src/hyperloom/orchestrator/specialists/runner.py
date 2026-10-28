@@ -23,8 +23,9 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
+from hyperloom.common.coerce import first_str, first_text
 from hyperloom.common.fs_utils import append_text_nofollow, write_text_nofollow
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
@@ -77,6 +78,8 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
 
@@ -192,6 +195,21 @@ def _extra_focus_tags(
     tags = normalize_dispatch_tags(params)
     primary_anchor = (domain.kb_anchor or "").strip()
     return tuple(t for t in tags if t and t != primary_anchor)
+
+
+def _param(params: dict[str, Any], key: str, kind: type[_T]) -> _T:
+    """``params[key]`` as ``kind``; a missing or falsy value is ``kind()``."""
+    return kind(params.get(key) or kind())
+
+
+def _param_dicts(params: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The mapping entries of the ``params[key]`` list."""
+    return [entry for entry in (params.get(key) or []) if isinstance(entry, dict)]
+
+
+def _param_texts(params: dict[str, Any], key: str) -> tuple[str, ...]:
+    """The non-blank, stripped entries of the ``params[key]`` list."""
+    return tuple(str(entry).strip() for entry in (params.get(key) or ()) if str(entry).strip())
 
 
 SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
@@ -578,11 +596,11 @@ class SpecialistRunner:
         """
         params = ctx.task.params or {}
         domain_key = dispatch_domain_key(params)
-        gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
+        gap = first_text(params.get("gap_canonical_id"), params.get("gap"))
         max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
-        task_description = str(params.get("task_description") or "").strip()
+        task_description = _param(params, "task_description", str).strip()
 
         workspace = self._resolve_workspace(ctx)
 
@@ -619,8 +637,8 @@ class SpecialistRunner:
 
         # The operator-defined specialist reads its description and focus from the session.
         shared_state = ctx.extra.get("shared_state")
-        custom_specialist_prompt = str(getattr(shared_state, "custom_specialist_prompt", "") or "")
-        custom_specialist_description = str(getattr(shared_state, "custom_specialist_description", "") or "")
+        custom_specialist_prompt = first_str(getattr(shared_state, "custom_specialist_prompt", ""))
+        custom_specialist_description = first_str(getattr(shared_state, "custom_specialist_description", ""))
         if domain.key == CUSTOM_SPECIALIST_KEY and custom_specialist_description:
             domain = replace(domain, description=custom_specialist_description)
 
@@ -644,88 +662,84 @@ class SpecialistRunner:
                 domain=domain,
                 max_turns=max_turns,
                 gap_canonical_id=gap,
-                gap_symptom=str(params.get("gap_symptom") or ""),
-                gap_layer=str(params.get("gap_layer") or ""),
-                gap_evidence=dict(params.get("gap_evidence") or {}),
-                kb_subgraph=dict(params.get("kb_subgraph") or {}),
-                experience_kb_block=str(params.get("experience_kb_block") or ""),
+                gap_symptom=_param(params, "gap_symptom", str),
+                gap_layer=_param(params, "gap_layer", str),
+                gap_evidence=_param(params, "gap_evidence", dict),
+                kb_subgraph=_param(params, "kb_subgraph", dict),
+                experience_kb_block=_param(params, "experience_kb_block", str),
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
-                roofline_evidence=dict(params.get("roofline_evidence") or {}),
-                runtime_findings=str(params.get("runtime_findings") or ""),
+                roofline_evidence=_param(params, "roofline_evidence", dict),
+                runtime_findings=_param(params, "runtime_findings", str),
                 extra_focus_tags=_extra_focus_tags(params, domain),
-                warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
-                warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
-                warm_start_lessons=list(params.get("warm_start_lessons") or []),
+                warm_start_recipe=_param(params, "warm_start_recipe", dict),
+                warm_start_pitfalls=_param(params, "warm_start_pitfalls", list),
+                warm_start_lessons=_param(params, "warm_start_lessons", list),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
-                framework=str(params.get("framework") or ""),
-                session_framework_tree=str(params.get("session_framework_tree") or ""),
-                framework_source_roots=tuple(params.get("framework_source_roots") or ()),
-                worktree_base=str(worktree_base) if worktree is not None and worktree_base is not None else "",
+                framework=_param(params, "framework", str),
+                session_framework_tree=_param(params, "session_framework_tree", str),
+                framework_source_roots=_param(params, "framework_source_roots", tuple),
+                worktree_base=str(worktree_base) if worktree is not None else "",
                 worktree_package_dir=(
-                    str(worktree_source.tree.relative_to(worktree_source.root))
-                    if worktree is not None and worktree_source is not None
-                    else ""
+                    str(worktree_source.tree.relative_to(worktree_source.root)) if worktree is not None else ""
                 ),
-                source_hint_directories=tuple(params.get("source_hint_directories") or ()),
-                model_name=str(params.get("model_name") or ""),
-                model_path=str(params.get("model_path") or ""),
-                model_info=dict(params.get("model_info") or {}),
-                static_recon_checklist=str(params.get("static_recon_checklist") or ""),
-                enablement_source_context=str(params.get("enablement_source_context") or ""),
-                enablement_candidate_refs=tuple(
-                    str(r).strip() for r in (params.get("enablement_candidate_refs") or ()) if str(r).strip()
-                ),
-                enablement_failure_signature=dict(params.get("enablement_failure_signature") or {}),
+                source_hint_directories=_param(params, "source_hint_directories", tuple),
+                model_name=_param(params, "model_name", str),
+                model_path=_param(params, "model_path", str),
+                model_info=_param(params, "model_info", dict),
+                static_recon_checklist=_param(params, "static_recon_checklist", str),
+                enablement_source_context=_param(params, "enablement_source_context", str),
+                enablement_candidate_refs=_param_texts(params, "enablement_candidate_refs"),
+                enablement_failure_signature=_param(params, "enablement_failure_signature", dict),
                 enablement_accepted_config={
-                    "extra_envs": dict(params.get("base_extra_envs") or {}),
-                    "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+                    "extra_envs": _param(params, "base_extra_envs", dict),
+                    "extra_server_args": _param(params, "base_extra_args", str).strip(),
                 },
-                gpu_type=str(params.get("gpu_type") or ""),
+                gpu_type=_param(params, "gpu_type", str),
                 allocated_gpu_ids=allocated_gpu_ids,
-                tp=int(params.get("tp") or 0),
-                hbm_gb=float(params.get("hbm_gb") or 0.0),
-                peak_tflops=float(params.get("peak_tflops") or 0.0),
-                arch_notes=str(params.get("arch_notes") or ""),
-                target_gap_notes=str(params.get("target_gap_notes") or ""),
-                already_proven=[p for p in (params.get("already_proven") or []) if isinstance(p, dict)],
-                recipe_sites=tuple(str(s).strip() for s in (params.get("recipe_sites") or ()) if str(s).strip()),
-                research_hints=str(params.get("research_hints") or ""),
+                tp=_param(params, "tp", int),
+                hbm_gb=_param(params, "hbm_gb", float),
+                peak_tflops=_param(params, "peak_tflops", float),
+                arch_notes=_param(params, "arch_notes", str),
+                target_gap_notes=_param(params, "target_gap_notes", str),
+                already_proven=_param_dicts(params, "already_proven"),
+                recipe_sites=_param_texts(params, "recipe_sites"),
+                research_hints=_param(params, "research_hints", str),
                 # Workload context warmed from SharedState.
-                precision=str(params.get("precision") or ""),
-                conc=int(params.get("conc") or 0),
-                isl=int(params.get("isl") or 0),
-                osl=int(params.get("osl") or 0),
-                max_model_len=int(params.get("max_model_len") or 0),
+                precision=_param(params, "precision", str),
+                conc=_param(params, "conc", int),
+                isl=_param(params, "isl", int),
+                osl=_param(params, "osl", int),
+                max_model_len=_param(params, "max_model_len", int),
                 # benchmark_mode selects the AgentX prompt blocks; the corpus
                 # shape supplies their numbers.
-                benchmark_mode=str(params.get("benchmark_mode") or ""),
-                agentx_corpus_shape=dict(params.get("agentx_corpus_shape") or {}),
-                agentx_grading=dict(params.get("agentx_grading") or {}),
-                agentx_backend=str(params.get("agentx_backend") or ""),
+                benchmark_mode=_param(params, "benchmark_mode", str),
+                agentx_corpus_shape=_param(params, "agentx_corpus_shape", dict),
+                agentx_grading=_param(params, "agentx_grading", dict),
+                agentx_backend=_param(params, "agentx_backend", str),
                 # Runtime fingerprint to flag version-mismatched lessons.
-                framework_version=str(params.get("framework_version") or ""),
+                framework_version=_param(params, "framework_version", str),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
-                notes=str(params.get("notes") or ""),
+                notes=_param(params, "notes", str),
                 scope=profile.scope,
                 mode=profile.mode,
                 bench=profile.bench,
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
-                auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
+                auto_retry_reason=_param(params, "_auto_retry_reason", str),
                 # The same instant the reaper kills at, as a duration.
                 wall_budget_sec=seconds_until(
                     _ctx_deadline(ctx),
                     unbounded_cap=UNBOUNDED_REAP_CAP_SEC,
                 ),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
-                baseline_tput=float(params.get("baseline_tput") or 0.0),
-                current_tput=float(params.get("current_tput") or 0.0),
-                cumulative_gain_validated=float(params.get("cumulative_gain_validated") or 0.0),
-                keep_threshold_pct=float(params.get("keep_threshold_pct") or 0.0),
-                applied_stack=[e for e in (params.get("applied_stack") or []) if isinstance(e, dict)],
-                task_kind=str(params.get("task_kind") or ""),
-                prior_attempts=[e for e in (params.get("prior_attempts") or []) if isinstance(e, dict)],
-                pr_lead=dict(params.get("pr_lead") or {}),
+                baseline_tput=_param(params, "baseline_tput", float),
+                current_tput=_param(params, "current_tput", float),
+                cumulative_gain_validated=_param(params, "cumulative_gain_validated", float),
+                keep_threshold_pct=_param(params, "keep_threshold_pct", float),
+                applied_stack=_param_dicts(params, "applied_stack"),
+                task_kind=_param(params, "task_kind", str),
+                prior_attempts=_param_dicts(params, "prior_attempts"),
+                pr_lead=_param(params, "pr_lead", dict),
                 custom_specialist_prompt=custom_specialist_prompt,
             )
 

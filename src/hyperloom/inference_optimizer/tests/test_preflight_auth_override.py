@@ -22,7 +22,7 @@ import pytest
 
 from hyperloom.common import claude_oneshot
 from hyperloom.common.env import EnvValueError
-from hyperloom.common.llm_config import deepseek_compat_env
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
 from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
@@ -198,6 +198,23 @@ def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
         cli_preflight._load_kernel_agent_env_fallback()
 
     assert failure.value.code == 2
+
+
+_BACKEND_MODEL_KEYS = {"claude": "CLAUDE_MODEL", "codex": "CODEX_MODEL", "deepseek": "DSH_MODEL"}
+
+
+@pytest.mark.parametrize("backend", AGENT_BACKEND_CHOICES)
+def test_dotenv_model_reaches_every_backend(monkeypatch, tmp_path, backend):
+    (tmp_path / ".env").write_text(
+        "".join(f"{key}=dotenv-{name}\n" for name, key in _BACKEND_MODEL_KEYS.items()), encoding="utf-8"
+    )
+    monkeypatch.setenv("REPO_ROOT", str(tmp_path))
+    for key in _BACKEND_MODEL_KEYS.values():
+        monkeypatch.delenv(key, raising=False)
+
+    cli_preflight._load_dotenv_fallback()
+
+    assert resolve_forge_llm_model(backend) == f"dotenv-{backend}"
 
 
 @pytest.fixture

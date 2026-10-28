@@ -161,7 +161,6 @@ def _backend(tmp_path: Path) -> CodexBackend:
         allowed_intents=_ORCHESTRATION_INTENTS,
         model="gpt-5.6-sol",
         cwd=tmp_path / "orchestration",
-        sandbox_mode="workspace-write",
     )
 
 
@@ -199,7 +198,6 @@ async def test_request_intent_round_trips_through_the_backend(
         CodexSessionResult(
             text=_schema_enforced_reply("request", _KERNEL_REQUEST_PAYLOAD),
             usage={"input_tokens": 120, "output_tokens": 8},
-            thread_id="thread-1",
         ),
     )
     result = await _backend(tmp_path).run("kernel k001 needs optimization", system_prompt="You are the Coordinator.")
@@ -357,19 +355,19 @@ def test_run_codex_turn_forwards_the_output_schema_to_the_sdk(
     monkeypatch.setattr(codex_session, "load_codex_sdk", lambda: _fake_sdk(recorder))
     schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
 
+    for _key, _value in {
+        "OPENAI_API_KEY": "key",
+        "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+        "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
+        "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }.items():
+        monkeypatch.setenv(_key, _value)
     result = asyncio.run(
         codex_session.run_codex_turn(
             request=codex_session.CodexTurnRequest(prompt="p", timeout_sec=5.0, output_schema=schema),
             config=codex_session.CodexSessionConfig(
                 cwd=tmp_path,
                 model="gpt-5.6-sol",
-                sandbox_mode="bypass",
-                env={
-                    "OPENAI_API_KEY": "key",
-                    "OPENAI_BASE_URL": "https://gateway.invalid/v1",
-                    "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
-                    "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
-                },
             ),
             developer_instructions="d",
         )
@@ -387,19 +385,19 @@ def test_run_codex_turn_defaults_to_no_output_schema(
     recorder: dict[str, Any] = {"reply": "done"}
     monkeypatch.setattr(codex_session, "load_codex_sdk", lambda: _fake_sdk(recorder))
 
+    for _key, _value in {
+        "OPENAI_API_KEY": "key",
+        "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+        "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
+        "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }.items():
+        monkeypatch.setenv(_key, _value)
     asyncio.run(
         codex_session.run_codex_turn(
             request=codex_session.CodexTurnRequest(prompt="p", timeout_sec=5.0),
             config=codex_session.CodexSessionConfig(
                 cwd=tmp_path,
                 model="gpt-5.6-sol",
-                sandbox_mode="bypass",
-                env={
-                    "OPENAI_API_KEY": "key",
-                    "OPENAI_BASE_URL": "https://gateway.invalid/v1",
-                    "HYPERLOOM_CODEX_SANDBOX_MODE": "bypass",
-                    "HYPERLOOM_RUNTIME_DIR": str(tmp_path / "runtime"),
-                },
             ),
             developer_instructions="d",
         )

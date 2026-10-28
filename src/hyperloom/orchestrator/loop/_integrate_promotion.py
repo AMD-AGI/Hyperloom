@@ -228,6 +228,7 @@ class IntegratePromotionMixin:
             "extra_envs": {str(k): str(v) for k, v in (result.get("extra_envs") or {}).items()},
             "source_phase": str(self.shared_state.phase or "KERNEL_AGENT"),
             **integrate_measurement_fields(measurement),
+            **_source_layer_handles(result),
         }
         if is_fusion:
             variant["provenance"] = "forge_fusion"
@@ -348,8 +349,6 @@ class IntegratePromotionMixin:
             self.shared_state.record_authored_framework_levers(
                 levers,
                 default_on=(lever_outcome == "default_on"),
-                specialist_task_id=str(result.get("specialist_task_id") or ""),
-                stack_delta_pct=result.get("delta_pct"),
             )
         )
 

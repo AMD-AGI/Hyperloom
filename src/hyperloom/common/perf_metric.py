@@ -44,10 +44,16 @@ GRADED_OUTPUT_PER_GPU = "output_tput_per_gpu"
 # rose because more requests failed is not a win.
 GRADED_DURATION = "duration_seconds"
 GRADED_ERROR_RATE = "request_error_rate"
+# Requests left unserved (a transport failure or a zero-token reply) and requests sent over the measured rounds. A
+# short reply the client counted failed is not unserved; its quality is the accuracy check's question.
+GRADED_UNSERVED_REQUESTS = "graded_unserved_requests"
+GRADED_REQUESTS_TOTAL = "graded_requests_total"
 
 # A trace replay slices a different part of the corpus when the window moves, so the two rounds stop measuring the
 # same work. Sized to catch a truncated round, not the few percent a full round drifts by.
 DURATION_DRIFT_PCT = 5.0
+
+_PERCENT = 100.0
 
 # Extra failed requests a candidate may report over its anchor, in the rate's percentage points. aiperf counts a reply
 # that carries no content as failed, and a corpus turn answered with a single token comes back with content under one
@@ -66,7 +72,9 @@ ERROR_RATE_SLACK_PCT = 0.5
 # Duration and error rate are members because they are decision inputs, not decoration: ``incomparability_reason``
 # refuses a pair whose windows differ by more than ``DURATION_DRIFT_PCT`` or whose candidate dropped too many requests,
 # and a published verdict that omits them cannot be re-derived from the record. The objective and its two guards
-# are here for the same reason -- every input the verdict reads is recoverable from one block.
+# are here for the same reason -- every input the verdict reads is recoverable from one block. The exception is the
+# unserved and total request counts the guard prefers when both sides carry them: they join once a ``main`` producer
+# stamps them, together with dropping the error-rate fallback in ``_failure_rates_pct``.
 GRADED_AXIS_KEYS = (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
@@ -197,6 +205,8 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
         (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
+        (GRADED_UNSERVED_REQUESTS, _non_negative(source.get(GRADED_UNSERVED_REQUESTS))),
+        (GRADED_REQUESTS_TOTAL, _positive(source.get(GRADED_REQUESTS_TOTAL))),
     ):
         if value is not None:
             snap[key] = value
@@ -259,6 +269,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         "tpot_p90_ms",
         GRADED_INTVTY_P50,
         GRADED_OUTPUT_PER_GPU,
+        GRADED_REQUESTS_TOTAL,
     ):
         value = _positive(source.get(key))
         if value is not None:
@@ -266,9 +277,10 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
     if duration is not None:
         axes[GRADED_DURATION] = duration
-    error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
-    if error_rate is not None:
-        axes[GRADED_ERROR_RATE] = error_rate
+    for key in (GRADED_ERROR_RATE, GRADED_UNSERVED_REQUESTS):
+        value = _non_negative(source.get(key))
+        if value is not None:
+            axes[key] = value
     axes.update({key: source[key] for key in _AGENTX_EVIDENCE if key in source})
     return axes
 
@@ -293,7 +305,7 @@ def _within_band(candidate: float, anchor: float, band_pct: float) -> bool:
     """Whether *candidate* is not worse than *anchor* by more than the band."""
     if anchor <= 0:
         return True
-    return candidate >= anchor * (1.0 - band_pct / 100.0)
+    return candidate >= anchor * (1.0 - band_pct / _PERCENT)
 
 
 def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
@@ -320,21 +332,40 @@ def with_output_per_gpu(measurement: Mapping[str, Any], tp: Any) -> dict[str, An
     return stamped
 
 
+def _unserved_rate_pct(side: Mapping[str, Any]) -> float | None:
+    """The percentage of *side*'s requests the server left unserved; None when the side did not count them."""
+    unserved = _non_negative(side.get(GRADED_UNSERVED_REQUESTS))
+    total = _positive(side.get(GRADED_REQUESTS_TOTAL))
+    if unserved is None or total is None:
+        return None
+    return _PERCENT * unserved / total
+
+
+def _failure_rates_pct(candidate: Mapping[str, Any], anchor: Mapping[str, Any]) -> tuple[float, float] | None:
+    """Both sides' failure rates in percent: unserved if both counted them, else all failed; None if unreported."""
+    cand, ref = _unserved_rate_pct(candidate), _unserved_rate_pct(anchor)
+    if cand is None or ref is None:
+        cand, ref = _non_negative(candidate.get(GRADED_ERROR_RATE)), _non_negative(anchor.get(GRADED_ERROR_RATE))
+    if cand is None or ref is None:
+        return None
+    return cand, ref
+
+
 def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> str:
     """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
-    Fails closed on an unreported input. A truncated round still publishes plausible rates, so treating "no
-    evidence" as "comparable" is what lets one KEEP on a window it never ran.
+    Failures are the unserved requests when both sides counted them, so a short reply never refuses a pair. Fails
+    closed on an unreported input. A truncated round still publishes plausible rates, so treating "no evidence" as
+    "comparable" is what lets one KEEP on a window it never ran.
     """
-    for side in (candidate, anchor):
-        if not all(key in side for key in (GRADED_DURATION, GRADED_ERROR_RATE)):
-            return "comparability_inputs_missing"
+    rates = _failure_rates_pct(candidate, anchor)
     ref_duration = axis_of(anchor, GRADED_DURATION)
-    if ref_duration <= 0:
+    if rates is None or GRADED_DURATION not in candidate or ref_duration <= 0:
         return "comparability_inputs_missing"
-    if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * 100.0 > DURATION_DRIFT_PCT:
+    if abs(axis_of(candidate, GRADED_DURATION) / ref_duration - 1.0) * _PERCENT > DURATION_DRIFT_PCT:
         return "duration_drift"
-    if axis_of(candidate, GRADED_ERROR_RATE) > axis_of(anchor, GRADED_ERROR_RATE) + ERROR_RATE_SLACK_PCT:
+    cand_rate, ref_rate = rates
+    if cand_rate > ref_rate + ERROR_RATE_SLACK_PCT:
         return "extra_failed_requests"
     return ""
 
@@ -528,7 +559,9 @@ __all__ = [
     "GRADED_INTVTY_P50",
     "GRADED_OUTPUT",
     "GRADED_OUTPUT_PER_GPU",
+    "GRADED_REQUESTS_TOTAL",
     "GRADED_TOTAL",
+    "GRADED_UNSERVED_REQUESTS",
     "INTVTY_OBJECTIVES",
     "INTVTY_V1",
     "VERDICT_KEEP",

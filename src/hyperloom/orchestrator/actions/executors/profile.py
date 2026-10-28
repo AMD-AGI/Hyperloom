@@ -34,7 +34,6 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
 from .benchmark_result import round_succeeded
 from .baseline import BenchmarkRunExecutor
 
@@ -1118,7 +1117,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             self._host_probe_dir = self._inject_host_probe(config_path, output_dir)
             self._host_probe_status = ""
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
             log.warning("profile_executor: host-probe injection failed: %s", exc, exc_info=True)
             self._host_probe_dir = ""
             self._host_probe_status = f"probe_injection_failed: {exc}"
@@ -1155,9 +1154,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            if str(framework or "").strip().lower() == "xdit":
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
-                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):
@@ -1239,7 +1235,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
         try:
             out_path = Path(probe_dir).parent / _evidence.EVIDENCE_FILENAME
             document = _evidence.aggregate_probe_dir(probe_dir, out_path)
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
             log.warning(
                 "profile_executor: rewrite-evidence aggregation failed for %s: %s",
                 probe_dir,

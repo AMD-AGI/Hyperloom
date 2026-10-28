@@ -17,9 +17,10 @@ from typing import Any
 
 from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.env import is_truthy
+from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict
 
 from ._integrate_payload import _normalize_precision, _requested_framework, _requested_setting
-from ._untuned_gemm_csv import _read_model_config, _resolve_fp8_quant_type
+from ._untuned_gemm_csv import _resolve_fp8_quant_type
 
 log = logging.getLogger(__name__)
 
@@ -162,7 +163,8 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     Returns (precision, quant_type) tuple.
     """
-    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+    from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+    from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
     quant_type = str(payload.get("quant_type") or "auto").strip()
 
@@ -181,7 +183,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         ref_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")
     )
 
-    quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
+    quantization_arg = server_arg_value(server_args, "--quantization").lower()
 
     if quantization_arg == "fp8":
         precision = "fp8"
@@ -201,7 +203,9 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
     model_path = _requested_setting(payload, state, "model_path")
-    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
+    if precision and precision == checkpoint_format(
+        (load_model_config_dict(model_path) or {}).get("quantization_config")
+    ):
         return "auto", quant_type
     if not precision:
         precision = "bf16"

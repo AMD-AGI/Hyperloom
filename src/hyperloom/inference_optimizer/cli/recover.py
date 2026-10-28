@@ -56,6 +56,23 @@ def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
     )
 
 
+def add_recover_subparser(sub: argparse._SubParsersAction, common: argparse.ArgumentParser) -> None:
+    """Register the ``recover`` subcommand."""
+    rec = sub.add_parser("recover", parents=[common], help=RECOVER_HELP, description=RECOVER_DESCRIPTION)
+    rec.add_argument(
+        "--session-dir",
+        type=Path,
+        required=True,
+        help="Session directory of the crashed run (contains state.json / reports/trace/ and the recorder fragments).",
+    )
+    rec.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
+    )
+    add_cleanup_confirmation_arguments(rec)
+
+
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly."""
 

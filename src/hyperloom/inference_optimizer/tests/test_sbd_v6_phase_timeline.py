@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import phase_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import PHASE_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
@@ -45,7 +46,7 @@ def _bound_session(tmp_path):
 def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
     """Assemble one phase event's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return ext
@@ -53,7 +54,7 @@ def _ext(phase: str, macro_cycle: int = 0) -> dict[str, Any]:
 
 def _status(phase: str, macro_cycle: int = 0) -> str:
     _ext_, status = phase_event.assemble_phase_ext(
-        phase_event_parts(),
+        event_parts(PHASE_EVENT_SECTIONS),
         event=phase_event.phase_event_id(phase, macro_cycle),
     )
     return status
@@ -532,3 +533,34 @@ def test_repeated_denials_without_proposal_ids_are_not_collapsed(tmp_path):
     rows = _ext("PRELUDE")["denials"]["rows"]
     assert len(rows) == 2
     assert all(row["proposal_msg_id"] is None for row in rows)
+
+
+def test_a_settle_emits_candidate_settled_with_the_kind_the_dispatch_recorded(tmp_path):
+    from hyperloom.plugs import Implementation, ManifestSources, PlugHost, activated, builtin_registry, resolve_manifest
+
+    seen: list[tuple[str, dict]] = []
+
+    class _Spy:
+        def emit(self, event_type, data):
+            seen.append((event_type, dict(data)))
+
+        def flush(self):
+            pass
+
+    registry = builtin_registry()
+    registry.register(Implementation("events", "spy", lambda ctx: _Spy()))
+    host = PlugHost(resolve_manifest(registry, ManifestSources(cli_plugs=("events=spy",))), registry, session_dir=None)
+    host.start()
+    _enter("FRAMEWORK_AGENT", sequence=1, at=10.0)
+    phase_event.record_dispatch(
+        ActionDispatch(at=PhaseCycle("FRAMEWORK_AGENT", 0), action="explore", task_id="t-5", dispatched_unix=12.0)
+    )
+    with activated(host):
+        phase_event.record_settle(ActionSettlement(task_id="t-5", status="succeeded", decision="adopted"))
+
+    assert seen == [
+        (
+            "hyperloom.candidate_settled",
+            {"task_id": "t-5", "action": "explore", "decision": "adopted", "gain_pct": None},
+        )
+    ]

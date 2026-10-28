@@ -86,7 +86,7 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
 
 # models.py
 def test_candidate_slug() -> None:
-    assert Candidate(ref="feature/Foo@1", repo="r").slug == "feature-foo-1"
-    assert Candidate(ref="PR:123", repo="r").slug == "pr-123"
-    assert Candidate(ref="release/v0.8.x", repo="r").slug == "release-v0.8.x"
-    assert Candidate(ref="!!!", repo="r").slug == "candidate"
+    assert Candidate(ref="feature/Foo@1").slug == "feature-foo-1"
+    assert Candidate(ref="PR:123").slug == "pr-123"
+    assert Candidate(ref="release/v0.8.x").slug == "release-v0.8.x"
+    assert Candidate(ref="!!!").slug == "candidate"

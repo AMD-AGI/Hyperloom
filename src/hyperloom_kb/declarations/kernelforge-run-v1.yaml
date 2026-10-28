@@ -1,0 +1,167 @@
+# KernelForge forge-loop runs: one Experience per candidate kernel a run archived (candidates/iter_NNN), the kernel
+# one iteration measured and KernelForge's decision to keep or revert it. A run yields one or more: each lane of a
+# fan-out round is measured as its own candidate, built from its own plan, so each lane is its own Experience.
+# rationale.reasoning is the whole lesson KernelForge writes for the iteration, lessons/iter_NNN.md: the implementer's
+# record of what it explored, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope and outcome lines
+# after the verdict. When that file is absent, a single session's reasoning is the first three sentences of the
+# rationale its meta.json records. A lane or a merge with neither has none. A lesson longer than the 32 KB a text
+# field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold none, such as a
+# merge of two earlier candidates, which no agent made, becomes no Experience.
+# provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the scalar measurement and
+# decision fields of the candidate's meta.json (commit_hash, decision, kept, validation_passed, wall_ms,
+# mean_case_speedup, snr_db, vgpr, baseline_wall_ms, best_wall_ms_before, best_mean_case_speedup_before,
+# delta_vs_best_pct, session_end_reason, turns, agent_profile_id, agent_provider, agent_model, blockage_epoch), not
+# its plan, rationale, bench, profile, pmc_diagnosis, or shape; kb_record, the record KernelForge's own experience KB
+# filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis generation
+# reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
+# analysis_report_omitted, why a report too long for a text field is not held.
+# Every Experience has a raw_logs field, and it is intentionally empty for now: it links one 0-byte file,
+# raw-logs-not-collected.log, which kernelforge export-runs writes beside its document. The global KB refuses a
+# complete Experience without raw logs, and KernelForge's run logs are not collected yet. raw_logs is a top-level
+# Experience field, not a field of a category, so it is not declared here and takes no part in the schema_ref. Beyond
+# it an Experience carries none of the profiler's output: the only run files it links are the plan, the measured
+# kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff and the
+# kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged lines,
+# and the kernel file has none of the other files. The kernelforge-v1 mapping names both as code, so collection
+# screens them with the token formats only. The only Analysis output an Experience holds is the report its plan
+# was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
+# The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
+# that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
+# fields, so none is declared here.
+schema_version: 2
+
+objectives:
+  - id: kernel_time_ms@v1
+    description: >-
+      Minimize the wall time the kernel takes on the task's benchmark, in milliseconds: the time KernelForge
+      records for it (wall_ms). That time is the median of three run aggregates. KernelForge runs the task's
+      benchmark driver three independent times. One run's time is the median of the wall_ms samples that run
+      printed. If the driver prints one median_ms or mean_ms line instead, that printed number is the run's time.
+      Grouped GEMM's mean_ms is the arithmetic mean of that run's per-case times, so each of its runs contributes
+      a mean, and the recorded time is the median of those three means. KernelForge does not decide on this time:
+      it keeps a candidate only when the candidate's mean case speedup, the equal-weight mean over the benchmark
+      cases of the original kernel's time on a case divided by the candidate's, clears a bar KernelForge sets from
+      the best result so far and the spread of those runs. A KEEP can still be slower on this time, because
+      KernelForge keeps on mean case speedup rather than on it.
+    unit: ms
+    direction: lower_is_better
+
+identity:
+  - {name: operator, description: "Operator the kernel implements: the operator_name the run's campaign_config.json records, e.g. _softmax_kernel, gemm_a8w8_blockscale_bpreshuffle."}
+  - {name: kernel, description: "Kernel the run optimizes: the logical operator KernelForge files its KB records under, the operator's name normalized to lower snake case without a trailing _kernel, e.g. softmax, gemm_a16w16_nt_n1024_k4096."}
+  - {name: framework, description: "Framework that owns the source operator, e.g. aiter. Absent when the run records it as unknown."}
+  - {name: backend, description: "Kernel language of the candidate, e.g. triton, flydsl, hip."}
+  - {name: backend_version, description: "Release of the candidate's kernel language in the run's runtime, e.g. 0.3.2. forge-loop does not record it yet, so Experiences from its runs leave it absent.", kind: version}
+  - {name: gpu, description: "GPU model the candidate was measured on, which also fixes its architecture target, e.g. mi355x (gfx950), mi300x (gfx942)."}
+  - {name: dtype, description: "Data type of the operator's first input in the benchmark cases, e.g. bfloat16, float8_e4m3fn. forge-loop does not record it yet, so Experiences from its runs leave it absent."}
+  - name: driver_sha256
+    description: >-
+      SHA-256 of the benchmark driver file's bytes, as the run's campaign_config.json records it after preparation.
+      The hash is here so two runs of one operator on different benchmark drivers do not share a repeat group and
+      have their times pooled. The same driver bytes group together. A preparation rewrite that changes the driver
+      bytes splits them, because that rewrite is not deterministic; an unchanged driver does not get a new hash.
+      Absent when the run recorded none.
+
+baseline:
+  - name: best_wall_ms_before
+    description: >-
+      The recorded wall time of the best kernel KernelForge had kept when the iteration began, in milliseconds, as
+      the candidate's meta.json records it (best_wall_ms_before): the same median of three run aggregates as
+      candidate_wall_ms, for the kernel the candidate was measured against. Until the first KEEP, it is
+      KernelForge's own measurement of the kernel the forge-loop started from. KernelForge replaces it only when it
+      keeps a candidate, with that candidate's time; since it decides the KEEP on mean case speedup rather than on
+      this time, the value can occasionally rise.
+    kind: number
+    role: measurement
+  - name: source_ms
+    description: >-
+      How long the original kernel took before any change, in milliseconds, the same median of three run aggregates:
+      the pristine baseline the run's run_state.json records, which for a run given --baseline-json is that file's time rather
+      than the time of the kernel the search started from. A run state that records none leaves the baseline time
+      the candidate's meta.json archives (baseline_wall_ms).
+    kind: number
+
+# Hyperloom adds reasoning, alternatives, and preconditions to every declaration. Writing them here fails with
+# `declaration.rationale redeclares a default field`. For this declaration rationale.reasoning is the whole lesson.
+rationale:
+  - name: plan
+    description: >-
+      What the plan the candidate was built from sets out to do: the whole Summary line the plan opens with, the
+      planner's statement of the problem it addresses and of its goal. For a lane, the plan is the lane's own; for a
+      single session, the round's optimization plan, read from its original draft when KernelForge could not revise
+      the draft and put the critic's review in front of it (kernelforge/orchestrator/orchestration.py:1711 at
+      1c14e79e1); for a merge, the stacked plans as KernelForge records them. A plan without a Summary line, as every
+      plan written before KernelForge asked for one is, gives its first three sentences instead: lines a planner wrote
+      before the plan's first heading are skipped, as are headings, code blocks, and tables.
+    kind: text
+  - name: plan_file
+    description: >-
+      The whole plan the candidate was built from, as KernelForge archived it in the planning round's
+      orchestration/iter_NNN/: optimization_plan.md for a single session or a round's first lane, lane_NNN.md for
+      the round's other lanes. The Experience links to the file by its name, size, and SHA-256.
+    kind: file
+
+change:
+  - name: source_code
+    description: >-
+      The kernel file that was measured, as KernelForge archived it in candidates/iter_NNN/. The Experience links to
+      the file by its name, size, and SHA-256, and the knowledge base stores the file once. This is the anchor kernel
+      only. A wrapper or config edit is in change_diff_file, and the unchanged lines of this file are not in that diff.
+    kind: file
+  - name: change_diff_file
+    description: >-
+      The unified diff of every file the commit touched, as KernelForge archived it beside the kernel in
+      candidates/iter_NNN/change.diff. The Experience links to the file by its name, size, and SHA-256. The name says
+      it is the diff file, not another copy of the kernel: the diff does not contain the kernel's unchanged lines,
+      and the kernel file does not contain the other files the commit touched. Optional: absent when the candidate
+      archived no diff.
+    kind: file
+    required: false
+
+outcome:
+  - name: decision
+    description: KernelForge's decision label for an iteration, as its forge-loop runner assigns them.
+    role: decision
+    values:
+      - KEEP
+      - REVERT_PERF
+      - REVERT_VALIDATION
+      - REVERT_VALIDATION_TIMEOUT
+      - REVERT_VALIDATION_ERROR
+      - BUILD_FAILED
+      - CRASH
+      - REVERT_INTEGRITY
+      - REVERT_CONTENDED
+      - NO_CHANGES
+      - API_ERROR
+      - AGENT_ERROR
+      - ORCHESTRATION_ERROR
+  - name: candidate_wall_ms
+    description: >-
+      The candidate's recorded wall time in milliseconds, as its meta.json records it (wall_ms): the median of three
+      run aggregates. KernelForge runs the task's benchmark driver three independent times. One run's time is the
+      median of the wall_ms samples that run printed, or the single median_ms or mean_ms summary it prints, kept as
+      printed. When the driver prints mean_ms, as the grouped-GEMM driver does for the arithmetic mean of its
+      per-case timings, this is the median of those three means. It is reported, not decided on: KernelForge kept or
+      reverted the candidate on its mean case speedup (provenance.extra.meta.mean_case_speedup), so a kept candidate
+      can be slower than best_wall_ms_before.
+    kind: number
+    role: measurement
+
+reflection:
+  - name: analysis_report
+    description: >-
+      The whole report.md of the Analysis generation the candidate's plan was built on: KernelForge's cross-case
+      summary of one kernel, which its Analysis agent publishes for the commit it analyzed as one immutable
+      generation, forge_experiments/analysis/<commit>/generation-NNN/. Analysis runs on the baseline, and again after
+      a KEEP once the canonical mean case speedup has improved 5% on the analyzed kernel's, or just before a
+      Supervisor intervention; on a campaign longer than two hours it profiles the kernel with rocprof-compute,
+      through rocpc_profile.py, and a shorter campaign's report is written from the source alone. The generation is
+      the one the planning round's orchestration/iter_NNN/context.json names as its analysis_bundle evidence: until a
+      refresh is published, rounds plan on the last report that was, so candidates on both sides of a KEEP can carry
+      the same report. Optional: absent when the round named no published generation, as for a merge, which no round
+      planned, and when report.md is over the 32 KB a text field holds, which provenance.extra.analysis_report_omitted
+      then says. The profiler's raw output, such as pmc_perf.csv, the rocprofv3 counter CSVs, and the profile/ and
+      .rocprofv3/ directories, is never stored: it is large and tied to one binary.
+    kind: text
+    required: false

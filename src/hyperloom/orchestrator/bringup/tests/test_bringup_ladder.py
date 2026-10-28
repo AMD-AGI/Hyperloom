@@ -299,7 +299,6 @@ def test_clean_boot_has_no_failed_stage() -> None:
     )
     assert observation.stage_failed is None
     assert observation.stage_reached is LadderStage.HTTP_READY
-    assert observation.booted
 
 
 def test_observation_round_trips_through_json_types() -> None:

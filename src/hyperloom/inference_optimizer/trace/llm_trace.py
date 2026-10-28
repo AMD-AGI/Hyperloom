@@ -11,14 +11,10 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import text_or_none, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
-from ._row_utils import (
-    call_key_fields,
-    coerce_optional_int as _coerce_optional_int,
-    coerce_optional_str as _coerce_optional_str,
-    validate_closed_row,
-)
+from ._row_utils import call_key_fields, validate_closed_row
 
 log = logging.getLogger(__name__)
 
@@ -117,16 +113,16 @@ class LLMCallRecord:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs)."""
         return {
             **call_key_fields(self),
-            "input_tokens": _coerce_optional_int(self.input_tokens),
-            "output_tokens": _coerce_optional_int(self.output_tokens),
-            "cache_creation_input_tokens": _coerce_optional_int(self.cache_creation_input_tokens),
-            "cache_read_input_tokens": _coerce_optional_int(self.cache_read_input_tokens),
-            "reasoning_output_tokens": _coerce_optional_int(self.reasoning_output_tokens),
-            "latency_ms": _coerce_optional_int(self.latency_ms),
+            "input_tokens": to_int(self.input_tokens),
+            "output_tokens": to_int(self.output_tokens),
+            "cache_creation_input_tokens": to_int(self.cache_creation_input_tokens),
+            "cache_read_input_tokens": to_int(self.cache_read_input_tokens),
+            "reasoning_output_tokens": to_int(self.reasoning_output_tokens),
+            "latency_ms": to_int(self.latency_ms),
             "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
             "status": str(self.status),
-            "error_type": _coerce_optional_str(self.error_type),
-            "error_message": _coerce_optional_str(self.error_message),
+            "error_type": text_or_none(self.error_type),
+            "error_message": text_or_none(self.error_message),
         }
 
     @classmethod

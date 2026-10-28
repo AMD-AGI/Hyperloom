@@ -115,8 +115,8 @@ def render_session_report(
             parsed = parse_llm_response(llm_raw)
             exec_summary_llm = parsed["executive_summary"]
             narratives = parsed["section_narratives"]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("LLM narration failed: %s", exc)
+        except Exception as exc:  # isolation boundary: the optional LLM narration pass
+            log.warning("LLM narration failed: %s", exc, exc_info=True)
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
     used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")

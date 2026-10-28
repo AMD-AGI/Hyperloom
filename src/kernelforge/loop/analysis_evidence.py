@@ -581,11 +581,12 @@ class AnalysisEvidenceMixin:
             and not any(case.profile_summary_path or case.bottleneck for case in context.cases)
         ):
             return ""
+        prompt_view = context.to_prompt_dict()
         lines = [
             "## Analysis Evidence (authoritative paths; read on demand)",
-            (f"Canonical commit: {context.canonical_commit or context.analysis_commit}"),
-            (f"Evidence commit: {context.evidence_commit or context.analysis_commit}"),
-            f"Evidence status: {context.evidence_status or 'current'}",
+            f"Canonical commit: {prompt_view['canonical_commit']}",
+            f"Evidence commit: {prompt_view['analysis_evidence']['commit']}",
+            f"Evidence status: {prompt_view['analysis_evidence']['status']}",
             f"Evidence stale: {'yes' if context.evidence_stale else 'no'}",
             f"Source map: {context.source_map_path}",
         ]
@@ -614,22 +615,29 @@ class AnalysisEvidenceMixin:
                 "COMPLETE, AVAILABLE, SKIPPED, or FAILED."
             )
         lines.extend(f"{reference.kind}: {reference.path}" for reference in analysis_refs)
-        if any("analysis_static_only" in case.flags for case in context.cases):
-            lines.append(
-                "STATIC_ONLY: no hardware profiling evidence is available. "
-                "Treat bottleneck and potential claims as inference, not "
-                "measured profiler facts."
-            )
-        lines.append("Per-case evidence:")
-        for case in context.cases:
-            parts = [f"- {case.case_id}"]
-            if case.latency_ms is not None:
-                parts.append(f"latency={case.latency_ms:.6f} ms")
-            if case.bottleneck:
-                parts.append(f"bottleneck={case.bottleneck}")
-            if case.profile_summary_path:
-                parts.append(f"evidence={case.profile_summary_path}")
-            if case.flags:
-                parts.append("flags=" + ",".join(case.flags))
-            lines.append(" | ".join(parts))
+        lines.extend(_case_evidence_lines(context.cases))
         return "\n".join(lines)
+
+
+def _case_evidence_lines(cases: tuple[CaseEvidence, ...]) -> list[str]:
+    """The per-case section of the implementer's evidence map, behind the static-only caveat when it applies."""
+    lines = []
+    if any("analysis_static_only" in case.flags for case in cases):
+        lines.append(
+            "STATIC_ONLY: no hardware profiling evidence is available. "
+            "Treat bottleneck and potential claims as inference, not "
+            "measured profiler facts."
+        )
+    lines.append("Per-case evidence:")
+    for case in cases:
+        parts = [f"- {case.case_id}"]
+        if case.latency_ms is not None:
+            parts.append(f"latency={case.latency_ms:.6f} ms")
+        if case.bottleneck:
+            parts.append(f"bottleneck={case.bottleneck}")
+        if case.profile_summary_path:
+            parts.append(f"evidence={case.profile_summary_path}")
+        if case.flags:
+            parts.append("flags=" + ",".join(case.flags))
+        lines.append(" | ".join(parts))
+    return lines

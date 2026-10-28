@@ -38,7 +38,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | moves a call, an export or an assignment relative to another, or adds one that has to run after an existing one: a re-ordered projection, a guard that must see a restored value, a seed that must follow a resolver | T5 P5 D8 V8 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
 | touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
-| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
+| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 S8 |
 | touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
@@ -122,7 +122,7 @@ file-shaped row would miss.
 
 **Severity:** blocking
 **Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch.
-**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. `AGENTS.md` already bans new broad catches; this rule is about the narrow ones that still swallow.
+**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. S8 covers the broad ones; this rule is about the narrow ones that still swallow.
 **Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success.
 **Not a finding when:** the suppressed call is genuinely advisory (best-effort telemetry, cache warm) and the caller has an independent signal for the same condition, or the handler logs and re-raises.
 **Evidence:** `$WORK/diff.txt` -- the guarded region, the position of the log, and the caller's use of the return value.
@@ -187,6 +187,16 @@ file-shaped row would miss.
 **Not a finding when:** the producers cannot emit the empty or degenerate value (a schema default, a constructor that raises), or the fallback is still reached by another caller that does not pass through the guard.
 **Evidence:** `$WORK/diff.txt` -- the inserted guard, the fallback below it, and the producer sites in the same diff.
 **Report as:** `S7 <file>:<line> -- new guard makes <fallback> unreachable for <value>`
+
+### S8 -- A broad except must re-raise, or sit at the boundary that owns the failure and record it
+
+**Severity:** blocking
+**Fires when:** the diff adds an `except Exception`, `except BaseException` or bare `except`, or changes what an existing one does with the error.
+**The rule:** a broad handler has one of three shapes. It re-raises -- directly, through a helper that always raises, or by keeping the error and raising it after cleanup. Or it is the outermost handler on its path (a task, thread or process entry, a CLI `main`, a dispatcher tick, an atexit or signal handler, a telemetry sink that must never break its caller) and logs the error with its traceback. Or it isolates one item a loop or tick must survive (one candidate, sweep point, pod, profile) and does all three: logs the error with its traceback, puts the failure in a status or field the caller reads and a legitimate result never carries, and names what it isolates in a comment on the `except` line (`# isolation boundary: one sweep point`; as the `# noqa: BLE001` reason where Ruff still flags the line, which it does not once the handler logs with `exc_info`). Anything else -- a mid-path handler that logs and returns a fallback, a fallback a caller cannot tell from a real result, a handler that records nothing -- is narrowed to what the body raises or removed so the error reaches the boundary that owns it. The `code-metrics` gate refuses an added broad handler that records nothing; whether it sits at the right boundary is this rule's question.
+**Seen in:** PR #2168 -- broad handlers in the KERNEL fusion path swallowed failed `state.json` saves, and others turned errors into plausible return values; 49 of them were narrowed, removed or left to the boundary that records them.
+**Not a finding when:** the handler is only moved or re-indented; it is in a test; it re-raises; or the boundary is named and verified -- nothing above it records the failure, or the caller reads the per-item failure status.
+**Evidence:** `$WORK/diff.txt` -- the try body and the handler, the callers (`rg` the function name), and the status or field the caller reads.
+**Report as:** `S8 <file>:<line> -- broad except <is mid-path | records nothing | falls back to a value indistinguishable from <real result>>; <narrow to <types> | remove so <boundary> records it>`
 
 ---
 
@@ -775,7 +785,7 @@ backend registration outside `agent_backends/registry.py`; tier, path or schema 
 the code that reads them; a private re-implementation of a `hyperloom.common` helper --
 `common/io.py` (`atomic_write_*`, `safe_mtime`, `append_jsonl`), `common/jsonio.py`
 (`read_json`, `read_jsonl`), `common/timeutil.py` (`now_iso`), `common/proctree.py`
-(`group_alive`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
+(`group_members`, `kill_tree`). The shape is an `os.environ` read, a hardcoded tuple of names, or a
 second `def` whose body matches an exported one.
 **The rule:** a second home for a concern means two answers to the same question, and the one
 the reader is looking at is not necessarily the one that runs. Import from the owner. If the
@@ -846,17 +856,16 @@ function that reads long is not the same claim. Run the ceiling against the chan
 head, then against the same paths at `base.txt`, and match per function name:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+radon cc -s -n D $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/' \
+  | grep -v -e '^src/kernelforge/examples/' -e '/_vendor/' -e '/local_wiki/resources/' -e 'kb_store/remote_client.py')
 
 git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise "$WORK/base-<name>.py"
+radon cc -s -n D "$WORK/base-<name>.py"
 ```
 
-`--force-exclude` keeps Ruff's `extend-exclude` (vendored SDK copies, `src/kernelforge/examples`)
-out when paths are passed explicitly; `--isolated` is what lets the base copy be checked from
-outside the tree. Present at head and absent at base, or a higher number at head than at base,
+radon (6.0.1, as the gate pins) counts every `and` / `or`, ternary, comprehension and `assert` as a
+branch, as the gate and the code-health report do; `-n D` lists the functions above 20, and the
+`grep -v` keeps Ruff's `extend-exclude` trees (vendored SDK copies, `src/kernelforge/examples`) out. Present at head and absent at base, or a higher number at head than at base,
 fires. The same number on both sides is backlog and is silent. The `code-metrics` CI job measures
 the same two cases, but its `baseline-raise` label waives them, so the rule stays for the one
 question CI cannot answer: whether a labelled PR gives the reason. `AGENTS.md` *Size is a design
@@ -868,7 +877,7 @@ above 20 when it was introduced, which is the backlog the comparison exists to k
 finding.
 **Not a finding when:** the base number equals the head number (the unit was already over and
 this diff did not grow it); the file is a test, or sits in `extend-exclude`, which
-`--force-exclude` already settles; the added branches are a flat dispatch or validation table
+the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
 **Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`

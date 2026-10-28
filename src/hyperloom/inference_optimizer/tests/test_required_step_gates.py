@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
@@ -88,7 +89,7 @@ def test_baseline_first_still_blocks_other_actions(session_dir):
 def test_integrate_gate_inactive_without_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def _seed_kernel_opt_state(
@@ -115,7 +116,7 @@ def test_integrate_gate_inactive_when_decision_not_keep(session_dir):
     coord = Coordinator(session_dir, backends=_backends_full())
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-1", decision="REVERT")
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_integrate_gate_fires_when_keep_pending(session_dir):
@@ -128,7 +129,7 @@ def test_integrate_gate_fires_when_keep_pending(session_dir):
         micro=4.13,
         source_file="/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
     )
-    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
+    assert kd.pending_keep_kernel_ids(coord.shared_state)[0] == "k-rmsnorm"
 
 
 def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
@@ -143,7 +144,7 @@ def test_integrate_gate_clears_when_already_in_optimization_stack(session_dir):
     coord.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k-rmsnorm", "target_file": "/p/rmsnorm.py"},
     ]
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
@@ -151,7 +152,7 @@ def test_integrate_gate_clears_when_kernel_already_rejected(session_dir):
     _seed_post_baseline(coord)
     _seed_kernel_opt_state(coord, kernel_id="k-bad", decision="KEEP")
     coord.shared_state.rejected_kernel_ids = ["k-bad"]
-    assert coord.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(coord.shared_state) == []
 
 
 def test_pending_keep_no_longer_blocks_other_actions(session_dir):
@@ -164,8 +165,8 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         decision="KEEP",
         source_file="/p/rmsnorm.py",
     )
-    assert coord.shared_state.next_pending_keep_kernel_id() == "k-rmsnorm"
-    for action in ("explore", "sweep", "integrate", "report"):
+    assert kd.pending_keep_kernel_ids(coord.shared_state)[0] == "k-rmsnorm"
+    for action in ("explore", "integrate", "report"):
         assert coord.dispatcher._sequence_denial_for_action(action) is None, (
             f"{action!r} must not be sequence-denied by a pending KEEP"
         )
@@ -203,7 +204,7 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
     coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     assert coord.dispatcher._sequence_denial_for_action("report") is None
-    assert coord.shared_state.untried_hot_reusable_kernels()
+    assert kd.untried_hot_reusable_kernels(coord.shared_state)
 
 
 def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
@@ -245,7 +246,7 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    for action in ("explore", "sweep", "report", "profile", "roofline"):
+    for action in ("explore", "report"):
         denied = coord.dispatcher._sequence_denial_for_action(action)
         if denied is None:
             continue

@@ -116,15 +116,14 @@ def test_get_recent_outcomes_tool_is_registered():
     assert spec_methods["get_recent_outcomes"] == "recent_outcomes"
 
 
-def test_context_provider_recent_outcomes_not_wired_message():
-    provider = ContextProvider(shared_state=object())
-    assert "not wired" in provider.recent_outcomes()
-
-
 def test_context_provider_recent_outcomes_delegates_to_reader():
     provider = ContextProvider(
         shared_state=object(),
+        inbox_reader=lambda since_seq: "",
+        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda k: f"outcomes(top_k={k})",
+        running_tasks_reader=lambda: "",
+        reference_reader=lambda name: "",
     )
     assert provider.recent_outcomes(5) == "outcomes(top_k=5)"
 

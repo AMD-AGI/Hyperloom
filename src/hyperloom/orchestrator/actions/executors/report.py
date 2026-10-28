@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 )
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...kernel import kernel_decisions
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.failure_evidence import classify_root_cause_type
 from ...state.shared_state import SharedState
@@ -39,14 +40,6 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     if session_dir is None:
         return 0
     return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
-
-
-def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
-    fn = getattr(state, method, None)
-    if not callable(fn):
-        return default
-    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
@@ -139,56 +132,49 @@ def _build_failure_summary(
     """Surface the real terminal error on ``baseline_failed``."""
     if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
         return None
-    try:
-        attempt = _last_failed_baseline_attempt(state)
-        if attempt is None:
-            return None
-
-        error_class = str(attempt.get("error_class") or "unknown")
-        raw_error = str(attempt.get("error_excerpt") or "")
-        kept_lines, suppressed = _partition_benign_lines(raw_error)
-        error_text = "\n".join(kept_lines).strip()
-
-        server_log_abs = _resolve_attempt_server_log(attempt)
-        # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
-        if not error_text and server_log_abs is not None:
-            from ._subprocess_kill import server_log_death_excerpt
-
-            excerpt = server_log_death_excerpt(str(server_log_abs))
-            if excerpt:
-                error_text = excerpt.strip()
-                if error_class in ("", "unknown"):
-                    error_class = "server_init_dead"
-        if not error_text:
-            error_text = "(no terminal error captured; see logs)"
-
-        root_cause = _pick_failure_headline(error_text)
-        server_log_rel: str | None = None
-        if server_log_abs is not None:
-            if session_dir is not None:
-                try:
-                    server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
-                except ValueError:
-                    server_log_rel = str(server_log_abs)
-            else:
-                server_log_rel = str(server_log_abs)
-
-        summary: dict[str, Any] = {
-            "root_cause": root_cause[:500],
-            "root_cause_type": classify_root_cause_type(error_class, error_text),
-            "error_class": error_class,
-            "last_attempt_id": str(attempt.get("task_id") or ""),
-            "server_log": server_log_rel,
-        }
-        if suppressed:
-            summary["suppressed_benign"] = suppressed[:5]
-        return summary
-    except Exception:
-        log.warning(
-            "report_executor: failed to build failure_summary",
-            exc_info=True,
-        )
+    attempt = _last_failed_baseline_attempt(state)
+    if attempt is None:
         return None
+
+    error_class = str(attempt.get("error_class") or "unknown")
+    raw_error = str(attempt.get("error_excerpt") or "")
+    kept_lines, suppressed = _partition_benign_lines(raw_error)
+    error_text = "\n".join(kept_lines).strip()
+
+    server_log_abs = _resolve_attempt_server_log(attempt)
+    # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
+    if not error_text and server_log_abs is not None:
+        from ._subprocess_kill import server_log_death_excerpt
+
+        excerpt = server_log_death_excerpt(str(server_log_abs))
+        if excerpt:
+            error_text = excerpt.strip()
+            if error_class in ("", "unknown"):
+                error_class = "server_init_dead"
+    if not error_text:
+        error_text = "(no terminal error captured; see logs)"
+
+    root_cause = _pick_failure_headline(error_text)
+    server_log_rel: str | None = None
+    if server_log_abs is not None:
+        if session_dir is not None:
+            try:
+                server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
+            except ValueError:
+                server_log_rel = str(server_log_abs)
+        else:
+            server_log_rel = str(server_log_abs)
+
+    summary: dict[str, Any] = {
+        "root_cause": root_cause[:500],
+        "root_cause_type": classify_root_cause_type(error_class, error_text),
+        "error_class": error_class,
+        "last_attempt_id": str(attempt.get("task_id") or ""),
+        "server_log": server_log_rel,
+    }
+    if suppressed:
+        summary["suppressed_benign"] = suppressed[:5]
+    return summary
 
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
@@ -214,10 +200,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "source is at fault: correct the offending flag or value in --server-args / the recipe, then re-run."
     ),
     "environment_fault": (
-        "This host cannot run the combination as installed - the framework is missing from the serving "
-        "interpreter, a compiled extension has no build for this platform, the checkpoint path resolves "
-        "to nothing, or the port is already held. No patch to the model or the framework source repairs "
-        "any of those, so the run stopped instead of spending rounds authoring against the machine."
+        "The checkpoint path this run serves resolves to nothing on this host. No patch to the model or the "
+        "framework source repairs that, so the run stopped instead of spending rounds authoring against the machine."
     ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
@@ -481,10 +465,10 @@ def _build_summary_dict(
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len": len(state.optimization_stack or []),
-        # Honesty annotations: surface unfinished/unvalidated work; read defensively for partial-state stubs.
-        "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
-        "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
-        "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
+        # Honesty annotations: surface unfinished/unvalidated work.
+        "has_unvalidated_keeps": state.optimization_stack_has_unvalidated_keeps(),
+        "untried_hot_reusable_kernels": kernel_decisions.untried_hot_reusable_kernels(state),
+        "pending_keep_kernels": kernel_decisions.pending_keep_kernel_ids(state),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
@@ -1081,7 +1065,7 @@ def _write_kernel_opt_summary(
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
         return out_path
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, TypeError, ValueError) as exc:
         log.warning(
             "report_executor: failed to write kernel_optimization_summary.json: %s",
             exc,
@@ -1282,7 +1266,7 @@ class ReportExecutor:
                 output_dir=output_dir,
                 state=state,
             )
-        except Exception:
+        except (ValueError, TypeError, AttributeError, KeyError):
             log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
         if conc_sweep_curve_png is not None:
             try:

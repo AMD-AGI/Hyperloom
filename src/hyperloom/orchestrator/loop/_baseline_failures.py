@@ -25,7 +25,7 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
-from ..phases.machine_state import PHASE_ENABLEMENT
+from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
@@ -400,9 +400,12 @@ class BaselineFailureMixin:
         # so does a session that never admitted the eval lane -- nothing would
         # re-run the eval, so holding the budget just stalls the run. Baseline
         # failures are also the ENABLEMENT phase's own input, and its attempt cap
-        # bounds them.
+        # bounds them -- including a PRELUDE retry that settles before the transition.
         eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
-        in_enablement = str(self.shared_state.phase or "").strip().upper() == PHASE_ENABLEMENT
+        phase = str(self.shared_state.phase or "").strip().upper()
+        in_enablement = phase == PHASE_ENABLEMENT or (
+            phase == PHASE_PRELUDE and self._coord.enablement_lane.enablement_admitted()
+        )
         retries_suppressed = bool(eval_pending_suppress or in_enablement)
         if eval_failed:
             self._persist_eval_failure(result_payload)

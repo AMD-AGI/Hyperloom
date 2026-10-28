@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
@@ -53,6 +53,23 @@ from ..model_config_utils import summarize_model_config
 log = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class HostedPlugInputs:
+    """What a hosted run gives the plug host: the lock layer and the host inputs."""
+
+    lock: Mapping[str, Mapping[str, str]]
+    host_info: object
+
+
+_hosted_inputs: HostedPlugInputs | None = None
+
+
+def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
+    """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
+    global _hosted_inputs
+    _hosted_inputs = inputs
+
+
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
 
@@ -62,6 +79,7 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """
     resume_from = getattr(args, "resume_from", None)
     registry = builtin_registry()
+    hosted = _hosted_inputs
     try:
         sources = ManifestSources(
             profile=getattr(args, "plug_profile", None),
@@ -70,6 +88,7 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
             resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
+            locked=hosted.lock if hosted else {},
         )
         manifest = resolve_manifest(registry, sources)
         PlugHost(manifest, registry, session_dir=None).plan()
@@ -85,7 +104,13 @@ def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
     A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
     that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
     """
-    host = PlugHost(manifest, builtin_registry(), session_dir=session_dir)
+    hosted = _hosted_inputs
+    host = PlugHost(
+        manifest,
+        builtin_registry(),
+        session_dir=session_dir,
+        host_info=hosted.host_info if hosted else None,
+    )
     host.plan()
     if not manifest.is_builtin_default:
         write_resolved(session_dir, manifest, host.fingerprint())
@@ -662,16 +687,9 @@ def _seed_shared_state(
         0,
         min(research_lane_ceiling(), research_lane_capacity),
     )
-    gpu_specialist_capacity_raw = getattr(
-        args,
-        "gpu_specialist_capacity",
-        None,
-    )
+    # An unset (None) or unparsable capacity falls back to the visible GPU count.
     try:
-        gpu_specialist_capacity = max(
-            0,
-            int(gpu_specialist_capacity_raw) if gpu_specialist_capacity_raw is not None else detect_gpu_count(),
-        )
+        gpu_specialist_capacity = max(0, int(getattr(args, "gpu_specialist_capacity", None)))
     except (TypeError, ValueError):
         gpu_specialist_capacity = detect_gpu_count()
     # Collect plateau threshold overrides; absent keys use defaults at compute time.
@@ -706,17 +724,19 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
-    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    benchmark_mode = "synthetic"
+    agentx_backend = ""
+    agentx_epoch = 0
     if _agentx_enabled():
         from hyperloom.common.agentx_workload import agentic_backend
 
+        benchmark_mode = "agentx"
         agentx_backend = agentic_backend()
-    else:
-        agentx_backend = ""
+        agentx_epoch = AGENTX_MEASUREMENT_EPOCH
     state = SharedState(
         session_id=session_id,
-        claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
-        sandbox_user_id=(os.environ.get("SANDBOX_USER_ID") or "").strip(),
+        claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
+        sandbox_user_id=os.environ.get("SANDBOX_USER_ID", "").strip(),
         model_name=_model_identity,
         model_path=str(args.model),
         model_class=args.model_class or "",
@@ -766,8 +786,9 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
-        nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
+        nodes=max(1, int(getattr(args, _NODES, 1))),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         **(
             {}
@@ -786,7 +807,7 @@ def _seed_shared_state(
         # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
-        enablement_mode=str(getattr(args, "enablement", "all") or "all"),
+        enablement_mode=str(getattr(args, "enablement", "all")),
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
         research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
@@ -799,13 +820,11 @@ def _seed_shared_state(
             not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
         ),
         benchmark_mode=benchmark_mode,
-        agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_epoch=agentx_epoch,
         agentx_backend=agentx_backend,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
-        conc_sweep_total_budget_sec=int(
-            getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
-        ),
+        conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
     )
     state.save(session_dir)
     return state
@@ -962,7 +981,6 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.close_sequence_done = False
     state.target_reached_at = ""
     state.crash_count = 0
-    state.teardown_timings_sec = {}
     state.begin_leg()
     return state.resumed_ts
 
@@ -1004,14 +1022,14 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         if int(disk_state.crash_count or 0) < live:
             disk_state.crash_count = live
             disk_state.save(session_dir)
-    except Exception:
+    except (OSError, ValueError, TypeError):
         log.exception("crash_count reconcile (state.json) failed (non-fatal)")
 
     try:
         from hyperloom.orchestrator.actions.executors.report import reconcile_final_crash_count
 
         reconcile_final_crash_count(session_dir, live)
-    except Exception:
+    except (OSError, ValueError, TypeError, AttributeError):
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
 
 

@@ -11,23 +11,27 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.coerce import (
+    to_float as _float_or_none,
+    to_int as _int_or_none,
+    to_mapping as _as_dict,
+    to_list as _as_list,
+)
+
 from .event_fields import (
-    as_dict as _as_dict,
-    as_list as _as_list,
     bool_or_none as _bool_or_none,
     clip as _clip,
     failure_row as _failure_row,
-    float_or_none as _float_or_none,
     graded_axes as _graded_axes,
-    int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
 )
 from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import BASELINE_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +58,6 @@ ROW_ROUND = "round"
 
 # Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
 RUN_INITIAL = "initial"
-RUN_AFTER_EVAL_FAILURE = "retry_after_eval_failure"
 RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
 
 # The executor's round labels, mirrored so a consumer selects the measured pass without matching on prose.
@@ -108,7 +111,6 @@ __all__ = [
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",
-    "RUN_AFTER_EVAL_FAILURE",
     "RUN_AFTER_MOE_RUNNER_FAILURE",
     "RUN_INITIAL",
     "SECTION_ACTION",
@@ -119,7 +121,6 @@ __all__ = [
     "BaselineInvocation",
     "BaselineRequest",
     "BaselineRound",
-    "assemble_baseline_action",
     "assemble_baseline_actions",
     "assemble_baseline_ext",
     "anchoring_eval_from_action",
@@ -156,9 +157,7 @@ def record_action_decision(
     """
     if not str(task_id or "") or not str(decision or ""):
         return
-    from .event_sink import make_sink
-
-    sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
+    sink = EventSink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
         log.debug(
             "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
@@ -175,23 +174,10 @@ def record_action_decision(
     _republish_closed_event(sink.event_id)
 
 
-def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> dict[str, Any]:
-    """The event-level fragment: its timeline sequence and its own start time.
-
-    An event holds every measurement of one phase and cycle, and the timeline
-    orders events by ``start_time``, so the event's start is the first action's
-    -- read from here -- and never the closing action's, which would file the
-    event at whichever measurement happened to finish last.
-    """
-    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    return rows[0] if rows else {}
-
-
 def _republish_closed_event(event: str) -> None:
     """Re-assemble a closed event so a fragment written after it is published."""
-    from .assembler import baseline_event_parts
+    from .assembler import event_parts
     from .construct import republish_closed_event
-    from .event_rows import rows_for_event
 
     def _end_time(parts: Mapping[str, list[dict[str, Any]]], header: dict[str, Any]) -> str:
         action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
@@ -203,7 +189,7 @@ def _republish_closed_event(event: str) -> None:
     republish_closed_event(
         EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        load_parts=lambda: baseline_event_parts(event),
+        load_parts=lambda: event_parts(BASELINE_EVENT_SECTIONS, event=event),
         assemble=assemble_baseline_ext,
         end_time=_end_time,
     )
@@ -507,7 +493,7 @@ class BaselineRound:
 class BaselineEventRecorder:
     """Records one baseline action's facts into whichever event owns it."""
 
-    def __init__(self, sink: RecordSink, request: BaselineRequest, *, owns_event: bool = True):
+    def __init__(self, sink: EventSink, request: BaselineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event.
 
         ``request.task_kind`` is stated because this executor also measures
@@ -756,16 +742,19 @@ class BaselineEventRecorder:
         )
         if not self._owns_event:
             return
-        from .assembler import baseline_event_parts
+        from .assembler import event_parts
+        from .construct import event_header
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            parts = baseline_event_parts(self.event_id)
+            parts = event_parts(BASELINE_EVENT_SECTIONS, event=self.event_id)
             ext, derived = assemble_baseline_ext(parts, event=self.event_id)
-            # This action's own start only dates the event when the shell write
+            # The timeline orders events by ``start_time``, so the event is
+            # dated by its first action's open, never by whichever action closes
+            # last. This action's own start only dates it when the shell write
             # failed, leaving this close as the first thing to put it on the
             # timeline.
-            opened_at = str(_event_header(parts, event=self.event_id).get("start_time") or "")
+            opened_at = str(event_header(parts, SECTION_EVENT, self.event_id).get("start_time") or "")
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, opened_at or self._start_time),
                 sequence=self._sequence,
@@ -860,20 +849,6 @@ def assemble_baseline_actions(
     return actions
 
 
-def assemble_baseline_action(
-    parts: Mapping[str, list[dict[str, Any]]],
-    *,
-    event: str,
-    task_id: str,
-) -> dict[str, Any] | None:
-    """Assemble one baseline action out of its recorded rows."""
-    wanted = str(task_id or "")
-    for action in assemble_baseline_actions(parts, event=event):
-        if str(action.get("task_id") or "") == wanted:
-            return action
-    return None
-
-
 def assemble_baseline_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -890,7 +865,7 @@ def assemble_baseline_ext(
 
 
 def make_baseline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     request: BaselineRequest = BaselineRequest(),
     *,
     owns_event: bool = True,

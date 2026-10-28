@@ -481,6 +481,53 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     )
 
 
+def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
+    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
+    clock = _AClockOnlyThePassesMove()
+    fake_run, state = _cold_then_hot_fake_run(clock=clock, boot_sec=350.0, benchmark_sec=550.0)
+
+    def cold_round_also_ran_the_eval(cmd, *args, **kwargs):
+        first = state["calls"] == 0
+        completed = fake_run(cmd, *args, **kwargs)
+        if first:
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            (slot / "results_gsm8k.json").write_text(
+                json.dumps(
+                    {
+                        "results": {"gsm8k": {"exact_match,strict-match": 0.845}},
+                        "total_evaluation_time_seconds": "450.0",
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return completed
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    executor = BaselineExecutor(
+        magpie_python=sys.executable,
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=_prelude_shared_state(usable_sec=1200.0),
+    )
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+    with (
+        _passes_time_the_executor_believes(clock),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=cold_round_also_ran_the_eval,
+        ),
+    ):
+        result = _run(executor(ctx))
+
+    # Charged the eval, the hot pass (550 s) and a cold-priced variant (900 s) need 1450 s of the 1200 s left.
+    assert state["calls"] == 2, "the hot pass was priced with the cold round's accuracy eval"
+    assert result["status"] == "succeeded"
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert "measure_round_dropped" not in result
+    assert MEASURE_ROUND_DROPPED_WARNING not in result.get("nonfatal_warnings", [])
+
+
 def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp_path):
     """The two gates price the same second pass, so they must reach the same answer."""
     clock = _AClockOnlyThePassesMove()

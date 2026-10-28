@@ -13,10 +13,10 @@ from typing import Any
 
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
-    GPU_MASK_ENV_NAMES,
     redact_secret_values,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 _DROP = object()
 
@@ -168,7 +168,13 @@ def sanitize_publish_env_mapping(
 
 
 def sanitize_publish_server_args(value: str) -> str:
-    """Remove credential options and host-local path operands from argv text."""
+    """Remove credential options, host-local path operands and the flags the launch guards add from argv text.
+
+    The launch guards size ``INJECTED_LAUNCH_FLAGS`` for the run they launch and add them again to any later run that
+    leaves them out, so a shared recipe that kept them would hand one run's context cap to every replay.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS
+
     try:
         tokens = shlex.split(str(value or ""))
     except ValueError as exc:
@@ -181,16 +187,15 @@ def sanitize_publish_server_args(value: str) -> str:
             continue
         option, separator, operand = token.partition("=")
         normalized_option = option.lstrip("-")
-        if _is_secret_option(normalized_option):
+        if _is_secret_option(normalized_option) or option in INJECTED_LAUNCH_FLAGS:
             skip_value = not separator
             continue
         path_operand = operand if separator else token
-        if _is_absolute_path_text(path_operand):
-            if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
-                safe.pop()
-            continue
-        redacted = redact_secret_values(token)
-        if redacted != token or "[LOCAL_PATH]" in _redact_embedded_paths(token):
+        if (
+            _is_absolute_path_text(path_operand)
+            or redact_secret_values(token) != token
+            or "[LOCAL_PATH]" in _redact_embedded_paths(token)
+        ):
             if not separator and safe and safe[-1].startswith("-") and "=" not in safe[-1]:
                 safe.pop()
             continue

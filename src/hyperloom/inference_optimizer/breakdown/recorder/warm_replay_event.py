@@ -26,19 +26,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
-
-from .event_fields import (
-    as_dict as _as_dict,
-    failure_row as _failure_row,
-    float_or_none as _float_or_none,
-    now_iso_seconds as _now,
+from hyperloom.common.coerce import (
     text_or_none as _text_or_none,
+    to_float as _float_or_none,
+    to_unix,
+    to_mapping as _as_dict,
 )
+
+from .construct import event_header
+from .event_fields import failure_row as _failure_row, now_iso_seconds as _now
 from .event_ids import event_id
-from .event_rows import rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink, make_sink
+from .event_rows import blocking_gate, rows_for_event, sort_rows, wire_rows
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
+from .sections import WARM_REPLAY_EVENT_SECTIONS
 
 log = logging.getLogger(__name__)
 
@@ -231,7 +232,7 @@ class WarmReplayEventRecorder:
     from both halves.
     """
 
-    def __init__(self, sink: RecordSink, request: WarmReplayRequest):
+    def __init__(self, sink: EventSink, request: WarmReplayRequest):
         """Bind a recorder to one replay's event.
 
         A warm recipe has no single id: it takes ``tier``, the record
@@ -248,14 +249,12 @@ class WarmReplayEventRecorder:
         self._sequence: int | None = None
         self._rebound = False
         self._closed = False
-        self._task_id = str(request.task_id or "")
         # Gates are stamped at seconds precision and several rule inside one
         # second, so timestamps cannot order the arc. Assigned once per gate,
         # so a gate that re-rules keeps its original place.
         self._gate_ordinals: dict[str, int] = {}
         self._request = {
-            "task_id": self._task_id,
-            "baseline_action_ref": self._task_id,
+            "task_id": str(request.task_id or ""),
             "tier": str(request.tier or ""),
             "config_source": str(request.config_source or ""),
             "config_donor_tier": str(request.config_donor_tier or ""),
@@ -272,11 +271,6 @@ class WarmReplayEventRecorder:
     def event_id(self) -> str:
         """str: The event every row this recorder writes is tagged with."""
         return self._sink.event_id
-
-    @property
-    def task_id(self) -> str:
-        """str: The task id this replay was dispatched under."""
-        return self._task_id
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -533,11 +527,13 @@ class WarmReplayEventRecorder:
                 "duration_sec": self._duration_sec(end_time),
             },
         )
-        from .assembler import warm_replay_event_parts
+        from .assembler import event_parts
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
-            ext, derived = assemble_warm_replay_ext(warm_replay_event_parts(self.event_id), event=self.event_id)
+            ext, derived = assemble_warm_replay_ext(
+                event_parts(WARM_REPLAY_EVENT_SECTIONS, event=self.event_id), event=self.event_id
+            )
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
@@ -559,8 +555,7 @@ def assemble_warm_replay_ext(
     Rows of every other event in the session are ignored. The returned status
     is empty when no write has closed the event, leaving the caller's reading.
     """
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = event_rows[0] if event_rows else {}
+    header = event_header(parts, SECTION_EVENT, event)
     gates = wire_rows(
         sort_rows(rows_for_event(parts.get(SECTION_GATE) or [], event), keys=("ordinal", "ts", "gate")),
         drop=("event_id", "ordinal"),
@@ -583,7 +578,7 @@ def assemble_warm_replay_ext(
         # The gate that ended the arc, named rather than re-derived by a
         # consumer. A successful arc names nothing: a replay is admitted on an
         # eval that could not rule, which is no blocker.
-        "blocked_by": None if status == "succeeded" else _text_or_none(_blocking_gate(gates)),
+        "blocked_by": None if status == "succeeded" else _text_or_none(blocking_gate(gates)),
         "applied": applied or None,
         "verdict": _as_dict(header.get("verdict")),
         "promotion": _as_dict(header.get("promotion")) or None,
@@ -593,23 +588,6 @@ def assemble_warm_replay_ext(
         "duration_sec": header.get("duration_sec"),
     }
     return ext, status
-
-
-def _blocking_gate(gates: list[dict[str, Any]]) -> str:
-    """Name the first gate that did not pass, or ``""`` when all of them did.
-
-    A gate that ruled ``None`` blocks only if nothing after it failed, so a
-    replay admitted on an unscored eval and then rejected on the keep threshold
-    reports the threshold.
-    """
-    unresolved = ""
-    for row in gates:
-        passed = row.get("passed")
-        if passed is False:
-            return str(row.get("gate") or "")
-        if passed is None and not unresolved:
-            unresolved = str(row.get("gate") or "")
-    return unresolved
 
 
 def make_warm_replay_recorder(
@@ -628,7 +606,7 @@ def make_warm_replay_recorder(
 
     if decline_unbound("warm replay"):
         return None
-    recorder = WarmReplayEventRecorder(make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
+    recorder = WarmReplayEventRecorder(EventSink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
     if open_event_on_timeline:
         recorder.begin()
     else:
