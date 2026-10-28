@@ -135,6 +135,7 @@ ROUND_DUP: str = "round_dup"
 
 #: The provenance of a grid row that names none: the model proposed it directly.
 _DIRECT_PROVENANCE = "llm_direct"
+_LEAVE_ONE_OUT = "leave_one_out"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -270,7 +271,7 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
         for variant in _switch_manifest.leave_one_out_variants(active):
-            payload.append({**variant, "framework_lever_source": "leave_one_out"})
+            payload.append({**variant, "framework_lever_source": _LEAVE_ONE_OUT})
     return payload
 
 
@@ -332,7 +333,7 @@ def _framework_lever_attributions(
         if not isinstance(measured, (int, float)):
             continue
         source = str(seed.get("framework_lever_source") or "")
-        gain = -float(measured) if source == "leave_one_out" else float(measured)
+        gain = -float(measured) if source == _LEAVE_ONE_OUT else float(measured)
         out.append(
             {
                 "switch": str(seed["framework_lever"]),
@@ -709,7 +710,9 @@ def _lever_seeded_payload(payload: list[Any], levers: list[dict[str, Any]]) -> l
     if not fresh:
         return payload
     log.info("explore: seeding %d framework-rewrite lever variant(s) for attribution", len(fresh))
-    return fresh + list(payload)
+    # A leave-one-out arm only attributes a switch already on, so the arms that could KEEP run before it.
+    attribution = [v for v in fresh if v.get("framework_lever_source") == _LEAVE_ONE_OUT]
+    return [v for v in fresh if v not in attribution] + list(payload) + attribution
 
 
 def _seed_grid_payload(params: dict[str, Any], framework: str, yaml_envs: dict[str, Any]) -> list[Any]:
