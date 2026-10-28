@@ -789,3 +789,11 @@ def test_the_session_package_is_written_into_the_archive_not_the_container(run, 
     entry.main(["run"])
     archive = Path(_session_json(run)) / "archive"
     assert packaged == [archive / PACKAGE_SUBDIR / "s1.zip"] and packaged[0].is_file()
+
+
+def test_write_exit_is_public_and_writes_the_documented_document(tmp_path):
+    from hyperloom.hosted.entry import write_exit
+
+    write_exit(tmp_path, final=True, returncode=3, stop_reason="x")
+
+    assert json.loads((tmp_path / "exit.json").read_text()) == {"final": True, "returncode": 3, "stop_reason": "x"}
