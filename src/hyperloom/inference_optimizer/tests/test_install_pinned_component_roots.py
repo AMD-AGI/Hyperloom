@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX, TraceLens and GEAK revisions."""
+"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX and TraceLens revisions.
+
+Installer-managed tool paths stay out of ``.env``, so a later install cannot read them back as operator overrides.
+"""
 
 from __future__ import annotations
 
@@ -52,7 +55,8 @@ def test_magpie_and_inferencex_paths_stay_out_of_dotenv(tmp_path: Path) -> None:
 def test_tool_roots_in_dotenv_are_left_to_the_operator(tmp_path: Path, managed: bool) -> None:
     """An installer-managed TraceLens/GEAK path leaves .env; one the operator wrote there stays as written.
 
-    A managed path written back would read as an override on the next install once its pin moves.
+    A managed path written back is read as operator input by the next install, and is kept as an override once it no
+    longer canonicalises to the cache root.
     """
     if managed:
         tracelens, geak = tmp_path / "cache" / "TraceLens@0000000", tmp_path / "cache" / "GEAK@0000000"
