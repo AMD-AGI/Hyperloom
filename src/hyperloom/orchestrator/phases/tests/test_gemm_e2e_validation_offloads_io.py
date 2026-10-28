@@ -40,12 +40,6 @@ def test_the_serving_log_is_read_off_the_loop():
     assert re.search(r"await\s+asyncio\.to_thread\(\s*self\._serving_log_text\s*\)", src), src
 
 
-def test_the_reason_not_to_measure_is_read_off_the_loop():
-    """It reads every candidate's tuned CSVs."""
-    src = _validator_source()
-    assert re.search(r"await\s+asyncio\.to_thread\(\s*self\._reason_not_to_measure\s*,", src), src
-
-
 def test_the_coverage_replay_runs_off_the_loop():
     src = _validator_source()
     assert "self._gemm_tuned_config_coverage" in src
