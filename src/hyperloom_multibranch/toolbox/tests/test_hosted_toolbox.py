@@ -32,7 +32,7 @@ from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure import signing
 from hyperloom.measure.hosted_log import STATE_SENT
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
-from hyperloom.measure.sandboxes import BRANCH_ID_KEY, PURPOSE_KEY
+from hyperloom.measure.sandboxes import BRANCH_ID_KEY, DEFAULT_MAX_PARALLEL_TESTS, PURPOSE_KEY
 from hyperloom.measure.tests.hosted_fixtures import FAKE_RUNNER, point_yaml, spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
@@ -56,13 +56,14 @@ from hyperloom_multibranch.contracts.notebook import Role as NotebookRole, Write
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox import hosted_toolbox
-from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, LeaseTuning
+from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, GrantLimits, LeaseTuning
 from hyperloom_multibranch.toolbox.hosted_toolbox import (
     SOURCE_SHA_ENV,
     HostedOptions,
     HostedToolbox,
     HostedToolboxInputs,
     build_hosted_toolbox,
+    parallel_tests_for,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -422,6 +423,31 @@ def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -
     assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3
     with pytest.raises(ValueError, match="a grant of 2 GPUs cannot run a test of TP=4"):
         _toolbox(None, tmp_path, tp=4, grant_limits={**_GRANT, "max_gpus": 2}, sandbox_templates={"runner": "r-g4"})
+
+
+@pytest.mark.parametrize(
+    ("sandboxes", "gpus", "tp", "expected"),
+    [
+        (8, 8, 2, 4),  # the GPUs bound it: 8 // 2
+        (3, 8, 2, 3),  # the sandboxes bound it
+        (8, 7, 2, 3),  # a GPU short of a whole test does not count: 7 // 2
+        (1, 16, 1, 1),
+        (8, 4, 4, 1),
+    ],
+)
+def test_the_parallel_tests_rule_is_the_lesser_of_whole_tests_and_sandboxes(
+    sandboxes: int, gpus: int, tp: int, expected: int
+) -> None:
+    grant = GrantLimits(max_sandboxes=sandboxes, max_gpus=gpus, gpu_hours=1.0, max_runtime_sec=60)
+    assert parallel_tests_for(grant, tp) == expected
+    assert "parallel_tests_for" in hosted_toolbox.__all__
+
+
+def test_the_parallel_tests_rule_without_a_grant_is_the_pools_default_and_refuses_a_grant_too_small() -> None:
+    assert parallel_tests_for(None, 8) == DEFAULT_MAX_PARALLEL_TESTS
+    small = GrantLimits(max_sandboxes=8, max_gpus=2, gpu_hours=1.0, max_runtime_sec=60)
+    with pytest.raises(ValueError, match="a grant of 2 GPUs cannot run a test of TP=4"):
+        parallel_tests_for(small, 4)
 
 
 def test_the_rule_pack_digest_is_the_sessions(tmp_path: Path, reading_pack) -> None:

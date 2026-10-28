@@ -65,6 +65,7 @@ __all__ = [
     "HostedToolbox",
     "HostedToolboxInputs",
     "build_hosted_toolbox",
+    "parallel_tests_for",
 ]
 
 #: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads; the others are the sub-runs'.
@@ -283,8 +284,16 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
 
 
-def _parallel_tests(grant: GrantLimits | None, tp: int) -> int:
-    """At most as many tests at once as the grant's GPUs and sandboxes allow; the pool's default without a grant."""
+def parallel_tests_for(grant: GrantLimits | None, tp: int) -> int:
+    """How many tests of TP=``tp`` may run at once under ``grant``: ``min(max_gpus // tp, max_sandboxes)``, at least 1.
+
+    This is the one source of the grant's parallel-tests rule agreed in #112 section 1a; the hosted toolbox sizes its
+    measurement pool with it, and anything else that needs the number (a scheduler's cap, a planner) calls it rather
+    than repeating the arithmetic. Without a grant it is the pool's default.
+
+    Raises:
+        ValueError: When the grant has fewer GPUs than one test of TP=``tp`` needs.
+    """
     if grant is None:
         return DEFAULT_MAX_PARALLEL_TESTS
     if grant.max_gpus < tp:
@@ -354,7 +363,7 @@ def build_hosted_toolbox(
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
-    parallel = _parallel_tests(grant, inputs.tp)
+    parallel = parallel_tests_for(grant, inputs.tp)
     config = HostedConfig(
         session_dir=directory,
         run_id=inputs.run_id,
