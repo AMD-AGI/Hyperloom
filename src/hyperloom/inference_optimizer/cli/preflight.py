@@ -1906,7 +1906,6 @@ def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace, ru
         "inferencex_path": runtime.inferencex_path,
         "magpie_path": os.environ.get("MAGPIE_PATH") or None,
         "tracelens_required": tracelens_required,
-        "tracelens_route_hint": "agent" if not no_kernel else ("bypass" if enable_roofline else None),
         "provider_mode": _resolved_provider_mode(runtime.resolved_urls),
     }
     statuses = {str(step.get("status") or "") for step in event["ext"]["steps"]}

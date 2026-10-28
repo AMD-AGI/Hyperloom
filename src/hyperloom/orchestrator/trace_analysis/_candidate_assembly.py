@@ -467,8 +467,8 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
             member["vendor_playbook_group_id"] = group_id
             # Namespaced (not bare "aggregate_gpu_pct"): that name is already
             # an existing task_group-level concept (the sum of GPU% across a
-            # task_group's rows -- see tracelens_skill_runner.py and
-            # _bypass_report.py), stamped on task_group dicts, not candidate
+            # task_group's rows -- see tracelens_skill_runner.py),
+            # stamped on task_group dicts, not candidate
             # rows. Candidate rows don't carry it today, so reusing the name
             # here is currently harmless, but any future code that flattens
             # a task_group onto its candidate rows would silently change

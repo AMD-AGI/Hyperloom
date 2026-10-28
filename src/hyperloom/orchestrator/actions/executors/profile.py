@@ -281,10 +281,9 @@ def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
 
     Deliberately written *outside* ``trace_dir``: the resolver's ``_trace_candidates`` rglobs that directory for
     anything ending in ``_TRACE_EXTS``, which includes a bare ``.json``, so a certificate stored among the traces
-    becomes a trace candidate itself. That is not hypothetical -- it makes ``require_single_rank`` resolution
-    return nothing (a second unranked candidate) and lets an 82 KB certificate outrank a small real trace in the
-    size fallback. A subdirectory would not help, the scan is recursive. The name carries ``trace_dir``'s so the
-    ``torch_trace`` and ``capture_traces`` certificates of one workspace do not collide.
+    becomes a trace candidate itself and can outrank a small real trace in the size fallback. A subdirectory would
+    not help, the scan is recursive. The name carries ``trace_dir``'s so the ``torch_trace`` and ``capture_traces``
+    certificates of one workspace do not collide.
     """
     target = trace_dir.parent / f"{trace_dir.name}.selfcert.json"
     try:

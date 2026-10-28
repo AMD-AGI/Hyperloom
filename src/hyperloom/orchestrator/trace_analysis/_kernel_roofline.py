@@ -15,8 +15,7 @@ from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 from ._kernel_classification import _FLYDSL_SCAN_BYTES
 
-# Canonical roofline_source provenance enum, shared with the bypass route so both
-# emit the field from one vocabulary (see _roofline_source for the value ladder).
+# Canonical roofline_source provenance enum (see _roofline_source for the value ladder).
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL, PLACEHOLDER as _RL_PLACEHOLDER
 from ._trace_shapes import _dtypes_from_shapes, _shape_call_entries
 from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode

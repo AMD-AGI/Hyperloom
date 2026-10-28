@@ -718,7 +718,7 @@ class _RenderMixin:
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
             "full report not inlined; see profiler_digest above or call the "
-            f"{show_analysis_md} context tool for the verbatim analysis.md.)"
+            f"{show_analysis_md} context tool for the TraceLens report.)"
         )
 
     def _format_profiler_digest(self) -> str:
