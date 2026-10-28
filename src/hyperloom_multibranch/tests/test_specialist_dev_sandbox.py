@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -15,7 +16,7 @@ from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, UsageSource
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
@@ -115,10 +116,13 @@ class _Logs:
     """A branch log and nothing else: the dev sandbox writes no test, claim or judgement."""
 
     def __init__(self) -> None:
-        self.entries = []
+        self.entries, self.usage = [], []
 
     async def append_branch_log(self, entry):
         self.entries.append(entry)
+
+    async def record_llm_usage(self, usage):
+        self.usage.append(usage)
 
 
 class _Server:
@@ -336,6 +340,28 @@ async def test_a_lease_term_is_short_or_long(rig):
     server = rig.build().server
     with pytest.raises(Exception, match="term"):
         await server.call("dev_sandbox_lease", term="forever")
+
+
+async def test_the_llm_spend_forge_ledgers_under_a_lease_is_the_branchs_once_it_ends(rig):
+    built = rig.build()
+    granted = await built.server.call("dev_sandbox_lease", term="long", minutes=60)
+    root = Path(granted["root"])
+    for run, cost in (("fuse-1", 1.25), ("loop-2/nested", 0.5)):
+        (root / run).mkdir(parents=True)
+        ledger = {"input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 7, "total_cost_usd": cost}
+        (root / run / "llm_usage.json").write_text(json.dumps(ledger))
+    await built.server.call("dev_sandbox_release")
+    (usage,) = rig.logs.usage
+    assert (usage.branch, usage.source, usage.cost_usd) == (B1, UsageSource.SPECIALIST, 1.75)
+    assert (usage.tokens.input, usage.tokens.output, usage.tokens.cache_read) == (200, 40, 14)
+    assert usage.launch == "forge:lease-1"
+
+
+async def test_a_lease_whose_tools_kept_no_ledger_records_no_spend(rig):
+    built = rig.build()
+    await built.server.call("dev_sandbox_lease")
+    await built.server.call("dev_sandbox_release")
+    assert rig.logs.usage == []
 
 
 async def test_the_watch_reclaims_without_a_call(rig):

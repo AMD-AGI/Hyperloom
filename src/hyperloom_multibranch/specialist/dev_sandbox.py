@@ -17,12 +17,14 @@ releases whatever is left.
 Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards,
 importing the branch worktree's source, at a lower CPU priority, with every JIT and kernel cache in the lease's root:
 a cache beside the package it compiles for would be in the worktree, and its files in the next patch. Nothing a dev
-sandbox measures is written as a test, claim or judgement; its only records are branch-log notices.
+sandbox measures is written as a test, claim or judgement; its records are branch-log notices and, when the lease
+ends, the LLM spend the Forge runs under its root kept in their ledgers, charged to the branch.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -40,8 +42,9 @@ from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
-from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, LlmUsage, LlmUsageRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, UsageSource
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     BranchLease,
@@ -118,6 +121,8 @@ class DevSandbox(AgentSandbox, Protocol):
 
 class BranchLogAppender(Protocol):
     async def append_branch_log(self, entry: BranchLogEntry) -> BranchLogRecord: ...
+
+    async def record_llm_usage(self, usage: LlmUsage) -> LlmUsageRecord: ...
 
 
 #: The sandbox of a branch's lease.
@@ -346,6 +351,11 @@ class DevLeases:
             await self._toolbox.release_branch_sandbox(held.lease.lease_id)
         minutes = (self._clock() - held.granted) / MINUTE
         await self._note(branch, f"dev sandbox ended after {minutes:.1f} min: {reason}")
+        spent = await asyncio.to_thread(forge_spend, held.lease.root)
+        if spent is not None:
+            await self._blackboards(branch).record_llm_usage(
+                LlmUsage(branch, UsageSource.SPECIALIST, spent[0], spent[1], f"forge:{held.lease.lease_id}")
+            )
 
     def _watching(self) -> None:
         if self._watch is None or self._watch.done():
@@ -367,6 +377,25 @@ class DevLeases:
     def _ports(self, slot: int) -> tuple[int, int]:
         first = self._limits.port + slot * self._limits.ports
         return first, first + self._limits.ports - 1
+
+
+#: The ledger Forge's loop and FlyDSL rewrite keep in each experiments directory (``kernelforge.tracker.usage_ledger``):
+#: the running total of the LLM calls made from it.
+FORGE_LEDGER = "llm_usage.json"
+
+
+def forge_spend(root: Path) -> tuple[float, TokenCounts] | None:
+    """What the Forge runs under ``root`` spent on LLM calls, summed over their ledgers; ``None`` with no ledger."""
+    ledgers = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(root.rglob(FORGE_LEDGER))]
+    if not ledgers:
+        return None
+    tokens = TokenCounts(
+        input=sum(int(ledger.get("input_tokens", 0)) for ledger in ledgers),
+        output=sum(int(ledger.get("output_tokens", 0)) for ledger in ledgers),
+        cache_read=sum(int(ledger.get("cache_read_input_tokens", 0)) for ledger in ledgers),
+        cache_write=sum(int(ledger.get("cache_creation_input_tokens", 0)) for ledger in ledgers),
+    )
+    return sum(float(ledger.get("total_cost_usd", 0.0)) for ledger in ledgers), tokens
 
 
 def _report_failure(task: asyncio.Task[None]) -> None:
