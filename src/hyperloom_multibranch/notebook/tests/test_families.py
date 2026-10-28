@@ -97,3 +97,15 @@ def test_a_warm_start_replay_is_a_family_of_its_own_and_a_family_reads_as_a_labe
     assert replay == Family(Component.WARM_START.value, Mechanism.OTHER, SOURCE)
     assert Family("KV cache", Mechanism.PRECISION, CONFIG).label == "KV cache · quantization precision · config"
     assert Family("gemm", Mechanism.FUSION, None).label == "gemm · fusion · any layer"
+
+
+@pytest.mark.parametrize(
+    "family", [Family("KV cache", Mechanism.PRECISION, CONFIG), Family("moe", Mechanism.OTHER, None)]
+)
+def test_a_label_reads_back_as_its_family(family: Family) -> None:
+    assert Family.from_label(family.label) == family
+
+
+@pytest.mark.parametrize("label", ["not a family", "gemm · sprinkling · config", "gemm · fusion · nowhere"])
+def test_a_label_no_family_has_reads_as_none(label: str) -> None:
+    assert Family.from_label(label) is None

@@ -7,8 +7,8 @@
 branches, drawn for none, :func:`~.menu.in_control`): how many committed, the gain their merged commits brought per GPU
 hour, and how many fell on a family the session's model type had tried fewer than :data:`~.menu.EXPLORE_TRIALS` times
 before, the exploring ones, with what those committed. A test whose branch was drawn a menu before it, the control's as
-well, is read against the last one: whether its family was among the first :data:`TOP` and, where the menu listed it,
-the odds it gave beside whether the test committed, the menu's calibration. A control branch's menu was drawn but
+well, is read against the last one: whether a line among the first :data:`TOP` covers its family and, where a line
+does, the odds it gave beside whether the test committed, the menu's calibration. A control branch's menu was drawn but
 never shown, so how often its tests fall on the top families anyway is what the menu's own share is read against.
 
 Each session's outcomes are kept beside the archive (:class:`OutcomePool`), so the studies add them up over sessions.
@@ -26,6 +26,7 @@ from pathlib import Path
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.notebook.families import Family
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.notebook.rsi.family_stats import family_stats
@@ -128,8 +129,9 @@ def _last_menu(menus: Sequence[LoggedMenu], branch: str, before: float) -> Logge
     return next((menu for menu in reversed(menus) if menu.branch == branch and menu.at <= before), None)
 
 
-def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, label: str) -> GroupOutcome:
-    """One explore test of the family ``label``, read against the menu ``shown`` before it, if any."""
+def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, family: Family) -> GroupOutcome:
+    """One explore test of ``family``, read against the menu ``shown`` before it, if any: a line lists the test when
+    its family covers the test's, as the line of an op family no test had acted on covers every test of that op."""
 
     found = GroupOutcome(
         tests=1,
@@ -139,10 +141,12 @@ def _test(committed: bool, exploring: bool, shown: LoggedMenu | None, label: str
     )
     if shown is None:
         return found
-    found = dataclasses.replace(found, after_menu=1, on_top=int(label in shown.families[:TOP]))
-    if label not in shown.families or len(shown.odds) != len(shown.families):
+    lines = [Family.from_label(label) for label in shown.families]
+    listing = [index for index, line in enumerate(lines) if line is not None and line.covers(family)]
+    found = dataclasses.replace(found, after_menu=1, on_top=int(any(index < TOP for index in listing)))
+    if not listing or len(shown.odds) != len(shown.families):
         return found
-    odds = shown.odds[shown.families.index(label)]
+    odds = shown.odds[listing[0]]
     return dataclasses.replace(
         found, listed=1, listed_commits=int(committed), odds_sum=odds, squared_error=(odds - committed) ** 2
     )
@@ -179,7 +183,7 @@ def specialist_outcomes(
         if family is not None:
             exploring = tried.get(family.label, 0.0) < EXPLORE_TRIALS
             shown = _last_menu(menus, branch, record.requested_at)
-            add(branch, _test(record.commit_id is not None, exploring, shown, family.label))
+            add(branch, _test(record.commit_id is not None, exploring, shown, family))
     for item in snapshot.committed:
         if item.branch in group and item.merged_into is not None:
             add(item.branch, GroupOutcome(merged_gain_pct=item.gain_pct))

@@ -13,20 +13,22 @@ import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, OpShares, amdahl_ceiling_pct
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LearningKind
 from hyperloom_multibranch.notebook.families import Family, Mechanism
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import MENU_NOTE, CrossSessionBriefing
-from hyperloom_multibranch.notebook.rsi.family_stats import FamilyStat
+from hyperloom_multibranch.notebook.rsi.family_stats import FamilyStat, base_rate
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.menu import (
+    HOT_OP_SHARE_PCT,
     MENU_ITEMS,
     MENU_LOG,
     ON_INTEGRATION,
     TRIED_HERE,
+    UNTOUCHED,
     DirectionMenus,
     MenuEvidence,
     MenuLog,
@@ -97,6 +99,22 @@ def test_the_last_line_explores_the_least_tried_family_with_the_most_within_reac
     assert len(menu.items) == MENU_ITEMS + 1 and {item.family for item in menu.items[:MENU_ITEMS]} == set(strong)
     assert menu.items[-1].family == far and menu.items[-1].exploring
     assert menu.items[-1].render().startswith("to explore, weak far · parameter tuning · config: commit odds 0.")
+
+
+def test_a_hot_op_family_no_test_or_claim_acted_on_is_offered_at_its_base_rate(snapshot: NotebookSnapshot) -> None:
+    shares = OpShares("c1", "j1", "p1", {"fused_moe_kernel": 30.0, "paged_attention_ll4mi": 40.0, "rmsnorm": 2.0})
+    profiled = dataclasses.replace(snapshot, op_shares={"c1": shares})
+
+    menu = direction_menu(profiled, "s1", "c1", MenuEvidence(), metric=METRIC)
+
+    found = {item.family: item for item in menu.items}
+    moe = found[Family("moe", Mechanism.OTHER, None)]
+    assert (moe.tests, moe.odds) == (0.0, pytest.approx(base_rate(None)))
+    assert moe.gain_pct <= amdahl_ceiling_pct(30.0)
+    assert moe.marks == (f"{UNTOUCHED}; its ops take 30% of this commit's profile",)
+    # SPLIT, an attention family, was tested, so attention gets no open line; norm's 2% is under the bar.
+    assert SPLIT in found and Family("attention", Mechanism.OTHER, None) not in found
+    assert 2.0 < HOT_OP_SHARE_PCT and not any(item.family.target == "norm" for item in menu.items)
 
 
 def test_a_claims_note_says_its_familys_odds_and_its_tests_on_the_claimed_commit(snapshot: NotebookSnapshot) -> None:
