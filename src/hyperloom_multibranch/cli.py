@@ -62,9 +62,9 @@ A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
 run whose ``session.json`` names a session, it finishes that session as ``final-only`` does. It tells the host the run
-is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment or the runner cache
-keeps a session from running, with exit code 2 for a refused spec or session and 1 otherwise; a crash leaves no
-``exit.json``, and the host starts the run again.
+is over -- ``final: true`` in ``exit.json`` -- once CLOSE ran, and when the spec, the environment, a missing package of
+the ``hosted`` extra or the runner cache keeps a session from running, with exit code 2 for a refused spec or session
+and 1 otherwise; a crash leaves no ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
 manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
@@ -165,6 +165,7 @@ DEFAULT_MAX_BRANCHES = 4
 DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+log = logging.getLogger(__name__)
 #: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
 RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
 #: The GPU types Magpie has a benchmark script of their own for. ``hyperloom optimize`` runs mi308x and mi325x on
@@ -691,6 +692,9 @@ def hosted_run() -> int:
         return _not_run(host.state_dir, EXIT_USAGE, exc)
     except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
+    except ImportError as exc:
+        log.exception("hosted run: a module the session needs is not installed")
+        return _not_run(host.state_dir, EXIT_FAILED, exc)
     if start.stop_after_sec is not None:
         arm_grant_stop(max(0.0, start.stop_after_sec))
     try:
@@ -705,7 +709,8 @@ def hosted_run() -> int:
 
 def _hosted_start(host: HostInfo) -> HostedStart:
     """A new session of the spec, or ``final-only`` over the session ``session.json`` names; raises ValueError when
-    the spec or that session is refused, and what :func:`ready_session` raises."""
+    the spec or that session is refused, ImportError when a package of the ``hosted`` extra is missing, and what
+    :func:`ready_session` raises."""
 
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     previous = recorded_session(host.state_dir)

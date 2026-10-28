@@ -1170,16 +1170,35 @@ def test_a_runner_cache_that_cannot_be_built_ends_the_run_for_good(host: Host, m
     assert "is not a commit of the source" in str(document["error"])
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_missing_package_of_the_hosted_extra_ends_the_run_for_good_naming_it(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delitem(sys.modules, "hyperloom_multibranch.toolbox.hosted_toolbox", raising=False)
+    monkeypatch.delitem(sys.modules, "hyperloom.sandbox.e2b", raising=False)
+    monkeypatch.setitem(sys.modules, "e2b", None)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert "e2b" in str(document["error"])
+    assert agent_cli == [] and not any(host.workspace.iterdir())
+
+
+@pytest.mark.parametrize(
+    "crash", [RuntimeError("the scheduler crashed"), ModuleNotFoundError("No module named 'e2b'", name="e2b")]
+)
 @pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_hosted_session_that_crashes_leaves_the_host_to_start_the_run_again(
-    host: Host, monkeypatch: pytest.MonkeyPatch
+    crash: Exception, host: Host, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def crashes(*args: object) -> int:
-        raise RuntimeError("the scheduler crashed")
+        raise crash
 
     monkeypatch.setattr(cli, "run_session", crashes)
 
-    with pytest.raises(RuntimeError, match="crashed"):
+    with pytest.raises(type(crash)):
         cli.main(["hosted", "run"])
 
     assert not (host.state_dir / "exit.json").exists()
