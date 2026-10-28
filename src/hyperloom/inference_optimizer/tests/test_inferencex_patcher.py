@@ -221,6 +221,12 @@ async def benchmark_serving_main(...):
                                          logprobs=logprobs,
                                          best_of=best_of,
     )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0)
+    return parser
 """
 
 
@@ -1177,3 +1183,148 @@ def test_gate_path_falls_back_to_the_legacy_location(tmp_path: Path) -> None:
     )
 
     assert benchmark_serving_path_in(tmp_path) == tmp_path / "utils" / "bench_serving" / "benchmark_serving.py"
+
+
+# Warmup-round seed: the discarded warmup and the measured round run on one server, and with the client's fixed
+# default seed both send the same prompts, so the measured round is served from the warmup's prefix cache.
+_BS_SEED_LEGACY_LINE = '    parser.add_argument("--seed", type=int, default=0)'
+
+
+def _parsed_seed(text: str, argv: list[str]) -> int:
+    """Run the ``--seed`` line found in ``text`` through argparse, the way the client does."""
+    import argparse
+
+    seed_line = next(ln for ln in text.splitlines() if '"--seed"' in ln)
+    scope: dict[str, Any] = {"argparse": argparse}
+    exec("parser = argparse.ArgumentParser()\n" + seed_line.strip(), scope)
+    return scope["parser"].parse_args(argv).seed
+
+
+def test_bench_seed_patch_lets_the_round_choose_the_default_seed(fake_inferencex_with_benchmark_serving, monkeypatch):
+    """Unset keeps upstream's 0, so every measured round stays comparable with the ones recorded before the patch."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        BENCH_SEED_ENV,
+        ensure_benchmark_serving_seed_patched,
+    )
+
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
+    assert ensure_benchmark_serving_seed_patched(fake_inferencex_with_benchmark_serving) is True
+    text = src.read_text(encoding="utf-8")
+    assert _BS_SEED_LEGACY_LINE not in text
+
+    monkeypatch.delenv(BENCH_SEED_ENV, raising=False)
+    assert _parsed_seed(text, []) == 0
+    monkeypatch.setenv(BENCH_SEED_ENV, "")
+    assert _parsed_seed(text, []) == 0
+    monkeypatch.setenv(BENCH_SEED_ENV, "1")
+    assert _parsed_seed(text, []) == 1
+    assert _parsed_seed(text, ["--seed", "5"]) == 5, "an explicit --seed must still win over the env"
+
+
+def test_bench_seed_patch_is_idempotent_and_leaves_the_profile_patch_alone(fake_inferencex_with_benchmark_serving):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_serving_seed_patched,
+    )
+
+    src = fake_inferencex_with_benchmark_serving / "utils" / "bench_serving" / "benchmark_serving.py"
+    assert ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving) is True
+    assert ensure_benchmark_serving_seed_patched(fake_inferencex_with_benchmark_serving) is True
+    snapshot = src.read_text(encoding="utf-8")
+    assert ensure_benchmark_serving_seed_patched(fake_inferencex_with_benchmark_serving) is True
+    assert ensure_benchmark_serving_patched(fake_inferencex_with_benchmark_serving) is True
+    assert src.read_text(encoding="utf-8") == snapshot
+    assert snapshot.count("HYPERLOOM_BENCH_SEED") == 1
+    assert snapshot.count("PROFILE_EXTRA_BODY") == 1
+
+
+def test_bench_seed_patch_refuses_to_guess_when_the_seed_line_moved(tmp_path):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_serving_seed_patched,
+    )
+
+    bench_dir = tmp_path / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    src = bench_dir / "benchmark_serving.py"
+    src.write_text(_BS_UPSTREAM_FIXTURE.replace(_BS_SEED_LEGACY_LINE, "    parser.add_argument('--seed', default=0)"))
+
+    assert ensure_benchmark_serving_seed_patched(tmp_path) is False
+    assert "HYPERLOOM_BENCH_SEED" not in src.read_text(encoding="utf-8")
+
+
+def test_bench_seed_patch_follows_the_infx_move(tmp_path):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_serving_seed_patched,
+    )
+
+    real, shim = _write_infx_layout(tmp_path)
+
+    assert ensure_benchmark_serving_seed_patched(tmp_path) is True
+    assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")
+    assert shim.read_text(encoding="utf-8") == _BS_FORWARDING_SHIM
+
+
+def test_bench_seed_anchor_is_part_of_the_contract(tmp_path):
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        ensure_benchmark_serving_seed_patched,
+        failed_patch_anchors_in,
+        verify_patch_anchors,
+    )
+
+    real, _shim = _write_infx_layout(tmp_path)
+
+    pristine = next(s for s in verify_patch_anchors(tmp_path) if s.name == "bench_seed")
+    assert pristine.path == real and pristine.hits == 1 and not pristine.patched
+    assert ensure_benchmark_serving_seed_patched(tmp_path) is True
+    patched = next(s for s in verify_patch_anchors(tmp_path) if s.name == "bench_seed")
+    assert patched.patched and patched.ok
+
+    real.write_text(_BS_UPSTREAM_FIXTURE.replace(_BS_SEED_LEGACY_LINE, "    pass"), encoding="utf-8")
+    assert [s.name for s in failed_patch_anchors_in(tmp_path)] == ["bench_seed"]
+
+
+def test_apply_round_seed_marks_only_the_discarded_round():
+    """A seed inherited from the orchestrator's own env must not leak into a measured round."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        BENCH_SEED_ENV,
+        WARMUP_ROUND_SEED,
+        apply_round_seed,
+    )
+
+    warm = apply_round_seed({"A": "1"}, warmup=True)
+    assert warm == {"A": "1", BENCH_SEED_ENV: str(WARMUP_ROUND_SEED)}
+    assert WARMUP_ROUND_SEED != 0
+    assert apply_round_seed({"A": "1", BENCH_SEED_ENV: "7"}, warmup=False) == {"A": "1"}
+
+
+def test_baseline_hook_patches_the_seed_of_the_checkout_it_runs(tmp_path):
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_full_lib(ix_root)
+    real, _shim = _write_infx_layout(ix_root)
+
+    out = BaselineExecutor()._after_materialize_config(
+        _write_baseline_config(tmp_path, ix_root, run_eval=False), tmp_path / "out"
+    )
+
+    assert out is None
+    assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")
+
+
+def test_grid_preparation_patches_the_seed_too(tmp_path, monkeypatch):
+    """Explore and sweep never pass through the baseline hook, and their warmups need the patch just as much."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import _workload_envs
+    from hyperloom.orchestrator.actions.executors.benchmark_config import prepare_benchmark_runtime
+
+    ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_full_lib(ix_root)
+    real, _shim = _write_infx_layout(ix_root)
+    config = tmp_path / "variant.yaml"
+    config.write_text(yaml.safe_dump({"benchmark": {"envs": {"RUN_EVAL": "false"}}}), encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(ix_root))
+    monkeypatch.setattr(_workload_envs, "prepare_agentx_runtime", lambda **_kw: None)
+
+    assert prepare_benchmark_runtime(config, {}) is None
+    assert "HYPERLOOM_BENCH_SEED" in real.read_text(encoding="utf-8")

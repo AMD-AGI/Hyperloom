@@ -64,7 +64,7 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
-from .benchmark_config import prepare_benchmark_runtime
+from .benchmark_config import apply_benchmark_round_seed, prepare_benchmark_runtime
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
@@ -398,6 +398,9 @@ class GridLaunch:
     ready_server_log: str | None = None
     warmup_before_measure: bool | None = None
     lifecycle_boot_only: bool = False
+    # The grid's measured round is itself a caller's discarded warmup, so it must not send the prompts of the
+    # measured round that follows it on the same server.
+    warmup_round: bool = False
 
 
 @dataclass(frozen=True)
@@ -423,6 +426,7 @@ class MagpieRound:
     silence_timeout_sec: float | None = None
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
+    warmup: bool = False
 
 
 def _run_magpie(
@@ -458,6 +462,7 @@ def _run_magpie(
     preparation_failure = prepare_benchmark_runtime(config_path, env)
     if preparation_failure is not None:
         return preparation_failure.returncode, "", preparation_failure.error
+    apply_benchmark_round_seed(config_path, env, warmup=bench_round.warmup)
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = bench_round.result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
@@ -1021,6 +1026,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
                 cwd=str(run.output_root),
                 result_dir=run.launch.result_dir,
                 session_deadline_sec=run.stop.session_deadline_sec,
+                warmup=True,
             ),
         )
     except subprocess.TimeoutExpired as exc:
@@ -1177,6 +1183,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             cwd=str(run.output_root),
             result_dir=None,
             session_deadline_sec=run.stop.session_deadline_sec,
+            warmup=True,
         ),
     )
     log.info(
@@ -1213,6 +1220,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
                 silence_timeout_sec=run.silence_timeout_sec,
                 server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
                 session_deadline_sec=run.stop.session_deadline_sec,
+                warmup=run.launch.warmup_round,
             ),
         )
     except subprocess.TimeoutExpired as exc:

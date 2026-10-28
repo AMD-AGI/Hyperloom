@@ -107,6 +107,7 @@ from ._workload_envs import (
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_lib_eval_start_patched,
+    ensure_benchmark_serving_seed_patched,
     ensure_eval_probe_patched,
     ensure_eval_unbound_outputs_patched,
     eval_probe_targets_exist,
@@ -116,6 +117,7 @@ from ._inferencex_patcher import (
 from ._git import _git_head_sha
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
+from .benchmark_config import apply_benchmark_round_seed
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
@@ -2646,7 +2648,13 @@ class BenchmarkRunExecutor:
         warmup_eval = True if replayed and not defer_accuracy else None
         # Each warmup starts a fresh benchmark cap; the session deadline never resets.
         warmup_result = await self._run_guarded_round(
-            attempt, ROUND_WARMUP, warmup_dir, port=lifecycle["port"], cleanup=False, run_eval=warmup_eval
+            attempt,
+            ROUND_WARMUP,
+            warmup_dir,
+            port=lifecycle["port"],
+            cleanup=False,
+            run_eval=warmup_eval,
+            warmup_round=True,
         )
         if warmup_result.get("status") != "succeeded":
             # Warmup failure almost certainly recurs, so skip the measured round.
@@ -3033,6 +3041,8 @@ class BenchmarkRunExecutor:
             warm_dir.mkdir(parents=True, exist_ok=True)
             warm_cmd = [str(warm_dir) if c == str(round_.output_dir) else c for c in round_.cmd]
             warm_env = dict(round_.env)
+            # The pass runs on the server the measured pass reuses, so it must not send the measured prompts.
+            apply_benchmark_round_seed(round_.config_path, warm_env, warmup=True)
             warm_env["RESULT_DIR"] = str(warm_dir)
             warm_env["EVAL_RESULT_DIR"] = str(warm_dir / "eval_output")
             warm_env["SERVER_LOG"] = str(warm_dir / "server.log")
@@ -3171,8 +3181,9 @@ class BenchmarkRunExecutor:
         config_path: Path,
         output_dir: Path,
         server_already_ready: bool = False,
+        warmup_round: bool = False,
     ) -> dict[str, Any]:
-        """Run one Magpie benchmark subprocess and parse its result."""
+        """Run one Magpie benchmark subprocess and parse its result; ``warmup_round`` marks a discarded round."""
         from ._multi_node_env import (
             is_multi_node,
             log_mn_banner,
@@ -3187,6 +3198,7 @@ class BenchmarkRunExecutor:
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         env.update(magpie_remote_env())
+        apply_benchmark_round_seed(config_path, env, warmup=warmup_round)
         ctx_extra = getattr(attempt.ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
@@ -3757,6 +3769,9 @@ class BaselineExecutor(BenchmarkRunExecutor):
                 return {"status": "failed", "error_class": "inferencex_checkout_invalid", "error": invalid}
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
+        # Best-effort: without it the warmup round pre-fills the measured round's prefix cache, which inflates the
+        # anchor but never breaks a round.
+        ensure_benchmark_serving_seed_patched(Path(ix_root) if ix_root else None)
         # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
