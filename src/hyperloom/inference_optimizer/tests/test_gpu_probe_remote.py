@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from hyperloom.inference_optimizer.gpu_types import parse_gpu_type
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
 
 
@@ -215,10 +216,10 @@ def test_no_handoff_returns_none(monkeypatch):
 
 def test_parse_gpu_type_prefers_specific_tag():
     # gcnArchName fallback resolves gfx942 -> mi300x runner.
-    assert gpu_probe._parse_gpu_type("gfx942:sramecc+:xnack-") == "mi300x"
+    assert parse_gpu_type("gfx942:sramecc+:xnack-") == "mi300x"
     # MI325X is not shadowed by the MI300X substring rule.
-    assert gpu_probe._parse_gpu_type("AMD Instinct MI325X") == "mi325x"
-    assert gpu_probe._parse_gpu_type("nothing here") is None
+    assert parse_gpu_type("AMD Instinct MI325X") == "mi325x"
+    assert parse_gpu_type("nothing here") is None
 
 
 def test_a_failing_state_build_propagates(monkeypatch):
@@ -231,6 +232,6 @@ def test_a_failing_state_build_propagates(monkeypatch):
 
 
 def test_parse_gpu_type_preserves_exact_r9700_for_topology_validation():
-    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
-    assert gpu_probe._parse_gpu_type("AMD Radeon AI PRO R9700S") is None
-    assert gpu_probe._parse_gpu_type("gfx1201") is None
+    assert parse_gpu_type("AMD Radeon AI PRO R9700") == "r9700"
+    assert parse_gpu_type("AMD Radeon AI PRO R9700S") is None
+    assert parse_gpu_type("gfx1201") is None

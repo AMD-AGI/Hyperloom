@@ -14,8 +14,8 @@ from ..grid_server_args import compact_json_server_args
 from ..model_config_utils import _load_model_max_position_embeddings
 
 
-def _explicit_limits(server_args: str, framework: str) -> dict[str, str]:
-    tokens = shlex.split(compact_json_server_args(server_args, framework))
+def _explicit_limits(server_args: str) -> dict[str, str]:
+    tokens = shlex.split(compact_json_server_args(server_args))
     values = {}
     for index, token in enumerate(tokens):
         flag, separator, value = token.partition("=")
@@ -47,7 +47,7 @@ def validate_server_args(args: argparse.Namespace | None, model_path: str) -> No
     checks = [("--max-model-len" if explicit is not None else "$MAX_MODEL_LEN", context, int, native)]
     framework = str(getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")).strip().lower()
     if framework == "vllm":
-        values = _explicit_limits(str(getattr(args, "server_args", None) or ""), framework)
+        values = _explicit_limits(str(getattr(args, "server_args", None) or ""))
         checks.extend(
             [
                 ("vllm --gpu-memory-utilization", values.get("--gpu-memory-utilization"), float, 1),

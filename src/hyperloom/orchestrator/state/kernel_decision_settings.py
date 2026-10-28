@@ -11,6 +11,9 @@ import os
 # Independent bounded budget for integration-fault *attempts* (separate from the REVERT ``max_attempts`` quota).
 _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 
+# Bounded quota of non-fault gate verdicts before a patch without a KEEP is rejected.
+_MAX_INTEGRATE_E2E_ATTEMPTS = 3
+
 # Minimum GPU share for a reusable hot kernel to stay owed work until a backend produces a patch for it.
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 5.0
 

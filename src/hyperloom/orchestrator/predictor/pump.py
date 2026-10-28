@@ -156,13 +156,7 @@ class PredictorPump:
         report_path = state.last_trace_analyze.get("analysis_md_path")
         sites = await asyncio.to_thread(load_source_sites, report_path)
         sidecars = await asyncio.to_thread(load_sidecars, report_path)
-        request = build_request(
-            state,
-            session_id=str(state.session_id or ""),
-            sites=sites,
-            sidecars=sidecars,
-            budget=budget,
-        )
+        request = build_request(state, sites=sites, sidecars=sidecars, budget=budget)
         self._inflight = asyncio.create_task(
             asyncio.to_thread(predict, request, endpoint=conf.endpoint, timeout_sec=conf.timeout_sec)
         )

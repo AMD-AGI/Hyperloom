@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.fusion.gpu_arch import canon_arch
+from kernelforge.tools.gpu_arch import canon_arch
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,

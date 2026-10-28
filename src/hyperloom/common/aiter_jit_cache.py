@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +186,6 @@ def invalidate_jit_cache(
             build_existed=build_existed,
             module_scope=scope,
             module_names=[module.name for module in serving],
-            moved_at=datetime.now(timezone.utc).isoformat(),
         )
         if build_existed or serving:
             rollback_errors = _move_cache(jit_build, backup_dir, serving, record)
@@ -198,15 +196,14 @@ def invalidate_jit_cache(
     return record
 
 
-def _backup_directory(raw: str, src: Path, backup_root: str | Path | None) -> Path | None:
+def _backup_directory(raw: str, src: Path, backup_root: str | Path) -> Path | None:
     if not raw:
         return None
     saved = Path(raw)
     resolved = saved.resolve()
-    if backup_root is not None:
-        root = Path(backup_root).resolve()
-        if resolved == root or not resolved.is_relative_to(root):
-            raise ValueError(f"untrusted jit/build backup path: {saved}")
+    root = Path(backup_root).resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ValueError(f"untrusted jit/build backup path: {saved}")
     if resolved.is_relative_to(src.resolve()) or src.resolve().is_relative_to(resolved):
         raise ValueError(f"JIT backup overlaps the restore destination: {saved}")
     if saved.is_symlink() or not saved.is_dir():
@@ -215,7 +212,7 @@ def _backup_directory(raw: str, src: Path, backup_root: str | Path | None) -> Pa
 
 
 def _restore_inventory(
-    record: dict[str, Any], src: Path, backup_root: str | Path | None, scope: list[str] | None
+    record: dict[str, Any], src: Path, backup_root: str | Path, scope: list[str] | None
 ) -> tuple[Path | None, list[Path]]:
     backup_raw = str(record.get("backup_path") or "")
     build_existed = record.get("build_existed", bool(backup_raw) or record["status"] != "clean")
@@ -236,7 +233,7 @@ def _restore_inventory(
 
 
 def restore_jit_cache(
-    record: dict[str, Any], expected_jit_build_dir: str | Path, backup_root: str | Path | None
+    record: dict[str, Any], expected_jit_build_dir: str | Path, backup_root: str | Path
 ) -> dict[str, Any]:
     """Restore a baseline after validating the entire record and backup inventory.
 

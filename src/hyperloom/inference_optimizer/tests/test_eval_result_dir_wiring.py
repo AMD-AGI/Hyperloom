@@ -22,6 +22,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     parse_eval_results,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie, MagpieRound
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
 _GSM8K_RESULTS = {
@@ -425,6 +426,8 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     assert calls[0][1]["RESULT_DIR"] == str(output_dir / "mn_warmup")
     assert calls[0][1]["EVAL_RESULT_DIR"] == str(output_dir / "mn_warmup" / "eval_output")
     assert calls[1][1]["EVAL_RESULT_DIR"] == str(output_dir / "eval_output")
+    # The pass warms the server the measured pass reuses, so it must not send the measured prompts.
+    assert [env.get(BENCH_SEED_ENV) for _slot, env in calls] == ["1", None]
     # The warmup keeps its eval output in its OWN slot (asserted above) so a measured round never grades against it by
     # accident.
     assert result.get("accuracy") == pytest.approx(0.83)

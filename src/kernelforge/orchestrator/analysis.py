@@ -38,7 +38,7 @@ from kernelforge.orchestrator.analysis_session import (
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
 )
-from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.tools.durable_io import atomic_write_json, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
@@ -298,10 +298,6 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
         digest.update(_sha256(path).encode())
         digest.update(b"\0")
     return digest.hexdigest()
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 _GLOBAL_ARTIFACTS = {
@@ -623,10 +619,10 @@ class AnalysisAgentService:
             case_root = work_root / "cases" / case.directory
             case_root.mkdir(parents=True, exist_ok=True)
             if not (case_root / "case.json").is_file():
-                _atomic_write_json(case_root / "case.json", case.to_dict())
+                atomic_write_json(case_root / "case.json", case.to_dict())
         inventory_path = work_root / "case_inventory.json"
         if not inventory_path.is_file():
-            _atomic_write_json(
+            atomic_write_json(
                 inventory_path,
                 {
                     "analysis_commit": context.analysis_commit,
@@ -635,7 +631,7 @@ class AnalysisAgentService:
             )
         progress_path = work_root / "progress.json"
         if not progress_path.is_file():
-            _atomic_write_json(
+            atomic_write_json(
                 progress_path,
                 {
                     "analysis_commit": context.analysis_commit,
@@ -698,7 +694,7 @@ class AnalysisAgentService:
                 stream.write(json.dumps(provenance_payload, sort_keys=True) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-        _atomic_write_json(
+        atomic_write_json(
             profile_root.parent / "profile_provenance.json",
             {
                 "case_id": case.case_id,
@@ -721,7 +717,7 @@ class AnalysisAgentService:
         case_states = []
         for case in cases:
             case_root = work_root / "cases" / case.directory
-            _atomic_write_json(case_root / "case.json", case.to_dict())
+            atomic_write_json(case_root / "case.json", case.to_dict())
             analysis_path = case_root / "analysis.md"
             profile_root = case_root / "profile"
             has_analysis = cls._nonempty_file(analysis_path)
@@ -753,14 +749,14 @@ class AnalysisAgentService:
             )
 
         status = "READY" if len(completed) == len(cases) else "PARTIAL"
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "case_inventory.json",
             {
                 "analysis_commit": context.analysis_commit,
                 "cases": case_states,
             },
         )
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "progress.json",
             {
                 "analysis_commit": context.analysis_commit,
@@ -774,7 +770,7 @@ class AnalysisAgentService:
                 ],
             },
         )
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "manifest.json",
             {
                 "analysis_commit": context.analysis_commit,
@@ -1004,7 +1000,7 @@ class AnalysisAgentService:
             "changed_source_files": (list(incremental.changed_source_files) if incremental is not None else []),
         }
         if not session.request_path.is_file():
-            _atomic_write_json(session.request_path, request_payload)
+            atomic_write_json(session.request_path, request_payload)
             return
         try:
             durable_request = json.loads(session.request_path.read_text())
@@ -1025,7 +1021,7 @@ class AnalysisAgentService:
             raise AnalysisBundleError("durable analysis request does not match current inputs")
         if retry_published_bundle:
             durable_request["analysis_profiling_enabled"] = self.profiling_enabled
-            _atomic_write_json(session.request_path, durable_request)
+            atomic_write_json(session.request_path, durable_request)
 
     def _publish_session_bundle(
         self,
@@ -1174,7 +1170,7 @@ class AnalysisAgentService:
                 ],
             }
         )
-        _atomic_write_json(
+        atomic_write_json(
             catalog_path,
             {
                 "analysis_commit": workflow.analysis_commit,
@@ -1918,7 +1914,7 @@ Update analysis incrementally:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-        _atomic_write_json(
+        atomic_write_json(
             commit_root / "published.json",
             {
                 "generation_root": generation_root.name,

@@ -883,7 +883,6 @@ class _FakeGpuSpecialistLease:
             "cmd": launch.cmd,
             "cwd": launch.cwd,
             "log_path": launch.log_path,
-            "env_mode": launch.env_mode,
             "stdin_path": launch.stdin_path,
         }
         self.env = dict(launch.env or {})

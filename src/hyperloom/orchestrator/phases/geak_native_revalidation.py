@@ -13,6 +13,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK_FAILED,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
+
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -29,10 +35,6 @@ _ADVISE = "advise"
 
 
 ORIGIN = "geak_native_revalidation"
-
-
-VALIDATED = "validated"
-NO_PROMOTE = "no_promote"
 
 
 def _source_bearing_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -214,7 +216,7 @@ def _finish(coord: Any, review: dict[str, Any], *, status: str, error: str = "",
 
 def finish_invalid_source(coord: Any, error: str) -> None:
     """Settle an undeployable product without invoking GEAK's proxy harness."""
-    _finish(coord, {}, status="fallback_failed", error=error)
+    _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=error)
 
 
 def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: dict[str, Any]) -> None:
@@ -240,13 +242,13 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
             _finish(
                 coord,
                 review,
-                status=NO_PROMOTE,
+                status=REBENCH_NO_PROMOTE,
                 error=str(review.get("reasoning") or "Critic declined source integration"),
             )
             return
         verify_source_artifacts(params)
     except (OSError, ValueError) as exc:
-        _finish(coord, {}, status="fallback_failed", error=str(exc))
+        _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=str(exc))
         return
     task = Task(
         task_id=review["task_id"],
@@ -263,7 +265,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
         stack = coord.shared_state.optimization_stack
         if stack[-1].get("task_id") == task.task_id:
             _record_canonical_adoption(coord, params, coord.shared_state.current_best)
-        _finish(coord, review, status=VALIDATED, measurement=coord.shared_state.current_best)
+        _finish(coord, review, status=REBENCH_VALIDATED, measurement=coord.shared_state.current_best)
         return
     coord.shared_state.geak_pending = {
         **coord.shared_state.geak_pending,
@@ -284,7 +286,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
     _finish(
         coord,
         review,
-        status=VALIDATED if kept else NO_PROMOTE,
+        status=REBENCH_VALIDATED if kept else REBENCH_NO_PROMOTE,
         error=str(result.get("reason") or ""),
         measurement=measurement,
     )

@@ -12,12 +12,14 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FALLBACK,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
     SOURCE_GEAK_AUTHORED_KERNEL,
@@ -1566,80 +1568,37 @@ def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
     assert discovered[0]["provenance"] == "trace_analyze_run"
 
 
-def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
-        record_backend_versions_and_timeline,
-    )
-
-    recorder = _forge_recorder()
-    record_backend_versions_and_timeline(
-        tmp_path,
-        {
-            "kernel_id": "k001",
-            "run_id": "forge-run-1",
-            "status": "ok",
-            "attempts": [
-                {
-                    "attempt_id": "a1",
-                    "backend": "triton",
-                    "status": "failed",
-                    "micro_speedup": 0.9,
-                    "decision": "REVERT",
-                },
-                {
-                    "attempt_id": "a2",
-                    "backend": "aiter",
-                    "status": "success",
-                    "micro_speedup": 1.4,
-                    "decision": "KEEP",
-                },
-            ],
-            "verification": {
-                "best_attempt_id": "a2",
-                "micro_speedup": 1.4,
-                "best_artifact_path": "/w/out.py",
+_CONTROLLER_RESULT = {
+    "macro_cycle": 3,
+    "run_id": "controller-3",
+    "integration": {
+        "results": [
+            {
+                "operator_id": "kernel:forge:rmsnorm:sglang:v1:aiter:mi355x",
+                "status": "kept",
+                "gain_pct": 4.0,
             },
-            "proposal": {"decision": "KEEP"},
-        },
-        recorder=recorder,
-    )
-    recorder.finish(KernelExit(tput_after=1000.0))
-
-    rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]
-    assert [row["attempt_id"] for row in rows] == ["a1", "a2"]
-    assert rows[1]["backend"] == "aiter"
-    assert rows[1]["speedup"] == 1.4
-    assert rows[0]["micro_decision"] == "REVERT"
+            {
+                "operator_id": "kernel:forge:rope:sglang:v1:triton:mi355x",
+                "status": "reverted_e2e_failed",
+                "reason": "no gain",
+            },
+        ]
+    },
+}
 
 
 def test_controller_integrations_are_wired_to_forge_rewrites(tmp_path):
     recorder = _forge_recorder()
     phase = _phase_with_recorder(tmp_path, recorder)
-    phase._record_kernel_rewrite_controller_timeline(
-        {
-            "macro_cycle": 3,
-            "run_id": "controller-3",
-            "integration": {
-                "results": [
-                    {
-                        "operator_id": "kernel:forge:rmsnorm:sglang:v1:aiter:mi355x",
-                        "status": "kept",
-                        "gain_pct": 4.0,
-                    },
-                    {
-                        "operator_id": "kernel:forge:rope:sglang:v1:triton:mi355x",
-                        "status": "reverted_e2e_failed",
-                        "reason": "no gain",
-                    },
-                ]
-            },
-        }
-    )
+    phase._record_kernel_rewrite_controller_timeline(_CONTROLLER_RESULT)
     recorder.finish(KernelExit(tput_after=1000.0))
 
     rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]
+    assert [row["attempt_id"] for row in rows] == ["controller-c3-0", "controller-c3-1"]
     assert [row["name"] for row in rows] == ["rmsnorm", "rope"]
     assert rows[0]["backend"] == "forge"
+    assert rows[0]["backends_tried"] == ["forge"]
     assert rows[0]["speedup"] == 1.04
     assert rows[1]["micro_decision"] == "REVERT"
     assert rows[1]["failure_reason"] == "no gain"
@@ -1648,6 +1607,7 @@ def test_controller_integrations_are_wired_to_forge_rewrites(tmp_path):
     # one field a reader could ask both other routes but never forge.
     assert rows[0]["error_class"] is None
     assert rows[1]["error_class"] == "reverted_e2e_failed"
+    assert assemble_parts(tmp_path)["metadata"]["versions"]["tools"]["forge"]["tool"] == "forge"
 
 
 def test_gemm_and_fusion_handlers_record_their_forge_lanes(tmp_path):

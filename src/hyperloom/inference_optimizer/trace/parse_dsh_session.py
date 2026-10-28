@@ -15,7 +15,7 @@ from hyperloom.common.deepseek_session import step_usage, turn_end_failure
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.fs_utils import read_text_below_nofollow
 
-from ._row_utils import coerce_optional_int
+from hyperloom.common.coerce import to_int
 from .agent_trace import AgentTrace
 from .parse_usage import _json_objects, _summarize_tool_input, normalize_usage
 
@@ -60,7 +60,7 @@ def _session_records(home: Path, path: Path) -> list[dict[str, Any]]:
 def _is_root(records: list[dict[str, Any]]) -> bool:
     """Whether a session is the run's own rather than a subagent's (``delegationDepth`` 0)."""
     header = records[0] if records and records[0].get("type") == "session" else {}
-    return not coerce_optional_int(header.get("delegationDepth"))
+    return not to_int(header.get("delegationDepth"))
 
 
 def _data(record: dict[str, Any], kind: str) -> dict[str, Any]:

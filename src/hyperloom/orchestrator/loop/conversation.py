@@ -18,14 +18,14 @@ from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
+from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from hyperloom.common.timeutil import parse_iso_unix_or_zero
 from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -402,7 +402,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             lanes, expires_at = lanes_by_task.get(task.task_id, ([], ""))
             gpus = gpus_by_task.get(task.task_id, [])
             params = task.params or {}
-            started = parse_iso_unix_or_zero(task.updated_at)
+            started = to_unix(task.updated_at, 0.0)
             running_sec = max(0.0, now_unix - started) if started > 0 else 0.0
             parts = [
                 f"  - task_id={task.task_id}",
@@ -419,7 +419,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if task.lease_ttl_sec:
                 parts.append(f"lease_ttl_sec={task.lease_ttl_sec}")
             if expires_at:
-                exp_unix = parse_iso_unix_or_zero(expires_at)
+                exp_unix = to_unix(expires_at, 0.0)
                 if exp_unix > 0:
                     parts.append(f"lease_expires_in_sec={int(exp_unix - now_unix)}")
             if lanes:
@@ -473,17 +473,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_analysis_reader(self) -> str:
         """Return the latest TraceLens analysis.md snapshot text."""
-        blob = self.shared_state._format_analysis_md_full()
-        if blob and blob.strip():
-            return blob
-        # Fallback: read the path recorded on last_trace_analyze.
         lta = self.shared_state.last_trace_analyze or {}
+        text = lta.get("analysis_md_text") or ""
+        if text:
+            return strip_base64_data_urls(text)
         path = str(lta.get("analysis_md_path") or "")
         if path:
             try:
                 from pathlib import Path as _Path
 
-                return _Path(path).read_text(encoding="utf-8")
+                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
             except OSError as exc:
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"

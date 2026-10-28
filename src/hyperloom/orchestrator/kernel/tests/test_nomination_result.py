@@ -180,6 +180,13 @@ def test_unparsable_summary_counts_as_zero() -> None:
     assert outcome.candidates_seen == 0
 
 
+def test_an_infinite_or_boolean_summary_count_reads_as_zero() -> None:
+    outcome = nres.parse_outcome(
+        _envelope([_entry("a")], nomination={"candidates_seen": float("inf"), "resolved": True, "selected": 1})
+    )
+    assert (outcome.candidates_seen, outcome.resolved, outcome.selected) == (0, 0, 1)
+
+
 def test_non_finite_speedup_sorts_last_without_crashing() -> None:
     outcome = nres.parse_outcome(_envelope([_entry("nan", micro_speedup=None), _entry("real", micro_speedup=1.2)]))
     assert [patch.kernel_name for patch in outcome.patches] == ["real", "nan"]

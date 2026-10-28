@@ -24,47 +24,9 @@ log = logging.getLogger(__name__)
 class TargetAnalysisExecutor:
     """ActionRunner for the ``target_analysis`` action kind."""
 
-    def __init__(
-        self,
-        *,
-        compare_against_gpu: str,
-        session_dir: Path | str | None = None,
-    ):
+    def __init__(self, *, compare_against_gpu: str):
         """Initialize the executor with the pinned comparison reference."""
         self.compare_against_gpu = (compare_against_gpu or "").strip()
-        if session_dir is not None:
-            self.session_dir: Path | None = Path(session_dir)
-        else:
-            self.session_dir = None
-
-    def _resolve_session_dir(self, ctx: RunnerContext) -> Path | None:
-        """Resolve session_dir: ``ctx.extra["session_dir"]`` > ``task.params["session_dir"]`` > constructor arg > ``paths.session_dir()``; ``None`` when nothing resolves."""
-        extra = getattr(ctx, "extra", None) or {}
-        cand = extra.get("session_dir")
-        if cand:
-            return Path(cand)
-        params = ctx.task.params or {}
-        cand = params.get("session_dir")
-        if cand:
-            return Path(cand)
-        if self.session_dir is not None:
-            return self.session_dir
-        try:
-            from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-            sd = _sd()
-            return sd if sd.exists() else None
-        except (OSError, RuntimeError):
-            return None
-
-    def _resolve_session_dir_for_cleanup(self, ctx: RunnerContext) -> Path | None:
-        """Best-effort session root for stale artefact cleanup when analyze cannot run."""
-        resolved = self._resolve_session_dir(ctx)
-        if resolved is not None:
-            return resolved
-        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-        return _sd()
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the external-baseline comparison and persist report artefacts."""
@@ -76,22 +38,7 @@ class TargetAnalysisExecutor:
         benchmark_mode: BenchmarkMode = "agentx" if agentx_active(state) else "synthetic"
         model_path = str(params.get("model_path") or getattr(state, "model_path", "") or env_str("MODEL_PATH"))
 
-        session_dir = self._resolve_session_dir(ctx)
-        if session_dir is None:
-            cleanup_dir = self._resolve_session_dir_for_cleanup(ctx)
-            if cleanup_dir is not None:
-                clear_competitor_target(cleanup_dir)
-            log.warning(
-                "target_analysis_executor: could not resolve session_dir; skipping (no artefacts will be written)",
-            )
-            return {
-                "status": "succeeded",
-                "kind": ctx.task.kind,
-                "note": "skipped: no session_dir",
-                "baseline_status": "skipped",
-                "reason": "no_session_dir",
-            }
-
+        session_dir = Path(ctx.extra["session_dir"])
         compare_against_gpu = str(params.get("compare_against_gpu") or self.compare_against_gpu or "").strip()
         framework = str(params.get("framework") or getattr(state, "framework", "") or env_str("FRAMEWORK"))
         precision = str(params.get("precision") or env_str("PRECISION") or getattr(state, "precision", ""))

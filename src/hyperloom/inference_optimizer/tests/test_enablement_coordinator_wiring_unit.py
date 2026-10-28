@@ -190,10 +190,9 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
     from hyperloom.agents.framework.models import Candidate
 
     cands = [
-        Candidate(ref="PR:1", repo="r", title="minor perf tweak", html_url="http://x/1"),
+        Candidate(ref="PR:1", title="minor perf tweak", html_url="http://x/1"),
         Candidate(
             ref="PR:2",
-            repo="r",
             title="Add support to enable GLM architecture on ROCm",
             html_url="http://x/2",
         ),
@@ -407,8 +406,8 @@ async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_p
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     cands = [
-        Candidate(ref="PR:1", repo="r", title="enable GLM arch on ROCm", html_url="http://x/1"),
-        Candidate(ref="PR:2", repo="r", title="add GLM support fix", html_url="http://x/2"),
+        Candidate(ref="PR:1", title="enable GLM arch on ROCm", html_url="http://x/1"),
+        Candidate(ref="PR:2", title="add GLM support fix", html_url="http://x/2"),
     ]
     _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self(tmp_path)

@@ -42,7 +42,7 @@ def _image_id(image: str) -> str:
     return image.split("/")[-1] if image else ""
 
 
-def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, producer: str) -> None:
+def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
     """Deep-merge ``payload`` into the ``metadata`` singleton.
 
     Spool failures are parked by :class:`Recorder`. Projection bugs raise.
@@ -50,18 +50,10 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
-    if not payload:
-        trace_skip(reason="empty payload", section=SECTION)
-        return
-    recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
+    recorder_for(session_dir, producer=PRODUCER_COORDINATOR).record_upsert_singleton(SECTION, dict(payload))
 
 
-def record_metadata_identity(
-    session_dir: Path | str | None,
-    manifest: Mapping[str, Any],
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-) -> None:
+def record_metadata_identity(session_dir: Path | str | None, manifest: Mapping[str, Any]) -> None:
     """Record session identity and the container image from a fresh manifest.
 
     Called where the manifest is stamped, which is the only point that knows
@@ -111,20 +103,11 @@ def record_metadata_identity(
     if isinstance(workflow_flags, Mapping):
         from ..workflow_contract import workflow_metadata
 
-        workflow = workflow_metadata(workflow_flags)
-        authored_digest = manifest.get("workflow_contract_digest")
-        if manifest.get("workflow_contract_version") and authored_digest != workflow["contract_digest"]:
-            raise ValueError("manifest workflow contract identity does not match the published contract")
-        payload["workflow"] = workflow
-    _write(session_dir, payload, producer=producer)
+        payload["workflow"] = workflow_metadata(workflow_flags)
+    _write(session_dir, payload)
 
 
-def record_metadata_langfuse(
-    session_dir: Path | str | None,
-    receipt: Mapping[str, Any],
-    *,
-    producer: str = PRODUCER_COORDINATOR,
-) -> None:
+def record_metadata_langfuse(session_dir: Path | str | None, receipt: Mapping[str, Any]) -> None:
     """Record the Langfuse entrypoint and push counts from an emitter receipt.
 
     Called both when the emitter decides whether it is enabled and after the
@@ -134,7 +117,7 @@ def record_metadata_langfuse(
     if not isinstance(receipt, Mapping) or not receipt:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    _write(session_dir, {"langfuse": _langfuse(receipt)}, producer=producer)
+    _write(session_dir, {"langfuse": _langfuse(receipt)})
 
 
 def snapshot_metadata(rec: Recorder, state: Any) -> None:

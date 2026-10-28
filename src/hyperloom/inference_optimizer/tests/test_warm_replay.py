@@ -764,6 +764,35 @@ async def test_warm_replay_skips_a_recipe_that_restates_the_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_an_agentx_baseline_already_launches_with(tmp_path):
+    """AgentX carries the baseline's server args in its launch overrides, not in ``benchmark.envs``."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8", extra_envs={"SGLANG_TEST": "1"})
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    launch = {"version": 1, "append_args": ["--kv-cache-dtype", "fp8"], "env": {"SGLANG_TEST": "1"}}
+    config.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "Qwen/Qwen3-0.6B",
+                    "agentx": {"enabled": True, "mode": "canonical", "launch_overrides": launch},
+                    "envs": {"TP": "1", "EP_SIZE": "1", "CONC": "8"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.baseline_config_path = str(config)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
+
+
+@pytest.mark.asyncio
 async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
     """One setting the baseline does not hold is enough for the replay to run."""
     recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8 --max-num-seqs 128")
@@ -3298,7 +3327,7 @@ def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, di
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -3392,7 +3421,7 @@ def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, "", workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     hook = trees[1] / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     hook.chmod(0o755)
@@ -3445,7 +3474,7 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     assert [p["status"] for p in result["warm_patch_result"]["patches"]] == ["present_in_dirty_worktree"]
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
@@ -3480,7 +3509,7 @@ def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, m
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}

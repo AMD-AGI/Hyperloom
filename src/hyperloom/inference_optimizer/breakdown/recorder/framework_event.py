@@ -519,36 +519,22 @@ class FrameworkEventRecorder:
         key = str(proposal_id or "")
         if not key:
             return
-        authored = str(review.verdict or "")
         ruling: dict[str, Any] = {
-            "verdict": authored,
-            "effective_verdict": str(review.effective_verdict or "") or authored,
-            "held_to_rule": str(review.held_to_rule or ""),
-            "reviewer": str(review.reviewer or ""),
-            "reason": str(review.reason or ""),
+            "verdict": review.verdict,
+            "effective_verdict": review.effective_verdict or review.verdict,
+            "held_to_rule": review.held_to_rule,
+            "reviewer": review.reviewer,
+            "reason": review.reason,
             "confidence": _float_or_none(review.confidence),
-            "failure_reason_code": str(review.failure_reason_code or ""),
+            "failure_reason_code": review.failure_reason_code,
             "concerns": [],
             "reviewed_at": _now(),
         }
-        for field, value in _as_dict(review.advisory).items():
-            name = str(field or "")
-            if name and name not in ruling:
-                ruling[name] = value
-        rows = [
-            {
-                "variant_name": str(row.get("variant_name") or ""),
-                "verdict": str(row.get("verdict") or ""),
-                "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
-                "held_to_rule": str(row.get("held_to_rule") or ""),
-                "reason": str(row.get("reason") or ""),
-                "failure_reason_code": str(row.get("failure_reason_code") or ""),
-            }
-            for row in (review.variants or [])
-            if str(row.get("variant_name") or "")
-        ]
-        if rows:
-            ruling["variants"] = rows
+        for name, value in _as_dict(review.advisory).items():
+            ruling.setdefault(name, value)
+        variants = [dict(row) for row in review.variants or []]
+        if variants:
+            ruling["variants"] = variants
         self._sink.record(
             SECTION_PROPOSAL,
             {"proposal_id": key, "critic_review": ruling},
@@ -806,17 +792,14 @@ def assemble_framework_ext(
     header = event_header(parts, SECTION_EVENT, event)
 
     plateau = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PLATEAU) or [], event), keys=("evaluated_at", "arm")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_PLATEAU], event), keys=("evaluated_at", "arm")), drop=("event_id",)
     )
     runs = wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_RUN) or [], event), keys=("dispatched_at", "run_id")),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_RUN], event), keys=("dispatched_at", "run_id")), drop=("event_id",)
     )
-    attempt_rows = sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT) or [], event), keys=("ts", "attempt_id"))
+    attempt_rows = sort_rows(rows_for_event(parts[SECTION_ATTEMPT], event), keys=("ts", "attempt_id"))
     gates_by_attempt = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_ATTEMPT_GATE) or [], event), keys=("ordinal", "ts", "gate")),
-        "attempt_id",
+        sort_rows(rows_for_event(parts[SECTION_ATTEMPT_GATE], event), keys=("ordinal", "ts", "gate")), "attempt_id"
     )
     attempts: list[dict[str, Any]] = []
     for row in wire_rows(attempt_rows, drop=("event_id",)):
@@ -826,14 +809,12 @@ def assemble_framework_ext(
         attempts.append(row)
 
     steps_by_proposal = group_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL_STEP) or [], event), keys=("ts", "step")),
-        "proposal_id",
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL_STEP], event), keys=("ts", "step")), "proposal_id"
     )
     attempts_by_proposal = group_rows(attempts, "proposal_ref")
     proposals: list[dict[str, Any]] = []
     for row in wire_rows(
-        sort_rows(rows_for_event(parts.get(SECTION_PROPOSAL) or [], event), keys=("proposal_id",)),
-        drop=("event_id",),
+        sort_rows(rows_for_event(parts[SECTION_PROPOSAL], event), keys=("proposal_id",)), drop=("event_id",)
     ):
         key = str(row.get("proposal_id") or "")
         row["lifecycle"] = wire_rows(steps_by_proposal.get(key, []), drop=("event_id", "proposal_id"))

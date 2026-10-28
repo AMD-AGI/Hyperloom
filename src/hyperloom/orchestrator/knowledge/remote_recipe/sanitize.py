@@ -13,10 +13,10 @@ from typing import Any
 
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
-    GPU_MASK_ENV_NAMES,
     redact_secret_values,
     valid_env_key,
 )
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 _DROP = object()
 

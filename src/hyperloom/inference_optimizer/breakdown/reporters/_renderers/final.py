@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.coerce import optional_positive_float
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
 
 from hyperloom.common.coerce import to_mapping
@@ -24,7 +25,6 @@ from ..base import (
     events_of,
     fmt_pct,
     md_kv_list,
-    measured_ms,
     outcome_of,
     register_renderer,
     session_of,
@@ -32,13 +32,27 @@ from ..base import (
     validation_of,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
 
-# ``geak.rebench.final_status`` values with the same meaning, but settled: the
-# rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
-# are deliberately absent — those ARE verdicts, so the candidate was judged.
-_GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
+_GEAK_DROPPED_FACT = (
+    "GEAK candidate (self-reported {gain}) was DROPPED without revalidation (status={status}, {reason})."
+)
+_GEAK_DROPPED_WARNING = (
+    "A measured GEAK e2e candidate was abandoned because its same-harness revalidation {failure} ({reason}). It was "
+    "never judged on merit, so this session's gain may understate what the optimizer actually found — the "
+    "candidate's artefacts are on disk but absent from current_best / action_path / the validated gain."
+)
+_GEAK_AWAITING_FACT = (
+    "GEAK candidate (self-reported {gain}) is AWAITING a main-flow rebench — excluded from the headline gain and "
+    "final stack until a measured rebench validates it."
+)
+_GEAK_AWAITING_WARNING = (
+    "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been confirmed by a same-harness main-flow rebench, "
+    "so it is intentionally kept out of current_best / action_path / the validated gain. Its self-reported number is "
+    "audit-only and must not be presented as the headline result."
+)
 
 
 def _gain_axis_note(final: dict[str, Any]) -> str:
@@ -102,9 +116,37 @@ def _settled_failure(rebench: dict[str, Any], action_path: list[Any]) -> bool:
             that failed stamps ``failed`` and nothing retracts it when the 2a
             fallback then promotes the candidate for real.
     """
-    if str(rebench.get("final_status") or "") not in _GEAK_DROPPED_RESULT_STATUSES:
+    if str(rebench.get("final_status") or "") not in REBENCH_FAILED_STATUSES:
         return False
     return not any(str(step).split(":", 1)[0] == "geak_e2e" for step in action_path)
+
+
+def _geak_candidate_standing(
+    candidate: dict[str, Any], rebench: dict[str, Any], claim: dict[str, Any], action_path: list[Any]
+) -> tuple[list[str], list[str]]:
+    """The ``(facts, warnings)`` saying why a GEAK e2e candidate is absent from the final stack; empty when none is."""
+    status = str(candidate.get("status") or "")
+    self_gain = candidate.get("self_reported_gain_pct")
+    self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+    if status in GEAK_DROPPED_STATUSES:
+        reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
+        return (
+            [_GEAK_DROPPED_FACT.format(gain=self_gain_str, status=status, reason=reason)],
+            [_GEAK_DROPPED_WARNING.format(failure="could not land", reason=reason)],
+        )
+    if status == "awaiting_rebench":
+        return [_GEAK_AWAITING_FACT.format(gain=self_gain_str)], [_GEAK_AWAITING_WARNING]
+    # Last: a settled ``failed`` on the rebench outlives the candidate slot it was recorded from, so a LIVE candidate
+    # in a later macro-cycle must win over a terminal status left behind by an earlier one.
+    if not _settled_failure(rebench, action_path):
+        return [], []
+    geak_gain = claim.get("self_reported_gain_pct")
+    geak_gain_str = fmt_pct(geak_gain, plus=True) if isinstance(geak_gain, (int, float)) else "unknown"
+    reason = str(rebench.get("final_error") or "").strip() or "reason not recorded"
+    return (
+        [_GEAK_DROPPED_FACT.format(gain=geak_gain_str, status=f"rebench_{rebench.get('final_status')}", reason=reason)],
+        [_GEAK_DROPPED_WARNING.format(failure="failed", reason=reason)],
+    )
 
 
 @register_renderer("final")
@@ -139,12 +181,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     # is settled after every one of them has closed.
     candidate = to_mapping(close_of(breakdown).get("geak_candidate"))
     rebench, claim = _last_geak_rebench(breakdown)
-    revalidation_pending = bool(candidate.get("revalidation_pending"))
-    candidate_status = str(candidate.get("status") or "")
-    pending_awaiting = candidate_status == "awaiting_rebench"
 
     facts: list[str] = []
-    warnings: list[str] = []
     decisions: list[Decision] = []
 
     from .... import framework_registry
@@ -153,70 +191,26 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     _unit = framework_registry.primary_metric_unit(fw)
     if final_tput:
         facts.append(f"Final: {framework_registry.format_primary_metric(fw, final_tput, precision=2)}.")
-    if base_tput and final_tput:
-        base_v = framework_registry.primary_metric_value(fw, base_tput)
-        final_v = framework_registry.primary_metric_value(fw, final_tput)
-        if base_v is not None and final_v is not None:
-            # For latency-based metrics, an improvement shows as a negative delta.
-            note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
-            facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
+        if base_tput:
+            base_v = framework_registry.primary_metric_value(fw, base_tput)
+            final_v = framework_registry.primary_metric_value(fw, final_tput)
+            if base_v is not None and final_v is not None:
+                # For latency-based metrics, an improvement shows as a negative delta.
+                note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
+                facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}{_gain_axis_note(f)}.")
         decisions.append(
             Decision(
-                kind="kept" if (gain_v or 0) > 0 else "attempted",
+                kind="kept" if gain_v > 0 else "attempted",
                 subject="final",
                 metric_pct=float(gain_v),
                 rationale=f"validated at stack_len={val_stack_len} ts={val_ts}",
             )
         )
     facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
-    self_gain = candidate.get("self_reported_gain_pct")
-    self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-    if candidate_status in GEAK_DROPPED_STATUSES:
-        drop_reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
-        facts.append(
-            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
-            f"revalidation (status={candidate_status}, {drop_reason})."
-        )
-        warnings.append(
-            "A measured GEAK e2e candidate was abandoned because its same-harness "
-            f"revalidation could not land ({drop_reason}). It was never judged on "
-            "merit, so this session's gain may understate what the optimizer "
-            "actually found — the candidate's artefacts are on disk but absent "
-            "from current_best / action_path / the validated gain."
-        )
-    elif pending_awaiting:
-        facts.append(
-            f"GEAK candidate (self-reported {self_gain_str}) is AWAITING a "
-            "main-flow rebench — excluded from the headline gain and final stack "
-            "until a measured rebench validates it."
-        )
-        warnings.append(
-            "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been "
-            "confirmed by a same-harness main-flow rebench, so it is intentionally "
-            "kept out of current_best / action_path / the validated gain. Its "
-            "self-reported number is audit-only and must not be presented as the "
-            "headline result."
-        )
-    # Last: a settled ``failed`` on the rebench outlives the candidate slot it
-    # was recorded from, so a LIVE candidate in a later macro-cycle must win
-    # over a terminal status left behind by an earlier one.
-    elif _settled_failure(rebench, action_path):
-        geak_gain = claim.get("self_reported_gain_pct")
-        geak_gain_str = fmt_pct(geak_gain, plus=True) if isinstance(geak_gain, (int, float)) else "unknown"
-        drop_reason = str(rebench.get("final_error") or "").strip() or "reason not recorded"
-        facts.append(
-            f"GEAK candidate (self-reported {geak_gain_str}) was DROPPED without "
-            f"revalidation (status=rebench_{rebench.get('final_status')}, {drop_reason})."
-        )
-        warnings.append(
-            "A measured GEAK e2e candidate was abandoned because its same-harness "
-            f"revalidation failed ({drop_reason}). It was never judged on merit, "
-            "so this session's gain may understate what the optimizer actually "
-            "found — the candidate's artefacts are on disk but absent from "
-            "current_best / action_path / the validated gain."
-        )
+    geak_facts, warnings = _geak_candidate_standing(candidate, rebench, claim, action_path)
+    facts.extend(geak_facts)
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
@@ -232,17 +226,16 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     md_kv = md_kv_list(
         [
             ("final_output_throughput", final_tput),
-            ("throughput_unit", framework_registry.throughput_unit(fw) or None),
+            ("throughput_unit", framework_registry.throughput_unit(fw)),
             ("validated_gain_pct", gain_v),
-            ("revalidation_pending", revalidation_pending or None),
             ("geak_candidate", candidate or None),
             ("validated_at_stack_len", val_stack_len),
             ("validated_ts", val_ts),
             ("measurement_basis", validation.get("measurement_basis")),
             ("stack_changed_after_validation", stack_changed),
-            ("extra_server_args", extra_args or None),
-            ("action_path", action_path or None),
-            ("ttft_mean_ms", measured_ms(f.get("ttft_mean_ms"))),
+            ("extra_server_args", extra_args),
+            ("action_path", action_path),
+            ("ttft_mean_ms", optional_positive_float(f.get("ttft_mean_ms"))),
             ("e2el_mean_ms", f.get("e2el_mean_ms")),
             ("ttft_e2el_source", validation.get("ttft_e2el_source")),
             ("extra_envs", f.get("extra_envs") or None),
@@ -257,10 +250,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         md_parts.append("")
         md_parts.append("**AgentX graded axes** (validation round):")
         md_parts.append(graded_md)
-    inv_md = render_invocation_block(f.get("invocation"), session.get("image"))
-    if inv_md:
-        md_parts.append("")
-        md_parts.append(inv_md)
+    # Kept last: an empty invocation block then leaves only trailing newlines, which the strip below drops.
+    md_parts.append("")
+    md_parts.append(render_invocation_block(f.get("invocation"), session.get("image")))
 
     return RenderedSection(
         section_id="final",
