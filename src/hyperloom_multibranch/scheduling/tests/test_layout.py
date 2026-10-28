@@ -75,7 +75,6 @@ def test_layout_paths() -> None:
         layout.prelude_child: "MB-prelude/MB-prelude-child.json",
         layout.root_recipe: "MB-prelude/MB-root-recipe.json",
         layout.prelude_log: "MB-prelude/MB-prelude.log",
-        layout.prelude_patches: "MB-prelude/MB-unexpressed-patches",
         layout.merges: "MB-integration/MB-merges.jsonl",
         layout.report: "MB-reports/MB-report.json",
         layout.report_markdown: "MB-reports/MB-report.md",

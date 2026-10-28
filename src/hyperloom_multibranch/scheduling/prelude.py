@@ -1,20 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PRELUDE: run the main flow once for the baseline, enablement and roofline, then root the session on its result.
+"""PRELUDE: run the main flow once for the baseline and roofline, then root the session on its result.
 
-The child is ``hyperloom optimize`` with every optimization lever off, given the whole remaining session budget. Its
-session is read by :mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe,
-whose kept patches go to the session's blob store and which the experiment repository stores as the root commit, and
-the session profile is written. What the child kept that a recipe cannot express does not fail PRELUDE: the root
-recipe names it as ``unexpressed``, and kept patches outside the framework checkout are copied to ``MB-prelude/``. The
-Recipe KB's champions for that profile are read as warm-start leads for the
-specialists, the best of them prepared for replay on the root's image and offered to the integrator as the session's
-champion, which EXPLORE opens on when it beats the baseline; their files are in the session's blob store; no
-Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
-gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing nothing: one it refuses
-stays a lead with the refusal named in place of the replay, unless the champion was built on another image, whose
-launch config alone is checked in its place, and one acceptance has not answered for when
+The child is ``hyperloom optimize`` with every optimization lever and enablement off, given the whole remaining session
+budget. A baseline it cannot establish ends it with the main flow's own baseline stop, and PRELUDE fails naming that
+stop; it never spends the session repairing the combo. Its session is read by
+:mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe, which the experiment
+repository stores as the root commit, and the session profile is written. The Recipe KB's champions for that profile are
+read as warm-start leads for the specialists, the best of them prepared for replay on the root's image and offered to
+the integrator as the session's champion, which EXPLORE opens on when it beats the baseline; their files are in the
+session's blob store; no Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot
+be read is recorded and gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing
+nothing: one it refuses stays a lead with the refusal named in place of the replay, unless the champion was built on
+another image, whose launch config alone is checked in its place, and one acceptance has not answered for when
 :data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked. The baseline every recorded value
 is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
 roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
@@ -55,9 +54,9 @@ from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
-from hyperloom.contracts.recipe import PatchRef, Recipe
+from hyperloom.contracts.recipe import Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
-from hyperloom.measure.compile import BlobError, BlobStore
+from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -99,13 +98,14 @@ if TYPE_CHECKING:
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
 HYPERLOOM_COMMAND = ("-m", "hyperloom", "optimize")
-#: Only the baseline, enablement and roofline: no optimization lever, no Recipe KB read or write-back.
+#: Only the baseline and roofline: no optimization lever, no Recipe KB read or write-back, and no enablement, whose
+#: default in the main flow admits it, so a baseline that cannot be established ends the child.
 PRELUDE_FLAGS = (
     "--no-framework-agent",
     "--no-kernel",
     "--no-enable-conc-sweep",
     "--enablement",
-    "launch",
+    "off",
     "--no-warm-replay",
     "--no-research-scout",
     "--degraded-kb",
@@ -293,18 +293,15 @@ class Prelude:
 
     async def _derive_root(self, child: Path, framework: str, base_image_digest: str) -> _DerivedRoot:
         try:
-            artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
-            recipe = await self._root_recipe(artifacts, framework, base_image_digest)
-        except (PreludeReadError, OSError, BlobError) as exc:
+            artifacts = await asyncio.to_thread(read_prelude, child)
+            pin = await asyncio.to_thread(framework_pin, artifacts)
+            recipe = root_recipe(framework, pin, base_image_digest)
+        except PreludeReadError as exc:
             raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         return _DerivedRoot(child, artifacts, recipe)
 
     async def _commit_root(self, derived: _DerivedRoot, workload: Workload, child_gpu_seconds: float) -> PreludeResult:
         child, artifacts, recipe = derived.child, derived.artifacts, derived.recipe
-        try:
-            saved = await asyncio.to_thread(self._save_foreign_patches, artifacts)
-        except OSError as exc:
-            raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
         root = await self._repo.init_root(recipe)
         await self._notebook.record_lineage(
@@ -321,9 +318,6 @@ class Prelude:
                 {
                     "root_commit": root,
                     "child_session": str(child),
-                    "unexpressed": list(recipe.unexpressed),
-                    "unexpressed_patches": saved,
-                    "setup_script": None if artifacts.setup_script is None else str(artifacts.setup_script),
                     "child_gpu_seconds_upper_bound": child_gpu_seconds,
                 },
             )
@@ -448,27 +442,6 @@ class Prelude:
             raise
         await self._processes.kill_branch(PRELUDE_BRANCH)
         return exit_code
-
-    async def _root_recipe(self, artifacts: PreludeArtifacts, framework: str, base_image_digest: str) -> Recipe:
-        """The git calls and file reads run off the event loop, so a stop signal is not held up behind them."""
-
-        pin = await asyncio.to_thread(framework_pin, artifacts)
-        patches: list[PatchRef] = []
-        for kept in artifacts.kept_patches:
-            text = await asyncio.to_thread(kept.patch_file.read_text, encoding="utf-8")
-            patches.append(await self._repo.store_patch(framework, text))
-        return await asyncio.to_thread(root_recipe, artifacts, framework, pin, tuple(patches), base_image_digest)
-
-    def _save_foreign_patches(self, artifacts: PreludeArtifacts) -> dict[str, str]:
-        """Copy the patches no component carries to ``MB-prelude/``; ``{copy: the tree it applies to}``. Blocks."""
-
-        saved: dict[str, str] = {}
-        for index, patch in enumerate(artifacts.foreign_patches):
-            copy = self._layout.prelude_patches / f"{index:04d}-{patch.patch_file.name}"
-            copy.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(patch.patch_file, copy)
-            saved[str(copy)] = str(patch.root)
-        return saved
 
     async def measure_baseline(self, root: str) -> float:
         """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; return the longest
@@ -613,15 +586,6 @@ def _longest_wall_seconds(results: Iterable[TestResult]) -> float:
         ),
         default=0.0,
     )
-
-
-def _succeeded(artifacts: PreludeArtifacts) -> PreludeArtifacts:
-    if not artifacts.succeeded:
-        raise PreludeFailed(
-            f"the baseline prelude ended with stop_reason={artifacts.stop_reason!r} "
-            f"and baseline_tput={artifacts.baseline_tput}"
-        )
-    return artifacts
 
 
 def _session_profile(

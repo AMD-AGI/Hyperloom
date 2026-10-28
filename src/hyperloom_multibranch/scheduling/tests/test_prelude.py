@@ -79,12 +79,14 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     AGENTX_RUN_ID,
     AGENTX_RUN_PERF,
     AGENTX_RUN_SECONDS,
-    PATCH_TEXT,
+    BASELINE_ERROR_CLASS,
     POINT_CONFIG,
     ROOFLINE_PEAK,
     ROOFLINE_RUN_ID,
     TRACE_FILE,
     child_with_patch,
+    failed_child,
+    head_of,
     with_agentx_baseline_run,
     with_roofline_profile,
     write_child_session,
@@ -222,7 +224,7 @@ def test_child_command_uses_only_options_the_main_flow_declares(tmp_path: Path) 
         assert flag in argv
     for flag in ("--no-research-scout", "--degraded-kb"):
         assert flag in argv
-    assert argv[argv.index("--enablement") + 1] == "launch"
+    assert argv[argv.index("--enablement") + 1] == "off"
     assert argv[argv.index("--max-hours") + 1] == "1.500000"
     assert argv[argv.index(LAUNCH_FLAG) + 1] == str(tmp_path / "launch.json")
     assert argv[argv.index("--gpu-type") + 1] == "mi355x"
@@ -262,8 +264,8 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert result.root_commit == await peers.repo.head(INTEGRATION_BRANCH)
     recipe = await peers.repo.read_recipe(result.root_commit)
     [component] = recipe.components
-    texts = [await peers.repo.patch_text(result.root_commit, patch.path) for patch in component.patches]
-    assert texts == [PATCH_TEXT] and recipe.base_image_digest == IMAGE
+    assert (component.upstream_ref, component.patches) == (head_of(tmp_path / "framework"), ())
+    assert (recipe.launch, recipe.base_image_digest) == (LaunchConfig(), IMAGE)
     assert json.loads(layout.root_recipe.read_text()) == recipe.to_document()
     assert json.loads(layout.prelude_child.read_text())["session_dir"] == str(child)
     assert await processes.leftovers() == ()
@@ -379,32 +381,6 @@ async def test_the_child_gpu_time_is_bounded_by_its_wall_time_times_tp_and_recor
     logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
     [rooted] = [entry["detail"] for entry in logged if entry["reason"] == "root committed"]
     assert rooted["child_gpu_seconds_upper_bound"] == 1800.0 * 4
-
-
-async def test_a_patch_off_the_framework_checkout_is_kept_in_the_prelude_dir_and_marks_the_root(
-    tmp_path: Path,
-) -> None:
-    layout = _layout(tmp_path)
-    child = child_with_patch(tmp_path)
-    site_packages = tmp_path / "site-packages"
-    site_packages.mkdir()
-    state = json.loads((child / "state.json").read_text())
-    state["enablement"]["patch_roots"] = {state["enablement"]["kept_patches"][0]: str(site_packages)}
-    write_child_session(child, state)
-    processes, peers = _registry(layout, child), _peers(layout)
-
-    budget = SessionBudget.from_hours(2.0, NOW)
-    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
-
-    recipe = await peers.repo.read_recipe(result.root_commit)
-    assert recipe.unexpressed == (f"patch:{site_packages}/1.patch", "setup_commands")
-    assert [component.patches for component in recipe.components] == [()]
-    copy = layout.prelude_patches / "0000-1.patch"
-    assert copy.read_text() == PATCH_TEXT
-    logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
-    detail = next(entry["detail"] for entry in logged if entry["reason"] == "root committed")
-    assert detail["unexpressed"] == list(recipe.unexpressed)
-    assert detail["unexpressed_patches"] == {str(copy): str(site_packages)}
 
 
 async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_prepared_for_replay(
@@ -611,16 +587,22 @@ async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path
     assert not layout.repo.exists()
 
 
-async def test_child_without_a_baseline_fails_prelude(tmp_path: Path) -> None:
+async def test_a_child_whose_baseline_failed_fails_prelude_with_its_reason_and_commits_nothing(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    child = write_child_session(
-        tmp_path / "child",
-        {"schema_version": 6, "stop_reason": "enablement_attempts_exhausted", "baseline_tput": 0.0},
-    )
+    child = failed_child(tmp_path)
     peers = _peers(layout)
-    with pytest.raises(PreludeFailed, match="enablement_attempts_exhausted"):
+
+    with pytest.raises(PreludeFailed) as failed:
         await _run(_prelude(layout, _registry(layout, child, exit_code=1), peers), SessionBudget.from_hours(2.0, NOW))
-    assert not layout.repo.exists()
+
+    assert str(failed.value) == (
+        f"cannot root the session on the baseline prelude in {child}: the child ended with "
+        f"stop_reason='baseline_failed' and baseline_tput=0.0; its last baseline attempt failed with "
+        f"{BASELINE_ERROR_CLASS!r}"
+    )
+    assert not layout.repo.exists() and not layout.root_recipe.exists()
+    assert [entry["reason"] for entry in _logged(layout)] == ["child started"]
+    assert peers.toolbox.requests == {} and peers.toolbox.root_profiles == []
 
 
 async def test_baseline_tests_that_fail_to_measure_fail_prelude(tmp_path: Path) -> None:
@@ -825,7 +807,6 @@ async def test_an_agentx_baseline_is_the_childs_own_run_and_no_root_test_is_subm
     [
         ({"decision": "discarded"}, {}, "promoted no baseline that succeeded"),
         ({"extras": {"baseline_tput": 1.0}}, {}, "not the anchor's baseline_tput"),
-        ({}, {"enablement": {"succeeded": True}}, "after the anchor was promoted"),
         ({}, {"baseline_measure_round_dropped": True}, "cold start"),
         ({}, {"baseline_perf": {**AGENTX_RUN_PERF, "e2e_norm_intvty_p50": 120.0}}, "the child recorded 120.0"),
     ],
