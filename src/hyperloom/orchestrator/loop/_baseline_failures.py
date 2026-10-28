@@ -22,6 +22,7 @@ from ..actions.executors._accuracy_gate import (
 from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from ..actions.executors.cycle_bench_arm import release_unscreened_levers
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
@@ -299,7 +300,7 @@ class BaselineFailureMixin:
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             self._close_failed_geak_revalidation(result_payload)
         if task.kind == "explore":
-            self._release_unscreened_levers(task.params)
+            release_unscreened_levers(self.shared_state, task.params)
         # Per-action audit (failed attempt) for the in-scope kinds.
         if task.kind in _AUDIT_ACTIONS:
             audit_extras: dict[str, Any] = {}

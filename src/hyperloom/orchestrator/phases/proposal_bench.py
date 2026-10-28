@@ -199,17 +199,13 @@ class ProposalBench(CoordinatorCollaborator):
         while the serving lanes have other work, and is screened alone once they would otherwise idle.
         """
         from ..actions.executors import cycle_bench_arm as cba
-        from ..actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_INCONCLUSIVE
 
         arms = cba.cycle_arms(list(self.shared_state.authored_framework_levers or []))
         if not arms:
             return await self._enqueue_cycle_reference()
         if self._coord.dispatcher.admission_frozen:
             # A batch queued now would be cancelled by the transition; the levers go back to replay attribution.
-            for switch in (s for arm in arms for s in arm["envs"]):
-                self.shared_state.record_framework_lever_attribution(
-                    switch, gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE
-                )
+            cba.release_unscreened_levers(self.shared_state, {cba.CYCLE_ARMS_PARAM: arms})
             return False
         live = [*await self.tasks.queued(), *await self.tasks.running()]
         if _holds_cycle_batch(live):

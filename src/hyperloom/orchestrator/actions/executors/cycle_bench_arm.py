@@ -18,7 +18,7 @@ import statistics
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ from typing import Any
 from hyperloom.orchestrator.measurement import cycle_bench as cb
 from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, cycle_bench_enabled, decode_cycles_ms
 
-from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_INCONCLUSIVE, ATTRIBUTION_CYCLE_PENDING
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
 
@@ -101,6 +101,18 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def bundle_arm(key: str, envs: dict[str, str]) -> dict[str, Any]:
     """The arm that switches every lever of the bundle round *key* on together."""
     return {"name": "lever-bundle", "envs": dict(envs), BUNDLE_ARM_KEY: key}
+
+
+def release_unscreened_levers(state: Any, params: Mapping[str, Any] | None) -> None:
+    """Hand a cycle batch's levers back to replay attribution, and its bundle to its replay round, when the batch
+    ended without verdicts."""
+    for arm in (params or {}).get(CYCLE_ARMS_PARAM) or []:
+        if arm.get(BUNDLE_ARM_KEY):
+            screens = state.cycle_bundle_screens or {}
+            state.cycle_bundle_screens = {**screens, str(arm[BUNDLE_ARM_KEY]): BUNDLE_INCONCLUSIVE}
+            continue
+        for switch in arm.get("envs") or {}:
+            state.record_framework_lever_attribution(str(switch), gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE)
 
 
 def _weighting_log(launch_dir: Path, baseline: str) -> Path:

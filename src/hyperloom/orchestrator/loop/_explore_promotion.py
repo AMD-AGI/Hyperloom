@@ -10,12 +10,13 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
-from ..actions.executors._integrate_vocabulary import (
-    ATTRIBUTION_CYCLE_BENCH,
-    ATTRIBUTION_CYCLE_BROKEN,
-    ATTRIBUTION_CYCLE_INCONCLUSIVE,
+from ..actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN
+from ..actions.executors.cycle_bench_arm import (
+    BUNDLE_ARM_KEY,
+    BUNDLE_REFUSED,
+    CYCLE_ARMS_PARAM,
+    release_unscreened_levers,
 )
-from ..actions.executors.cycle_bench_arm import BUNDLE_ARM_KEY, BUNDLE_INCONCLUSIVE, BUNDLE_REFUSED, CYCLE_ARMS_PARAM
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from ..measurement.cycle_bench import STATUS_SCREENED, VERDICT_BROKEN
 from ._promote_outcome import _PromoteOutcome
@@ -140,7 +141,7 @@ class ExplorePromotionMixin:
             stack_len = len(self.shared_state.optimization_stack or [])
             self.shared_state.last_attribution_trace = {"stack_len": stack_len, "trace": str(capture)}
         if not result.get("valid"):
-            self._release_unscreened_levers(result)
+            release_unscreened_levers(self.shared_state, result)
             return
         self._keep_cycle_reference(result)
         verdicts = result.get("verdicts") or {}
@@ -175,19 +176,6 @@ class ExplorePromotionMixin:
         """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""
         self.shared_state.cycle_screen_refused = reason
         log.warning("cycle bench: dormant admission closed for the session: %s", reason)
-
-    def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
-        """Hand a cycle batch's levers back to replay attribution, and its bundle to its replay round, when the batch
-        ended without verdicts."""
-        for arm in (params or {}).get(CYCLE_ARMS_PARAM) or []:
-            if arm.get(BUNDLE_ARM_KEY):
-                screens = self.shared_state.cycle_bundle_screens or {}
-                self.shared_state.cycle_bundle_screens = {**screens, str(arm[BUNDLE_ARM_KEY]): BUNDLE_INCONCLUSIVE}
-                continue
-            for switch in arm.get("envs") or {}:
-                self.shared_state.record_framework_lever_attribution(
-                    str(switch), gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE
-                )
 
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
         recorded = False
