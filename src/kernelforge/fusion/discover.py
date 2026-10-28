@@ -22,7 +22,15 @@ from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 from kernelforge.trace_events import load_trace_events
 
-from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
+from kernelforge.serving_windows import step_windows
+
+from .diagnose import (
+    LAUNCH_BOUND_CATEGORIES,
+    _kernel_span,
+    _load_trace_events,
+    categories_in_text,
+    categorize_kernel_name,
+)
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -134,17 +142,17 @@ def _resolve_max_fusions(value: Optional[int] = None) -> int:
 def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
-    """Top GPU kernels from a kineto trace by total-duration share."""
+    """Top GPU kernels from a kineto trace by total-duration share, over its decode steps when it annotates them."""
+    events = _load_trace_events(trace_path)
+    decode = [(w.start_us, w.end_us) for w in step_windows(events) if w.is_decode]
     agg: dict[str, list[float]] = {}
     total = 0.0
-    for ev in _load_trace_events(trace_path):
-        if ev.get("cat") != "kernel":
+    for ev in events:
+        span = _kernel_span(ev)
+        if span is None:
             continue
-        try:
-            dur = float(ev.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if dur <= 0:
+        dur, ts = span
+        if decode and not (ts is not None and any(lo <= ts < hi for lo, hi in decode)):
             continue
         name = str(ev.get("name") or "")
         d = agg.setdefault(name, [0.0, 0])
@@ -157,7 +165,7 @@ def hot_kernels_from_trace(
     rows: list[dict[str, Any]] = []
     for name, (dur, count) in agg.items():
         cat = categorize_kernel_name(name)
-        if launch_bound_only and cat in COMPUTE_CATEGORIES:
+        if launch_bound_only and (cat in COMPUTE_CATEGORIES or cat == "collective"):
             continue
         rows.append(
             {
