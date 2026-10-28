@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_option_names, to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ...policy.gate import PolicyDenied
 
@@ -55,7 +55,7 @@ def stack_of(params: Mapping[str, Any]) -> dict[str, Any]:
         "throughput": float(params.get("base_tput") or 0.0),
         "extra_server_args": str(params.get("base_extra_args") or "").strip(),
         "extra_envs": {str(k): str(v) for k, v in dict(params.get("base_extra_envs") or {}).items()},
-        "remove_args": list(dict.fromkeys(to_str_list(params.get("base_remove_args")))),
+        "remove_args": to_option_names(params.get("base_remove_args")),
         "unset_envs": list(dict.fromkeys(to_str_list(params.get("base_unset_envs")))),
         "args_mode": str(params.get("base_args_mode") or "append").strip().lower(),
     }

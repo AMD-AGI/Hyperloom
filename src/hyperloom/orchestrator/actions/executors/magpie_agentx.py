@@ -16,6 +16,7 @@ from typing import AbstractSet, Any, Mapping
 import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.common.coerce import to_option_names
 from hyperloom.common.unified_diff import touched_paths
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
@@ -38,6 +39,10 @@ class LaunchChanges:
     remove_args: list[str] = field(default_factory=list)
     unset_env: list[str] = field(default_factory=list)
     replace_args: bool = False
+
+    def __post_init__(self) -> None:
+        """Reduce the removals to bare option names, the only shape AgentX's ``remove_args`` accepts."""
+        self.remove_args = to_option_names(self.remove_args)
 
 
 REPLACE = "replace"

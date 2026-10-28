@@ -119,6 +119,21 @@ def to_str_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def to_option_names(value: Any) -> list[str]:
+    """Coerce *value* into bare long option names: one option per entry, in order, without repeats.
+
+    A removal names an option, never a value: ``--flag=value`` and ``--flag value`` both name ``--flag``, because
+    removing an option removes whatever value it carried. Magpie's ``launch_overrides.remove_args`` validator rejects
+    anything but a bare name, so every layer that admits removals into a variant or a launch owes them this shape.
+    """
+    names: list[str] = []
+    for entry in to_str_list(value):
+        name = entry.split()[0].partition("=")[0]
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def text_or_none(value: Any) -> str | None:
     """``str(value)`` stripped, or ``None`` when *value* is ``None`` or blank."""
     if value is None:
@@ -155,6 +170,7 @@ __all__ = [
     "first_int",
     "first_str",
     "optional_positive_int",
+    "to_option_names",
     "text_or_none",
     "to_unix",
     "to_list",
