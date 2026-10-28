@@ -267,7 +267,8 @@ class AgentRunSpec:
     protected_path_rules: ProtectedPathRules | None = None
     # The tools a provider describes to the model, when they must differ from the ones ``tool_policy`` lets this
     # session use. A resumed follow-up keeps the definitions of the conversation it continues, because they open the
-    # cached prefix every earlier turn was billed against; ``tool_policy`` alone still decides what it may run.
+    # cached prefix every earlier turn was billed against. The provider refuses every described tool ``tool_policy``
+    # does not allow, whatever its permission mode or settings would approve.
     # Appended for the same reason as the fields above.
     declared_tool_policy: AgentToolPolicy | None = None
     # A leading part of ``user_prompt`` that sibling sessions send verbatim. ``user_prompt`` stays the whole prompt;

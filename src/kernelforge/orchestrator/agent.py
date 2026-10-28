@@ -922,7 +922,9 @@ def _make_session_summarizer(
         spec,
         # The implementer's system prompt and tool definitions open the cached prefix the whole session was billed
         # against; changing either makes the summary rewrite that prefix instead of reading it. The summarizer role
-        # travels in the user turn and the narrower tool_policy below decides what the turn may run.
+        # travels in the user turn, and a provider that describes tools beyond the narrower tool_policy below must
+        # refuse them whatever the permission mode or settings say (the Claude backend denies them in a PreToolUse
+        # hook).
         declared_tool_policy=implementer_policy,
         writable=False,
         hooks=None,
@@ -941,8 +943,6 @@ def _make_session_summarizer(
             extra_tools=(),
             # Enough turns to check a path or a number it half-remembers, not enough to start exploring the workspace.
             max_turns=4,
-            # Refuses the described edit and shell tools outright; any approving mode would let them run.
-            permission_mode="dontAsk",
         ),
     )
 

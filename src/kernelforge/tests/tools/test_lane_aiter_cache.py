@@ -17,7 +17,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
     AgentToolPolicy,
 )
-from kernelforge.agent_backends.claude import _SESSION_ENV_DEFAULTS, ClaudeBackend
+from hyperloom.common.llm_stability_env import apply_llm_stability_env
+from kernelforge.agent_backends.claude import ClaudeBackend
 from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
@@ -66,6 +67,13 @@ def _result_message():
         num_turns=1,
         session_id="s",
     )
+
+
+def _stability_env() -> dict[str, str]:
+    """The LLM-transport stability env the Claude backend applies to every session it spawns."""
+    env: dict[str, str] = {}
+    apply_llm_stability_env(env)
+    return env
 
 
 def _recording_claude_backend(spawned: list[dict[str, str]]) -> ClaudeBackend:
@@ -227,7 +235,7 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
 
 async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, monkeypatch):
     """Pin the single-lane path: an ordinary session carries no overlay beyond the backend's own defaults."""
-    for key in _SESSION_ENV_DEFAULTS:
+    for key in _stability_env():
         monkeypatch.delenv(key, raising=False)
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
@@ -253,12 +261,12 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path, 
         )
     )
 
-    assert captured["options"].kwargs["env"] == _SESSION_ENV_DEFAULTS
+    assert captured["options"].kwargs["env"] == _stability_env()
 
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeypatch):
     """The overlay reaches the provider option the SDK spawns the CLI with."""
-    for key in _SESSION_ENV_DEFAULTS:
+    for key in _stability_env():
         monkeypatch.delenv(key, raising=False)
     workspace = _lane_dir(tmp_path, "claude-env")
     captured: dict = {}
@@ -283,7 +291,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path, monkeyp
         )
     )
 
-    assert captured["options"].kwargs["env"] == {**_SESSION_ENV_DEFAULTS, "AITER_JIT_DIR": "/lane/1/jit"}
+    assert captured["options"].kwargs["env"] == {**_stability_env(), "AITER_JIT_DIR": "/lane/1/jit"}
 
 
 def test_codex_hands_the_session_environment_to_its_app_server(tmp_path):

@@ -414,14 +414,14 @@ def test_summarizer_keeps_the_prefix_the_implementer_session_cached():
     assert spec.declared_tool_policy == implementer_spec.tool_policy
     # Thinking settings are part of what a cached prefix is matched against.
     assert spec.tool_policy.thinking_budget_tokens == 3000
-    assert spec.tool_policy.permission_mode == "dontAsk"
     assert spec.tool_policy.max_turns == 4
 
 
 def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading():
     captured: dict = {}
     backend = _backend([_result_message(session_id="sess-1")], captured)
-    implementer_spec = _spec(tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100))
+    # A gated implementer: its in-session hooks keep it from running bare.
+    implementer_spec = _spec(tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100, bare=False))
     summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage=None)
 
     asyncio.run(summarize("record your lesson"))
@@ -431,11 +431,46 @@ def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading
     assert kwargs["system_prompt"] == "implementer system prompt"
     assert kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
     assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
-    assert kwargs["permission_mode"] == "dontAsk"
+    assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}
+
+
+def _denied_tools(kwargs: dict) -> set[str]:
+    """The tools a PreToolUse hook in these SDK options refuses, checked by calling the hook."""
+    denied: set[str] = set()
+    for matcher in kwargs.get("hooks", {}).get("PreToolUse", []):
+        for name in matcher.matcher.split("|"):
+            for callback in matcher.hooks:
+                answer = asyncio.run(callback({"tool_name": name}, None, None))
+                if answer.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+                    denied.add(name)
+    return denied
 
 
 @pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
-def test_describing_unpermitted_tools_requires_a_mode_that_refuses_them(mode):
+def test_an_approving_operator_mode_cannot_reopen_the_described_only_tools(mode):
+    """A permission mode from the operator's agent options replaces the policy's; the deny hook still holds."""
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    backend.runtime.options = {"permission_mode": mode}
+    spec = _spec(
+        writable=False,
+        read_only_resume=True,
+        allow_dirty_targets=True,
+        allow_untracked=True,
+        protected_globs=["*"],
+        declared_tool_policy=AgentToolPolicy(read=True, write=True, shell=True, bare=False),
+        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, bare=False),
+    )
+
+    asyncio.run(backend.run(spec))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["permission_mode"] == mode
+    assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}
+
+
+def test_a_bare_resume_describes_only_the_tools_it_may_use():
+    """A bare session runs no hooks, so it cannot refuse a described tool and does not describe one."""
     captured: dict = {}
     backend = _backend([_result_message(session_id="s")], captured)
     spec = _spec(
@@ -445,11 +480,24 @@ def test_describing_unpermitted_tools_requires_a_mode_that_refuses_them(mode):
         allow_untracked=True,
         protected_globs=["*"],
         declared_tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
-        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, permission_mode=mode),
+        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, bare=True),
     )
 
-    with pytest.raises(ClaudeBackendError, match="dontAsk"):
-        asyncio.run(backend.run(spec))
+    asyncio.run(backend.run(spec))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["tools"] == ["Read", "Grep", "Glob"]
+    assert "hooks" not in kwargs
+    assert kwargs["extra_args"] == {"bare": None}
+
+
+def test_a_session_describing_only_what_it_may_use_gets_no_deny_hook():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "hooks" not in captured["options"].kwargs
 
 
 def test_sessions_turn_off_claude_code_title_generation(monkeypatch):

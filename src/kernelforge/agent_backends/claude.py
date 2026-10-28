@@ -15,10 +15,12 @@ import shutil
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom.common.llm_stability_env import apply_llm_stability_env
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -291,10 +293,28 @@ def _prepare_claude_environment() -> None:
         os.environ["ANTHROPIC_CUSTOM_HEADERS"] = format_custom_headers(gateway.headers)
 
 
-# Applied to every session unless the operator's environment names the variable itself. Claude Code's non-essential
-# traffic includes a session-title request that resends the first prompt, uncached, at the session model's price; no
-# Forge session reads that title.
-_SESSION_ENV_DEFAULTS = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+def _session_env_defaults() -> dict[str, str]:
+    """The shared LLM-transport stability env, less every variable the operator's environment already sets.
+
+    It turns off Claude Code's non-essential traffic, which includes a session-title request that resends the first
+    prompt, uncached, at the session model's price; no Forge session reads that title.
+    """
+    defaults: dict[str, str] = {}
+    apply_llm_stability_env(defaults)
+    return {key: value for key, value in defaults.items() if key not in os.environ}
+
+
+async def _refuse_described_only_tool(input_data: dict, tool_use_id: str | None, context: Any) -> dict:
+    """Deny a tool the session describes only because the conversation it continues used it."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "This turn may only read; the tool is listed for the conversation it continues.",
+        }
+    }
+
+
 # The content-block type of plain text, and the attribute an SDK text block carries it in.
 _TEXT = "text"
 
@@ -552,15 +572,6 @@ class ClaudeBackend:
         """The SDK options one generic tool policy asks for."""
         allowed_tools = self._role_tools(policy)
         declared_tools = self._role_tools(spec.declared_tool_policy) if spec.declared_tool_policy else allowed_tools
-        permission_mode = policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")
-        described_only = sorted(set(_builtin_tools(declared_tools)) - set(allowed_tools))
-        if described_only and permission_mode != "dontAsk":
-            # Every other mode can approve a described tool that is missing from ``allowed_tools``: acceptEdits passes
-            # Edit and Write, bypassPermissions passes everything.
-            raise ClaudeBackendError(
-                f"a session that describes tools it may not use ({', '.join(described_only)}) must run with "
-                f"permission_mode='dontAsk', not {permission_mode!r}"
-            )
         options: dict[str, Any] = {
             "allowed_tools": allowed_tools,
             # ``allowed_tools`` is only a permission list: the CLI still loads
@@ -579,7 +590,7 @@ class ClaudeBackend:
             # MCP tools are not part of the built-in set and are carried by
             # ``allowed_tools`` alone.
             "tools": _builtin_tools(declared_tools),
-            "permission_mode": permission_mode,
+            "permission_mode": (policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
         }
         if policy.max_turns is not None:
             options["max_turns"] = policy.max_turns
@@ -637,6 +648,7 @@ class ClaudeBackend:
 
     def _provider_options(self, spec: AgentRunSpec) -> dict[str, Any]:
         """Adapt a generic run specification into Claude SDK options."""
+        spec = self._with_described_only_tools_denied(spec)
         options: dict[str, Any] = {
             "model": spec.model,
             "cwd": spec.cwd,
@@ -666,10 +678,30 @@ class ClaudeBackend:
         if spec.env:
             # The SDK spawns the CLI with the inherited process environment and applies this over it.
             options["env"] = {**options.get("env", {}), **spec.env}
-        defaults = {key: value for key, value in _SESSION_ENV_DEFAULTS.items() if key not in os.environ}
-        if defaults:
+        if defaults := _session_env_defaults():
             options["env"] = {**defaults, **options.get("env", {})}
         return options
+
+    def _with_described_only_tools_denied(self, spec: AgentRunSpec) -> AgentRunSpec:
+        """``spec`` with a PreToolUse hook denying every built-in tool it describes but its tool policy does not allow.
+
+        A deny hook runs before any permission mode or settings allow rule can approve the tool, and unlike
+        ``disallowed_tools`` it leaves the tool definitions, which open the cached prefix, as they are. A bare session
+        runs no hooks and has a prefix of its own, so one describes only the tools it may use.
+        """
+        if spec.declared_tool_policy is None or spec.tool_policy is None:
+            return spec
+        allowed = set(self._role_tools(spec.tool_policy))
+        described_only = [
+            name for name in _builtin_tools(self._role_tools(spec.declared_tool_policy)) if name not in allowed
+        ]
+        if not described_only:
+            return spec
+        if spec.hooks is None and spec.tool_policy.bare:
+            return replace(spec, declared_tool_policy=None)
+        denial = AgentHook(matcher="|".join(described_only), callback=_refuse_described_only_tool)
+        hooks = spec.hooks or AgentHooks()
+        return replace(spec, hooks=replace(hooks, pre_tool_use=[denial, *hooks.pre_tool_use]))
 
     @staticmethod
     def _role_tools(policy) -> list[str]:
