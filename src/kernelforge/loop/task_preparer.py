@@ -20,7 +20,7 @@ from pathlib import Path
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec, with_writable_sandbox
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.tools.git import ensure_commit_identity, git
+from kernelforge.tools.git import ensure_commit_identity, git, git_head
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
@@ -141,11 +141,6 @@ def _git(workspace: Path, *args: str) -> tuple[int, str]:
     except OSError as exc:
         return 128, str(exc)
     return r.returncode, (r.stdout + r.stderr)
-
-
-def _git_head(workspace: Path) -> str:
-    code, out = _git(workspace, "rev-parse", "HEAD")
-    return out.strip() if code == 0 else ""
 
 
 def _git_diff_patch(workspace: Path, base_sha: str) -> str:
@@ -1007,7 +1002,7 @@ class _SourceGuard:
     def __init__(self, workspace: Path, protected: set[Path]) -> None:
         self._workspace = workspace
         self._snapshot = _snapshot(list(protected))
-        self.base_sha = _git_head(workspace)
+        self.base_sha = git_head(workspace)
         self.pre_untracked = _git_untracked(workspace)
         # The caller's pre-prep uncommitted tracked modifications, captured so a failure rollback restores them
         # instead of resetting the whole tree to HEAD.
@@ -1411,8 +1406,8 @@ def _prepare_failure_message(guard: "_SourceGuard", failure: _PrepareFailure) ->
 def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int) -> PrepareResult:
     """Make the prepared driver, and everything it reads at runtime, part of pristine.
 
-    IterationLoop captures its base SHA from this commit, so anything left out
-    of it is not there for the measurements that follow.
+    IterationLoop captures its base SHA from this commit, so anything left out of it is not there for the measurements
+    that follow. Nothing staged is nothing to commit: a driver git ignores, as the controller stages one, runs in place.
     """
     workspace, guard, spec_path, audit_dir_str = layout.workspace, layout.guard, layout.spec_path, layout.audit_dir_str
     stage_code, stage_out = _stage_preparation_changes(workspace, guard.pre_untracked)
@@ -1455,7 +1450,7 @@ def _commit_prepared_task(layout: _PreparationLayout, *, pf, attempt_count: int)
     # a git cwd, and a commit with none to auto-detect cannot land.
     ensure_commit_identity(workspace)
     _, commit_out = _git(workspace, "commit", "-m", "forge prepass: prepared measurement driver")
-    if _git_head(workspace) == guard.base_sha:
+    if git_head(workspace) == guard.base_sha and _git(workspace, "diff-index", "--quiet", "--cached", "HEAD")[0]:
         guard.rollback()
         return PrepareResult(
             ok=False,

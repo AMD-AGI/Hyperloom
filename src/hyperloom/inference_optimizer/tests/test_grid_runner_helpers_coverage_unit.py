@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer.grid_server_args import remove_server_args
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
+from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling, where apply_compatibility_filter
 # resolves them (not via the re-export).
@@ -41,7 +43,7 @@ def test_validate_magpie_python_override_requires_python(tmp_path):
 def test_compatibility_filter_drops_on_model_class(monkeypatch) -> None:
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (False, False))
     grid = [_variant("mla", "--enable-flashinfer-mla"), _variant("plain", "")]
-    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "meta-llama-3-8b"))
+    kept, dropped = vf.apply_compatibility_filter(grid, serving=ServingStack("sglang", "meta-llama-3-8b"))
     assert [v.name for v in kept] == ["plain"]
     assert len(dropped) == 1
     assert dropped[0]["source"] == "compatibility_filter"
@@ -52,13 +54,13 @@ def test_compatibility_filter_keeps_a_flag_the_model_class_supports(monkeypatch)
     # Whether the installed server accepts the flag is left to its own argparse at launch.
     monkeypatch.setattr(vf, "_detect_model_class", lambda mp: (True, True))
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", "deepseek-moe"))
+    kept, dropped = vf.apply_compatibility_filter(grid, serving=ServingStack("sglang", "deepseek-moe"))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
 def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
-    kept, dropped = gr.apply_compatibility_filter(grid, serving=ServingStack("sglang", ""))
+    kept, dropped = vf.apply_compatibility_filter(grid, serving=ServingStack("sglang", ""))
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
@@ -226,24 +228,24 @@ def test_resolve_probe_python_prefers_magpie_interpreter(monkeypatch) -> None:
     # The harness interpreter is used directly; no vllm-exe resolution is tried.
     monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/srv/venv/bin/python")
     monkeypatch.setattr(
-        gr.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
+        bi.shutil, "which", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("which() should not be called"))
     )
-    assert gr._resolve_probe_python() == "/srv/venv/bin/python"
+    assert bi._resolve_probe_python() == "/srv/venv/bin/python"
 
 
 def test_resolve_probe_python_falls_back_to_vllm_venv(monkeypatch) -> None:
     # magpie_python is the canonical default -> pin the venv that backs ``vllm serve``.
     monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
-    monkeypatch.setattr(gr.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
-    monkeypatch.setattr(gr.os.path, "exists", lambda p: p == "/other/venv/bin/python")
-    assert gr._resolve_probe_python() == "/other/venv/bin/python"
+    monkeypatch.setattr(bi.shutil, "which", lambda name: "/other/venv/bin/vllm" if name == "vllm" else None)
+    monkeypatch.setattr(bi.os.path, "exists", lambda p: p == "/other/venv/bin/python")
+    assert bi._resolve_probe_python() == "/other/venv/bin/python"
 
 
 def test_resolve_probe_python_no_bare_python3_fallback(monkeypatch) -> None:
     # With no resolvable vllm exe, fall back to the canonical magpie default — never a bare "python3".
     monkeypatch.setattr(bi, "_resolve_magpie_python", lambda: "/opt/venv/bin/python")
-    monkeypatch.setattr(gr.shutil, "which", lambda *_a, **_k: None)
-    assert gr._resolve_probe_python() == "/opt/venv/bin/python"
+    monkeypatch.setattr(bi.shutil, "which", lambda *_a, **_k: None)
+    assert bi._resolve_probe_python() == "/opt/venv/bin/python"
 
 
 def test_probe_invokes_resolved_interpreter(monkeypatch) -> None:
@@ -272,7 +274,7 @@ def test_runtime_overrides_model_precision_and_gpu_no_framework_agent(monkeypatc
     for k in ("ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
     bench: dict = {}  # no framework -> benchmark_script popped
-    gr.apply_runtime_benchmark_overrides(
+    apply_runtime_benchmark_overrides(
         bench,
         model_path="/models/x",
         gpu_type="mi355x",
@@ -287,7 +289,7 @@ def test_runtime_overrides_framework_pins_generic_script(monkeypatch) -> None:
     for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
     bench = {"framework": "sglang"}
-    gr.apply_runtime_benchmark_overrides(bench, gpu_type="mi300x")
+    apply_runtime_benchmark_overrides(bench, gpu_type="mi300x")
     assert bench["benchmark_script"] == "sglang_mi300x.sh"
 
 
@@ -298,7 +300,7 @@ def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
     monkeypatch.setenv("TP", "2")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     bench: dict = {}
-    envs = gr.apply_runtime_benchmark_overrides(bench)
+    envs = apply_runtime_benchmark_overrides(bench)
     assert envs["ISL"] == 128
     assert envs["TP"] == 2
     # TP>1 with no explicit ROCR -> auto-filled device list
@@ -309,7 +311,7 @@ def test_runtime_overrides_explicit_benchmark_script_wins(monkeypatch) -> None:
     for k in ("PRECISION", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "CONC", "ROCR_VISIBLE_DEVICES"):
         monkeypatch.delenv(k, raising=False)
     bench = {"framework": "vllm"}
-    gr.apply_runtime_benchmark_overrides(
+    apply_runtime_benchmark_overrides(
         bench,
         gpu_type="mi300x",
         benchmark_script="custom.sh",
@@ -357,7 +359,7 @@ def test_build_variant_yaml_injects_extra_envs(tmp_path: Path) -> None:
     envs = cfg["benchmark"]["envs"]
     assert envs["USE_AITER"] == "1"
     # variant + base server args merged into the framework's args env
-    arg_key = gr.server_args_env_name("sglang")
+    arg_key = server_args_env_name("sglang")
     assert "--foo 1" in envs[arg_key]
 
 
@@ -387,6 +389,20 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     args = cfg["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert args.count("--attention-backend") == 1, f"duplicate flag: {args}"
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
+
+
+def test_build_variant_yaml_repeated_multi_value_flag_keeps_last(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--cuda-graph-bs 1 2 4"}}}),
+        encoding="utf-8",
+    )
+    out = gr._build_variant_yaml(
+        gr.GridRecipe(base_yaml_path=base), _variant("v1", "--cuda-graph-bs 8 16"), output_subdir=tmp_path / "v1"
+    )
+    assert yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] == (
+        "--cuda-graph-bs 8 16"
+    )
 
 
 def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
@@ -445,36 +461,8 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
 
 
-def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
-    """JSON stays an opaque argv token while unrelated flags dedupe last-wins."""
-    args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
-    out = gr.shell_safe_dedupe(args)
-    assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
-    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
-
-
-def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
-    """Multi-token flags must not be reassembled as stray positional tokens."""
-    args = "--cuda-graph-bs 1 2 4 --cuda-graph-bs 8 16"
-    out = gr.shell_safe_dedupe(args)
-    assert out == args
-
-
-def test_shell_safe_dedupe_normalizes_equals_form() -> None:
-    """--flag=value and --flag value must dedupe to one (last wins)."""
-    out = gr.shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
-    assert out.count("--attention-backend") == 1, out
-    assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
-    assert "ROCM_ATTN" not in out
-
-
-def test_shell_safe_dedupe_simple_last_wins() -> None:
-    out = gr.shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
-    assert out == "--tp 8 --mem-fraction-static 0.9"
-
-
 def test_compose_server_args_replace_still_applies_remove_args() -> None:
-    out = gr.compose_server_args(
+    out = compose_server_args(
         inherited_args="--bad-base 1",
         base_extra_args="--also-bad 2",
         variant_extra_args="--bad-base 3 --keep 4",
@@ -485,7 +473,7 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
 
 
 def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
-    out = gr.compose_server_args(
+    out = compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
         variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
@@ -496,7 +484,7 @@ def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_wi
 
 
 def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
-    out = gr.compose_server_args(
+    out = compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
@@ -508,7 +496,7 @@ def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
 def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
     from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
-    launched = gr.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
+    launched = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
     assert "--no-enable-prefix-caching" in launched
     assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 

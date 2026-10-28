@@ -134,7 +134,7 @@ class RayExecutionBackend:
     def __init__(self) -> None:
         self._ensured = False
 
-    def ensure(self, num_gpus: int | None = None, log_path: Path | None = None) -> None:
+    def ensure(self, num_gpus: int | None = None) -> None:
         """Ensure a Ray cluster is up and this process is connected."""
         if self._ensured:
             return
@@ -144,16 +144,16 @@ class RayExecutionBackend:
         )
 
         resolved = _resolve_head_num_gpus(num_gpus)
-        ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
-        quiet_ray_init(num_gpus=resolved, log_path=log_path)
+        ensure_ray_cluster(num_gpus=resolved)
+        quiet_ray_init(num_gpus=resolved)
         self._ensured = True
 
-    def restart_local_head(self, log_path: Path | None = None) -> None:
+    def restart_local_head(self) -> None:
         """Replace the local head with one that declares ``serving_slot`` and reconnect to it."""
         from ._ray_runtime import restart_local_head_with_serving_slot
 
         self._ensured = False
-        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None), log_path=log_path)
+        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None))
         self._ensured = True
 
 

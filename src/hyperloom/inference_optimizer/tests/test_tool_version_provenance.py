@@ -13,11 +13,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hyperloom.inference_optimizer.breakdown.recorder import (
-    assemble_parts,
-    instrument,
-    tool_versions,
-)
+from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, tool_versions
 
 
 def _init_git_repo(path: Path) -> str:
@@ -54,17 +50,7 @@ def _distribution_version() -> str:
 def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     # Every producer that resolves a build writes to one map, keyed by tool.
     tool_versions.record_tool_version(tmp_path, tool="tracelens", root=str(tmp_path))
-    instrument.record_backend_versions_and_timeline(
-        tmp_path,
-        {
-            "kernel_id": "k1",
-            "run_id": "r1",
-            "attempts": [
-                {"attempt_id": "a1", "backend": "geak", "status": "completed"},
-            ],
-        },
-        recorder=None,
-    )
+    tool_versions.record_tool_version(tmp_path, tool="geak")
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]
     assert isinstance(versions, dict)
@@ -72,54 +58,17 @@ def test_versions_map_composed_at_top_level(tmp_path: Path) -> None:
     assert versions["geak"]["tool"] == "geak"
 
 
-def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
+def test_forge_mints_versions_entry(tmp_path: Path) -> None:
     sha = _init_git_repo(tmp_path)
-    instrument.record_backend_versions_and_timeline(
-        tmp_path,
-        {
-            "kernel_id": "k1",
-            "run_id": "r1",
-            "attempts": [
-                {
-                    "attempt_id": "a1",
-                    "backend": "forge",
-                    "status": "completed",
-                    "metadata": {"root_dir": str(tmp_path)},
-                },
-            ],
-        },
-        recorder=None,
-    )
+    tool_versions.record_tool_version(tmp_path, tool="forge", root=str(tmp_path))
     out = assemble_parts(tmp_path)
     versions = out["metadata"]["versions"]["tools"]
     assert versions["forge"]["tool"] == "forge"
     # KernelForge ships inside this distribution, so its version IS Hyperloom's;
-    # the producer-supplied root_dir still yields a commit, so both halves survive.
+    # the producer-supplied root still yields a commit, so both halves survive.
     assert versions["forge"]["version"] == _distribution_version()
     assert versions["forge"]["version"] != sha
     assert versions["forge"]["commit"] == sha
-
-
-def test_a_result_with_no_attempts_still_credits_the_backend_it_names(tmp_path: Path) -> None:
-    # A run that failed before any backend launched still knows which build was in play.
-    instrument.record_backend_versions_and_timeline(
-        tmp_path,
-        {"kernel_id": "k1", "backend": "geak", "status": "failed", "attempts": []},
-        recorder=None,
-    )
-    out = assemble_parts(tmp_path)
-    assert out["metadata"]["versions"]["tools"]["geak"]["tool"] == "geak"
-
-
-def test_a_pre_dispatch_gating_failure_invents_no_build(tmp_path: Path) -> None:
-    # No backend resolved: an all-empty entry would read as a tool that ran and reported nothing.
-    instrument.record_backend_versions_and_timeline(
-        tmp_path,
-        {"kernel_id": "k1", "status": "failed", "attempts": []},
-        recorder=None,
-    )
-    out = assemble_parts(tmp_path)
-    assert not (out.get("metadata") or {}).get("versions")
 
 
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: Path, monkeypatch) -> None:

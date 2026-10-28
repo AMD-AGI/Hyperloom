@@ -33,6 +33,7 @@ class _StubPrelude:
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
     _apply_warm_kernel_plan = PreludePhase._apply_warm_kernel_plan
+    _kernel_launch_overlay = PreludePhase._kernel_launch_overlay
     _land_warm_kernel_entry = PreludePhase._land_warm_kernel_entry
     _settle_warm_kernel_preparation = PreludePhase._settle_warm_kernel_preparation
     _unwind_prepared_warm_kernel = PreludePhase._unwind_prepared_warm_kernel

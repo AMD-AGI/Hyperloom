@@ -28,6 +28,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from ..prompts.transport import TRANSPORT_STRUCTURED_OUTPUT
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
+from hyperloom.common.coerce import to_int
 from .base import (
     BackendError,
     BackendTurnResult,
@@ -35,7 +36,6 @@ from .base import (
     RetryPolicy,
     parse_call_timeout_env,
     retry_with_backoff,
-    safe_int,
 )
 
 from .mcp_emit_intent import constraints_sentence, payload_contract
@@ -264,13 +264,13 @@ class DeepSeekBackend:
             sdk_result = await self._drive_turn(system_prompt, correction, prompt_chars=len(correction))
             for key, value in (sdk_result.usage or {}).items():
                 if key == "context_tokens_peak":
-                    usage[key] = max(safe_int(usage.get(key)), safe_int(value))
+                    usage[key] = max(to_int(usage.get(key), 0), to_int(value, 0))
                 else:
-                    usage[key] = safe_int(usage.get(key)) + safe_int(value)
+                    usage[key] = to_int(usage.get(key), 0) + to_int(value, 0)
 
-        input_tokens = safe_int(usage.get("input_tokens"))
-        output_tokens = safe_int(usage.get("output_tokens"))
-        cache_read_tokens = safe_int(usage.get("cache_read_input_tokens"))
+        input_tokens = to_int(usage.get("input_tokens"), 0)
+        output_tokens = to_int(usage.get("output_tokens"), 0)
+        cache_read_tokens = to_int(usage.get("cache_read_input_tokens"), 0)
         metadata: dict[str, Any] = {
             "model": self.model,
             "session_id": sdk_result.session_id,
@@ -283,7 +283,7 @@ class DeepSeekBackend:
             "cache_read_input_tokens": cache_read_tokens,
             # The largest single request of the turn -- the figure the checkpoint
             # policy compares against the model's window.
-            "context_tokens_peak": safe_int(usage.get("context_tokens_peak")),
+            "context_tokens_peak": to_int(usage.get("context_tokens_peak"), 0),
             # Full conversation text for conversations.jsonl, handed up for the
             # caller to persist.
             "prompt": prompt,
@@ -323,9 +323,9 @@ class DeepSeekBackend:
                 "model": self.model,
                 "prompt_chars": prompt_chars,
                 "reply_chars": len(sdk_result.text),
-                "input_tokens": safe_int(usage.get("input_tokens")),
-                "output_tokens": safe_int(usage.get("output_tokens")),
-                "cache_read_input_tokens": safe_int(usage.get("cache_read_input_tokens")),
+                "input_tokens": to_int(usage.get("input_tokens"), 0),
+                "output_tokens": to_int(usage.get("output_tokens"), 0),
+                "cache_read_input_tokens": to_int(usage.get("cache_read_input_tokens"), 0),
                 "session_id": sdk_result.session_id,
             }
         )

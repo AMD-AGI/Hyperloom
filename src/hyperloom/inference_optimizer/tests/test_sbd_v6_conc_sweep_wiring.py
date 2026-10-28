@@ -37,12 +37,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridStop,
-    GridVariant,
-    VariantResult,
-    variant_benchmark_timeout_sec,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -84,7 +80,13 @@ def _state(baseline_yaml: Path, **overrides: Any) -> SharedState:
     return state
 
 
-def _variant(variant: GridVariant, *, throughput: float | None, status: str = "succeeded") -> VariantResult:
+def _variant(
+    variant: GridVariant,
+    *,
+    throughput: float | None,
+    status: str = "succeeded",
+    granted_cap_sec: float | None = 7800.0,
+) -> VariantResult:
     name = variant.name
     return VariantResult(
         name=name,
@@ -101,9 +103,10 @@ def _variant(variant: GridVariant, *, throughput: float | None, status: str = "s
         error=None if status == "succeeded" else "boom",
         error_class="" if status == "succeeded" else "magpie_timeout",
         killed_overtime=False,
-        # The runner grants each slot its cap and publishes it on the row it returns; a double that
-        # left it out would stand in for a runner that never told anyone what it enforced.
-        granted_cap_sec=variant_benchmark_timeout_sec(variant),
+        # The runner grants each slot its cap once it has composed the rung's config, and publishes
+        # it on the row it returns; a double that left it out would stand in for a runner that never
+        # told anyone what it enforced.
+        granted_cap_sec=granted_cap_sec,
     )
 
 
@@ -243,12 +246,19 @@ _OPERATOR_CAP = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
 
 async def _rungs_that_cleared_the_operator_cap(*, grid: list[GridVariant], **_kw):
     """A runner whose rungs clear the operator's cap, so each one ran under the cap its own workload asks for."""
-    return [_variant(replace(variant, unset_envs=[_OPERATOR_CAP]), throughput=100.0) for variant in grid]
+    return [
+        _variant(
+            replace(variant, unset_envs=[_OPERATOR_CAP]),
+            throughput=100.0,
+            granted_cap_sec=resolve_benchmark_timeouts(
+                {"HYPERLOOM_AGENTX": "1", "CONC": str(variant.extra_envs["CONC"])}
+            )[1],
+        )
+        for variant in grid
+    ]
 
 
-def test_a_rung_is_recorded_under_the_cap_its_runner_granted_it(
-    session_dir: Path, baseline_yaml: Path, monkeypatch
-):
+def test_a_rung_is_recorded_under_the_cap_its_runner_granted_it(session_dir: Path, baseline_yaml: Path, monkeypatch):
     """The runner grants the cap, so the record follows the row, not a second derivation from its envs.
 
     These rungs cleared the operator's override before running, which no reader
@@ -408,6 +418,8 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
     assert refused["error_class"] == "budget_exhausted"
     assert refused["budget_remaining_sec"] == 4.0
     assert refused["output_throughput"] is None
+    # No config was composed for this rung and no round of it ran, so it was granted no time.
+    assert refused["granted_cap_sec"] is None
     # The arm that never got to start says so at the arm level instead.
     assert ext["arms"][ARM_BASELINE]["refused"]["reason"] == "insufficient_remaining_for_variant"
     assert ext["runtime"]["budget_skip_reason"] == "insufficient_remaining_for_variant"

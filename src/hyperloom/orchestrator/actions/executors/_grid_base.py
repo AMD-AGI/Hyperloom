@@ -22,7 +22,6 @@ DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 # Terminal outcomes that ended a grid variant without a graded comparison, so
 # they are neither a KEEP nor a REVERT.
 TS_FAILED = "FAILED"
-TS_KILLED_OVERTIME = "KILLED_OVERTIME"
 TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"
 
 

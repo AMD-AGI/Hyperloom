@@ -5,20 +5,25 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
 from hyperloom.common.agentx_workload import agentx_warmup_requests
 from hyperloom.orchestrator.actions.executors._grid_runner import (
+    GridRecipe,
     GridVariant,
+    _build_variant_yaml,
+    composed_benchmark_timeout_sec,
     sync_benchmark_timeout,
-    variant_benchmark_timeout_sec,
+    variant_conc,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     resolve_benchmark_timeouts,
     sync_agentx_phase_wait,
-    workload_benchmark_timeout_sec,
 )
+from hyperloom.orchestrator.actions.executors._workload_envs import LaunchLayer
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_skip_result
 
 
@@ -101,47 +106,78 @@ def test_an_operator_cap_wins_over_the_canonical_derivation():
     assert resolve_benchmark_timeouts(env)[1] == 1234.0
 
 
-def test_rungs_of_one_grid_are_capped_by_their_own_workload(monkeypatch):
-    """The ladder's rungs share a process environment: the cap has to follow the variant, not that."""
+@pytest.fixture
+def granted_cap(tmp_path, monkeypatch):
+    """Compose a variant's config the way the runner does, and read back the cap its rounds get.
+
+    The invoking environment is stripped of every name that sizes a workload, so what a
+    test asserts is what the base YAML, the recipe's base layer and the variant put into
+    the composition between them -- which is all the rounds launch with.
+    """
+    for name in ("CONC", "NUM_PROMPTS", "HYPERLOOM_AGENTX", "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"):
+        monkeypatch.delenv(name, raising=False)
+    counter = iter(range(100))
+
+    def compose(base_envs: dict[str, str], variant: GridVariant, base: LaunchLayer = LaunchLayer()) -> float:
+        nth = next(counter)
+        base_yaml = tmp_path / f"base_{nth:02d}.yaml"
+        config = {
+            "benchmark": {
+                "framework": "sglang",
+                "model": "Qwen/Qwen3-0.6B",
+                "agentx": {"enabled": True, "mode": "canonical"},
+                "envs": {"HYPERLOOM_AGENTX": "1", "TP": "1", **base_envs},
+            }
+        }
+        base_yaml.write_text(yaml.safe_dump(config), encoding="utf-8")
+        cfg_path = _build_variant_yaml(
+            GridRecipe(base_yaml_path=base_yaml, base=base), variant, output_subdir=tmp_path / f"variant_{nth:02d}"
+        )
+        return composed_benchmark_timeout_sec(Path(cfg_path))
+
+    return compose
+
+
+def test_a_rung_is_granted_the_cap_the_workload_it_inherits_asks_for(granted_cap):
+    """The pin that sizes the work is as often inherited as set: this rung moves only server args."""
+    variant = GridVariant("args_only", extra_server_args="--chunked-prefill-size 2048")
+    assert variant_conc(variant) is None, "nothing in the variant spec names this rung's workload"
+    assert granted_cap({"CONC": "20"}, variant) == resolve_benchmark_timeouts(_canonical_env(CONC="20"))[1] > 7800.0
+
+
+def test_a_pin_from_the_recipes_base_layer_sizes_the_grant_too(granted_cap):
+    """``GridRecipe.base`` is composed into the launch env the same way the base YAML is."""
+    variant = GridVariant("args_only", extra_server_args="--chunked-prefill-size 2048")
+    cap = granted_cap({}, variant, LaunchLayer(extra_envs={"CONC": "20"}))
+    assert cap == resolve_benchmark_timeouts(_canonical_env(CONC="20"))[1] > 7800.0
+
+
+def test_rungs_of_one_grid_are_capped_by_their_own_workload(granted_cap):
+    """The ladder's rungs share one base config: the cap has to follow the rung, not that."""
+    low = granted_cap({"CONC": "14"}, GridVariant("low", extra_envs={"CONC": "14", "NUM_PROMPTS": "70"}))
+    high = granted_cap({"CONC": "14"}, GridVariant("high", extra_envs={"CONC": "28", "NUM_PROMPTS": "140"}))
+    assert high > low == resolve_benchmark_timeouts(_canonical_env(CONC="14"))[1]
+
+
+def test_a_rung_that_clears_an_inherited_concurrency_falls_back_to_the_stock_cap(granted_cap):
+    """A variant's clears move the size of its work as much as its pins do, so the grant reads both."""
+    assert granted_cap({"CONC": "28"}, GridVariant("no_conc", unset_envs=["CONC"])) == 7800.0
+
+
+def test_an_operator_cap_a_rung_pins_wins_over_the_workload_it_inherits(granted_cap):
+    variant = GridVariant("capped", extra_envs={"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "60"})
+    assert granted_cap({"CONC": "28"}, variant) == 60.0
+
+
+def test_a_rung_that_never_ran_publishes_no_grant(monkeypatch):
+    """No config was composed for it and no round of it started, so it was granted no time at all.
+
+    A number here would be the cap of a run nobody made, and the reader cannot tell that
+    apart from the cap a rung was really held to.
+    """
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "14")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-    low = workload_benchmark_timeout_sec({"CONC": "14", "NUM_PROMPTS": "70"})
-    high = workload_benchmark_timeout_sec({"CONC": "28", "NUM_PROMPTS": "140"})
-    assert high > low == resolve_benchmark_timeouts()[1]
-
-
-def test_a_rung_that_clears_its_concurrency_falls_back_to_the_stock_cap(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("CONC", "28")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-    assert workload_benchmark_timeout_sec(None, ["CONC"]) == 7800.0
-
-
-def test_a_rung_is_granted_the_cap_its_whole_spec_asks_for(monkeypatch):
-    """A variant's clears move the size of its work as much as its pins do, so the grant has to read both."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "60")
-    variant = GridVariant(
-        "optimized_conc20",
-        extra_envs={"CONC": "20", "NUM_PROMPTS": "100"},
-        unset_envs=["INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"],
-    )
-    assert variant_benchmark_timeout_sec(variant) == resolve_benchmark_timeouts(_canonical_env(CONC="20"))[1]
-    # What the rung's pins alone say, which is the cap of some other run.
-    assert workload_benchmark_timeout_sec(variant.extra_envs) == 60.0
-
-
-def test_a_rung_publishes_the_cap_it_was_granted(monkeypatch):
-    """Whoever grants the cap writes it on the row; a reader that derives its own reports a run nobody made."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "60")
-    variant = GridVariant(
-        "optimized_conc20",
-        extra_envs={"CONC": "20", "NUM_PROMPTS": "100"},
-        unset_envs=["INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"],
-    )
-    assert _budget_skip_result(variant).granted_cap_sec == variant_benchmark_timeout_sec(variant)
+    variant = GridVariant("optimized_conc20", extra_envs={"CONC": "20", "NUM_PROMPTS": "100"})
+    assert _budget_skip_result(variant).granted_cap_sec is None
 
 
 def test_the_client_phase_wait_is_exported_at_the_rungs_own_cap():

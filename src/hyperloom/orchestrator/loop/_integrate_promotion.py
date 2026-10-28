@@ -349,8 +349,6 @@ class IntegratePromotionMixin:
             self.shared_state.record_authored_framework_levers(
                 levers,
                 default_on=(lever_outcome == "default_on"),
-                specialist_task_id=str(result.get("specialist_task_id") or ""),
-                stack_delta_pct=result.get("delta_pct"),
             )
         )
 

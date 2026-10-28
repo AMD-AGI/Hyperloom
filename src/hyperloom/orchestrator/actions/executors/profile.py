@@ -34,7 +34,6 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
 from .benchmark_result import round_succeeded
 from .baseline import BenchmarkRunExecutor
 
@@ -652,7 +651,7 @@ def _validate_trace_structure(
 
 # Fold the composite's base overrides into the caller's profile params.
 def _merge_profile_params(params: dict[str, Any]) -> None:
-    from ._grid_runner import merge_server_args
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 
     merged_args = merge_server_args(
         _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip()),
@@ -1155,9 +1154,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            if str(framework or "").strip().lower() == "xdit":
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
-                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):

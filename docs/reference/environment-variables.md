@@ -368,7 +368,7 @@ require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
-decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+decided that — in a versioned schema (`schema_version`, currently `1.2.0`), so
 consumers and triage read a contract rather than candidate internals.
 
 ---
@@ -983,8 +983,10 @@ and a `CONC` pinned, the cap defaults to
 measured across the rungs of one 8×MI355X sweep, doubled for the cold warmup,
 plus the `metric_window_s` window, metrics finalisation and boot), and never below
 the stock 7800 s: about 10,200 s at `CONC` 20. A concurrency sweep resolves this
-per rung from the rung's own environment pins, so the rung that measures more
-lanes is granted more time rather than the ladder sharing one grant.
+per rung from the environment the rung's own config is launched with -- whether
+the `CONC` in it was pinned by the rung, inherited from the base config or
+cleared by the rung -- so the rung that measures more lanes is granted more time
+rather than the ladder sharing one grant.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
 fixed-sequence profiling. Configure capture steps, count, delay and interval through

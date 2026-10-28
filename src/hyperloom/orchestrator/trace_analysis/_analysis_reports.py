@@ -24,7 +24,8 @@ from ._kernel_roofline import (
     kernel_roofline_path_for_run,
 )
 from ._trace_inputs import TraceInputs
-from .tracelens_skill_runner import aggregate_by_source_function, tracelens_analysis_mode
+from .tracelens_skill_runner import aggregate_by_source_function
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 log = logging.getLogger(__name__)
 

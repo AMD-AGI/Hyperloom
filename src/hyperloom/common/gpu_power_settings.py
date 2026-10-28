@@ -21,9 +21,9 @@ import json
 import os
 import re
 import shutil
-import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
+import subprocess  # nosec B404 - fixed amd-smi invocations.
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from hyperloom.common.env import env_flag
 
@@ -44,12 +44,16 @@ __all__ = [
     "declared_setting_problems",
     "gfx_clock_limits",
     "gpu_power_sampling_unavailable",
+    "gpu_rows",
     "gpus_outside_session",
+    "metric_value",
     "reading_matches",
     "single_clock_limit",
     "normalize_perf_level",
+    "read_amd_smi_json",
     "read_gpu_power_settings",
     "read_node_power_settings",
+    "run_amd_smi",
     "visible_gpu_indices",
 ]
 
@@ -189,12 +193,14 @@ def _masked_cards(nodes: Mapping[int, int], rocr: list[int] | None, hip: list[in
     return {by_node[ordinal] for ordinal in visible}
 
 
-def _gpu_rows(payload: Any) -> list[dict[str, Any]]:
+def gpu_rows(payload: Any) -> list[dict[str, Any]]:
+    """The per-card rows of an ``amd-smi --json`` payload, each keyed by its integer ``gpu`` index."""
     rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
     return [row for row in rows or [] if isinstance(row, dict) and isinstance(row.get("gpu"), int)]
 
 
-def _value(block: Any) -> float | None:
+def metric_value(block: Any) -> float | None:
+    """The number in an ``amd-smi`` reading, bare or as ``{"value": n, "unit": ...}``; ``None`` for anything else."""
     if isinstance(block, dict):
         block = block.get("value")
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
@@ -206,10 +212,10 @@ def _power_cap_w(limit: Any) -> float | None:
         return None
     for key in ("ppt0", "ppt"):
         section = limit.get(key)
-        if isinstance(section, dict) and (cap := _value(section.get("socket_power_limit"))) is not None:
+        if isinstance(section, dict) and (cap := metric_value(section.get("socket_power_limit"))) is not None:
             return cap
     for key in ("socket_power_limit", "power_cap"):
-        if (cap := _value(limit.get(key))) is not None:
+        if (cap := metric_value(limit.get(key))) is not None:
             return cap
     return None
 
@@ -261,8 +267,8 @@ def gfx_clock_limits(clock: Any) -> frozenset[float]:
         for name, block in clock.items()
         if str(name).startswith("gfx_")
         and isinstance(block, dict)
-        and _value(block.get("clk")) is not None
-        and (limit := _value(block.get("max_clk"))) is not None
+        and metric_value(block.get("clk")) is not None
+        and (limit := metric_value(block.get("max_clk"))) is not None
     )
 
 
@@ -281,17 +287,24 @@ def reading_matches(got: Any, want: float) -> bool:
     )
 
 
-def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
-    if shutil.which("amd-smi") is None and run is subprocess.run:
-        raise GpuPowerSettingsError("amd-smi is not on PATH")
+def run_amd_smi(args: Sequence[str], timeout: float = _READ_TIMEOUT_SEC) -> str:
+    """Run ``amd-smi`` with ``args`` and return its stdout; raise :class:`GpuPowerSettingsError` when it fails."""
     try:
-        done = run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
+        done = subprocess.run(["amd-smi", *args], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
     if done.returncode != 0:
-        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[:200]}")
+        # amd-smi prints a traceback on failure; its last line is the one that says why.
+        lines = [line.strip() for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
+        detail = (lines[-1] if lines else "")[:200]
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {detail}")
+    return str(done.stdout or "")
+
+
+def read_amd_smi_json(*args: str) -> Any:
+    """Parse the ``--json`` output of a read-only ``amd-smi`` subcommand; raise when it fails or prints no JSON."""
     try:
-        return json.loads(done.stdout)
+        return json.loads(run_amd_smi([*args, "--json"]))
     except ValueError as exc:
         raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} printed no JSON") from exc
 
@@ -302,29 +315,25 @@ def _read_gpu_kfd_nodes() -> dict[int, int]:
     Raises:
         GpuPowerSettingsError: ``amd-smi`` failed, or reported a card without its KFD node.
     """
-    rows = _gpu_rows(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "list"))
+    rows = gpu_rows(read_amd_smi_json("list"))
     nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
     if len(nodes) != len(rows):
         raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
     return nodes
 
 
-def read_gpu_power_settings(
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = _READ_TIMEOUT_SEC,
-) -> dict[int, dict[str, Any]]:
+def read_gpu_power_settings() -> dict[int, dict[str, Any]]:
     """``{gpu: {"power_cap_w": float | None, "perf_level": str, "sclk_max_mhz": float | None}}`` for every card listed.
 
     Raises:
-        GpuPowerSettingsError: ``amd-smi`` is absent, failed, or printed something that is not its JSON.
+        GpuPowerSettingsError: ``amd-smi`` could not run, failed, or printed something that is not its JSON.
     """
     settings: dict[int, dict[str, Any]] = {}
-    for row in _gpu_rows(_amd_smi_json(run, timeout, "static", "--limit")):
+    for row in gpu_rows(read_amd_smi_json("static", "--limit")):
         settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
-    for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--perf-level")):
+    for row in gpu_rows(read_amd_smi_json("metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
-    for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--clock")):
+    for row in gpu_rows(read_amd_smi_json("metric", "--clock")):
         if row["gpu"] in settings:
             settings[row["gpu"]][SCLK_MAX_MHZ] = single_clock_limit(gfx_clock_limits(row.get("clock")))
     for entry in settings.values():
@@ -340,10 +349,10 @@ def read_node_power_settings() -> dict[str, Any]:
     The limit is the one firmware enforces, which can sit below the one the BMC was asked for.
 
     Raises:
-        GpuPowerSettingsError: ``amd-smi`` is absent, failed (a release before ROCm 7.2 has no ``node`` command), or
+        GpuPowerSettingsError: ``amd-smi`` could not run, failed (a release before ROCm 7.2 has no ``node`` command), or
             printed something that is not its JSON.
     """
-    return _parse_node_power(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "node", "--power-management"))
+    return _parse_node_power(read_amd_smi_json("node", "--power-management"))
 
 
 def _parse_node_power(payload: Any) -> dict[str, Any]:
@@ -356,7 +365,7 @@ def _parse_node_power(payload: Any) -> dict[str, Any]:
     status = str(management.get("status") or "").lower()
     return {
         NPM: status if status in NPM_STATES else "",
-        NODE_POWER_LIMIT_W: _value(management.get("limit")),
+        NODE_POWER_LIMIT_W: metric_value(management.get("limit")),
     }
 
 

@@ -100,22 +100,6 @@ def test_format_search_state():
     out = SharedState._format_search_state(search)
     assert "cursor=3  accepted=1  rejected=1  tested=1" in out
     assert "f1" in out and "KEEP" in out
-    assert "killed_overtime" not in out
-
-
-def test_format_search_state_head_reports_killed_overtime():
-    search = {
-        "cursor": 8,
-        "tested": {"f1": {}, "f2": {}},
-        "last_round": {"round_id": 3, "killed_overtime": ["f1", "f2"]},
-    }
-    out = SharedState._format_search_state(search)
-    assert "killed_overtime(last_round)=2" in out
-    # A round with no kill must not add noise to the head line.
-    search["last_round"] = {"round_id": 4, "killed_overtime": []}
-    assert "killed_overtime" not in SharedState._format_search_state(search)
-    search["last_round"] = "not-a-dict"
-    assert "killed_overtime" not in SharedState._format_search_state(search)
 
 
 def test_format_optimization_stack():
@@ -187,19 +171,17 @@ def test_format_trace_analyze_skipped_kernels():
     assert "skipped_kernels_top" in out
 
 
-def test_format_analysis_md_full(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
+def test_format_analysis_md_pointer():
     st = SharedState()
-    assert "no TraceLens snapshot" in st._format_analysis_md_full()
+    assert "no TraceLens snapshot" in st._format_analysis_md_pointer()
     st.last_trace_analyze = {
         "analysis_md_text": "# Analysis\nbody",
         "roofline_snapshot_id": 5,
         "roofline_baseline_gain_at_snapshot": 12.5,
     }
-    out = st._format_analysis_md_full()
+    out = st._format_analysis_md_pointer()
     assert "snapshot #5" in out
     assert "12.50%" in out
-    assert "body" in out
 
 
 def test_format_last_action_failures_multiline_and_log_path():

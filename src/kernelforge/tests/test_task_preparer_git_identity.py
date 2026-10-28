@@ -131,12 +131,12 @@ def test_prepass_commit_lands_when_git_cannot_auto_detect_an_identity(tmp_path, 
     _no_identity_to_borrow(monkeypatch)
     workspace, kernel, driver = _workspace_without_an_identity(tmp_path)
     _conforming_preparation(monkeypatch, driver)
-    base_sha = task_preparer._git_head(workspace)
+    base_sha = task_preparer.git_head(workspace)
 
     result = _prepare(tmp_path, workspace, kernel, driver)
 
     assert result.ok is True, result.message
-    assert task_preparer._git_head(workspace) != base_sha
+    assert task_preparer.git_head(workspace) != base_sha
 
 
 def test_prepass_commit_is_attributed_to_forge(tmp_path, monkeypatch):
@@ -192,5 +192,5 @@ def test_a_later_commit_into_the_same_repo_also_lands(tmp_path, monkeypatch):
         allowed_paths={"warm.md"},
     )
 
-    assert sha == task_preparer._git_head(workspace)
+    assert sha == task_preparer.git_head(workspace)
     assert _last_author(workspace) == FORGE_IDENTITY

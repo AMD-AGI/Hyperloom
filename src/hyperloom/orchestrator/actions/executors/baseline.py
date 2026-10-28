@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import ExitStack, suppress
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +29,9 @@ from typing import Any, Iterable, Iterator, Mapping, NamedTuple
 
 import yaml
 
+from hyperloom.common.coerce import optional_positive_float
 from hyperloom.common.env import is_truthy
+from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.jsonio import read_json
@@ -81,7 +83,6 @@ from ._grid_runner import (
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
-    SERVER_DEAD_RETURNCODE,
     RoundWatch,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
@@ -90,9 +91,7 @@ from ._subprocess_kill import (
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
-from ._accuracy_gate import (
-    materialized_run_eval_disabled,
-)
+from ._accuracy_gate import materialized_run_eval_disabled, post_ready_sec_without_eval
 
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
@@ -131,6 +130,7 @@ from .benchmark_result import (
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
+from .bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 from .magpie_agentx import ServerArgvInvalidError
 
 
@@ -643,19 +643,14 @@ def _unlaunched_round_result(
     )
 
 
-def _round_headroom_sec(state: Any, session_deadline_sec: float | None) -> tuple[float | None, dict[str, Any]]:
+def _round_headroom_sec(state: Any) -> tuple[float | None, dict[str, Any]]:
     """Seconds this round's budget may still spend, and the numbers behind it."""
-    if state is not None:
-        usable_sec = _phase_state.session_usable_seconds(state)
-        if usable_sec is not None:
-            return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
-        outside: dict[str, Any] = {"reason": "unbounded_session_budget"}
-    else:
-        outside = {"reason": "no_session_state"}
-    if session_deadline_sec is None:
-        return None, outside
-    remaining_sec = max(0.0, session_deadline_sec - time.monotonic())
-    return remaining_sec, {**outside, "bound": "session_deadline", "affordable_sec": round(remaining_sec, 1)}
+    if state is None:
+        return None, {"reason": "no_session_state"}
+    usable_sec = _phase_state.session_usable_seconds(state)
+    if usable_sec is None:
+        return None, {"reason": "unbounded_session_budget"}
+    return usable_sec, {"bound": "session_usable", "affordable_sec": round(usable_sec, 1)}
 
 
 def _cold_anchor_from_warmup(
@@ -677,15 +672,6 @@ def _a_use_must_follow_the_round(state: Any) -> bool:
     return phase == _phase_state.PHASE_PRELUDE
 
 
-def _positive_seconds(value: Any) -> float | None:
-    """Coerce a duration a round reported to seconds, or ``None`` when it did not."""
-    try:
-        seconds = float(value or 0.0)
-    except (TypeError, ValueError):
-        return None
-    return seconds if seconds > 0.0 else None
-
-
 def _disable_cuda_graph_flag(framework: str) -> str:
     """Return the framework-correct flag that disables cuda-graph capture."""
     return _DISABLE_CUDA_GRAPH_FLAGS.get(
@@ -699,11 +685,7 @@ def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
     return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
 
 
-def _classify_subprocess_error(
-    elapsed_sec: float,
-    stderr_tail: str,
-    returncode: int | None = None,
-) -> str:
+def _classify_subprocess_error(elapsed_sec: float, stderr_tail: str) -> str:
     """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
@@ -995,37 +977,17 @@ def _verify_three_way_clean(
 ) -> tuple[bool, str]:
     """Reject only residue newly introduced on this patch's paths."""
     try:
-        unmerged = subprocess.run(
-            [
-                "git",
-                *safe_directory_args(
-                    ["ls-files", "-u", "--", *touched],
-                    cwd=repo_path,
-                ),
-            ],
-            cwd=repo_path,
-            capture_output=True,
-            timeout=15,
-            check=True,
-        )
+        after = _three_way_residue_snapshot(repo_path, touched)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         return False, f"post_3way_check_failed:{type(exc).__name__}"
-    after_unmerged = unmerged.stdout.decode(errors="replace").splitlines()
-    if set(after_unmerged) - set(before.get("unmerged") or []):
+    if set(after["unmerged"]) - set(before.get("unmerged") or []):
         return False, "new_unmerged_index_entries"
-    root = Path(repo_path).resolve()
-    markers = (b"<<<<<<< ", b"=======", b">>>>>>> ")
     for rel in touched:
         prior = (before.get("paths") or {}).get(rel) or {}
-        if (root / f"{rel}.rej").exists() and not prior.get("reject"):
+        now = after["paths"][rel]
+        if now["reject"] and not prior.get("reject"):
             return False, f"new_reject_file:{rel}.rej"
-        target = root / rel
-        marker_lines: list[str] = []
-        if target.is_file() and not target.is_symlink():
-            marker_lines = [
-                line.decode(errors="replace") for line in target.read_bytes().splitlines() if line.startswith(markers)
-            ]
-        if set(marker_lines) - set(prior.get("markers") or []):
+        if set(now["markers"]) - set(prior.get("markers") or []):
             return False, f"new_conflict_marker:{rel}"
     return True, ""
 
@@ -1191,8 +1153,6 @@ def _refuse_warm_replay_before_apply(
     trees: dict[str, dict[str, Any]],
     overlays: list[_OverlayText],
 ) -> dict[str, Any] | None:
-    if not any(roots):
-        return _refused_warm_replay(patches, "missing_target_repo")
     if absent := next((root for root in roots if root and root not in trees), ""):
         return {**_refused_warm_replay(patches, "apply_root_absent"), "pre_sha": "", "target_repo": absent}
     rejected = next((idx for idx, overlay in enumerate(overlays) if overlay.reason), -1)
@@ -1351,7 +1311,7 @@ def _apply_warm_patch_sequence(
             continue
         if method in ("applied", "applied_3way", "applied_nogit"):
             tree["mutated"] = True
-        applied.append({"patch_file": patch_file, "idx": str(idx), "status": method})
+        applied.append({"patch_file": patch_file, "status": method})
         status.update(status=method, applied_patch=str(patch_path))
     return applied, statuses
 
@@ -1393,7 +1353,6 @@ def _warm_replay_report(
 
 def _apply_warm_patches(
     params: dict[str, Any],
-    target_repo: str,
     output_dir: Path,
     *,
     before_mutation: Any = None,
@@ -1402,9 +1361,8 @@ def _apply_warm_patches(
     if not (patches := params.get("patches")):
         return []
     required = bool(params.get("required_patch_timeline"))
-    # The recorded root is the tree the gain was measured on, so it outranks the locally resolved one rather than
-    # being checked against it.
-    roots = [str(patch.get("framework_root") or "").strip() or target_repo for patch in patches]
+    # Each overlay applies into the tree its gain was measured on.
+    roots = [str(patch.get("framework_root") or "").strip() for patch in patches]
     trees = _warm_patch_trees(roots)
     overlays = _screened_overlays(patches)
     if required and (refusal := _refuse_warm_replay_before_apply(patches, roots, trees, overlays)) is not None:
@@ -1480,15 +1438,11 @@ def _stamp_warm_patch_trees(
     """Record which trees this round patched, for prelude to promote or restore."""
     trees = list(patch_application.get("trees") or [])
     primary = trees[0] if trees else {}
-    target = str(patch_application.get("target_repo") or primary.get("root") or "")
     result["warm_patch_result"] = dict(patch_application)
     result["warm_patch_trees"] = trees
-    result["warm_patch_pre_sha"] = str(primary.get("pre_sha") or patch_application.get("pre_sha") or "")
-    result["warm_patch_target"] = target
-    result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest") or primary.get(
-        "snapshot_manifest"
-    )
-    result["warm_patch_canonical_target"] = target
+    result["warm_patch_pre_sha"] = str(primary.get("pre_sha") or "")
+    result["warm_patch_target"] = str(primary.get("root") or "")
+    result["warm_patch_snapshot_manifest"] = primary.get("snapshot_manifest")
 
 
 def _stamp_warm_patch_outcome(
@@ -1666,15 +1620,13 @@ class _BenchProcess(NamedTuple):
 
 def _boot_failure(finished: _BenchProcess, server_log: Path) -> tuple[str, str] | None:
     death = server_log_death_excerpt(str(server_log))
-    dead = death is not None or finished.returncode == SERVER_DEAD_RETURNCODE
-    death_error = death or "server engine/worker init failed (reaped by liveness watchdog); see server.log"
-    error = death_error if dead else (finished.stderr or finished.stdout)[-2000:]
+    error = death if death is not None else (finished.stderr or finished.stdout)[-2000:]
     texts = (finished.server_log_text, finished.stderr, finished.stdout)
     if is_aiter_jit_registry_mismatch(*texts):
         return "aiter_jit_registry_mismatch", error
     if _is_cuda_graph_capture_failure(*texts):
         return "cuda_graph_capture_failed", error
-    return ("server_init_dead", death_error) if dead else None
+    return ("server_init_dead", death) if death is not None else None
 
 
 class BenchmarkRunExecutor:
@@ -1795,9 +1747,8 @@ class BenchmarkRunExecutor:
         """Warn when the measured round climbed far enough above the warm-up to suggest a server still ramping."""
         warm = float(warmup_tput or 0.0)
         measured = float(result.get("output_throughput") or 0.0)
-        if warm <= 0 or measured <= 0:
+        if measured <= 0 or (delta_pct := incremental_gain_pct(measured, warm)) is None:
             return
-        delta_pct = (measured - warm) / warm * 100.0
         if delta_pct <= _COLD_START_DELTA_WARN_PCT:
             return
         result.setdefault("nonfatal_warnings", [])
@@ -1891,15 +1842,10 @@ class BenchmarkRunExecutor:
 
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the action inside the session the context names."""
-        from hyperloom.inference_optimizer.session.session_binding import bound_session_or_none, session_scope
+        from hyperloom.inference_optimizer.session.session_binding import named_session_scope
 
         # Only a context that names its session binds one.
-        named = (getattr(ctx, "extra", None) or {}).get("session_dir")
-        with ExitStack() as stack:
-            with suppress(OSError, RuntimeError):
-                session = Path(named).resolve() if named else None
-                if session is not None and bound_session_or_none() != session:
-                    stack.enter_context(session_scope(session))
+        with named_session_scope((getattr(ctx, "extra", None) or {}).get("session_dir")):
             return await self._run(ctx)
 
     async def _run(self, ctx: RunnerContext) -> dict[str, Any]:
@@ -2314,7 +2260,6 @@ class BenchmarkRunExecutor:
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=str(getattr(shared_state, "model_path", "") or ""),
-            for_serving=True,
         )
         await _prepare_aiter_serving_so(base_extra_envs)
         try:
@@ -2538,7 +2483,7 @@ class BenchmarkRunExecutor:
             if isinstance(entry, dict)
         ):
             return {"status": "failed", "failure": "missing_target_repo", "patches": [], "applied": []}
-        application = _apply_warm_patches(params, "", output_dir, before_mutation=_persist_recipe_snapshot)
+        application = _apply_warm_patches(params, output_dir, before_mutation=_persist_recipe_snapshot)
         if isinstance(application, Mapping):
             if application.get("status") == "failed":
                 return application
@@ -2760,7 +2705,7 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         affordable, evidence = self._measure_round_affordable(
             warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
-            warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
+            warmup_post_ready_sec=post_ready_sec_without_eval(warmup_result),
             ctx_extra=getattr(attempt.ctx, "extra", None) or {},
         )
         if affordable:
@@ -2919,7 +2864,7 @@ class BenchmarkRunExecutor:
             # Without the split, a variant is priced at a whole cold round, which is what it is: a boot and a
             # benchmark that pays the compile.
             use_sec = _phase_state.one_more_measurement_sec(state) or cold_sec
-        headroom_sec, evidence = _round_headroom_sec(state, None)
+        headroom_sec, evidence = _round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
         cost = round_sec + use_sec
@@ -2940,15 +2885,15 @@ class BenchmarkRunExecutor:
     ) -> tuple[bool, dict[str, Any]]:
         """Whether the budget covers the measured round *and a use for it*."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
-        headroom_sec, evidence = _round_headroom_sec(state, None)
+        headroom_sec, evidence = _round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
-        warmup_sec = _positive_seconds(warmup_runtime_sec)
+        warmup_sec = optional_positive_float(warmup_runtime_sec)
         priced_by = "session_hot_pass"
         benchmark_sec = _phase_state.measured_seconds(state, "baseline_warm_runtime_sec")
         if benchmark_sec is None:
             priced_by = "warmup_post_ready"
-            benchmark_sec = _positive_seconds(warmup_post_ready_sec)
+            benchmark_sec = optional_positive_float(warmup_post_ready_sec)
         if benchmark_sec is None or warmup_sec is None:
             return True, {"reason": "no_measured_benchmark_to_predict_from", **evidence}
         use_sec = 0.0
@@ -3000,9 +2945,7 @@ class BenchmarkRunExecutor:
         port: int,
     ) -> None:
         """Remove the pid/json files a previous round left for this framework and port."""
-        base = Path(pid_dir)
-        tag = f"{framework}_{port}"
-        for p in (base / f"{tag}.pid", base / f"{tag}.json"):
+        for p in (lifecycle_pid_file(pid_dir, framework, port), lifecycle_meta_file(pid_dir, framework, port)):
             try:
                 if p.exists():
                     p.unlink()
@@ -3313,7 +3256,7 @@ class BenchmarkRunExecutor:
         try:
             # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
             # carries the same reference flags the single-node materialized YAML does.
-            from ._grid_runner import merge_server_args
+            from hyperloom.inference_optimizer.grid_server_args import merge_server_args
             from ._workload_envs import resolve_reference_launch
 
             ref_args, ref_envs, _ = resolve_reference_launch()
@@ -3616,7 +3559,7 @@ class BenchmarkRunExecutor:
             }
         if finished.returncode != 0:
             tail = redact_secret_values((finished.stderr or finished.stdout)[-2000:])
-            err_class = _classify_subprocess_error(finished.runtime_sec, tail, finished.returncode)
+            err_class = _classify_subprocess_error(finished.runtime_sec, tail)
             return {
                 "status": "failed",
                 "error_class": err_class,
@@ -3659,7 +3602,7 @@ class BenchmarkRunExecutor:
             if boot is not None:
                 error_class, error = boot
             elif finished.returncode != 0:
-                error_class, error = _classify_subprocess_error(finished.runtime_sec, tail, finished.returncode), tail
+                error_class, error = _classify_subprocess_error(finished.runtime_sec, tail), tail
             elif not report_path.exists():
                 error_class = "no_report"
                 error = f"{_BENCHMARK_REPORT_NAME} missing under {workspace}"

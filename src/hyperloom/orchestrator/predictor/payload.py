@@ -12,11 +12,11 @@ completely is omitted rather than half-filled. See
 
 from __future__ import annotations
 
-import datetime as _dt
+import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import to_float
+from hyperloom.common.coerce import optional_positive_float, text_or_none, to_float, to_unix
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
@@ -46,16 +46,6 @@ _MODEL_INFO_KEYS = ("model_type", "attention_type", "num_hidden_layers", "num_ex
 _KERNEL_KEYS = ("name", "gpu_pct", "efficiency_percent", "arithmetic_intensity", "kernel_category")
 
 
-def _positive(value: Any) -> float | None:
-    """A rate or a ceiling, which is absent unless positive."""
-    out = to_float(value)
-    return out if out is not None and out > 0 else None
-
-
-def _text(value: Any) -> str | None:
-    return str(value or "").strip() or None
-
-
 def _bound(value: Any) -> str | None:
     """A bound label, lower-cased; ``unknown`` is dropped because the predictor renders ``<label>-bound``."""
     text = str(value or "").strip().lower()
@@ -63,20 +53,14 @@ def _bound(value: Any) -> str | None:
 
 
 def _profile_age_sec(trace: dict[str, Any]) -> int | None:
-    raw = str(trace.get("ts") or "").strip()
-    try:
-        stamped = _dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamped.tzinfo is None:
-        stamped = stamped.replace(tzinfo=_dt.timezone.utc)
-    return max(0, int((_dt.datetime.now(_dt.timezone.utc) - stamped).total_seconds()))
+    stamped = to_unix(trace.get("ts"))
+    return None if stamped is None else max(0, int(time.time() - stamped))
 
 
 def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """Roofline ceilings plus what the perf model added; ``None`` without either ceiling."""
-    mem = _positive(snapshot.get("roofline_mem_ceiling_tok_per_sec"))
-    cmp_ = _positive(snapshot.get("roofline_cmp_ceiling_tok_per_sec"))
+    mem = optional_positive_float(snapshot.get("roofline_mem_ceiling_tok_per_sec"))
+    cmp_ = optional_positive_float(snapshot.get("roofline_cmp_ceiling_tok_per_sec"))
     if mem is None and cmp_ is None:
         return None
     perfmodel = snapshot.get("perfmodel_breakdown")
@@ -86,10 +70,10 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "roofline_mem_ceiling_tok_per_sec": mem,
         "roofline_cmp_ceiling_tok_per_sec": cmp_,
         "roofline_bound_kind": _bound(snapshot.get("roofline_bound_kind")),
-        "achieved_tok_per_sec": _positive(snapshot.get("achieved_tok_per_sec")),
+        "achieved_tok_per_sec": optional_positive_float(snapshot.get("achieved_tok_per_sec")),
         "gap_to_roofline_pct": to_float(snapshot.get("gap_to_roofline_pct")),
-        "hbm_bw_gbps": _positive(perfmodel.get("hbm_bw_gbps")),
-        "peak_achievable_tflops": _positive(perfmodel.get("peak_achievable_tflops")),
+        "hbm_bw_gbps": optional_positive_float(perfmodel.get("hbm_bw_gbps")),
+        "peak_achievable_tflops": optional_positive_float(perfmodel.get("peak_achievable_tflops")),
         "n_ops_total": len(ops) if ops else None,
         "n_ops_memory_bound": sum(str(op.get("bound") or "").lower() == "memory" for op in ops) if ops else None,
     }
@@ -156,9 +140,9 @@ def _stack(state: SessionView) -> list[dict[str, Any]]:
         envs = step.get("extra_envs")
         out.append(
             {
-                "candidate_extra_server_args": _text(step.get("candidate_extra_server_args")),
+                "candidate_extra_server_args": text_or_none(step.get("candidate_extra_server_args")),
                 "extra_envs": dict(envs) if isinstance(envs, dict) and envs else None,
-                "tput": _positive(step.get("tput")),
+                "tput": optional_positive_float(step.get("tput")),
             }
         )
     return out
@@ -167,9 +151,8 @@ def _stack(state: SessionView) -> list[dict[str, Any]]:
 def build_request(
     state: SessionView,
     *,
-    session_id: str,
     sites: Mapping[str, dict[str, Any]],
-    sidecars: Mapping[str, Any] | None = None,
+    sidecars: Mapping[str, Any],
     budget: PhaseBudget,
 ) -> dict[str, Any]:
     """Build the request body for the current decision point.
@@ -184,14 +167,14 @@ def build_request(
     best = state.current_best
     return {
         "schema": REQUEST_SCHEMA,
-        "session_id": session_id,
+        "session_id": str(state.session_id or ""),
         "identification": {
-            "model_name": _text(state.model_name),
-            "model_class": _text(state.model_class),
-            "gpu_type": _text(state.gpu_type),
-            "framework": _text(state.framework),
-            "framework_version": _text(state.framework_version),
-            "precision": _text(state.precision),
+            "model_name": text_or_none(state.model_name),
+            "model_class": text_or_none(state.model_class),
+            "gpu_type": text_or_none(state.gpu_type),
+            "framework": text_or_none(state.framework),
+            "framework_version": text_or_none(state.framework_version),
+            "precision": text_or_none(state.precision),
             "tp": state.tp,
             "ep": state.ep,
             "model_info": {key: info.get(key) for key in _MODEL_INFO_KEYS},
@@ -204,17 +187,17 @@ def build_request(
         },
         "phase": {
             "phase": PHASE_LABEL,
-            "phase_reason": _text(last_transition.get("reason")),
+            "phase_reason": text_or_none(last_transition.get("reason")),
             "phase_elapsed_seconds": round(budget.elapsed_sec, 1),
         },
         "performance": {
-            "baseline_tput": _positive(state.baseline_tput),
+            "baseline_tput": optional_positive_float(state.baseline_tput),
             # Candidates are graded against the champion once the stack is non-empty.
-            "current_best_tput": _positive(best.get("tput")),
+            "current_best_tput": optional_positive_float(best.get("tput")),
             "cumulative_gain_validated": to_float(state.cumulative_gain_validated),
             # Decays with the macro-cycle and doubles on multi-node.
             "keep_threshold_pct": budget.keep_threshold_pct,
             "optimization_stack": _stack(state),
         },
-        "evidence": _evidence(state, sites, sidecars or {}),
+        "evidence": _evidence(state, sites, sidecars),
     }

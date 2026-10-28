@@ -9,8 +9,10 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
+from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.perf_metric import GradedComparison, VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from ..kernel import kernel_decisions
 from ..kernel.keep_thresholds import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
@@ -313,7 +315,7 @@ class KernelStackPhase(CoordinatorCollaborator):
         drained = 0
         max_drain = 10
         while drained < max_drain:
-            pending_records = state.pending_kernel_integration_records()
+            pending_records = kernel_decisions.pending_kernel_integration_records(state)
             if not pending_records:
                 break
             pending = pending_records[0]
@@ -623,10 +625,8 @@ class KernelStackPhase(CoordinatorCollaborator):
             decision=_graded_stack_decision(graded, stack_id),
             verdict=graded.verdict,
             new_tput=new_tput,
-            gain_pct=(new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0,
-            incremental_gain_pct=(
-                (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
-            ),
+            gain_pct=gain_pct_or_zero(new_tput, base_tput),
+            incremental_gain_pct=gain_pct_or_zero(graded.candidate, graded.reference),
             objective=graded.objective,
             degrade_reason=graded.degrade_reason,
         )

@@ -38,15 +38,14 @@ from ..stop_attribution import (
     STOPPED_BY_THE_RUN,
     StoppedByTheRun,
 )
-from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
-from ._benchmark_interpreter import _resolve_probe_python as _resolve_probe_python
+from ._benchmark_runtime import apply_runtime_benchmark_overrides
+from ._benchmark_interpreter import _resolve_probe_python
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     RoundWatch,
     resolve_benchmark_timeouts,
@@ -54,7 +53,6 @@ from ._subprocess_kill import (
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
     sync_agentx_phase_wait,
-    workload_benchmark_timeout_sec,
 )
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -73,36 +71,21 @@ from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_specu
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.overlay import is_safe_path_entry
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
 from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
 from ._workload_envs import BenchmarkTarget, LaunchLayer
 
-# Re-exported from sibling modules to keep the module namespace intact.
-from ._grid_base import (
-    DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
-    GridVariant as GridVariant,
-    VariantResult as VariantResult,
-)
+from ._grid_base import GridVariant, VariantResult
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import (
     SGLANG_MOE_RUNNER_BACKEND_RE,
+    compose_server_args,
     moe_runner_requires_aiter,
     remove_moe_runner_backend_arg,
-    server_args_env_name as server_args_env_name,
-    merge_server_args as merge_server_args,
-    compose_server_args as compose_server_args,
-    shell_safe_dedupe as shell_safe_dedupe,
-)
-from ._grid_variant_filter import (
-    resolve_skip_spec as resolve_skip_spec,
-    _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
-    _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
-    reorder_grid_for_multi_node as reorder_grid_for_multi_node,
-    apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
-    apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
-    apply_compatibility_filter as apply_compatibility_filter,
-    apply_user_skip_list as apply_user_skip_list,
+    dedupe_extra_server_args,
 )
 
 
@@ -557,43 +540,11 @@ def _mn_restart_env(
     return merged
 
 
-def _resolve_mn_effective_server_args(
-    cfg_path: Path,
-    base_yaml_path: Path,
-    variant: Any,
-    *,
-    base_extra_args: str,
-    base_args_mode: str,
-) -> str:
-    """Resolve the multi-node server args for a variant restart; prefer the materialized variant YAML, falling back to a recompose from the base YAML."""
-    try:
-        with cfg_path.open(encoding="utf-8") as _f:
-            _variant_cfg = yaml.safe_load(_f) or {}
-        _variant_bench = _variant_cfg.get("benchmark") or {}
-        _variant_envs = _variant_bench.get("envs") or {}
-        _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
-        return str(_variant_envs.get(_variant_framework_env) or "")
-    except (OSError, ValueError, yaml.YAMLError, AttributeError):
-        log.debug(
-            "grid_runner: failed to read materialized variant args from %s",
-            cfg_path,
-            exc_info=True,
-        )
-        with base_yaml_path.open(encoding="utf-8") as _f:
-            _base_cfg = yaml.safe_load(_f) or {}
-        _base_bench = _base_cfg.get("benchmark") or {}
-        _base_envs = _base_bench.get("envs") or {}
-        _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-        _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-        return shell_safe_dedupe(
-            compose_server_args(
-                inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
-                base_extra_args=base_extra_args,
-                variant_extra_args=variant.extra_server_args,
-                remove_args=getattr(variant, "remove_args", []),
-                args_mode=getattr(variant, "args_mode", "append"),
-            )
-        )
+def _resolve_mn_effective_server_args(cfg_path: Path) -> str:
+    """The server args the materialized variant YAML carries, for a multi-node variant restart."""
+    with cfg_path.open(encoding="utf-8") as f:
+        bench = (yaml.safe_load(f) or {}).get("benchmark") or {}
+    return str((bench.get("envs") or {}).get(server_args_env_name(bench.get("framework"))) or "")
 
 
 def _variant_progress_note(
@@ -697,30 +648,20 @@ def _multi_node_warmup_rounds(variant_expected_sec: Any) -> int:
     return 1 if (is_multi_node() and mn_bench_warmup_enabled()) else 0
 
 
-def variant_benchmark_timeout_sec(variant: GridVariant) -> float:
-    """The hard cap one variant's rounds are granted, sized to the workload the whole variant spec composes.
-
-    A variant says what it wants pinned *and* what it wants cleared, and both
-    move the size of the work a round has to get through, so a grant derived
-    from the pins alone would be a grant for some other run. Every caller that
-    has to name a variant's cap -- the slot that enforces it, the rows that
-    publish it -- asks here, so there is one answer per variant.
-    """
-    return workload_benchmark_timeout_sec(variant.extra_envs, variant.unset_envs)
-
-
 class _VariantSlot(NamedTuple):
     """One variant's place in the grid, the directory its rounds write to, and the time they are granted.
 
-    The cap belongs to the slot rather than to the grid because the variant's own
-    env pins are what size it: a sweep's rungs differ in the concurrency they
-    measure, so they differ in the work one round has to get through.
+    The cap belongs to the slot rather than to the grid because a sweep's rungs differ in
+    the concurrency they measure, so they differ in the work one round has to get through.
+    It is ``None`` until this variant's config has been composed, because until then nobody
+    has seen the env the rounds will run under: a slot still holding ``None`` names a
+    variant whose rounds never started, and was granted nothing.
     """
 
     idx: int
     variant: GridVariant
     path: Path
-    benchmark_timeout_sec: float
+    benchmark_timeout_sec: float | None = None
 
 
 class _VariantFailure(NamedTuple):
@@ -768,12 +709,17 @@ class _GridRun(NamedTuple):
 
 
 class _VariantRounds(NamedTuple):
-    """The config one variant's rounds share, and the server they were given."""
+    """The config one variant's rounds share, the server they were given, and the time they are granted.
+
+    ``benchmark_timeout_sec`` is sized from ``cfg_path`` and not from the variant spec,
+    because that config is where every layer of the launch env has already landed.
+    """
 
     cfg_path: Path
     lifecycle: dict[str, Any]
     auto_warmup: bool
     mn_effective_args: str
+    benchmark_timeout_sec: float
 
 
 class _BenchmarkPass(NamedTuple):
@@ -1027,14 +973,10 @@ async def _variant_yaml_or_abort(
 
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
     cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.launch.server_lifecycle)
-    mn_effective_args = _resolve_mn_effective_server_args(
-        cfg_path,
-        run.recipe.base_yaml_path,
-        at.variant,
-        base_extra_args=run.recipe.base.extra_server_args,
-        base_args_mode=run.recipe.base.args_mode,
+    mn_effective_args = _resolve_mn_effective_server_args(cfg_path)
+    cold = _VariantRounds(
+        cfg_path, {"eligible": False}, False, mn_effective_args, composed_benchmark_timeout_sec(cfg_path)
     )
-    cold = _VariantRounds(cfg_path, {"eligible": False}, False, mn_effective_args)
     if not run.auto_warmup_requested:
         return cold
     try:
@@ -1061,7 +1003,9 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
             exc_info=True,
         )
         _abort_variant(at, _VariantFailure(_WARMUP_YAML_BUILD_ERROR, repr(exc), f"{_WARMUP_YAML_BUILD_ERROR}: {exc!r}"))
-    return _VariantRounds(warmed_cfg_path, lifecycle, True, mn_effective_args)
+    return _VariantRounds(
+        warmed_cfg_path, lifecycle, True, mn_effective_args, composed_benchmark_timeout_sec(warmed_cfg_path)
+    )
 
 
 async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
@@ -1080,7 +1024,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
     # Held in a local because the abort line below has to name the cap the round was actually granted: the
     # declared one is a hang backstop, and a round killed at the reserved cap logged as a two-hour timeout
     # reads as a variant that hangs rather than a budget that ran out.
-    warmup_cap_sec = at.benchmark_timeout_sec
+    warmup_cap_sec = rounds.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
             run,
@@ -1245,7 +1189,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             magpie_python=run.magpie_python,
             config_path=rounds.cfg_path,
             output_dir=warm_slot,
-            timeout_sec=at.benchmark_timeout_sec,
+            timeout_sec=rounds.benchmark_timeout_sec,
             silence_timeout_sec=run.silence_timeout_sec,
             server_already_ready=True,
             cwd=str(run.output_root),
@@ -1271,7 +1215,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
     workspaces_before = snapshot_workspaces(at.path)
     started_unix = time.time()
-    measure_cap_sec = at.benchmark_timeout_sec
+    measure_cap_sec = rounds.benchmark_timeout_sec
     try:
         proc = await _reported_magpie(
             run,
@@ -1311,36 +1255,25 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
     return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
 
 
-def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
+def _abort_on_detokenizer_stall(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
     destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
     # server.log is itself one of the salvaged artifacts, so the cause of death only reaches the slot here.
     harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=round_.started_unix)
     server_log = at.path / "server.log"
-    if round_.proc.returncode == SERVER_DEAD_RETURNCODE:
-        cause = "server_init_dead (engine/worker bootstrap failed; parent hung)"
-        failure = _VariantFailure(
-            "server_init_dead",
-            server_log_death_excerpt(str(server_log))
-            or "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog",
-        )
-    else:
-        cause = "detokenizer_stall (server ready but log went silent)"
-        failure = _VariantFailure(
-            "detokenizer_stall",
-            "server reported ready but emitted no log output (hung engine / detokenizer stall); "
-            "reaped by the detokenizer-stall watchdog",
-            "detokenizer_stall: server ready but log went silent",
-        )
     log.warning(
-        "grid_runner: variant %s aborted: %s after %.1fs",
+        "grid_runner: variant %s aborted: detokenizer_stall (server ready but log went silent) after %.1fs",
         _variant_tag(run, at),
-        cause,
         runtime_sec,
     )
     _abort_variant(
         at,
-        failure,
+        _VariantFailure(
+            "detokenizer_stall",
+            "server reported ready but emitted no log output (hung engine / detokenizer stall); "
+            "reaped by the detokenizer-stall watchdog",
+            "detokenizer_stall: server ready but log went silent",
+        ),
         returncode=round_.proc.returncode,
         runtime_sec=runtime_sec,
         server_log_path=_existing_log_path(server_log),
@@ -1363,8 +1296,8 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
             returncode=returncode,
             runtime_sec=round(max(0.0, time.time() - round_.started_unix), 2),
         )
-    if returncode in (SERVER_DEAD_RETURNCODE, DETOKENIZER_STALL_RETURNCODE):
-        _abort_on_watchdog(run, at, round_)
+    if returncode == DETOKENIZER_STALL_RETURNCODE:
+        _abort_on_detokenizer_stall(run, at, round_)
     stopped = stopped_by_the_run(returncode)
     if stopped is not None:
         attempt = _RoundAttempt(at, returncode, round_.started_unix, at.path / "server.log", round_.server_survivors)
@@ -1607,6 +1540,10 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     """Measure one variant and return its row, or raise :class:`_VariantAborted` carrying why it has none."""
     _refuse_unsupported_capability(run, at)
     rounds = await _prepare_variant_rounds(run, at)
+    # Composition is what names the grant, so the slot only carries one from here on: every row built
+    # below publishes the cap this variant's rounds were held to, and every row built above publishes
+    # none, because no round of this variant was ever granted time.
+    at = at._replace(benchmark_timeout_sec=rounds.benchmark_timeout_sec)
     warmup_tput = await _run_warmup_round(run, at, rounds) if rounds.auto_warmup else None
     _log_variant_banner(run, at)
     await _restart_multi_node_server(run, at, rounds)
@@ -1636,8 +1573,8 @@ async def run_grid(
 
     ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
-    # Silence is a property of the invoking process, so the grid shares one; the hard cap is a property of each
-    # variant's workload, so it is resolved per slot below.
+    # Silence is a property of the invoking process, so the grid shares one; the hard cap is a property of the
+    # workload each variant's config composes, so it is resolved per slot when that config is written.
     silence_timeout_sec = resolve_benchmark_timeouts()[0]
     magpie_python = launch.magpie_python
     if not magpie_python:
@@ -1671,12 +1608,7 @@ async def run_grid(
     )
     results: list[VariantResult] = []
     for i, variant in enumerate(grid):
-        at = _VariantSlot(
-            i,
-            variant,
-            output_root / f"variant_{i:02d}_{_safe(variant.name)}",
-            variant_benchmark_timeout_sec(variant),
-        )
+        at = _VariantSlot(i, variant, output_root / f"variant_{i:02d}_{_safe(variant.name)}")
         try:
             if _warn_budget_cannot_admit(
                 run, i, rounds_left=run.rounds_per_variant, spent_on="the variants before this one"
@@ -1733,7 +1665,6 @@ def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Vari
         error=stopped.never_started,
         error_class=stopped.error_class,
         note=variant.note,
-        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -1890,25 +1821,11 @@ __all__ = [
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
     "VariantResult",
-    "apply_multi_node_invalid_variants",
-    "apply_aiter_moe_pin_filter",
-    "apply_runtime_benchmark_overrides",
-    "reorder_grid_for_multi_node",
-    "merge_server_args",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
-    "server_args_env_name",
     "session_grid_bounds",
     "stopped_by_the_run",
-    "variant_benchmark_timeout_sec",
-    # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_probe_python",
-    "resolve_skip_spec",
-    "_MN_PARAMS_PRIORITY",
-    "_MN_BACKENDS_PRIORITY",
-    "apply_compatibility_filter",
-    "apply_user_skip_list",
 ]
 
 
@@ -1954,8 +1871,7 @@ def _importable_overlay_dir(variant: GridVariant) -> str:
     overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
     if not overlay:
         return ""
-    contained = ":" not in overlay and ".." not in Path(overlay).parts
-    if contained and not any(c in overlay for c in ("\n", "\r", "\x00")) and Path(overlay).is_dir():
+    if is_safe_path_entry(overlay) and Path(overlay).is_dir():
         return overlay
     log.warning(
         "grid: dropping unsafe overlay_pythonpath %r (not a single existing directory / contains separator or traversal)",
@@ -1974,6 +1890,30 @@ def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
     envs["PATH"] = ":".join(parts)
 
 
+def composed_benchmark_timeout_sec(config_path: Path) -> float:
+    """The hard cap the rounds of one materialized config are granted, sized to the env that config launches with.
+
+    The workload a round has to get through is named by the composed env, not by the
+    variant spec: the pin that sizes it -- a sweep's ``CONC``, an agentic flow -- is as
+    often inherited from the base YAML or from the recipe's base layer as it is set by
+    the variant, and a variant may equally clear one the base pinned. Sizing the grant
+    from the variant's own deltas alone would grant the time some other, usually
+    smaller, run needs, so it is read back off the config the round is launched from.
+    """
+    bench = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+    envs = dict(os.environ)
+    envs.update({str(k): str(v) for k, v in (bench.get("envs") or {}).items()})
+    if is_magpie_agentx(bench):
+        # AgentX keeps the variant's deltas in its launch overrides and applies them over the
+        # inherited env when it starts; the same order here, so the cap is sized to the env the
+        # round runs under rather than to the one it inherited.
+        launch = (bench.get("agentx") or {}).get("launch_overrides") or {}
+        for name in launch.get("unset_env") or []:
+            envs.pop(str(name), None)
+        envs.update({str(k): str(v) for k, v in (launch.get("env") or {}).items()})
+    return resolve_benchmark_timeouts(envs)[1]
+
+
 def _build_variant_yaml(
     recipe: GridRecipe,
     variant: GridVariant,
@@ -1981,7 +1921,12 @@ def _build_variant_yaml(
     output_subdir: Path,
     server_lifecycle: dict[str, Any] | None = None,
 ) -> Path:
-    """Materialize a per-variant Magpie YAML on disk."""
+    """Materialize a per-variant Magpie YAML on disk.
+
+    This is where every layer of a variant's launch env is composed, so the config it
+    writes -- not the variant spec -- is what ``composed_benchmark_timeout_sec`` sizes
+    the rounds' grant from.
+    """
     base = recipe.base
     target = recipe.target
     cfg = yaml.safe_load(recipe.base_yaml_path.read_text(encoding="utf-8"))
@@ -2026,7 +1971,7 @@ def _build_variant_yaml(
         combined, args_env=extra_args_env, model_path=target.model_path, variant=variant
     )
     if combined:
-        envs[extra_args_env] = shell_safe_dedupe(combined)
+        envs[extra_args_env] = dedupe_extra_server_args(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)

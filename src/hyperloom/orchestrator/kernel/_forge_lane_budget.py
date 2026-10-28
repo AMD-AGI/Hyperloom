@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.coerce import optional_positive_int
+
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from .lane_budget import INSUFFICIENT_BUDGET, LANE_GEMM, LaneAllocation
 from .lane_budget import allocate as _allocate_lane_budgets
@@ -148,14 +150,6 @@ def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int
     return max(1, value)
 
 
-def _positive_int(value: object) -> int:
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
-
-
 def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     """Attention TP shard behind the session's serving ``tp``.
 
@@ -163,10 +157,11 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     forge-fuse cannot infer the attention shard from ``--tp`` alone -- and it
     stamps the harness group/head dims from exactly this number.
     """
-    explicit = _positive_int(payload.get("attn_tp"))
+    explicit = optional_positive_int(payload.get("attn_tp"), 0)
     if explicit:
         return explicit
-    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+    from hyperloom.inference_optimizer.grid_server_args import server_arg_value
+    from hyperloom.inference_optimizer.roofline_ceiling import resolve_runtime_workload
 
     server_args = str(payload.get("extra_server_args") or "").strip()
     if not server_args:
@@ -177,8 +172,8 @@ def _fusion_attn_tp_size(state: object, payload: dict, *, tp: int) -> int:
     # launch_infera_node injects --dp-size = tp when a dp-attention flag arrives
     # without one, and these args are read before that injection.
     dp = (
-        _positive_int(_parse_server_arg(server_args, "--dp-size"))
-        or _positive_int(_parse_server_arg(server_args, "--data-parallel-size"))
+        optional_positive_int(server_arg_value(server_args, "--dp-size"), 0)
+        or optional_positive_int(server_arg_value(server_args, "--data-parallel-size"), 0)
         or tp
     )
     return max(1, tp // dp)
@@ -192,15 +187,15 @@ def _fusion_session_serve_args(
     model_path: str,
 ) -> dict[str, int]:
     """TP / attention TP / KV block size / max-model-len the smoke must match."""
-    tp = _positive_int(payload.get("tp") or getattr(state, "tp", 0))
-    max_model_len = _positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0))
-    block_size = _positive_int(payload.get("block_size"))
+    tp = optional_positive_int(payload.get("tp") or getattr(state, "tp", 0), 0)
+    max_model_len = optional_positive_int(payload.get("max_model_len") or getattr(state, "max_model_len", 0), 0)
+    block_size = optional_positive_int(payload.get("block_size"), 0)
     if block_size <= 0 and "vllm" in (framework or "").strip().lower():
         from hyperloom.inference_optimizer.model_config_utils import (
             _sparse_kv_block_size,
         )
 
-        block_size = _positive_int(_sparse_kv_block_size(model_path))
+        block_size = optional_positive_int(_sparse_kv_block_size(model_path), 0)
     args: dict[str, int] = {}
     if tp:
         args["tp"] = tp

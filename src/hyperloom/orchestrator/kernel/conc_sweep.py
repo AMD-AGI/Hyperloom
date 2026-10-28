@@ -48,11 +48,8 @@ from ..actions.executors._grid_runner import (
     run_grid,
     session_grid_bounds,
 )
-from ..actions.executors._grid_runner import variant_benchmark_timeout_sec, variant_conc
-from ..actions.executors._subprocess_kill import (
-    resolve_benchmark_timeouts,
-    session_deadline_to_remaining_sec,
-)
+from ..actions.executors._grid_runner import variant_conc
+from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
 from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
@@ -143,7 +140,12 @@ def _optimized_arm(state: SharedState) -> _Arm | None:
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes \"out of time\" from \"Magpie crashed\"."""
+    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes \"out of time\" from \"Magpie crashed\".
+
+    No config was composed for this rung and no round of it ran, so it was granted no
+    cap and ``granted_cap_sec`` stays ``None``: the grid runner is the only party that
+    grants one, and only once it knows the env the rounds launch under.
+    """
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
@@ -155,7 +157,6 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
         error="conc_sweep total budget exhausted before this variant ran",
         error_class="budget_exhausted",
         note=variant.note,
-        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -182,7 +183,6 @@ def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Var
         error=stopped.never_started,
         error_class=stopped.error_class,
         note=variant.note,
-        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -195,7 +195,6 @@ def _raised_result(variant: GridVariant, stage: str, exc: Exception) -> VariantR
         status="failed",
         error=f"{stage}: {exc}",
         error_class=type(exc).__name__,
-        granted_cap_sec=variant_benchmark_timeout_sec(variant),
     )
 
 
@@ -1203,7 +1202,7 @@ def _decline_before_start(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from hyperloom.common.overlay import is_safe_path_entry
         from ..kernel.geak_config import geak_overlay_is_loadable
 
         if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
@@ -1337,10 +1336,7 @@ async def run_conc_sweep(
     workspace.mkdir(parents=True, exist_ok=True)
 
     # Re-materialize (idempotent) in case we fell back to the shipped asset.
-    resolved_model = resolve_session_model_path(
-        state_model_path=str(getattr(state, "model_path", "") or ""),
-        for_serving=True,
-    )
+    resolved_model = resolve_session_model_path(state_model_path=str(getattr(state, "model_path", "") or ""))
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
     # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
     # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.

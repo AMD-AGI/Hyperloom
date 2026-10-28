@@ -243,8 +243,7 @@ def _back_up_existing_file(abs_path: Path, bak: Path) -> tuple[dict[str, Any] | 
     return {
         "target": str(abs_path),
         "existed": True,
-        "backup_path": str(bak),
-        "revert_action": "restore",
+        "backup": str(bak),
         "mode": mode,
         "pre_image_sha256": _file_digest(abs_path),
     }, ""
@@ -349,8 +348,7 @@ def _apply_patch_no_git(
             record: dict[str, Any] = {
                 "target": str(abs_path),
                 "existed": False,
-                "backup_path": None,
-                "revert_action": "delete",
+                "backup": None,
             }
         else:
             bak = backup_root / _bak_name(patch_stem, rel, seq_offset + len(backups))
