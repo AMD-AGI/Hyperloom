@@ -105,8 +105,10 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
         source, tmp_path / "round", launch=LaunchLayer(extra_envs={"TEST_SERVER_KNOB": "2"})
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert launch["append_args"] == ["--disable-custom-all-reduce"]
-    assert launch["env"] == {"TEST_SERVER_KNOB": "2"}
+    watchdog = ["--watchdog-timeout", "1800"] if framework == "sglang" else []
+    assert launch["append_args"] == ["--disable-custom-all-reduce", *watchdog]
+    step_timeout = {"VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "1200"} if framework == "vllm" else {}
+    assert launch["env"] == {"TEST_SERVER_KNOB": "2", **step_timeout}
     enable_profile(candidate)
     profiled = load_benchmark(candidate)["profiler"]["torch_profiler"]
     assert profiled["enabled"] is True
@@ -278,7 +280,8 @@ def test_operator_argument_can_be_ablated(tmp_path, monkeypatch):
         source, tmp_path / "ablate", launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"])
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
-    assert launch["append_args"] == launch["remove_args"] == []
+    assert launch["append_args"] == ["--watchdog-timeout", "1800"]
+    assert launch["remove_args"] == []
 
 
 def test_operator_env_can_be_removed_or_replaced_by_a_candidate(tmp_path, monkeypatch):

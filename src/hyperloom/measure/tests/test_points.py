@@ -43,6 +43,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
+#: The scheduler watchdog the main flow gives an sglang AgentX launch that sets none.
+WATCHDOG = ["--watchdog-timeout", "1800"]
 
 
 @pytest.fixture(autouse=True)
@@ -337,7 +339,7 @@ def test_an_agentx_point_is_what_the_main_flow_hands_magpie_for_the_recipe_and_c
     assert (envs["CONC"], envs["RUN_EVAL"]) == (level, "false")
     assert not {"NUM_PROMPTS", "NUM_WARMUPS", "EXTRA_SGLANG_ARGS", "HSA_FORCE_FINE_GRAIN_PCIE"} & envs.keys()
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
-    assert launch["append_args"] == SERVER_ARGS.split()
+    assert launch["append_args"] == [*SERVER_ARGS.split(), *WATCHDOG]
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1"}
 
 
@@ -379,7 +381,7 @@ def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
     assert rendered["benchmark"]["profiler"]["torch_profiler"]["num_steps"] == AGENTX_PROFILE_STEPS
     assert "PROFILE" not in rendered["benchmark"]["envs"]
-    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
+    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == [*SERVER_ARGS.split(), *WATCHDOG]
 
 
 def test_an_agentx_profile_captures_half_the_main_flows_steps_unless_its_point_names_a_count(tmp_path):
