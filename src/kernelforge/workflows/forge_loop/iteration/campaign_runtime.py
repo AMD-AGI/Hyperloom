@@ -421,6 +421,8 @@ class CampaignMixin:
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
             return True, None
+        if self._stop_at_speedup_target(iteration):
+            return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"
             print(

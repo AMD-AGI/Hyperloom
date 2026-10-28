@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from kernelforge.config import AgentRuntimeOptions, CeilingSwitch, GpuOptions
@@ -117,6 +118,7 @@ class ForgeLoopRequest:
     loop_shape: LoopShape
     roofline_ceiling: CeilingSwitch
     roofline_target: float
+    target_mean_case_speedup: float
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
@@ -150,6 +152,35 @@ def validate_roofline_target(target: float, ceiling_enabled: bool) -> float:
     return value
 
 
+_SPEEDUP_TARGET_OPTION = "--target-mean-case-speedup"
+
+
+def validate_speedup_target(target: float) -> float:
+    """Check the speedup target is a finite speedup the baseline has not already met; zero turns it off.
+
+    The baseline's mean case speedup is one by definition, so any other target
+    at or below one, a negative one included, would end every campaign before
+    its first round, and a target that is not finite can never be reached.
+    Both are refused rather than run: a mistyped target must not leave a
+    campaign without the stop its operator believes it has.
+    """
+    value = float(target or 0.0)
+    if value == 0:
+        return 0.0
+    if not math.isfinite(value):
+        raise InvalidOptionValue(
+            f"{_SPEEDUP_TARGET_OPTION} {value} can never be reached; give a finite speedup above 1.0, or 0 for none",
+            param_hint=_SPEEDUP_TARGET_OPTION,
+        )
+    if value <= 1.0:
+        raise InvalidOptionValue(
+            f"{_SPEEDUP_TARGET_OPTION} {value} is at or below 1.0, which the baseline already meets; "
+            "give a speedup above 1.0, or 0 for none",
+            param_hint=_SPEEDUP_TARGET_OPTION,
+        )
+    return value
+
+
 __all__ = [
     "AgentRoleOptions",
     "CampaignTarget",
@@ -162,4 +193,5 @@ __all__ = [
     "TaskIdentity",
     "TimeBudget",
     "validate_roofline_target",
+    "validate_speedup_target",
 ]

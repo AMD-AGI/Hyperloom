@@ -28,6 +28,7 @@ from kernelforge.workflows.forge_loop.bootstrap.request import (
     ForgeLoopRequest,
     SpecialistProbeOptions,
     validate_roofline_target,
+    validate_speedup_target,
 )
 from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadline, _ForgeRun
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec, _is_long_horizon
@@ -623,6 +624,7 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         commit_new_paths=list(campaign.commit_new_paths),
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=validate_roofline_target(request.roofline_target, request.roofline_ceiling.enabled),
+        target_mean_case_speedup=validate_speedup_target(request.target_mean_case_speedup),
     )
     if request.baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
