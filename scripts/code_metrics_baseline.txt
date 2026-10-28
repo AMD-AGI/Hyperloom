@@ -727,8 +727,6 @@ function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.en
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisBundle.apply 52
 function-lines src/kernelforge/orchestrator/contracts.py::OrchestrationContext.__post_init__ 75
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 104
-function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._parse_cross_cutting_move 61
-function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._partition_round 105
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._synthesize_optimization_plan_result 63
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent.plan_dispatch 75
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent.revise_optimization_plan 61
@@ -798,7 +796,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1464
 module-lines src/kernelforge/loop/runner.py 5864
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
-module-lines src/kernelforge/orchestrator/orchestration.py 1826
+module-lines src/kernelforge/orchestrator/orchestration.py 1529
 nested-blocks scripts/platform_audit_bmc.py::main 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_recipe_server_env 5

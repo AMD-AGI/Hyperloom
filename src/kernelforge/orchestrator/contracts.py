@@ -30,6 +30,11 @@ def _text(value: Any, label: str, *, allow_empty: bool = False) -> str:
     return normalized
 
 
+def _texts(values: Sequence[Any], label: str) -> None:
+    for index, value in enumerate(values):
+        _text(value, f"{label}[{index}]")
+
+
 def _identifier(value: Any, label: str) -> str:
     normalized = _text(value, label)
     if not _IDENTIFIER_RE.fullmatch(normalized):
@@ -249,16 +254,19 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Set when the caller has already decided the round's lanes: lane k serves assignment k, and the round plans every
+    # one of them rather than as many as the evidence alone would divide into.
+    lane_assignments: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
+        _texts(self.lane_assignments, "context.lane_assignments")
         _text(self.workspace, "context.workspace")
         _text(self.gpu_target, "context.gpu_target")
         _text(self.objective, "context.objective")
         _text(self.program_context, "context.program_context")
         _text(self.source_map_path, "context.source_map_path")
-        for index, source in enumerate(self.editable_sources):
-            _text(source, f"context.editable_sources[{index}]")
+        _texts(self.editable_sources, "context.editable_sources")
         if len(set(self.editable_sources)) != len(self.editable_sources):
             raise ValueError("context.editable_sources must not contain duplicates")
         _text(self.knowledge_index, "context.knowledge_index", allow_empty=True)
@@ -384,6 +392,8 @@ class OrchestrationContext:
         # Omitted rather than null, like ``CaseEvidence.roofline``.
         if self.roofline is not None:
             payload["roofline"] = self.roofline.to_dict()
+        if self.lane_assignments:
+            payload["lane_assignments"] = list(self.lane_assignments)
         return payload
 
 
@@ -641,13 +651,16 @@ class LaneGround:
     reason: str = ""
     joint: bool = False
     fallback: str = ""
+    # Why the evidence cannot serve an assigned lane; such a lane owns no ground and is not planned.
+    unplannable: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.lane_id, int) or isinstance(self.lane_id, bool):
             raise ValueError("lane ground.lane_id must be an integer")
         if self.lane_id < 1:
             raise ValueError("lane ground.lane_id must be positive")
-        _text(self.ground, "lane ground.ground")
+        _text(self.unplannable, "lane ground.unplannable", allow_empty=True)
+        _text(self.ground, "lane ground.ground", allow_empty=bool(self.unplannable))
         _text(self.reason, "lane ground.reason", allow_empty=True)
         if not isinstance(self.joint, bool):
             raise ValueError("lane ground.joint must be a boolean")
@@ -660,6 +673,7 @@ class LaneGround:
             "reason": self.reason,
             "joint": self.joint,
             "fallback": self.fallback,
+            "unplannable": self.unplannable,
         }
 
 
@@ -672,9 +686,13 @@ class SynthesizedPlan:
     ground: str = ""
     joint: bool = False
     fallback: str = ""
+    # The 1-based lane of the round's partition this plan was made for, kept through narrowing and revision.
+    lane_id: int = 1
 
     def __post_init__(self) -> None:
         _text(self.text, "synthesized plan")
+        if isinstance(self.lane_id, bool) or not isinstance(self.lane_id, int) or self.lane_id < 1:
+            raise ValueError("synthesized plan lane_id must be a positive integer")
         _text(
             self.session_id,
             "synthesized plan session_id",

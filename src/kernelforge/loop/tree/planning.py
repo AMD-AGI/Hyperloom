@@ -106,9 +106,8 @@ def start_brief(tree: SearchTree, start: TreeNode, slots: Sequence[Slot]) -> str
         "kept in the search tree and can be continued later, so do not trade a promising route for a small "
         "immediate gain.",
     ]
-    opened = ", ".join(f'{item.direction_id} "{item.name}"' for item in tree.directions_from(start.commit))
-    for position, slot in enumerate(slots, start=1):
-        lines.append(f"{position}. {_slot_task(tree, slot, opened)}")
+    for position, assignment in enumerate(slot_assignments(tree, start, slots), start=1):
+        lines.append(f"{position}. {assignment}")
     if any(slot.slot_type is SlotType.BRANCH for slot in slots):
         lines.append(
             'Every BRANCH lane begins its plan with a "## Direction" section of lines "- name:", "- hypothesis:", '
@@ -116,6 +115,12 @@ def start_brief(tree: SearchTree, start: TreeNode, slots: Sequence[Slot]) -> str
             "saying whether it was adopted or, if refuted, the evidence that refutes it."
         )
     return "\n".join(lines)
+
+
+def slot_assignments(tree: SearchTree, start: TreeNode, slots: Sequence[Slot]) -> tuple[str, ...]:
+    """What each slot planned at ``start`` asks its lane for, in slot order."""
+    opened = ", ".join(f'{item.direction_id} "{item.name}"' for item in tree.directions_from(start.commit))
+    return tuple(_slot_task(tree, slot, opened) for slot in slots)
 
 
 def _slot_task(tree: SearchTree, slot: Slot, opened: str) -> str:
@@ -232,28 +237,32 @@ class TreePlanningMixin:
             supervisor_guidance="",
             last_critic_verdict="",
             last_critic_review="",
+            lane_assignments=slot_assignments(tree, start, slots),
         )
 
     def _map_plans(self, iteration: int, slots: list[Slot], result) -> RoundPlans:
-        """Give each slot the lane plan published for it; a lane the round did not publish leaves its slot out."""
+        """Give each slot the plan published for its lane; a slot whose lane has none says why.
+
+        Slot k is planning lane k, and each published plan names the lane it was made for, so a lane lost anywhere
+        in planning costs exactly its own slot.
+        """
         diagnostics = dict(getattr(result, "structured_output_diagnostics", None) or {})
-        lane_count = int((diagnostics.get("lanes") or {}).get("planned") or len(slots))
-        dropped = {
-            int(item.get("lane_id") or 0) for item in (diagnostics.get("lane_narrowing") or {}).get("dropped") or ()
+        lane_ids = (diagnostics.get("lanes") or {}).get("published_lane_ids") or ()
+        published = dict(zip(lane_ids, result.optimization_plans))
+        dropped = (diagnostics.get("lane_narrowing") or {}).get("dropped_lanes") or {}
+        losses = {
+            **(diagnostics.get("lane_losses") or {}),
+            **{lane: f"the plan critic dropped its lane: {reason}" for lane, reason in dropped.items()},
         }
-        published = iter(plan for plan in result.optimization_plans if str(plan).strip())
+        unavailable = (diagnostics.get("synthesis") or {}).get("message") or "planning published no plan for its lane"
         plans: list[SlotPlan] = []
         unplanned: list[UnplannedSlot] = []
         for lane, slot in enumerate(slots, start=1):
-            if lane > lane_count or lane in dropped:
-                reason = "the plan critic dropped its lane" if lane in dropped else "planning produced fewer lanes"
-                unplanned.append(UnplannedSlot(slot, reason))
-                continue
-            text = next(published, "")
-            if not text:
-                unplanned.append(UnplannedSlot(slot, "planning published no plan for its lane"))
-                continue
-            plans.append(self._slot_plan(iteration, slot, text))
+            text = str(published.get(lane) or "").strip()
+            if text:
+                plans.append(self._slot_plan(iteration, slot, text))
+            else:
+                unplanned.append(UnplannedSlot(slot, losses.get(str(lane)) or unavailable))
         self._write_round_record(iteration, slots[0].start, "orchestration.json", diagnostics)
         return RoundPlans(tuple(plans), tuple(unplanned))
 
@@ -293,5 +302,6 @@ __all__ = [
     "UnplannedSlot",
     "port_plan",
     "read_direction_record",
+    "slot_assignments",
     "start_brief",
 ]

@@ -110,9 +110,15 @@ class _Planning:
             plans = ("set VALUE = 11",)
         else:
             plans = ("set VALUE = 4",)
-        return SimpleNamespace(
-            optimization_plans=plans[:lanes], structured_output_diagnostics={"lanes": {"planned": lanes}}
-        )
+        # The tree decides the lanes: one assignment per slot planned here.
+        assert len(context.lane_assignments) == lanes
+        return _planned(plans[:lanes])
+
+
+def _planned(plans: tuple[str, ...]) -> SimpleNamespace:
+    """A planning result whose plans are for lanes 1, 2, ... in order."""
+    lanes = {"planned": len(plans), "published_lane_ids": list(range(1, len(plans) + 1))}
+    return SimpleNamespace(optimization_plans=plans, structured_output_diagnostics={"lanes": lanes})
 
 
 def _lane_factory(_lane_dir, _serialized_driver):
@@ -159,10 +165,7 @@ class _SlowerPlanning(_Planning):
     """Every route it plans is slower than the root."""
 
     async def run(self, context, *, usage=None, lanes=1):
-        plans = ("set VALUE = 12", "set VALUE = 15")
-        return SimpleNamespace(
-            optimization_plans=plans[:lanes], structured_output_diagnostics={"lanes": {"planned": lanes}}
-        )
+        return _planned(("set VALUE = 12", "set VALUE = 15")[:lanes])
 
 
 def _relay_of(agents: LoopAgents) -> LoopAgents:
