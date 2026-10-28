@@ -227,13 +227,25 @@ def runtime_dir() -> Path:
     return workspace_root() / "runtime"
 
 
+def _installed_repo_root() -> Path:
+    """The root install.sh's ``resolve_repo_root`` picks when ``$REPO_ROOT`` is unset.
+
+    A source checkout is the directory holding ``pyproject.toml`` above ``src/``; a packaged install (the wheel in
+    site-packages) is the directory holding the ``hyperloom`` package. Deriving it from this file, not the working
+    directory, makes a process started elsewhere (a hosted run's MB entry) find the checkouts install.sh made.
+    """
+    package_parent = Path(__file__).resolve().parents[3]
+    source_root = package_parent.parent
+    return source_root if (source_root / "pyproject.toml").is_file() else package_parent
+
+
 def deps_cache_root() -> Path:
-    """Writable cache root for open-source dependency checkouts."""
+    """Writable cache root for open-source dependency checkouts: install.sh's ``$REPO_ROOT/.cache``."""
     override = os.environ.get(ENV_CACHE_DIR)
     if override:
         return Path(override)
-    repo_root = os.environ.get(ENV_REPO_ROOT) or os.getcwd()
-    return Path(repo_root) / ".cache"
+    repo_root = os.environ.get(ENV_REPO_ROOT)
+    return (Path(repo_root) if repo_root else _installed_repo_root()) / ".cache"
 
 
 def _dir_mtime(p: Path) -> float:
