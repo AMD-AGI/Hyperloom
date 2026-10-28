@@ -33,7 +33,9 @@ class _Tasks:
         return self._running
 
     async def create_or_return_existing(self, spec):
-        existing = any(c["idempotency_key"] == spec.idempotency_key for c in self.created)
+        existing = spec.idempotency_key in self.ended or any(
+            c["idempotency_key"] == spec.idempotency_key for c in self.created
+        )
         self.created.append(vars(spec))
         return SimpleNamespace(task_id=f"t-{len(self.created)}"), existing
 
@@ -211,6 +213,32 @@ async def test_no_second_batch_while_one_is_queued_or_the_phase_is_leaving():
             _awaiting_screen(fp._coord.shared_state, switch, patch)
         assert await fp.enqueue_cycle_batch() is False
         assert _explores(fp) == []
+
+
+async def test_a_cycle_batch_that_ended_without_running_is_enqueued_again():
+    """GLM-5.3: recover cancelled a preempted pod's cycle batch, and its spent key left both levers pending."""
+    from hashlib import sha1
+
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_INCONCLUSIVE
+
+    fp = _phase()
+    state = fp._coord.shared_state
+    for switch, patch in (("HL_A", "t-1"), ("HL_C", "t-2")):
+        _awaiting_screen(state, switch, patch)
+    key = "cycle-batch-c0-" + sha1(b"t-1,t-2", usedforsecurity=False).hexdigest()[:12]
+    fp._coord.tasks.ended = {key: "cancelled", f"{key}-a1": "failed"}
+
+    assert await fp.enqueue_cycle_batch() is True
+    fp._coord.tasks.ended[f"{key}-a2"] = "cancelled"
+    assert await fp.enqueue_cycle_batch() is False
+
+    assert (
+        [b["idempotency_key"] for b in _explores(fp)],
+        [r["attribution_source"] for r in state.authored_framework_levers],
+    ) == (
+        [f"{key}-a2"],
+        [ATTRIBUTION_CYCLE_INCONCLUSIVE, ATTRIBUTION_CYCLE_INCONCLUSIVE],
+    )
 
 
 def test_a_cycle_batch_is_priced_per_arm_and_its_two_bases():

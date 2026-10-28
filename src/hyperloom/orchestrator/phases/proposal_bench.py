@@ -29,13 +29,13 @@ log = _logging.getLogger(__name__)
 _COORDINATOR_SOURCE = "coordinator_internal"
 _INTEGRATE = "integrate_patch"
 
-#: A reference batch cancelled (a recovered pod) or failed (a server that did not boot) is enqueued again, this often.
-_CYCLE_REFERENCE_ATTEMPTS = 3
+#: A cycle batch cancelled (a recovered pod) or failed (a server that did not boot) is enqueued again, this often.
+_CYCLE_BATCH_ATTEMPTS = 3
 _UNRUN_STATES = frozenset({"cancelled", "failed"})
 
 
 def _never_ran(task: Any) -> bool:
-    """Whether a reference batch's task ended without a batch: cancelled, failed, or settled on a failed result."""
+    """Whether a cycle batch's task ended without a batch: cancelled, failed, or settled on a failed result."""
     if str(task.state) in _UNRUN_STATES:
         return True
     last = (list(getattr(task, "history", None) or []) or [{}])[-1]
@@ -214,14 +214,16 @@ class ProposalBench(CoordinatorCollaborator):
         if len(arms) < 2 and any(lane in serving for t in live for lane in (getattr(t, "requires_lanes", ()) or ())):
             return False
         names = sha1(",".join(arm["name"] for arm in arms).encode(), usedforsecurity=False).hexdigest()[:12]
+        key = await self._fresh_batch_key(f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}")
+        if key is None:
+            cba.release_unscreened_levers(self.shared_state, {cba.CYCLE_ARMS_PARAM: arms})
+            return False
         params = {
             "source": _COORDINATOR_SOURCE,
             "reason": cba.CYCLE_BATCH_REASON,
             cba.CYCLE_ARMS_PARAM: arms,
         }
-        task = await self._enqueue_coordinator_explore(
-            params, idempotency_key=f"cycle-batch-c{int(self.shared_state.macro_cycle or 0)}-{names}"
-        )
+        task = await self._enqueue_coordinator_explore(params, idempotency_key=key)
         if task is not None:
             log.info("cycle bench: enqueued batch task_id=%s over %s", task.task_id, [arm["name"] for arm in arms])
         return task is not None
@@ -241,7 +243,7 @@ class ProposalBench(CoordinatorCollaborator):
             return False
         if _holds_cycle_batch([*await self.tasks.queued(), *await self.tasks.running()]):
             return False
-        key = await self._cycle_reference_key(f"cycle-reference-c{int(state.macro_cycle or 0)}-s{stack_len}")
+        key = await self._fresh_batch_key(f"cycle-reference-c{int(state.macro_cycle or 0)}-s{stack_len}")
         if key is None:
             return False
         params = {"source": _COORDINATOR_SOURCE, "reason": cba.CYCLE_BATCH_REASON, cba.CYCLE_ARMS_PARAM: []}
@@ -252,9 +254,9 @@ class ProposalBench(CoordinatorCollaborator):
             )
         return task is not None
 
-    async def _cycle_reference_key(self, base: str) -> str | None:
-        """The key of this stack's next reference batch: a new attempt only once the last ended without running."""
-        for attempt in range(_CYCLE_REFERENCE_ATTEMPTS):
+    async def _fresh_batch_key(self, base: str) -> str | None:
+        """The key of the next cycle batch on ``base``: a new attempt only once the last ended without running."""
+        for attempt in range(_CYCLE_BATCH_ATTEMPTS):
             key = base if attempt == 0 else f"{base}-a{attempt}"
             task = await self.tasks.find_by_idempotency_key(key)
             if task is None or not _never_ran(task):
