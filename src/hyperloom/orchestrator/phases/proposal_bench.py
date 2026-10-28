@@ -10,9 +10,11 @@ from collections.abc import Iterable, Mapping
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ..collaborator import CoordinatorCollaborator
+from ..measurement.cycle_bench import cycle_bench_enabled
 from ..specialists.domains import CUSTOM_SPECIALIST_KEY
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TaskSpec
@@ -67,6 +69,13 @@ def _holds_cycle_batch(tasks: Iterable[Any]) -> bool:
     from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 
     return any(CYCLE_ARMS_PARAM in (getattr(task, "params", None) or {}) for task in tasks)
+
+
+def _screen_on(state: Any) -> bool:
+    """Whether the cycle screen runs: switched on, an AgentX workload, and not refused this session."""
+    return (
+        cycle_bench_enabled() and agentx_active(benchmark_mode=state.benchmark_mode) and not state.cycle_screen_refused
+    )
 
 
 class ProposalBench(CoordinatorCollaborator):
@@ -142,16 +151,10 @@ class ProposalBench(CoordinatorCollaborator):
     async def _bundle_screened(self, key: str, variant: Mapping[str, Any]) -> bool:
         """Whether the bundle round *key* may run: off the cycle screen, or its levers ran on together there without
         breaking or regressing. Until the screen reports, its arm is queued as a cycle batch of its own."""
-        from hyperloom.common.perf_metric import agentx_active
-
         from ..actions.executors import cycle_bench_arm as cba
 
         state = self.shared_state
-        if (
-            not cba.cycle_bench_enabled()
-            or not agentx_active(benchmark_mode=state.benchmark_mode)
-            or state.cycle_screen_refused
-        ):
+        if not _screen_on(state):
             return True
         verdict = (state.cycle_bundle_screens or {}).get(key)
         if verdict is not None:
@@ -230,16 +233,12 @@ class ProposalBench(CoordinatorCollaborator):
     async def _enqueue_cycle_reference(self) -> bool:
         """Enqueue the two bases alone for an AgentX stack no batch has measured, so the patches admitted dormant
         on it are held to the tree before them; whether one was enqueued."""
-        from hyperloom.common.perf_metric import agentx_active
-
         from ..actions.executors import cycle_bench_arm as cba
 
         state = self.shared_state
         stack_len = len(state.optimization_stack or [])
         if (
-            not cba.cycle_bench_enabled()
-            or not agentx_active(benchmark_mode=state.benchmark_mode)
-            or state.cycle_screen_refused
+            not _screen_on(state)
             or (state.cycle_reference or {}).get("stack_len") == stack_len
             or self._coord.dispatcher.admission_frozen
         ):
