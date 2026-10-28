@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import string
 import shutil
 import stat
 import sys
@@ -99,12 +100,11 @@ _PYTHON_HEREDOC = re.compile(
 )
 # The interpreter a heredoc is fed to, as it appears on the line that opens the document.
 _HEREDOC_PYTHON_VERB = re.compile(r"(?:^|\s)(?:[A-Za-z0-9_./-]*/)?python(?:\d+(?:\.\d+)*)?(?:\s|$)")
-_PYTHON_COMMAND_PREFIX = re.compile(
-    r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_./-]*/)?python"
-    r"(?:\d+(?:\.\d+)*)?\s+"
-    r"(?:-[A-Za-z][^\s;&|]*\s+)*"
-    r"-c\s+",
-)
+# An interpreter word and the whitespace after it; the options that may follow it are walked by
+# _python_c_payload_start, not matched here.
+_PYTHON_INTERPRETER_WORD = re.compile(r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_./-]*/)?python(?:\d+(?:\.\d+)*)?\s+")
+_COMMAND_SEPARATORS = frozenset(";&|")
+_ASCII_LETTERS = frozenset(string.ascii_letters)
 # Where a ``python -c`` payload word ends, by the quote it opens with: a single-quoted word at the next quote, a
 # double-quoted one at the next quote no backslash escapes, a bare word at whitespace or a command separator.
 _PAYLOAD_WORD_BODY = {
@@ -182,15 +182,46 @@ def _simple_commands(text: str) -> Iterator[tuple[str, list[str]]]:
                 )
 
 
+def _skip_whitespace(text: str, position: int) -> int:
+    while position < len(text) and text[position].isspace():
+        position += 1
+    return position
+
+
+def _python_c_payload_start(command: str, cursor: int) -> int | None:
+    """Where the payload of the next ``python [options] -c`` at or after ``cursor`` starts, or None.
+
+    The options between the interpreter and ``-c`` (``-`` and an ASCII letter, then anything up to whitespace
+    or a command separator, then whitespace) are walked one word at a time, so a long run of them costs linear
+    time. When the run holds ``-c`` more than once, the payload follows the last one.
+    """
+    for interpreter in _PYTHON_INTERPRETER_WORD.finditer(command, cursor):
+        position, payload_start = interpreter.end(), None
+        while command.startswith("-", position) and command[position + 1 : position + 2] in _ASCII_LETTERS:
+            word_end = position + 1
+            while word_end < len(command) and not (
+                command[word_end].isspace() or command[word_end] in _COMMAND_SEPARATORS
+            ):
+                word_end += 1
+            next_word = _skip_whitespace(command, word_end)
+            if next_word == word_end:
+                break
+            if command[position:word_end] == "-c":
+                payload_start = next_word
+            position = next_word
+        if payload_start is not None:
+            return payload_start
+    return None
+
+
 def _python_command_payloads(command: str) -> list[tuple[str, int, int]]:
     """Extract ``python -c`` payloads with a linear quoted-string scan."""
     payloads: list[tuple[str, int, int]] = []
     cursor = 0
     while True:
-        match = _PYTHON_COMMAND_PREFIX.search(command, cursor)
-        if match is None:
+        start = _python_c_payload_start(command, cursor)
+        if start is None:
             break
-        start = match.end()
         if start >= len(command):
             break
 

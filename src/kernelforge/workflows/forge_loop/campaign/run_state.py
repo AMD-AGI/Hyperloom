@@ -628,14 +628,17 @@ class WorkspaceLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_file = open(self.path, "a+")
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as e:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as e:
+                raise WorkspaceLockError(f"workspace is already in use: {self.path.parent.parent}") from e
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(f"pid={os.getpid()}\n")
+            lock_file.flush()
+        except BaseException:
             lock_file.close()
-            raise WorkspaceLockError(f"workspace is already in use: {self.path.parent.parent}") from e
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(f"pid={os.getpid()}\n")
-        lock_file.flush()
+            raise
         self._file = lock_file
         return self
 

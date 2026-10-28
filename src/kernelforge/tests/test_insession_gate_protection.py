@@ -248,6 +248,29 @@ def test_python_c_payload_scanner_rejects_long_unterminated_quotes():
     assert all(not gate_module._python_command_payloads(command) for command in commands)
 
 
+@pytest.mark.parametrize(
+    ("command", "payload"),
+    [
+        ("python -c 'print(1)'", "print(1)"),
+        ("/usr/bin/python3.11 -u -B -c 'x=1'", "x=1"),
+        ("python -I -c -c 'last'", "last"),
+        ("python -cfoo 'x'", None),
+        ("python -u; -c 'x'", None),
+        ("xpython -c 'x'", None),
+    ],
+)
+def test_python_c_payload_follows_the_options_before_it(command, payload):
+    found = [source for source, _start, _end in gate_module._python_command_payloads(command)]
+
+    assert found == ([payload] if payload else [])
+
+
+def test_a_long_option_run_before_python_c_still_yields_its_payload():
+    command = "python\t" + "-A\x7f-A " * 20_000 + "-c 'x=1'"
+
+    assert [source for source, _start, _end in gate_module._python_command_payloads(command)] == ["x=1"]
+
+
 def test_candidate_diff_fingerprint_failure_is_fail_closed(
     tmp_path: Path,
     monkeypatch,

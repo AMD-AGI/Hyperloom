@@ -164,7 +164,6 @@ def _author_baseline_harness(
     """
     attempts = _harness_alignment_attempts()
     feedback = ""
-    published, error = False, "harness was never authored"
 
     for attempt in range(1, attempts + 1):
         Path(harness_path).unlink(missing_ok=True)

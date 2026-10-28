@@ -506,10 +506,12 @@ def _build_evidence(
             parts += [
                 "",
                 "## Current driver is a COMPILE-ONLY STUB — rewrite it completely",
-                "The driver below only verifies that the kernel compiles with hipcc. "
-                "It has NO runtime measurement, NO correctness check, and NO timing "
-                "output. You MUST write a complete measurement driver from scratch — "
-                "do not adapt the compile-only boilerplate.",
+                (
+                    "The driver below only verifies that the kernel compiles with hipcc. "
+                    "It has NO runtime measurement, NO correctness check, and NO timing "
+                    "output. You MUST write a complete measurement driver from scratch — "
+                    "do not adapt the compile-only boilerplate."
+                ),
                 f"### `{driver}`",
                 "```python",
                 driver_text,

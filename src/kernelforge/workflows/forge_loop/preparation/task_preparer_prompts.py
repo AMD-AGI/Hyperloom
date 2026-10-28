@@ -27,12 +27,16 @@ def _reference_note(ref_dir: Path | None, workspace: Path) -> str:
         f"A copy of KernelForge's shipped reference material is in `./{rel_root}/`.",
         # A driver authored against this directory passed validation and then crashed on the loop's first baseline
         # bench, because the directory is deleted between the two.
-        f"`./{rel_root}/` is TEMPORARY authoring scaffolding: it is DELETED before "
-        "your driver is validated and committed, so read it now but never read it "
-        "at runtime — do not open, import, or glob anything under it from the "
-        "driver or its helpers.",
-        "Read the contract and ONE reference driver before writing; the others "
-        "are there if the first does not match your case:",
+        (
+            f"`./{rel_root}/` is TEMPORARY authoring scaffolding: it is DELETED before "
+            "your driver is validated and committed, so read it now but never read it "
+            "at runtime — do not open, import, or glob anything under it from the "
+            "driver or its helpers."
+        ),
+        (
+            "Read the contract and ONE reference driver before writing; the others "
+            "are there if the first does not match your case:"
+        ),
     ]
     readme = ref_dir / "README.md"
     if readme.is_file():
