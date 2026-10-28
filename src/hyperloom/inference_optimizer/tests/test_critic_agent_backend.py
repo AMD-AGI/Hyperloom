@@ -1861,18 +1861,15 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     def respond(request):
         assert request.url.path == "/v1/messages"
         observed.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "id": "msg_test",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-opus-4-8",
-                "content": [{"type": "text", "text": reply}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 20, "output_tokens": 10},
-            },
+        message = {"id": "msg_test", "model": "claude-opus-4-8", "content": [], "usage": {"input_tokens": 20}}
+        events = (
+            {"type": "message_start", "message": message},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}},
+            {"type": "message_stop"},
         )
+        return httpx.Response(200, content="".join(f"data: {json.dumps(event)}\n\n" for event in events).encode())
 
     async def query(*, prompt, options):
         observed.append(prompt)

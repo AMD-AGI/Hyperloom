@@ -389,8 +389,7 @@ def test_provisioned_runtime_lands_in_yaml_not_process_env(tmp_path, monkeypatch
     envs = materialized["benchmark"]["envs"]
     # the server binary resolves the attempt runtime, proven via YAML.
     assert f"{venv}/bin" in envs["PATH"]
-    assert envs["HYPERLOOM_FRAMEWORK_BIN"] == f"{venv}/bin"
-    assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == venv
+    assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == f"{venv}/bin/python"
 
 
 def test_opt_venv_path_never_replaced(tmp_path):

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import logging
 import os
 import re
@@ -392,14 +394,17 @@ COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
 # kernelName values with these libtypes are not linked into serving ``module_*.so``.
 NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
 
-# Longest prefix first: a bpreshuffle CSV may carry ``libtype=cktile`` rows whose
-# kernelName is ``a8w8_blockscale_cktile_*`` (no bpreshuffle infix).
+_BLOCKSCALE_CKTILE = "module_gemm_a8w8_blockscale_cktile"
+_BLOCKSCALE_BPRESHUFFLE_CKTILE = "module_gemm_a8w8_blockscale_bpreshuffle_cktile"
+
+# Longest prefix first. The prefix names a kernel's family, not always its module: see
+# serving_module_for_kernel's ``table_modules``.
 _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
     (
         "a8w8_blockscale_bpreshuffle",
         {
             "ck": "module_gemm_a8w8_blockscale_bpreshuffle",
-            "cktile": "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+            "cktile": _BLOCKSCALE_BPRESHUFFLE_CKTILE,
             "asm": "module_gemm_a8w8_blockscale_bpreshuffle_asm",
         },
     ),
@@ -407,7 +412,7 @@ _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
         "a8w8_blockscale",
         {
             "ck": "module_gemm_a8w8_blockscale",
-            "cktile": "module_gemm_a8w8_blockscale_cktile",
+            "cktile": _BLOCKSCALE_CKTILE,
             "asm": "module_gemm_a8w8_blockscale_asm",
         },
     ),
@@ -423,16 +428,28 @@ _KERNEL_PREFIX_TO_MODULE: tuple[tuple[str, dict[str, str]], ...] = (
     ("a4w4", {"ck": "module_gemm_a4w4_blockscale"}),
 )
 
+#: Each module's libtype, the key a table's row picks its module by.
+_MODULE_LIBTYPE: dict[str, str] = {
+    module: lib for _, by_lib in _KERNEL_PREFIX_TO_MODULE for lib, module in by_lib.items()
+}
+
+#: Modules one kernel name can live in. Both blockscale tables generate their cktile rows with
+#: ``ck_gemm_a8w8_blockscale/gen_instances_cktile.py``, so a bpreshuffle table's cktile rows are named
+#: ``a8w8_blockscale_cktile_*`` too, and the shared ``.cu`` raises the same registry error for either.
+_MODULES_SHARING_NAMES: dict[str, tuple[str, ...]] = {
+    _BLOCKSCALE_CKTILE: (_BLOCKSCALE_CKTILE, _BLOCKSCALE_BPRESHUFFLE_CKTILE),
+}
+
 # Serving modules whose codegen reads the matching AITER_CONFIG_* tune file.
 AITER_ENV_TO_SERVING_MODULES: dict[str, tuple[str, ...]] = {
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": (
         "module_gemm_a8w8_blockscale_bpreshuffle",
-        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
+        _BLOCKSCALE_BPRESHUFFLE_CKTILE,
         "module_gemm_a8w8_blockscale_bpreshuffle_asm",
     ),
     "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": (
         "module_gemm_a8w8_blockscale",
-        "module_gemm_a8w8_blockscale_cktile",
+        _BLOCKSCALE_CKTILE,
         "module_gemm_a8w8_blockscale_asm",
     ),
     "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE": (
@@ -487,13 +504,24 @@ def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
         # cktile kernel carries it in its own name.
         resolved = serving_module_for_kernel(kernel, "cktile" if "cktile" in kernel else "ck")
         if resolved:
-            modules.append(resolved)
+            modules.extend(_MODULES_SHARING_NAMES.get(resolved, (resolved,)))
     return tuple(dict.fromkeys(modules))
 
 
-def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
-    """Serving ``module_*.so`` that should contain this JIT kernel name."""
+def serving_module_for_kernel(kernel_name: str, libtype: str, table_modules: tuple[str, ...] = ()) -> str | None:
+    """Serving ``module_*.so`` that should contain this JIT kernel name.
+
+    Args:
+        kernel_name: The row's ``kernelName``.
+        libtype: The row's ``libtype``; empty means ``ck``.
+        table_modules: The modules the row's table generates, when the caller knows the table. aiter
+            builds a table's rows into that table's module for their libtype whatever the name says:
+            a bpreshuffle table's ``a8w8_blockscale_cktile_*`` rows live in its own cktile module.
+    """
     lib = str(libtype or "").strip().lower() or "ck"
+    for module in table_modules:
+        if _MODULE_LIBTYPE.get(module) == lib:
+            return module
     for prefix, by_lib in _KERNEL_PREFIX_TO_MODULE:
         if kernel_name.startswith(prefix):
             return by_lib.get(lib)
@@ -530,8 +558,8 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
     """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
-    ``module_*.so``. A name is looked up in the module implied by its prefix and
-    ``libtype``, falling back to ``modules``. Missing .so files mean the next start
+    ``module_*.so``. A name is looked up in the module of ``modules`` its ``libtype``
+    names, then in the one its prefix implies, falling back to ``modules``. Missing .so files mean the next start
     will compile from the current CSV, so that case is treated as covered.
     """
     rows = csv_jit_kernel_rows(csv_path)
@@ -552,7 +580,7 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
         return blobs[module]
 
     for name, libtype in rows:
-        resolved = serving_module_for_kernel(name, libtype)
+        resolved = serving_module_for_kernel(name, libtype, modules)
         search = (resolved,) if resolved else modules
         encoded = name.encode("utf-8")
         saw_so = False
@@ -568,6 +596,69 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
         if saw_so and not found:
             return False
     return True
+
+
+#: What hyperloom's prewarm writes beside the modules it built from the image's own tree and tables
+#: (``hyperloom.measure.runner.native.prewarm``): ``{"schema", "modules": [{"name", "sha256", "tables_sha256", ...}]}``.
+AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
+_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tables_sha256(configs_dir: Path) -> str:
+    """The prewarm's digest of aiter's tuned tables: a line ``<relative path>\\t<sha256>\\n`` per file, by path."""
+    files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
+    digest = hashlib.sha256()
+    for relative, path in files:
+        digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
+    return digest.hexdigest()
+
+
+def image_own_modules(jit_dir: Path, configs_dir: Path, envs: dict[str, str] | None) -> frozenset[str]:
+    """Serving modules the prewarm built from the image's own tree and tables that are still what it installed.
+
+    A module counts when the prewarm manifest lists it with the sha256 its ``.so`` has now and with the
+    tables ``configs_dir`` holds now, and this round leaves its ``AITER_CONFIG_*`` unset: it is then the
+    module aiter would build at the first call, so moving it aside only makes the next start compile it
+    again, past sglang's watchdog. A module of a variable the round sets reads another table and is not
+    the image's own for this round.
+    """
+    try:
+        document = json.loads((jit_dir / AITER_PREWARM_MANIFEST).read_bytes())
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(document, dict) or document.get("schema") != _PREWARM_SCHEMA:
+        return frozenset()
+    overridden = {
+        m
+        for key, value in (envs or {}).items()
+        if str(value).strip()
+        for m in AITER_ENV_TO_SERVING_MODULES.get(key, ())
+    }
+    tables: str | None = None
+    own: set[str] = set()
+    for entry in document.get("modules") or []:
+        name = str(entry.get("name") or "") if isinstance(entry, dict) else ""
+        so_path = jit_dir / f"{name}.so"
+        if not name or name in overridden or not so_path.is_file():
+            continue
+        try:
+            if _file_sha256(so_path) != entry.get("sha256"):
+                continue
+            tables = _tables_sha256(configs_dir) if tables is None else tables
+        except OSError:
+            continue
+        if entry.get("tables_sha256") == tables:
+            own.add(name)
+    return frozenset(own)
 
 
 def _invalidate_jit_build(jit_build: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
@@ -653,12 +744,16 @@ def prepare_serving_so_for_csvs(
                 continue
             modules_needed.extend(modules)
             for name, libtype in csv_jit_kernel_rows(csv_path):
-                resolved = serving_module_for_kernel(name, libtype)
+                resolved = serving_module_for_kernel(name, libtype, modules)
                 if resolved:
                     modules_needed.append(resolved)
-    modules_needed_t = tuple(dict.fromkeys(modules_needed))
+    own = image_own_modules(jit_dir, configs_dir, envs) if modules_needed else frozenset()
+    modules_needed_t = tuple(m for m in dict.fromkeys(modules_needed) if m not in own)
     if not modules_needed_t:
-        return {"action": "skip", "jit_dir": str(jit_dir)}
+        skipped: dict[str, Any] = {"action": "skip", "jit_dir": str(jit_dir)}
+        if own:
+            skipped["kept_image_own"] = sorted(own)
+        return skipped
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules_needed_t)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -695,9 +790,11 @@ def drop_serving_so_for_envs(
     )
     if context is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    _, jit_build = context
+    package_root, jit_build = context
     jit_dir = jit_build.parent
-    modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
+    # A module a registry mismatch named is dropped even when it is the image's own: its tables changed under it.
+    own = image_own_modules(jit_dir, package_root / "configs", envs) - set(also_modules)
+    modules = tuple(m for m in dict.fromkeys((*_modules_for_envs(envs), *also_modules)) if m not in own)
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     invalidation = _invalidate_jit_build(jit_build, dest, modules)
     removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
@@ -724,6 +821,7 @@ __all__ = [
     "AITER_ENV_TO_TUNED_FILE",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
+    "AITER_PREWARM_MANIFEST",
     "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",
@@ -734,6 +832,7 @@ __all__ = [
     "csvs_aiter_will_load",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",
+    "image_own_modules",
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",

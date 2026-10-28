@@ -10,7 +10,9 @@ from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FAILED,
     REBENCH_FALLBACK,
+    REBENCH_FALLBACK_FAILED,
     REBENCH_NO_MATERIAL,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
@@ -581,13 +583,13 @@ class GeakRevalidation(CoordinatorCollaborator):
     def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
         geak_result = {
             **(self.shared_state.geak_result or {}),
-            "revalidation_status": "failed",
+            "revalidation_status": REBENCH_FAILED,
             "revalidation_error_class": str(result_payload.get("error_class") or ""),
             "revalidation_error": str(result_payload.get("error") or result_payload.get("reason") or "")[:500],
         }
         self.shared_state.geak_result = geak_result
         self._record_geak_rebench_conclusion(
-            final_status="failed",
+            final_status=REBENCH_FAILED,
             final_error_class=geak_result["revalidation_error_class"],
             final_error=geak_result["revalidation_error"],
         )
@@ -797,7 +799,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             # needs to know the replay is settled, not merely broken.
             refusal = str(fallback_result.get("status") or "")
             geak_result["revalidation_status"] = (
-                REBENCH_NO_PROMOTE if refusal == REBENCH_NO_PROMOTE else "fallback_failed"
+                REBENCH_NO_PROMOTE if refusal == REBENCH_NO_PROMOTE else REBENCH_FALLBACK_FAILED
             )
             geak_result["revalidation_error_class"] = refusal
             geak_result["revalidation_error"] = str(

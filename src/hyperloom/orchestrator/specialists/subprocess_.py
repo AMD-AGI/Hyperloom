@@ -537,7 +537,6 @@ class SpecialistSubprocessDispatcher:
                                 env=env,
                                 cwd=str(request.worktree or request.workspace),
                                 log_path=str(process_log),
-                                env_mode="replace",
                                 stdin_path=str(prompt_file),
                             )
                         )

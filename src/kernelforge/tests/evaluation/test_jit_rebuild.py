@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the JIT-rebuild safety net (loop/jit_rebuild.py)."""
+"""Unit tests for the JIT-rebuild safety net (evaluation/jit_rebuild.py)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.tools.git import GitError
-from kernelforge.loop.jit_rebuild import (
+from kernelforge.evaluation.jit_rebuild import (
     JitRebuildUnavailable,
     force_jit_rebuild,
     force_jit_rebuild_for_changes,
@@ -200,7 +200,7 @@ def test_jit_cache_includes_actual_undeclared_edit(
     helper.write_text("optimized helper\n")
     captured = []
     monkeypatch.setattr(
-        "kernelforge.loop.jit_rebuild.activate_aiter_cache_for_sources",
+        "kernelforge.evaluation.jit_rebuild.activate_aiter_cache_for_sources",
         lambda paths: captured.extend(paths),
     )
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
 from hyperloom.orchestrator.actions.executors import bypass_runner
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors.benchmark_result import (
     extract_benchmark_measurement,
 )
@@ -295,24 +297,35 @@ def test_unknown_server_framework_raises_value_error():
         raise AssertionError("expected ValueError for unknown server framework")
 
 
-def test_wait_for_server_ready_polls_until_200():
+def _fake_clock(monkeypatch, ticks=None):
+    """Replace the engine's clock: no real sleeping, and ``ticks`` as the monotonic readings when given."""
+    readings = iter(ticks) if ticks is not None else None
+    clock = types.SimpleNamespace(
+        sleep=lambda _s: None,
+        monotonic=(lambda: next(readings)) if readings is not None else (lambda: 0.0),
+    )
+    monkeypatch.setattr(bypass_engine, "time", clock)
+
+
+def test_wait_for_server_ready_polls_until_200(monkeypatch):
     calls = {"n": 0}
 
     def probe(url):
         calls["n"] += 1
         return 200 if calls["n"] >= 3 else 503
 
+    monkeypatch.setattr(bypass_engine, "_probe_health", probe)
+    _fake_clock(monkeypatch)
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=100.0,
         server_exited=lambda: False,
-        poll=bypass_engine.HealthPoll(poll_s=0.0, probe=probe, sleep=lambda _s: None),
     )
     assert ok is True
     assert calls["n"] == 3
 
 
-def test_wait_for_server_ready_stops_when_the_server_has_exited():
+def test_wait_for_server_ready_stops_when_the_server_has_exited(monkeypatch):
     """A server that is gone will never answer, so the wait ends with it."""
     probes = {"n": 0}
 
@@ -320,25 +333,25 @@ def test_wait_for_server_ready_stops_when_the_server_has_exited():
         probes["n"] += 1
         return 503
 
+    monkeypatch.setattr(bypass_engine, "_probe_health", probe)
+    _fake_clock(monkeypatch)
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=3600.0,
         server_exited=lambda: True,
-        poll=bypass_engine.HealthPoll(poll_s=0.0, probe=probe, sleep=lambda _s: None),
     )
     assert ok is False
     # Once, not for the hour the timeout would otherwise have run.
     assert probes["n"] == 1
 
 
-def test_wait_for_server_ready_times_out():
-    ticks = iter([0.0, 1.0, 2.0, 3.0, 100.0])
-
+def test_wait_for_server_ready_times_out(monkeypatch):
+    monkeypatch.setattr(bypass_engine, "_probe_health", lambda _u: 503)
+    _fake_clock(monkeypatch, [0.0, 1.0, 2.0, 3.0, 100.0])
     ok = bypass_engine.wait_for_server_ready(
         "http://127.0.0.1:8888",
         timeout_s=5.0,
         server_exited=lambda: False,
-        poll=bypass_engine.HealthPoll(poll_s=0.0, probe=lambda _u: 503, sleep=lambda _s: None, now=lambda: next(ticks)),
     )
     assert ok is False
 
@@ -630,14 +643,19 @@ def test_bypass_pid_meta_helpers(tmp_path):
     assert bypass_engine.lifecycle_files_present(pid_dir, "vllm", 8888) is True
 
 
-def test_server_health_ok_probe():
-    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=lambda u: 200) is True
-    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=lambda u: 503) is False
+def test_server_health_ok_probe(monkeypatch):
+    probed: list[str] = []
+    monkeypatch.setattr(bypass_engine, "_probe_health", lambda u: probed.append(u) or 200)
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888/") is True
+    assert probed == ["http://127.0.0.1:8888/health"]
+    monkeypatch.setattr(bypass_engine, "_probe_health", lambda u: 503)
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888") is False
 
     def boom(u):
         raise OSError("refused")
 
-    assert bypass_engine.server_health_ok("http://127.0.0.1:8888", probe=boom) is False
+    monkeypatch.setattr(bypass_engine, "_probe_health", boom)
+    assert bypass_engine.server_health_ok("http://127.0.0.1:8888") is False
 
 
 def test_boot_only_round_persists_the_server_without_terminating_it(tmp_path, monkeypatch):
@@ -1710,6 +1728,44 @@ def test_finalize_report_client_failure_without_raw(tmp_path):
     assert rep["profiling_enabled"] is True
     assert "benchmark client exited 9" in rep["errors"]
     assert "inferencex_result.json not produced" in rep["errors"]
+
+
+@pytest.mark.parametrize("round_seed,expected", [(None, None), ("1", "1")])
+def test_client_takes_the_round_seed_from_the_env(tmp_path, monkeypatch, round_seed, expected):
+    """The bypass client argv names the seed itself, so a warmup round moves off the measured prompts unpatched."""
+    if round_seed is None:
+        monkeypatch.delenv(BENCH_SEED_ENV, raising=False)
+    else:
+        monkeypatch.setenv(BENCH_SEED_ENV, round_seed)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(
+        bypass_runner, "_run_subprocess", lambda cmd, timeout_s, workspace, tag: launched.append(cmd) or 0
+    )
+    r = bypass_runner._Round(
+        framework="sglang",
+        model="/models/x",
+        tp=1,
+        port=8888,
+        max_model_len=None,
+        profile=False,
+        profile_dir=None,
+        bench_envs={"RUN_EVAL": "false"},
+        server_log=tmp_path / "server.log",
+        base_url="http://127.0.0.1:8888",
+        timeout_s=60.0,
+        server_ready_timeout_s=60.0,
+        inferencex_root=str(tmp_path),
+        conc=4,
+        isl=128,
+        osl=64,
+        rrr=0.5,
+        workspace=tmp_path,
+    )
+
+    assert r.run_client() == 0
+    (cmd,) = launched
+    seed = cmd[cmd.index("--seed") + 1] if "--seed" in cmd else None
+    assert seed == expected
 
 
 def test_terminate_server_fallback_kill_and_closes_log(monkeypatch):

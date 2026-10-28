@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
+from ..mcp_tool_names import qualified_context_tool_name
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
@@ -144,7 +145,8 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
         rows.append("  failure: " + render_failure_line(row, excerpt_chars=120))
     elided = len(failures) - max_variant_rows
     if elided > 0:
-        rows.append(f"  (+{elided} more failures; pull get_variant_failures)")
+        pull = qualified_context_tool_name("get_variant_failures")
+        rows.append(f"  (+{elided} more failures; pull {pull})")
     return rows
 
 

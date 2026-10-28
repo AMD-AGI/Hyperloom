@@ -1,4 +1,0 @@
-# Build tools the hosted bootstrap needs to build the Hyperloom wheel without build isolation, so that
-# they are hash-pinned in requirements/app.lock like everything else. Keep in step with [build-system].
-setuptools>=77
-wheel

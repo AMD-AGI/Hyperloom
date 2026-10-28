@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.tools.git import git
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_json
 from kernelforge.loop.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -20,11 +20,6 @@ from kernelforge.loop.reporting import (
     is_best_manifest,
 )
 from kernelforge.evaluation.scoring import warm_start_improvement_flags
-
-
-def atomic_write_json(path: str | Path, payload: dict) -> None:
-    """Durably publish one JSON snapshot via temp-file replacement."""
-    atomic_write_text(path, json.dumps(payload))
 
 
 def load_published_best(workspace_dir: str) -> dict | None:

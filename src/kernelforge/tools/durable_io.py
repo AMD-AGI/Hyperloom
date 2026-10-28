@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -48,6 +49,11 @@ def atomic_write_bytes(path: str | Path, data: bytes) -> None:
 def atomic_write_text(path: str | Path, content: str) -> None:
     """Publish UTF-8 text at ``path``, replacing any prior content in one step."""
     atomic_write_bytes(path, content.encode("utf-8"))
+
+
+def atomic_write_json(path: str | Path, payload: object) -> None:
+    """Publish ``payload`` as indented, key-sorted JSON at ``path``, replacing any prior content in one step."""
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _fsync_file(path: Path) -> None:

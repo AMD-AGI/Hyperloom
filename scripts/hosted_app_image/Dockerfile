@@ -13,17 +13,15 @@ ARG SPECIALIST_USER=hl-specialist
 ARG SPECIALIST_ID=2000
 
 USER root
-# git fetches the source, setpriv (util-linux) starts a specialist as another user, python3-venv
-# makes the run's environment.
+# git fetches the source, setpriv (util-linux) starts a specialist as another user.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates git python3-venv util-linux; \
+    apt-get install -y --no-install-recommends ca-certificates git util-linux; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --gid "${SPECIALIST_ID}" "${SPECIALIST_USER}"; \
     useradd --create-home --uid "${SPECIALIST_ID}" --gid "${SPECIALIST_ID}" --shell /bin/bash "${SPECIALIST_USER}"; \
-    command -v git setpriv; \
-    python3 -m venv --help >/dev/null
+    command -v git setpriv
 
 # The claude CLI the specialists spawn from PATH, installed the way install_kernel_tools.sh does
 # (Claude Code's native installer, HYPERLOOM_CLAUDE_CODE_VERSION, latest when unset), but under a

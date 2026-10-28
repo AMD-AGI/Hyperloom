@@ -80,14 +80,14 @@ class TestFormatPrimaryMetric:
 
 class TestServerArgsEnvName:
     def test_exact(self):
-        assert gr.server_args_env_name("xdit") == "EXTRA_XDIT_ARGS"
-        assert gr.server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
-        assert gr.server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
-        assert gr.server_args_env_name(None) == "EXTRA_SGLANG_ARGS"
+        assert fr.server_args_env_name("xdit") == "EXTRA_XDIT_ARGS"
+        assert fr.server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
+        assert fr.server_args_env_name("vllm") == "EXTRA_VLLM_ARGS"
+        assert fr.server_args_env_name(None) == "EXTRA_SGLANG_ARGS"
 
     def test_version_suffix_substring(self):
-        assert gr.server_args_env_name("vllm@0.21") == "EXTRA_VLLM_ARGS"
-        assert gr.server_args_env_name("xdit-rocm") == "EXTRA_XDIT_ARGS"
+        assert fr.server_args_env_name("vllm@0.21") == "EXTRA_VLLM_ARGS"
+        assert fr.server_args_env_name("xdit-rocm") == "EXTRA_XDIT_ARGS"
 
 
 class TestXditBlacklist:
@@ -110,7 +110,7 @@ class TestXditBlacklist:
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
         bad = gr.GridVariant(name="xdit_fp4", extra_server_args="", extra_envs={"XDIT_USE_FP4_GEMMS": "1"})
-        kept, dropped = gr.apply_compatibility_filter([good, bad], serving=ServingStack("xdit", ""))
+        kept, dropped = vf.apply_compatibility_filter([good, bad], serving=ServingStack("xdit", ""))
         kept_names = {v.name for v in kept}
         dropped_names = {d["name"] for d in dropped}
         assert "xdit_ok" in kept_names

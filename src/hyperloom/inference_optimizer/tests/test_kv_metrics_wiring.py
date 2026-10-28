@@ -380,8 +380,8 @@ class _DoneProc:
     def poll(self):
         return None
 
-    def communicate(self, timeout=None):
-        return ("out", "err")
+    def wait(self, timeout=None):
+        return 0
 
 
 class _HangingProc:
@@ -390,15 +390,29 @@ class _HangingProc:
     def poll(self):
         return None
 
-    def communicate(self, timeout=None):
+    def wait(self, timeout=None):
         raise sk.subprocess.TimeoutExpired(self.args, timeout)
+
+
+class _Capture:
+    """A capture holding what the child wrote, with no pipe activity of its own."""
+
+    last_activity_at = None
+
+    def note_output(self):
+        pass
+
+    def finish(self):
+        return ("out", "err")
+
+
+def _watch(proc, watched, recorders):
+    return sk._communicate_with_watchdog(proc, watched, recorders=recorders, capture=_Capture())
 
 
 def test_recorder_is_closed_on_the_normal_return_path():
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), recorders=sk._RecorderFanout([rec])
-    )
+    _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([rec]))
 
     assert rec.closed_aborted is False
 
@@ -409,9 +423,7 @@ def test_no_scraping_before_the_server_is_up():
     the ready marker and the death gate most need it responsive. Boot has no
     traffic to measure anyway."""
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), recorders=sk._RecorderFanout([rec])
-    )
+    _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([rec]))
 
     assert rec.ticks == 0
 
@@ -424,10 +436,10 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
     never enters a comparison, so the whole round aggregated to empty.
     """
     rec = _Recorder()
-    sk._communicate_with_watchdog(
+    _watch(
         _DoneProc(),
         sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-        recorders=sk._RecorderFanout([rec]),
+        sk._RecorderFanout([rec]),
     )
 
     assert rec.ticks >= 1
@@ -496,9 +508,7 @@ def test_recorder_is_closed_as_aborted_when_a_gate_raises():
     """The failure a consumer cannot recover from is a window that never closed."""
     rec = _Recorder()
     with pytest.raises(sk.subprocess.TimeoutExpired):
-        sk._communicate_with_watchdog(
-            _HangingProc(), sk._WatchedRound(sk.RoundWatch(timeout=0.01)), recorders=sk._RecorderFanout([rec])
-        )
+        _watch(_HangingProc(), sk._WatchedRound(sk.RoundWatch(timeout=0.01)), sk._RecorderFanout([rec]))
 
     assert rec.closed_aborted is True
 
@@ -526,16 +536,16 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             _SlowProc.calls += 1
             if _SlowProc.calls <= 4:
                 raise sk.subprocess.TimeoutExpired(self.args, timeout)
-            return ("out", "err")
+            return 0
 
-    sk._communicate_with_watchdog(
+    _watch(
         _SlowProc(),
         sk._WatchedRound(sk.RoundWatch(timeout=60, server_log_path=str(log_path))),
-        recorders=sk._RecorderFanout([rec]),
+        sk._RecorderFanout([rec]),
     )
 
     assert rec.phases == ["measured", "warmup", "measured", "eval"]
@@ -544,9 +554,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
 def test_no_recorder_leaves_the_loop_unchanged():
     """An empty fanout must be a strict no-op: this is a production watchdog."""
-    out = sk._communicate_with_watchdog(
-        _DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), recorders=sk._RecorderFanout([])
-    )
+    out = _watch(_DoneProc(), sk._WatchedRound(sk.RoundWatch(timeout=5)), sk._RecorderFanout([]))
     assert out == ("out", "err")
 
 
@@ -565,10 +573,10 @@ def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sk, "_build_kv_recorder", lambda *a: _Exploding())
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
-    out = sk._communicate_with_watchdog(
+    out = _watch(
         _DoneProc(),
         sk._WatchedRound(sk.RoundWatch(timeout=5, server_already_ready=True)),
-        recorders=sk._build_round_recorders(str(tmp_path / "server.log"), {}),
+        sk._build_round_recorders(str(tmp_path / "server.log"), {}),
     )
     assert out == ("out", "err")
 

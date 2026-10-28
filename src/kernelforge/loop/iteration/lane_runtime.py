@@ -26,7 +26,7 @@ from kernelforge.loop.merge_candidates import (
     select_merge_pair,
 )
 from kernelforge.loop.run_state import make_event
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_json, atomic_write_text
 from kernelforge.tools.git import git
 from kernelforge.workspace.edit_policy import is_protected_path
 
@@ -403,8 +403,6 @@ class LaneRuntimeMixin:
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         path = self._lane_queue_path()
         try:
             if not self._lane_queue:
@@ -446,8 +444,6 @@ class LaneRuntimeMixin:
         analysis_commit: str,
     ) -> Path:
         """Atomically publish every lane's plan and return lane 1's path."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         published = [str(plan).strip() for plan in plans]
         if not published or not published[0]:
             raise ValueError("optimization plan must not be empty")
@@ -541,8 +537,6 @@ class LaneRuntimeMixin:
 
     def _persist_orchestration_result(self, iteration, context, result) -> None:
         """Persist planning diagnostics before publishing the executable plan."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         root = self._orchestration_root(iteration)
         atomic_write_json(
             root / ROUND_CONTEXT,
@@ -590,8 +584,6 @@ class LaneRuntimeMixin:
         plan_path: Path,
     ) -> None:
         """Publish the final-plan pointer only after the plan exists."""
-        from kernelforge.loop.recovery import atomic_write_json
-
         diagnostics_path = self._orchestration_root(iteration) / "structured_output.json"
         if not diagnostics_path.is_file():
             return

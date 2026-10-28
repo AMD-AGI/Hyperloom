@@ -30,12 +30,6 @@ __all__ = ["FrameworkTally", "config_attempts", "config_tally", "specialist_tall
 #: The per-variant outcome the executor reports for a variant it promoted.
 _KEEP = "KEEP"
 
-#: Reachable only for a session recorded before the per-KEEP confirmation round
-#: was removed: a variant that won its round and was withheld when the
-#: confirmation did not reproduce it. Counted apart from a plain revert, which
-#: is a variant that lost on measurement.
-_KEEP_UNSTABLE = "KEEP_UNSTABLE"
-
 #: The producer label a specialist-proposed attempt carries on its proposal.
 _PRODUCER_SPECIALIST = "specialist"
 
@@ -47,7 +41,6 @@ class FrameworkTally:
         """Start an empty tally."""
         self.tested = 0
         self.keeps = 0
-        self.keep_unstable = 0
         self.best_gain_pct: float | None = None
         self.rounds: set[str] = set()
 
@@ -59,11 +52,8 @@ class FrameworkTally:
                 ``framework_agent`` event.
         """
         self.tested += 1
-        outcome = str(attempt.get("outcome") or "").upper()
-        if outcome == _KEEP:
+        if str(attempt.get("outcome") or "").upper() == _KEEP:
             self.keeps += 1
-        elif outcome == _KEEP_UNSTABLE:
-            self.keep_unstable += 1
         round_id = str(attempt.get("round_id") or "")
         if round_id:
             self.rounds.add(round_id)
