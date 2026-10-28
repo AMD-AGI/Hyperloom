@@ -89,7 +89,6 @@ cyclomatic-complexity src/hyperloom/inference_optimizer/tools/dump_session_break
 cyclomatic-complexity src/hyperloom/inference_optimizer/trace/request_events.py::stream_json_requests 22
 cyclomatic-complexity src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 26
 cyclomatic-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 25
-cyclomatic-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.verify 23
 cyclomatic-complexity src/kernelforge/assembly/capture.py::bind_compile 24
 cyclomatic-complexity src/kernelforge/assembly/prepare.py::prepare_assembly 21
 cyclomatic-complexity src/kernelforge/cli/forge_loop_command.py::forge_loop 50
@@ -576,7 +575,6 @@ function-lines src/kernelforge/agent_backends/session_resume.py::run_session_wit
 function-lines src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard._restore_baseline 61
 function-lines src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 62
 function-lines src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.rollback 59
-function-lines src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.verify 51
 function-lines src/kernelforge/assembly/prepare.py::prepare_assembly 71
 function-lines src/kernelforge/cli/forge_loop_command.py::_RunReporter.build_result 61
 function-lines src/kernelforge/cli/forge_loop_command.py::_collect_pr_kb_context 52

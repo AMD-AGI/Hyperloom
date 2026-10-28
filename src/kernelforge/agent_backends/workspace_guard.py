@@ -25,6 +25,9 @@ from kernelforge.workspace.edit_policy import (
 
 log = logging.getLogger(__name__)
 
+_BYTECODE_SUFFIXES = frozenset({".pyc", ".pyo"})
+_BYTECODE_CACHE_DIRNAME = "__pycache__"
+
 
 def _nul_paths(output: str) -> list[str]:
     """Split a NUL-delimited git path list."""
@@ -563,14 +566,34 @@ class WorkspaceGuard:
         if self._read_only_state() != self.read_only_state:
             violations.append("tracked, staged, or untracked files changed")
 
-        current_protected = self._ignored_protected_paths()
-        changed_snapshots = [
-            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
-        ]
-        new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
-        if changed_snapshots or new_protected:
-            violations.append("protected ignored files changed: " + ", ".join([*changed_snapshots, *new_protected]))
+        protected_ignored = self._protected_ignored_changes()
+        if protected_ignored:
+            violations.append("protected ignored files changed: " + ", ".join(protected_ignored))
         return violations
+
+    def _protected_ignored_changes(self) -> list[str]:
+        """Protected ignored paths the turn changed or created, once the bytecode it compiled is put back.
+
+        Python writes bytecode beside every protected module it imports, so running the driver is enough to create
+        it. Bytecode is derived from the protected source, and the interpreter loads it instead of that source when
+        its header matches, so a session's bytecode is never kept: a changed file gets its snapshot back and a new
+        one is removed. Neither rejects the turn.
+        """
+        changed = [path for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot]
+        created = self._ignored_protected_paths() - self.baseline_protected_ignored
+        for path in changed:
+            if self._is_bytecode(path):
+                self._restore_filesystem_snapshot(path, self.snapshots[path])
+        for path in sorted(created, key=lambda item: len(item.parts), reverse=True):
+            if self._is_bytecode(path):
+                self._remove_filesystem_path(path)
+                self._remove_empty_parents(path)
+        return [str(path) for path in [*changed, *created] if not self._is_bytecode(path)]
+
+    def _is_bytecode(self, path: Path) -> bool:
+        """Whether a workspace path is compiled Python bytecode or a bytecode cache directory."""
+        relative = path.relative_to(self.root) if path.is_relative_to(self.root) else path
+        return relative.suffix in _BYTECODE_SUFFIXES or _BYTECODE_CACHE_DIRNAME in relative.parts
 
     def _read_only_state(self) -> tuple:
         """Fingerprint all Git-visible state a read-only turn must preserve."""
@@ -737,11 +760,7 @@ class WorkspaceGuard:
             path for path in tracked_changes if not self.spec.allow_tracked_changes or self._is_protected(path)
         ]
         protected_untracked = [path for path in untracked if self._is_protected(path)]
-        current_protected = self._ignored_protected_paths()
-        changed_snapshots = [
-            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
-        ]
-        new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
+        protected_ignored = self._protected_ignored_changes()
 
         violations: list[str] = []
         if index_changed:
@@ -754,9 +773,8 @@ class WorkspaceGuard:
             violations.append(f"protected tracked files changed: {', '.join(protected_changes)}")
         if protected_untracked:
             violations.append(f"protected files created: {', '.join(protected_untracked)}")
-        if changed_snapshots or new_protected:
-            paths = [*changed_snapshots, *new_protected]
-            violations.append(f"protected ignored files changed: {', '.join(paths)}")
+        if protected_ignored:
+            violations.append(f"protected ignored files changed: {', '.join(protected_ignored)}")
         unsupported = self._unsupported_untracked(untracked)
         if unsupported:
             violations.append(f"new non-ignored files are unsupported: {', '.join(unsupported)}")
