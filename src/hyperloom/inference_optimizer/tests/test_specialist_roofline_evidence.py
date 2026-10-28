@@ -15,8 +15,8 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.specialists.domains import (
     get_domain,
 )
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
     _section_roofline_evidence,
     build_specialist_prompts,
 )
