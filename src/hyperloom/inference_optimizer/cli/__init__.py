@@ -261,9 +261,17 @@ def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> N
         apply_scriptable_runtime_defaults,
     )
     from hyperloom.orchestrator.actions.executors.bypass_scriptable import (
+        DeclaredLeversError,
+        load_declared_levers,
         resolve_scriptable_script,
         scriptable_script_candidates,
     )
+
+    try:  # a malformed declaration must fail here, not surface later as empty_grid
+        load_declared_levers()
+    except DeclaredLeversError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     bench: dict[str, Any] = {"framework": "custom"}
     envs: dict[str, Any] = {}
