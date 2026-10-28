@@ -25,13 +25,13 @@ Blocking means one of four things, and the repo treats them as equal:
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
-| Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head — rules E1-E4 |
+| Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head, or a check is dropped as covered by something that decides less — rules E1-E5 |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names the bullet it breaks plus, where that bullet is about ownership, the module in this repo that already owns the concern |
 
 The second kind is the one a correct diff passes: right line by line, tested, accurately described,
 and still resting on a measurement that does not reproduce or leaving the reported failure
-happening. E1-E4 each name the tool to re-run or the branch to trace; one that names neither is
+happening. E1-E5 each name the tool to re-run, the branch to trace or the predicate to read; one that names neither is
 taste and goes like any other.
 
 The fourth kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
@@ -86,7 +86,7 @@ follow [`references/re-review.md`](references/re-review.md) beside the steps bel
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt`, a skim of `diff.txt`, or a `label:` line in `meta.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 77 rules across 11
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 78 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list, V2 and V7 without
 a verdict line. On a re-review, so are

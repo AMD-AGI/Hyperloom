@@ -35,7 +35,12 @@ When a human reviewer catches something the skill missed:
 3. Write the false-positive self-check into the body: the condition under which the shape is
    correct and the rule must stay silent.
 4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
-5. Run this skill on the PR that carries the change, against the version of it on `main`, and read
+5. Run every command the rule body names, in this repo, and paste what it printed into the commit.
+   A rule whose evidence step cannot be executed is not a rule: #2227 shipped `git merge-tree <base>
+   HEAD origin/main`, the deprecated three-argument form, which prints a diff listing and no tree
+   sha for the `git grep` that follows it, and shipped a trigger reading a label out of `ci.txt`,
+   where fetch.sh writes no labels.
+6. Run this skill on the PR that carries the change, against the version of it on `main`, and read
    the card. A change to the review process is reviewed by the review process; skipping that is
    how #2227 shipped two rounds of the same defect -- a deleted rule whose gate was confirmed by
    matching ids rather than by reading what the gate measures -- both caught by a human who did
@@ -49,6 +54,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | The diff... | Read |
 |---|---|
 | changes any non-test file under `src/` | X1 X3 X8 |
+| removes, narrows or skips a check because another mechanism is said to cover it: a CI job, a linter, a gate script, a type checker, another rule | E5 |
 | gives a measurement or a causal claim as the reason for the change: a function over a ceiling, a run truncated by a cap or timeout, a named session's duration or termination reason, a percentage or baseline entry | E1 |
 | names a concrete failure it addresses: an error string, a session id, an RSI problem, `Fixes #N` | E2 E4 |
 | is typed `refactor`, or gives simplification, complexity or structure as the reason | E1 E3 |
@@ -190,6 +196,16 @@ opened for stays live.
 **Not a finding when:** the consumer is the boundary (the value enters there), or the upstream owner is named in the body with the follow-up that moves the refusal.
 **Evidence:** the call chain from where the value enters to where the diff guards it; the upstream module in the head tree that already parses or admits it.
 **Report as:** `E4 <file>:<line> -- guards <value> at <consumer> while <boundary> admits it; <other consumer> keeps the defect`
+
+### E5 -- A claim that something else already checks this is evidence about a function body, not about a name
+
+**Severity:** blocking
+**Fires when:** the diff removes, narrows or declines to apply a check on the grounds that another mechanism covers it -- a CI job, a linter, a gate script, a type checker, a test, another rule -- or the body says "already caught by", "the gate decides", "CI covers", "redundant with".
+**The rule:** the evidence is the covering mechanism's own decision, quoted: the line that returns, the condition it tests, the set it iterates. A name, an id, a rule number or a job title is not evidence, because the thing that drifts is what the function measures, never what it is called. Read the predicate and state its boundary: what it iterates (`change.new_functions()` yields only names absent from the base tree), what it returns early on (`not params`), what granularity it resolves at (`Packages.unit()` from `.importlinter`, coarser than a subpackage), what shape it requires (`body[0]` an `ast.If` ending in `return`). Then state what falls outside that boundary and say explicitly who has it -- the reviewer, or nobody. Coverage asserted without that quotation is a premise, and E1's answer applies: it does not hold until it reproduces. This is E1's other half: E1 is for a premise with a number to re-run, E5 for one with a boundary to read.
+**Seen in:** PR #2227 -- four rules deleted as gated across three rounds, each wrong, each time the gate function existing and carrying the matching id. `private_reach_problems` resolves at `.importlinter` granularity, so a private import inside `hyperloom.orchestrator` is reported by nobody; `flag_argument_problems` walks `change.new_functions()`, so a flag added to an existing function is invisible; `_forwarded_to` returns `None` when `not params`, so a parameterless forwarder is invisible; and `code_metrics_report.py:136-138` waives all of their findings on a `baseline-raise` PR. Every one of those is a line in a body that the matching id did not reveal.
+**Not a finding when:** the body quotes the covering predicate and states its boundary, and the boundary genuinely contains the shape being dropped; or the mechanism is a hard schema or type that cannot admit the shape at all.
+**Evidence:** the covering function's own lines, quoted with their file and line; the shape that falls outside, and who owns it.
+**Report as:** `E5 <file>:<line> -- drops <check> as covered by <mechanism>; <mechanism> decides <narrower thing> at <file>:<line>, leaving <shape> to nobody`
 
 ---
 
@@ -1058,21 +1074,14 @@ test for one of its sentences, or for a sentence of *Clean design*, *Trust the c
 *Simplify by removing a mechanism*. A finding names the owner, the type or the split that would
 satisfy it; one that cannot is taste and goes.
 
-Four of this family's rules are gone: A9, A10, A11 and A12's single-implementation case are
-decided mechanically by the
-`code-metrics` job, which runs `tuple_return_problems`, `raw_vocabulary_problems`,
-`global_write_problems`, `forwarder_problems` and `single_implementation_problems` in
-`scripts/code_metrics_design.py` under those same rule ids. A9, A10, A11 and A12's
-single-implementation case were advisory here anyway. A1, A8 and A12 stay, each narrowed to the part of
-its shape the gate's own code does not reach: A1 to an import crossing a package boundary finer
-than the `.importlinter` unit, A8 to a flag added to a function that already existed and to a
-parameter only tests vary, A12 to a forwarder with an empty parameter list. A new function is the
-gate's own territory for both A8 and A12 -- `flag_argument_problems` and `forwarder_problems` each
-walk `change.new_functions()`. Matching rule ids are not matching coverage -- #2227 got that
-wrong four times, once per rule, and every time the gate function existed and carried the right id. A review that adjudicated them was re-deciding what a gate had already
-decided, and in 23 recorded reviews the whole family produced 119 verdict lines and no finding.
-A8 stays, narrowed to the two shapes `flag_argument_problems` and vulture cannot see. Re-flagging a
-gated rule is a defect in the review; see [`references/ci.md`](references/ci.md).
+Which A-family ids belong to the `code-metrics` job and which to the review is one table, in
+[`references/ci.md`](../review-pr/references/ci.md); where a split id's boundary falls is each
+rule's own `Severity:` line. Neither is restated here. What this paragraph is for is the reason the
+split exists: #2227 deleted four of these rules because a function in `code_metrics_design.py`
+carried the matching id, and was wrong every time -- the function judged something narrower than
+the rule did. A matching id is not matching coverage; E5 is the check that says what evidence is.
+In 23 recorded reviews this family produced 119 verdict lines and no finding, which is why the ids
+the gate really does decide are gone rather than kept as a second opinion.
 
 Severity follows a calibration: A2-A7, A13 and A14 were replayed on 30 recent merged PRs and every fire was
 judged by an independent adversarial judge (2026-10-11). A rule or a clearly delimited sub-case is
