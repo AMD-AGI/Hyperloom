@@ -42,6 +42,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.outside_facts import AITER_META_MARKER_DIR
 from hyperloom.measure.compile import EnvRoot, LocalBlobStore
 from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import FarmError, locate_package
@@ -86,7 +87,7 @@ PREWARM_MANIFEST = "hyperloom-prewarm.json"
 _SCHEMA = "hyperloom.aiter_prewarm/1"
 _JIT_DIR = "jit"
 _SO = ".so"
-_CONFIGS_DIR, _CSRC_DIR = "configs", "csrc"
+_CONFIGS_DIR = "configs"
 _MODULES = "modules"
 _INSTALLED_MODE = 0o644
 _UTF8 = "utf-8"
@@ -181,7 +182,7 @@ def source_digest(package: Path, tables: str) -> str:
     (``tables``, :func:`tables_digest`)."""
     document = {
         "config": file_sha256(config_path(package)),
-        _CSRC_DIR: tree_digest(image_aiter_meta(package) / _CSRC_DIR).sha256,
+        AITER_META_MARKER_DIR: tree_digest(image_aiter_meta(package) / AITER_META_MARKER_DIR).sha256,
         _CONFIGS_DIR: tables,
     }
     return hashlib.sha256(canonical_json(document).encode(_UTF8)).hexdigest()
