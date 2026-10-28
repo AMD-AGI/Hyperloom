@@ -15,7 +15,7 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 
 from ._accuracy_gate import materialized_run_eval_disabled
-from ._subprocess_kill import resolve_benchmark_timeouts
+from ._subprocess_kill import BENCHMARK_TIMEOUT_ENV, default_benchmark_timeout_sec, resolve_benchmark_timeouts
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,11 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
     the variant, and a variant may equally clear one the base pinned. Sizing the grant
     from the variant's own deltas alone would grant the time some other, usually
     smaller, run needs, so it is read back off the config the round is launched from.
+
+    Only the size comes from that env. The hard cap's override is the operator's grant,
+    read and validated once against the process env; a config's value for that name is
+    the workload's own and is never parsed as a grant here. A round whose config clears
+    the override runs on the size its workload needs.
     """
     bench = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
     envs = dict(os.environ)
@@ -47,7 +52,9 @@ def composed_benchmark_timeout_sec(config_path: Path) -> float:
         for name in launch.get("unset_env") or []:
             envs.pop(str(name), None)
         envs.update({str(k): str(v) for k, v in (launch.get("env") or {}).items()})
-    return resolve_benchmark_timeouts(envs)[1]
+    if BENCHMARK_TIMEOUT_ENV in envs and BENCHMARK_TIMEOUT_ENV in os.environ:
+        return resolve_benchmark_timeouts()[1]
+    return default_benchmark_timeout_sec(envs)
 
 
 def prepare_benchmark_runtime(config_path: Path, env: dict[str, str]) -> PreparationFailure | None:

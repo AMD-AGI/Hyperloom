@@ -979,16 +979,20 @@ image identity, required for custom models.
 
 Canonical replay warms up 11 requests per lane plus one probe before it opens its
 fixed profiling window, so its round grows with the concurrency being measured
-while the window does not. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset
-and a `CONC` pinned, the cap defaults to
-`(11 × CONC + 1) × 10 s × 2 + 3640 s + 300 s + 1800 s` (10 s per warmup request
-measured across the rungs of one 8×MI355X sweep, doubled for the cold warmup,
-plus the `metric_window_s` window, metrics finalisation and boot), and never below
-the stock 7800 s: about 10,200 s at `CONC` 20. A concurrency sweep resolves this
-per rung from the environment the rung's own config is launched with -- whether
-the `CONC` in it was pinned by the rung, inherited from the base config or
-cleared by the rung -- so the rung that measures more lanes is granted more time
-rather than the ladder sharing one grant.
+while the window does not. That shape is Magpie's, at the ref native AgentX pins
+it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
+the numbers below have to be re-measured when the pin moves. With
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
+defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
+request, sized to the slowest rung of one 8×MI355X sweep -- 18.8 s at `CONC` 20 --
+with about 6% over it, plus the `metric_window_s` window, metrics finalisation and
+boot), and never below the stock 7800 s: about 10,200 s at `CONC` 20. A
+concurrency sweep sizes this per rung from the environment the rung's own config
+is launched with -- whether the `CONC` in it was pinned by the rung, inherited
+from the base config or cleared by the rung -- so the rung that measures more
+lanes is granted more time rather than the ladder sharing one grant. The
+override itself stays the operator's: it is read from the process environment
+that preflight validated, never from a rung's config.
 
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
 fixed-sequence profiling. Configure capture steps, count, delay and interval through

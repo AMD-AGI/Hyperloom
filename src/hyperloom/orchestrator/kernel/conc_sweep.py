@@ -48,7 +48,7 @@ from ..actions.executors._grid_runner import (
     run_grid,
 )
 from ..actions.executors._grid_runner import variant_conc
-from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
 from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
@@ -501,8 +501,8 @@ class _SweepRun:
 
     ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
     far, and the second arm runs the rungs the first one reached. ``window`` is the earlier of the sweep's and the
-    session's monotonic deadlines, distinct from ``benchmark_timeout_sec``, the cap a rung that pins no workload of
-    its own gets.
+    session's monotonic deadlines; it holds no benchmark cap, because each rung's cap is sized from the config that
+    rung launches with and comes back on its row as ``granted_cap_sec``.
     """
 
     state: SharedState
@@ -518,7 +518,6 @@ class _SweepRun:
     workload: _WorkloadLadder
     optimized: _Arm
     baseline: _Arm
-    benchmark_timeout_sec: float
     window: _Window
     started_at: float
     total_budget_sec: int | None
@@ -1172,7 +1171,6 @@ async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
                 concs_ordered=run.ladder,
                 grid_source=grid_source,
                 num_prompts_factor=run.num_prompts_factor,
-                variant_timeout_sec=run.benchmark_timeout_sec,
                 arms_order=[run.baseline.name, run.optimized.name],
             )
         )
@@ -1232,7 +1230,6 @@ async def run_conc_sweep(
     nothing, which is what a direct caller with no session bound wants.
     Returns a skip envelope when prerequisites are unmet.
     """
-    _, benchmark_timeout_sec = resolve_benchmark_timeouts()
     session_deadline_sec = state.grid_session_deadline_sec()
     session_dir = Path(session_dir)
     # Whether the ladder was handed to the sweep or picked for the workload --
@@ -1356,7 +1353,6 @@ async def run_conc_sweep(
         workload=workload,
         optimized=optimized,
         baseline=_Arm(name="baseline"),
-        benchmark_timeout_sec=benchmark_timeout_sec,
         window=window,
         started_at=started_at,
         total_budget_sec=total_budget_sec,

@@ -164,9 +164,26 @@ def test_a_rung_that_clears_an_inherited_concurrency_falls_back_to_the_stock_cap
     assert granted_cap({"CONC": "28"}, GridVariant("no_conc", unset_envs=["CONC"])) == 7800.0
 
 
-def test_an_operator_cap_a_rung_pins_wins_over_the_workload_it_inherits(granted_cap):
-    variant = GridVariant("capped", extra_envs={"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "60"})
-    assert granted_cap({"CONC": "28"}, variant) == 60.0
+def test_a_rung_cannot_grant_itself_time_through_its_config(granted_cap):
+    """The override is the operator's, and preflight validates it once against the process env.
+
+    What a rung's config carries under that name went through no such validation, and
+    parsing it here would raise out of the rung and end the whole grid.
+    """
+    variant = GridVariant("capped", extra_envs={"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "two hours"})
+    assert granted_cap({"CONC": "28"}, variant) == resolve_benchmark_timeouts(_canonical_env(CONC="28"))[1]
+
+
+def test_the_operators_cap_holds_every_rung(granted_cap, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234")
+    variant = GridVariant("args_only", extra_server_args="--chunked-prefill-size 2048")
+    assert granted_cap({"CONC": "28"}, variant) == 1234.0
+
+
+def test_a_rung_that_clears_the_operators_cap_falls_back_to_its_workloads_size(granted_cap, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234")
+    variant = GridVariant("uncapped", unset_envs=["INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"])
+    assert granted_cap({"CONC": "28"}, variant) == resolve_benchmark_timeouts(_canonical_env(CONC="28"))[1]
 
 
 def test_a_rung_that_never_ran_publishes_no_grant(monkeypatch):

@@ -4,16 +4,17 @@
 name: Code metrics
 
 # White-box code-metrics gate (scripts/code_metrics.py). Thresholds, their reasons
-# and tool pins live in pyproject.toml [tool.hyperloom.code_metrics]; units already
-# over a threshold are in scripts/code_metrics_baseline.txt and may only go down.
-# Only files the change touches are judged (against the first parent on a PR, the
-# replaced main on a push). The same job runs the checks without a baseline:
+# and tool pins live in pyproject.toml [tool.hyperloom.code_metrics]. Each unit over
+# a threshold is compared with the same unit in the base tree (the first parent on a
+# PR, the replaced main on a push), measured in this job; only files the change
+# touches are judged. A push run lists every unit over a threshold in the job
+# summary. The same job runs the checks without a baseline:
 # comments, English only (tree, PR title, body and commits), production imports of
 # test code, added repeated literals, and the diff-only design checks (A1 private
 # names across packages, A8 flag arguments, A9 tuple returns, A10 raw enum values,
 # A11 global writes, A12 forwarders and single-implementation abstractions).
 #
-# The PR label ``baseline-raise`` waives new, worse and baseline-growth findings
+# The PR label ``baseline-raise`` waives new and worse findings
 # and the failing design checks (A1, A8, A12 forwarders; A9, A10, A11 and A12 single
 # implementations are advisory and never fail). The script reads the labels from
 # the API when it runs (--pr-number; on a push, --pushed-sha finds the PR whose
@@ -23,7 +24,7 @@ name: Code metrics
 # The job is a hard gate under the stable name ``code-metrics`` so it can be made
 # a required check. For that reason there is no paths-ignore: a required check
 # that a docs-only PR never starts would leave that PR blocked on "expected".
-# The whole job takes about a minute.
+# The whole job takes about two minutes: the tree and the base are each measured once.
 #
 # The verdict comes from the BASE's copy of the gate scripts (the first parent
 # on a PR, the replaced main on a push) run over this tree, so a change to
@@ -62,7 +63,7 @@ jobs:
       pull-requests: write
     steps:
       # Depth 2: on a PR the checkout is the merge commit, and its first parent is
-      # the base the merge was computed against -- the baseline it may not grow.
+      # the base the merge was computed against -- the tree every unit is compared with.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 2
@@ -92,7 +93,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           # A push to main is checked against the main it replaced, so a push
-          # that bypasses PRs cannot grow the baseline or loosen the config either.
+          # that bypasses PRs cannot make a unit worse or loosen the config either.
           BEFORE: ${{ github.event.before }}
         run: |
           # The report lives outside the checkout: a PR could make a checkout path a

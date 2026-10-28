@@ -69,8 +69,9 @@ doc is the authority on where that boundary lives.
   readability, extensibility, and reliability are what the thresholds stand in for; when a
   threshold and one of those disagree, say so and keep the clearer code.
   The `code-metrics` CI job measures that ceiling and the other gated limits in the style
-  guide § *Size and complexity* on the files a change touches; its `baseline-raise` label
-  waives them only with the reason in the PR description.
+  guide § *Size and complexity* on the files a change touches, against the same files at the
+  merge base; its `baseline-raise` label waives them only with the reason in the PR
+  description.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering

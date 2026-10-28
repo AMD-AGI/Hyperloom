@@ -51,6 +51,11 @@ AGENTX_BOOT_ALLOWANCE_SEC = 1800
 # 15 req/min against 48 once warm), so the cap is sized for the cold case.
 MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 
+# The canonical phases below are Magpie's, not ours: Hyperloom composes only
+# ``envs.CONC``, and the shape of the round that answers it belongs to Magpie at
+# the ref native AgentX pins it to (docs/components/magpie.md). Every CANON_
+# number here describes that pin and has to be re-measured when it moves.
+#
 # Canonical replay warms up this many requests per lane, plus one probe, before
 # it opens the profiling window: a sweep measured 155, 221 and 309 warmup
 # requests at CONC 14, 20 and 28, so the warmup phase grows with the
@@ -58,14 +63,13 @@ MLPERF_TIMEOUT_SAFETY_FACTOR = 2.0
 CANON_WARMUP_PER_LANE = 11
 CANON_WARMUP_PROBE_REQUESTS = 1
 
-# Wall-clock one warmup request costs. Measured across the rungs of one sweep on
-# 8xMI355X: 6.0s at CONC 14, 18.8s at CONC 20 and 15.6s at CONC 28, so the cost
-# does not fall off with concurrency and the slowest rung sets the rate.
-CANON_SECONDS_PER_WARMUP_REQUEST = 10.0
-
-# Warmup is the cold part of the round, and the rate above is a sample of three
-# rungs on one host; the same cold-case margin the MLPerf sizing takes.
-CANON_WARMUP_SAFETY_FACTOR = 2.0
+# Wall-clock one warmup request costs, sized to the slowest rung measured with
+# about 6% over it. Measured across the rungs of one sweep on 8xMI355X: 6.0s at
+# CONC 14, 18.8s at CONC 20 and 15.6s at CONC 28, so the cost does not fall off
+# with concurrency and the slowest rung sets the rate. Three rungs on one host
+# are a thin sample, and warmup is the cold part of the round: a slower rung
+# than any of these moves this number.
+CANON_SECONDS_PER_WARMUP_REQUEST = 20.0
 
 # The profiling window canonical mode owns: ``duration_s`` 3600 inside a
 # ``metric_window_s`` of 3640. It is a fixed window, independent of CONC.
@@ -168,5 +172,5 @@ def canonical_benchmark_timeout_sec(env: Mapping[str, str] | None = None) -> flo
     conc = agentx_concurrency(env)
     if conc <= 0:
         return 0.0
-    warmup = agentx_warmup_requests(conc) * CANON_SECONDS_PER_WARMUP_REQUEST * CANON_WARMUP_SAFETY_FACTOR
+    warmup = agentx_warmup_requests(conc) * CANON_SECONDS_PER_WARMUP_REQUEST
     return AGENTX_BOOT_ALLOWANCE_SEC + warmup + CANON_PROFILING_WINDOW_SEC + CANON_FINALISATION_SEC

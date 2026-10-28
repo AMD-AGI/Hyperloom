@@ -709,13 +709,15 @@ class V6ConcSweepPlan(TypedDict, total=False):
     ``arms_order`` matters to a reader of the budget: past its first rung the
     first arm may spend half the time left, and the second runs only the rungs
     it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
-    is the session's own CONC first, then the rest cheapest first."""
+    is the session's own CONC first, then the rest cheapest first. The plan
+    names no benchmark cap: rungs of one ladder are granted different caps,
+    sized to the workload each rung runs, and every row reports the cap it got
+    as ``granted_cap_sec``."""
 
     grid_source: str | None
     concs_requested: list[int]
     concs_ordered: list[int]
     num_prompts_factor: int | None
-    variant_timeout_sec: int | None
     arms_order: list[str]
 
 
