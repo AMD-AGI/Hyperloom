@@ -31,7 +31,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_option_names, to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import (
@@ -1548,6 +1548,15 @@ class LaunchLayer:
     remove_args: list[str] | tuple[str, ...] | set[str] | str | None = None
     unset_envs: list[str] | tuple[str, ...] | set[str] | str | None = None
     args_mode: str = "append"
+
+    def __post_init__(self) -> None:
+        """Reduce the removals to bare option names, as :class:`LaunchChanges` does for the AgentX side.
+
+        A removal names an option, not one occurrence of it: the fingerprint this layer is identified
+        by already reads it that way, so ``--b 8`` here has to drop every ``--b`` the composed args
+        carry rather than only the occurrence whose value matches.
+        """
+        object.__setattr__(self, "remove_args", to_option_names(self.remove_args))
 
 
 @dataclass(frozen=True)

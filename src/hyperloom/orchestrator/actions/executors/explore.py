@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_float, to_int, to_str_list
+from hyperloom.common.coerce import to_float, to_int, to_option_names, to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -811,7 +811,8 @@ class _ExploreRound:
         self.yaml_envs = bench.get("envs") or {}
         self.base_args = str(params.get("base_extra_args") or "").strip()
         self.base_envs = dict(params.get("base_extra_envs") or {})
-        self.base_remove_args = to_str_list(params.get("base_remove_args"))
+        # Bare option names: the round's identity and its native launch both compose from this list.
+        self.base_remove_args = to_option_names(params.get("base_remove_args"))
         self.base_unset_envs = to_str_list(params.get("base_unset_envs"))
         self.args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         inherited = str(self.yaml_envs.get(server_args_env_name(self.framework)) or "").strip()
