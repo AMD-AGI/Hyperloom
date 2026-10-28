@@ -91,26 +91,22 @@ def foldable_in_class(events: list[dict[str, Any]], windows: list[StepWindow]) -
             before[name][str(ordered[index - 1].get("name") or "")] += 1
         if index + 1 < len(ordered):
             after[name][str(ordered[index + 1].get("name") or "")] += 1
-    class_us = sum(totals.values()) or 1.0
     rows: list[dict[str, Any]] = []
     for name, launches in counts.items():
         per_step = launches / steps
         mean_us = totals[name] / launches
-        category = categorize_kernel_name(name)
         # A collective's time is the transfer and the wait for the other ranks, not a launch.
-        if mean_us > MAX_GLUE_US or per_step < MIN_LAUNCHES_PER_STEP or category == "collective":
+        if mean_us > MAX_GLUE_US or per_step < MIN_LAUNCHES_PER_STEP or categorize_kernel_name(name) == "collective":
             continue
         rows.append(
             {
                 "kernel": name,
-                "category": category,
                 "launches_per_step": round(per_step, 1),
                 "us_per_call": round(mean_us, 2),
                 "ms_per_step": round(totals[name] / steps / 1000.0, _REPORTED_PLACES),
                 # What comparing across classes needs: a prefill step outweighs a decode step, the capture's
                 # decode steps outnumber its prefill ones.
                 "ms_in_capture": round(totals[name] / 1000.0, _REPORTED_PLACES),
-                "pct_of_class": round(totals[name] / class_us * 100.0, 2),
                 "after": _dominant(before[name], launches),
                 "before": _dominant(after[name], launches),
             }

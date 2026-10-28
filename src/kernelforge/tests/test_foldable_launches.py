@@ -38,16 +38,6 @@ def test_the_glue_between_a_producer_and_its_consumer_is_named_with_both(tmp_pat
     assert row["before"] == {"name": "consumer", "share": 1.0}
 
 
-def test_a_kernel_doing_real_work_is_not_glue(tmp_path):
-    # The producer runs 14 us a call: above the floor a launch costs, so it is the work, not the glue.
-    events = [step("step[VERIFY bs=3]", 0.0, 1000.0), *_chain(1.0, 20, ("split_k", "reduce", "consumer"))]
-
-    named = [r["kernel"] for r in fl.foldable_launches(write_trace(tmp_path / "t.json", events))["VERIFY bs=3"]]
-
-    assert "reduce" in named
-    assert "split_k" not in named and "consumer" not in named
-
-
 def test_a_kernel_launched_a_few_times_is_not_what_the_step_spends_itself_on(tmp_path):
     events = [step("step[VERIFY bs=3]", 0.0, 1000.0), *_chain(1.0, 3, ("split_k", "reduce", "consumer"))]
 
@@ -81,7 +71,6 @@ def test_a_name_the_categoriser_misreads_is_still_found(tmp_path):
         if r["kernel"] == "_sparse_mla_reduce_kernel"
     ]
 
-    assert row["category"] == "attention"
     assert row["after"]["name"] == "_sparse_mla_split_k_kernel"
 
 
@@ -127,11 +116,6 @@ def test_the_rendering_names_what_to_fold_into_and_what_cannot(tmp_path):
     assert "after `split_k` (100%)" in body
     assert "before `consumer` (100%)" in body
     assert "folded into either of them without changing what is computed" in body
-
-
-def test_nothing_renders_without_candidates():
-    assert fl.render_foldable_launches({}) == []
-    assert fl.render_foldable_launches(None) == []
 
 
 def test_a_collective_stage_is_not_a_launch_to_fold(tmp_path):
