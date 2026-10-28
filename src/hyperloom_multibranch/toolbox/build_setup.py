@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
@@ -95,7 +95,7 @@ class BuildSetup:
     sglang_ref: str | None = None
     sglang_repo: str | None = None
     #: The image's own checkout of each component's upstream, read when its install names no commit.
-    image_checkouts: Mapping[str, Path] = MappingProxyType(IMAGE_CHECKOUTS)
+    image_checkouts: Mapping[str, Path] = field(default_factory=lambda: MappingProxyType(IMAGE_CHECKOUTS))
 
 
 def _directory(path: Path) -> Path:
