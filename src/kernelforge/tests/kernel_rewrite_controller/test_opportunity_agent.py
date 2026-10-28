@@ -21,6 +21,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.kernel_rewrite_controller import ControllerLayout, read_handoff
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
     ANALYSIS_STATUS_FAILED,
@@ -292,6 +293,7 @@ def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> No
     assert payload["driver_path"] == "driver.py"
     assert backend.spec.tool_policy.shell is False
     assert backend.spec.hooks is not None
+    assert backend.spec.protected_path_rules is FORGE_PROTECTED_PATHS
 
 
 def test_backend_model_probe_receives_an_existing_agent_directory(
@@ -301,16 +303,14 @@ def test_backend_model_probe_receives_an_existing_agent_directory(
     layout = ControllerLayout(tmp_path / "output")
     backend = _Backend(lambda _staging: None)
     runtime = AgentRuntimeConfig(provider="fake", model="fake")
-    config = SimpleNamespace(
-        max_turns=20,
-        agent_runtime=lambda: runtime,
-    )
+    config = SimpleNamespace(max_turns=20)
 
     monkeypatch.setattr(
         opportunity_agent_module.Config,
         "from_env",
         lambda **_kwargs: config,
     )
+    monkeypatch.setattr(opportunity_agent_module, "agent_runtime", lambda _config: runtime)
     monkeypatch.setattr(
         opportunity_agent_module,
         "with_writable_sandbox",
@@ -700,8 +700,9 @@ def test_an_analysis_whose_provider_is_unavailable_is_a_recorded_failure(
     monkeypatch.setattr(
         opportunity_agent_module.Config,
         "from_env",
-        lambda **_kwargs: SimpleNamespace(max_turns=20, agent_runtime=lambda: runtime),
+        lambda **_kwargs: SimpleNamespace(max_turns=20),
     )
+    monkeypatch.setattr(opportunity_agent_module, "agent_runtime", lambda _config: runtime)
     monkeypatch.setattr(opportunity_agent_module, "with_writable_sandbox", lambda selected: selected)
     unavailable = AgentProviderUnavailableError("claude CLI not found on PATH")
 

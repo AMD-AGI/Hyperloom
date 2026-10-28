@@ -14,9 +14,9 @@ from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
 from kernelforge.evaluation.jit_rebuild import tracked_source_changes
-from kernelforge.loop.new_path_allowlist import matches_commit_new_paths
 from kernelforge.tools.git import git, git_bytes
-from kernelforge.workspace.edit_policy import is_protected_path
+from kernelforge.tools.new_path_allowlist import matches_commit_new_paths
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ class WorkspaceGitMixin:
         for path in sorted(self._list_untracked()):
             if any(path == root or path.startswith(f"{root}/") for root in own_roots):
                 continue
-            allowed = matches_commit_new_paths(path, patterns) and not is_protected_path(
+            allowed = matches_commit_new_paths(path, patterns) and not FORGE_PROTECTED_PATHS.is_protected(
                 path,
                 workspace=self.ic.workspace_dir,
                 # The campaign driver carries no protected name of its own.

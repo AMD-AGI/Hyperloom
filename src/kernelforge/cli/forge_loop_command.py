@@ -49,8 +49,8 @@ from kernelforge.cli.publication import (
 )
 from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
-from kernelforge.config import Config
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.agent_backends.runtime import agent_runtime
+from kernelforge.config import Config, KnowledgeConfig
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
@@ -1873,7 +1873,7 @@ def forge_loop(request: ForgeLoopRequest):
     # PR references are independent of the experience-KB lifecycle.
     pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
-    selected_runtime = config.agent_runtime()
+    selected_runtime = agent_runtime(config)
     implementer_setup = ImplementerSetup(
         ImplementerTask(
             program_md=program_md,

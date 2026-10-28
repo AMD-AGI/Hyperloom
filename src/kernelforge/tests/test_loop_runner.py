@@ -1486,7 +1486,9 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tamper", diff=diff)]
-    patch_iteration_name(monkeypatch, "is_protected_path", lambda *_args, **_kwargs: False)
+    patch_iteration_name(
+        monkeypatch, "FORGE_PROTECTED_PATHS", SimpleNamespace(is_protected=lambda *_args, **_kwargs: False)
+    )
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)

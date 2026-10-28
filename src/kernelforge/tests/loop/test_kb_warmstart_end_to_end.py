@@ -11,7 +11,7 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.config import KnowledgeConfig
 from kernelforge.loop import recovery
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import WarmStartHarness

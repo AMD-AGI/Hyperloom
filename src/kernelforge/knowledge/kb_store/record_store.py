@@ -866,10 +866,8 @@ class LocalRewriteRecords:
 
 def create_rewrite_record_store(config: Any) -> RewriteRecordStore | None:
     """Pick a backend from the process-wide knowledge configuration."""
-    from kernelforge.knowledge.kb_store.config import (
-        KnowledgeStoreMode,
-        knowledge_config_from_runtime,
-    )
+    from kernelforge.config import KnowledgeStoreMode
+    from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
 
     knowledge = knowledge_config_from_runtime(config)
     if knowledge.mode is KnowledgeStoreMode.LOCAL:

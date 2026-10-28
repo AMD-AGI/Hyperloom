@@ -157,9 +157,9 @@ def test_factory_uses_same_runtime_for_independent_critic_backend(
         "create_registered_backend",
         create_backend,
     )
+    monkeypatch.setattr(orchestration_module, "agent_runtime", lambda _config: runtime)
     service = make_orchestration_service(
         config=SimpleNamespace(
-            agent_runtime=lambda: runtime,
             workspace="/workspace",
             max_turns=500,
             # The probe fields the factory now reads as attributes rather than through a ``getattr`` default that

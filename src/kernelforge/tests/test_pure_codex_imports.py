@@ -23,14 +23,17 @@ builtins.__import__ = blocked_import
 
 from kernelforge.orchestrator import agent as agent_module
 import kernelforge.knowledge.kb_store.writer
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 import kernelforge.kernel_backends.base
 
-runtime = Config(
-    agent_backend="codex",
-    agent_precheck=False,
-    agent_fallback_provider="",
-).agent_runtime()
+runtime = agent_runtime(
+    Config(
+        agent_backend="codex",
+        agent_precheck=False,
+        agent_fallback_provider="",
+    )
+)
 assert runtime.provider == "codex"
 print("PURE_CODEX_IMPORT_OK")
 """

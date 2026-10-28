@@ -160,8 +160,7 @@ def kb_store_run_config(tmp_path: Path, token: str) -> "object":
     imports are deferred: conftest is imported during collection, before the
     guardrails above are installed.
     """
-    from kernelforge.config import Config
-    from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+    from kernelforge.config import Config, KnowledgeConfig
 
     knowledge = KnowledgeConfig.from_env(
         {},

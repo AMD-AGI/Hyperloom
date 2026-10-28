@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+from kernelforge.tools.protected_paths import ProtectedPathRules
 
 
 #: Environment overlay applied to every session started inside the current
@@ -257,6 +258,10 @@ class AgentRunSpec:
     # surface. Unlike ``protected_globs=["*"]`` it reaches no ignored file, so a build the session runs is neither
     # snapshotted nor counted. Appended for the same reason as the fields above.
     allow_tracked_changes: bool = True
+    # The caller's rules for which workspace paths this session must leave as they are; ``protected_paths`` and
+    # ``protected_globs`` add to them per session. A session that can write is refused without them, so a caller that
+    # forgets them cannot run with nothing protected. Appended for the same reason as the fields above.
+    protected_path_rules: ProtectedPathRules | None = None
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.
