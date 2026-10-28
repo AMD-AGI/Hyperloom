@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from hyperloom_common.coerce import to_float, to_int, to_mapping
 from hyperloom.common.perf_metric import INTVTY_OBJECTIVES

@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom_common.env import env_float as _env_float, env_int as _env_int

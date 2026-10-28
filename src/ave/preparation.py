@@ -15,7 +15,7 @@ from ave.task import NonemptyText, OptimizationRequest, RelativeSource, scope_pr
 from hyperloom_common.io import atomic_write_json
 from hyperloom_common.jsonio import extract_last_json_with_key
 from ave.claude import query_result
-from ave.workspace import git
+from hyperloom_common.git_safety import repo_git
 
 
 class NoAveKernel(ValueError):
@@ -50,7 +50,7 @@ def read_selection(payload: dict, repositories: tuple[Path, ...]) -> PreparedKer
         path = kernel.repo_root / source
         if not path.resolve().is_relative_to(kernel.repo_root) or not path.is_file() or path.is_symlink():
             raise ValueError(f"Ave source must be a regular file inside the repository: {source}")
-        git("ls-files", "--error-unmatch", "--", source, cwd=kernel.repo_root)
+        repo_git(kernel.repo_root, "ls-files", "--error-unmatch", "--", source)
     compile(kernel.driver_source, "ave-driver.py", "exec")
     return replace(kernel, source_files=sources)
 

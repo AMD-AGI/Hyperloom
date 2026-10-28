@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from ..base import Decision, RenderedSection, fmt_pct, md_table, register_renderer
 from ._framework import config_tally, specialist_tally

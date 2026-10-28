@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from hyperloom_common.coerce import dict_rows, to_mapping
 

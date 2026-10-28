@@ -17,10 +17,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from ave.task import read_env_prompts
 from hyperloom_common.coerce import to_unix
-from hyperloom_common.env import ave_explicitly_enabled, forge_explicitly_enabled
+from hyperloom_common.env import env_str, forge_explicitly_enabled
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
 from hyperloom_common.timeutil import now_iso
@@ -713,7 +713,11 @@ def _seed_shared_state(
 
     # The only read of the backend choice; every later decision reads the persisted record.
     _kernel_optimizer_record = (
-        "forge" if forge_explicitly_enabled() else "geak" if not ave_explicitly_enabled() else AVE_BACKEND
+        "forge"
+        if forge_explicitly_enabled()
+        else "geak"
+        if env_str("KERNEL_OPT_BACKEND_ORDER").lower() != AVE_BACKEND
+        else AVE_BACKEND
     )
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.

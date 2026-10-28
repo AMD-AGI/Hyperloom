@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from hyperloom_common.coerce import text_or_none, to_int
 from hyperloom_common.io import JsonLineFormat, append_jsonl

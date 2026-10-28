@@ -21,7 +21,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from . import machine_state as _phase_state
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from .kernel_round_budget import controller_round_stop, measurement_round_sec
 from hyperloom_common.coerce import first_str, to_int
 from hyperloom_common.env import env_bool, env_float
@@ -764,7 +764,10 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             result = {"status": "skipped", "reason": str(error)}
         except asyncio.TimeoutError:
             result = {"status": "timed_out", "reason": "Ave kernel preparation exceeded its time budget"}
-        except (ImportError, OSError, ValueError, SyntaxError, RuntimeError, subprocess.SubprocessError) as error:
+        except FuturesCancelledError:
+            raise
+        except Exception as error:  # outermost Ave preparation boundary
+            log.exception("Ave kernel preparation failed")
             result = {"status": "failed", "reason": str(error)}
         state.ave_result = result
         state.save(self.session_dir)

@@ -6,18 +6,22 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import CancelledError
 from dataclasses import replace
 import json
 from pathlib import Path
 import shlex
 import subprocess
 import time
+from unittest.mock import AsyncMock, Mock
 
 from claude_agent_sdk import AssistantMessage, ResultMessage, ToolResultBlock, ToolUseBlock, UserMessage
 import pytest
 
-from ave.optimizer import AveLoop
-from ave.workspace import git
+from ave.optimizer import AveLoop, optimize
+from ave.preparation import PreparedKernel
+from ave.task import DeadlineExceeded
+from hyperloom_common.git_safety import app_git, repo_git
 
 
 def session_result(text="Applied the transformation.", *, is_error=False):
@@ -66,9 +70,133 @@ def test_ordered_steps_keep_slower_preparation_and_retry_from_verified_prefix(pr
     assert all(source == slower for source in claude.sources[1:])
     assert claude.prompts[2]["recent_attempts"][-1]["status"] == "failed"
     assert (prepared_run.workspace / "kernel.py").read_text() == (faster if recover else slower)
-    assert git("rev-parse", "HEAD", cwd=prepared_run.workspace).strip() == result["final_commit"]
-    assert git("diff", "HEAD", cwd=prepared_run.workspace) == ""
+    assert repo_git(prepared_run.workspace, "rev-parse", "HEAD").stdout.strip() == result["final_commit"]
+    assert repo_git(prepared_run.workspace, "diff", "HEAD").stdout == ""
     assert json.loads(prepared_run.result_json.read_text()) == result
+
+
+@pytest.mark.parametrize("failure", ["sdk", "git"])
+@pytest.mark.parametrize("recover", [True, False])
+def test_unexpected_step_errors_preserve_verified_prefix(prepared_run, monkeypatch, caplog, failure, recover):
+    slower = "VALUE = 7\nLATENCY = 3.0\n"
+    faster = "VALUE = 7\nLATENCY = 1.0\n"
+    claude = FakeClaude([slower, faster, faster, faster])
+
+    def should_fail():
+        return len(claude.prompts) == 2 or (not recover and len(claude.prompts) > 1)
+
+    async def query(*, prompt, options):
+        async for message in claude.query(prompt=prompt, options=options):
+            if failure == "sdk" and should_fail():
+                raise Exception("SDK stream failed")
+            yield message
+
+    def host_git(worktree, *args, **kwargs):
+        if failure == "git" and "commit" in args and should_fail():
+            raise subprocess.CalledProcessError(1, ["git", *args])
+        return app_git(worktree, *args, **kwargs)
+
+    monkeypatch.setattr("claude_agent_sdk.query", query)
+    monkeypatch.setattr("ave.optimizer.app_git", host_git)
+    result = asyncio.run(AveLoop(prepared_run).optimize())
+
+    assert result["status"] == ("completed" if recover else "failed")
+    assert result["completed_steps"] == [step.id for step in prepared_run.steps[: 2 if recover else 1]]
+    assert [item["status"] for item in result["attempts"]] == (
+        ["passed", "failed", "passed"] if recover else ["passed", "failed", "failed", "failed"]
+    )
+    assert all(source == slower for source in claude.sources[1:])
+    assert claude.prompts[2]["recent_attempts"][-1] == result["attempts"][1]
+    assert json.loads((prepared_run.logs / "0002-1/result.json").read_text()) == result["attempts"][1]
+    assert any(record.exc_info for record in caplog.records if "Ave step" in record.message)
+    assert (prepared_run.workspace / "kernel.py").read_text() == (faster if recover else slower)
+    assert repo_git(prepared_run.workspace, "status", "--porcelain").stdout == ""
+    assert json.loads(prepared_run.result_json.read_text()) == result
+
+
+@pytest.mark.parametrize("failure", ["baseline", "restore"])
+def test_fatal_loop_errors_write_failed_checkpoint(prepared_run, monkeypatch, failure):
+    claude = FakeClaude(["VALUE = 7\nLATENCY = 1.0\n"])
+    monkeypatch.setattr("claude_agent_sdk.query", claude.query)
+    target = "ave.optimizer.measure" if failure == "baseline" else "ave.workspace.StepWorkspace.restore"
+    monkeypatch.setattr(target, Mock(side_effect=Exception("fatal loop error")))
+
+    with pytest.raises(Exception, match="fatal loop error"):
+        asyncio.run(AveLoop(prepared_run).optimize())
+
+    result = json.loads(prepared_run.result_json.read_text())
+    assert result["status"] == "failed" and result["reason"] == "fatal loop error"
+    assert len(claude.prompts) == (0 if failure == "baseline" else 1)
+
+
+@pytest.mark.parametrize("stop", [DeadlineExceeded, asyncio.CancelledError, CancelledError])
+def test_deadline_and_cancellation_do_not_retry(prepared_run, monkeypatch, stop):
+    agent = AsyncMock(side_effect=stop("stopped"))
+    monkeypatch.setattr(AveLoop, "run_step_agent", agent)
+    loop = AveLoop(prepared_run)
+    if stop is DeadlineExceeded:
+        asyncio.run(loop.optimize())
+    else:
+        with pytest.raises(stop):
+            asyncio.run(loop.optimize())
+
+    result = json.loads(prepared_run.result_json.read_text())
+    assert result["status"] == ("timed_out" if stop is DeadlineExceeded else "cancelled")
+    assert result["attempts"] == []
+    agent.assert_awaited_once()
+
+
+@pytest.mark.parametrize("source", ["repo_root", "workspace"])
+def test_host_git_ignores_hooks_signing_and_ambient_config(prepared_run, monkeypatch, source):
+    repo = getattr(prepared_run, source)
+    output = prepared_run.result_json.parent / "campaign"
+    output.mkdir()
+    marker = output / "executed"
+    hooks = output / "hooks"
+    hooks.mkdir()
+    for name in ("pre-commit", "post-checkout"):
+        hook = hooks / name
+        hook.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" >> {shlex.quote(str(marker))}\nexit 1\n")
+        hook.chmod(0o755)
+    for name, value in (
+        ("core.hooksPath", hooks),
+        ("core.fsmonitor", hook),
+        ("commit.gpgsign", "true"),
+        ("gpg.program", hook),
+        ("diff.external", hook),
+        ("diff.probe.command", hook),
+        ("diff.probe.textconv", hook),
+    ):
+        repo_git(repo, "config", name, str(value))
+    admin = prepared_run.repo_root / ".git"
+    (admin / "info/attributes").write_text("kernel.py diff=probe\n")
+    config = (admin / "config").read_bytes()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(admin / "config"))
+    monkeypatch.setenv("GIT_DIR", str(output / "missing-git-dir"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(output / "foreign-index"))
+    original = "VALUE = 7\nLATENCY = 2.0\n# Existing serving edit\n"
+    (repo / "kernel.py").write_text(original)
+    claude = FakeClaude(["VALUE = 7\nLATENCY = 1.0\n"])
+    monkeypatch.setattr("claude_agent_sdk.query", claude.query)
+    kernel = PreparedKernel(repo, "kernel.py", ("kernel.py",), "kernel", prepared_run.driver.read_text(), "test")
+
+    async def worker(run):
+        assert (run.workspace / "kernel.py").read_text() == original
+        result = await AveLoop(run).optimize()
+        assert result["status"] == "completed" and len(result["attempts"]) == 1
+        return 0
+
+    result = asyncio.run(
+        optimize(kernel, steps=prepared_run.steps[:1], output=output, budget_sec=120, run_worker=worker)
+    )
+
+    assert result["status"] == "completed"
+    assert "+LATENCY = 1.0" in Path(result["integrate_params"]["patch_path"]).read_text()
+    assert not marker.exists() and not (output / "foreign-index").exists()
+    assert not (output / "workspace").exists()
+    assert (admin / "config").read_bytes() == config
+    assert (repo / "kernel.py").read_text() == original
+    assert repo_git(repo, "rev-parse", "HEAD").stdout.strip() == prepared_run.base_commit
 
 
 @pytest.mark.parametrize("timeout_source", ["agent", "driver"])
@@ -109,7 +237,7 @@ def test_step_timeout_retries_from_verified_prefix(prepared_run, monkeypatch, ti
     assert claude.sources[2] == slower
     assert claude.prompts[2]["recent_attempts"][-1] == failure
     assert (prepared_run.workspace / "kernel.py").read_text() == faster
-    assert git("status", "--porcelain", cwd=prepared_run.workspace) == ""
+    assert repo_git(prepared_run.workspace, "status", "--porcelain").stdout == ""
     if timeout_source == "driver":
         assert "candidate stalled" in (prepared_run.logs / "0002-1/correctness.log").read_text()
 
@@ -136,7 +264,7 @@ def test_deadline_stops_retries_and_preserves_verified_prefix(prepared_run, monk
     assert len(claude.prompts) == 2
     assert result["final_commit"] == result["attempts"][0]["commit"]
     assert (prepared_run.workspace / "kernel.py").read_text() == slower
-    assert git("status", "--porcelain", cwd=prepared_run.workspace) == ""
+    assert repo_git(prepared_run.workspace, "status", "--porcelain").stdout == ""
     assert json.loads(prepared_run.result_json.read_text()) == result
 
 
@@ -218,8 +346,8 @@ def test_agent_scope_violation_is_rejected_and_restored(prepared_run, monkeypatc
             elif violation == "untracked":
                 (run.workspace / "extra.py").write_text("VALUE = 8\n")
             else:
-                git("add", "kernel.py", cwd=run.workspace)
-                git("commit", "-m", "unauthorized", cwd=run.workspace)
+                repo_git(run.workspace, "add", "kernel.py")
+                repo_git(run.workspace, "commit", "-m", "unauthorized")
             yield message
 
     monkeypatch.setattr("claude_agent_sdk.query", query)
@@ -232,4 +360,4 @@ def test_agent_scope_violation_is_rejected_and_restored(prepared_run, monkeypatc
     assert not list(run.logs.glob("0001-*/correctness.log"))
     assert run.driver.read_bytes() == original_driver
     assert reference.read_bytes() == original_reference
-    assert git("status", "--porcelain", cwd=run.workspace) == ""
+    assert repo_git(run.workspace, "status", "--porcelain").stdout == ""

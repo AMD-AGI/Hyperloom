@@ -72,25 +72,27 @@ dispatcher admits it under `server_lifecycle`, `workspace_mutation` and
 `benchmark_lane` without joining it, so ticks keep running while it works. Its
 executor, `run_agent`, calls the handlers directly in Python — not
 through the REQUEST bus — and every step it runs (reprofile, GEMM tuning,
-fusion, the rewrite controller, GEAK and its revalidation) is covered by those
+fusion, the rewrite controller, Ave, GEAK and its revalidation) is covered by those
 lanes. Which calls it makes depends on the backend:
 
 ```python
-# 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
-#    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
+if self.geak_enabled():
     await self._run_geak_kernel_phase(from_phase=from_phase)
-    return
+    return {"status": "ok", "route": "geak"}
 
-# 2. Forge branch — optional GEMM tuning, then the shared fusion/rewrite tail.
-if self.shared_state.kernel_optimizer != AVE_BACKEND:
-    return await self._run_forge_kernel_phase()
+if self.shared_state.kernel_optimizer == AVE_BACKEND:
+    return await self._run_ave_kernel_phase()
 
-# 3. Ave branch — only with KERNEL_OPT_BACKEND_ORDER=ave.
-return await self._run_ave_kernel_phase()
+if not self._gemm_tuning_required_before_kernel_opt():
+    await self._finish_kernel_entry()
+    return {"status": "ok", "route": "forge_no_gemm"}
+
+...  # GEMM tuning and result handling.
+await self._finish_kernel_entry()
+return {"status": "ok", "route": "forge_gemm"}
 ```
 
-`_run_forge_kernel_phase()` runs GEMM tuning when required, then calls
+`run_agent()` handles Forge inline: it runs GEMM tuning when required, then calls
 `_finish_kernel_entry()`. Without GEMM tuning it calls that shared tail directly:
 
 ```python

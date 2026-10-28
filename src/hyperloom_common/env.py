@@ -24,8 +24,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-from ave import AVE_BACKEND
-
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 # Canonical "off" vocabulary. The empty string is an explicit off token: a
 # variable blanked on the command line is not the same as one never set.
@@ -155,11 +153,6 @@ def forge_explicitly_enabled() -> bool:
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 
 
-def ave_explicitly_enabled() -> bool:
-    """Whether the Ave kernel optimizer is opted in."""
-    return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == AVE_BACKEND
-
-
 __all__ = [
     "EnvValueError",
     "is_truthy",
@@ -169,5 +162,4 @@ __all__ = [
     "env_float",
     "env_str",
     "forge_explicitly_enabled",
-    "ave_explicitly_enabled",
 ]

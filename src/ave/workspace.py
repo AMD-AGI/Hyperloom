@@ -7,16 +7,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-import subprocess
 from collections.abc import Iterator
 
+from hyperloom_common.git_safety import app_git, repo_git
+
 GIT_REV_PARSE = "rev-parse"
-
-
-def git(*args: str, cwd: Path) -> str:
-    """Run Git with a fixed commit identity and surface failures."""
-    command = ["git", "-c", "user.name=Ave", "-c", "user.email=ave@localhost", *args]
-    return subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=True, timeout=120).stdout
+COMMIT_IDENTITY = ("-c", "user.name=Ave", "-c", "user.email=ave@localhost")
 
 
 class WorkspaceError(ValueError):
@@ -34,15 +30,26 @@ class StepWorkspace:
         self.untracked = self.untracked_files()
 
     def untracked_files(self) -> set[str]:
-        return set(git("ls-files", "--others", "--exclude-standard", "-z", cwd=self.workspace).split("\0")[:-1])
+        listed = app_git(self.workspace, "ls-files", "--others", "--exclude-standard", "-z", check=True)
+        return set(listed.stdout.split("\0")[:-1])
 
     def validate(self, editable_files: tuple[str, ...]) -> list[str]:
         """Require unchanged measurement inputs before the host accepts any timing."""
         if self.driver.is_symlink() or not self.driver.is_file() or self.driver.read_bytes() != self.driver_source:
             raise WorkspaceError("agent changed the protected driver")
-        if git(GIT_REV_PARSE, "HEAD", cwd=self.workspace).strip() != self.revision:
+        if app_git(self.workspace, GIT_REV_PARSE, "HEAD", check=True).stdout.strip() != self.revision:
             raise WorkspaceError("agent changed Git HEAD; the host owns commits")
-        changed = git("diff", "--no-renames", "--name-only", "-z", self.revision, cwd=self.workspace).split("\0")[:-1]
+        changed = app_git(
+            self.workspace,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            self.revision,
+            check=True,
+        ).stdout.split("\0")[:-1]
         if not set(changed) <= set(editable_files) or self.untracked_files() - self.untracked:
             raise WorkspaceError("agent changed files outside the step's source scope")
         if any((self.workspace / name).is_symlink() or not (self.workspace / name).is_file() for name in changed):
@@ -52,9 +59,9 @@ class StepWorkspace:
     def restore(self, revision: str) -> None:
         """Keep only the host-verified revision and remove new untracked session files."""
         added = self.untracked_files() - self.untracked
-        git("checkout", "--detach", "--force", revision, cwd=self.workspace)
+        app_git(self.workspace, "checkout", "--detach", "--force", revision, check=True)
         if added:
-            git("clean", "-fd", "--", *added, cwd=self.workspace)
+            app_git(self.workspace, "clean", "-fd", "--", *added, check=True)
         if self.driver.is_symlink():
             self.driver.unlink()
         self.driver.write_bytes(self.driver_source)
@@ -62,15 +69,15 @@ class StepWorkspace:
 
 def snapshot(repo: Path) -> str:
     """Capture tracked serving sources without changing their branch, index or worktree."""
-    revision = git("stash", "create", cwd=repo).strip()
-    return revision or git(GIT_REV_PARSE, "HEAD", cwd=repo).strip()
+    revision = repo_git(repo, *COMMIT_IDENTITY, "stash", "create").stdout.strip()
+    return revision or repo_git(repo, GIT_REV_PARSE, "HEAD").stdout.strip()
 
 
 @contextmanager
 def checkout(repo: Path, revision: str, destination: Path) -> Iterator[Path]:
     """Optimize a detached revision without changing the serving checkout."""
-    git("worktree", "add", "--detach", str(destination), revision, cwd=repo)
+    repo_git(repo, "worktree", "add", "--detach", str(destination), revision)
     try:
         yield destination
     finally:
-        git("worktree", "remove", "--force", str(destination), cwd=repo)
+        repo_git(repo, "worktree", "remove", "--force", str(destination))

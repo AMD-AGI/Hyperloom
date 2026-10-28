@@ -9,6 +9,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from concurrent.futures import CancelledError
 import json
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -16,12 +17,13 @@ import statistics
 import sys
 import time
 
-from ave import AVE_BACKEND
-from ave.measurement import DRIVER_TIMEOUT_SEC, MeasurementError, driver_environment, measure
+from hyperloom_common.kernel_backend import AVE_BACKEND
+from ave.measurement import DRIVER_TIMEOUT_SEC, driver_environment, measure
 from ave.task import DeadlineExceeded, OptimizationRun, PromptStep, scope_prompts
-from ave.workspace import StepWorkspace, WorkspaceError, checkout, git, snapshot
+from ave.workspace import COMMIT_IDENTITY, StepWorkspace, checkout, snapshot
 from ave.preparation import PreparedKernel
 from hyperloom_common.io import atomic_write_json
+from hyperloom_common.git_safety import app_git
 from ave.claude import query_result
 from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 
@@ -30,13 +32,16 @@ MIN_SESSION_SEC = 30
 STEP_ATTEMPTS = 3
 FAILED = "failed"
 TIMED_OUT = "timed_out"
-GIT_DIFF = "diff"
+GIT_DIFF = ("diff", "--no-ext-diff", "--no-textconv")
+log = logging.getLogger(__name__)
 
 
 def publish_candidate(run: OptimizationRun, result: dict) -> dict:
     """Export the verified revision in Hyperloom's existing integrate format."""
     revision = result["final_commit"]
-    changed = git(GIT_DIFF, "--name-only", run.base_commit, revision, cwd=run.workspace).splitlines()
+    changed = app_git(
+        run.workspace, *GIT_DIFF, "--name-only", run.base_commit, revision, check=True
+    ).stdout.splitlines()
     if not changed:
         return {}
     if not set(changed) <= set(run.source_files) or not result["correctness_passed"]:
@@ -46,9 +51,11 @@ def publish_candidate(run: OptimizationRun, result: dict) -> dict:
     for source in changed:
         destination = snapshot / source
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(git("show", f"{revision}:{source}", cwd=run.workspace))
+        destination.write_text(app_git(run.workspace, "show", f"{revision}:{source}", check=True).stdout)
     patch = output / "candidate.patch"
-    patch.write_text(git(GIT_DIFF, "--binary", run.base_commit, revision, "--", *changed, cwd=run.workspace))
+    patch.write_text(
+        app_git(run.workspace, *GIT_DIFF, "--binary", run.base_commit, revision, "--", *changed, check=True).stdout
+    )
     kernel_id = f"ave:{run.operator_name}:{output.name}"
     params = {
         "kernel_id": kernel_id,
@@ -96,7 +103,7 @@ async def optimize(
         )
         try:
             returncode = await run_worker(run)
-        except CancelledError:
+        except (asyncio.CancelledError, CancelledError):
             if run.result_json.exists():
                 result = json.loads(run.result_json.read_text())
                 result.update(status="cancelled", reason="Ave optimization was cancelled")
@@ -108,7 +115,9 @@ async def optimize(
         result = json.loads(run.result_json.read_text())
         if returncode == -9:
             result.update(status=TIMED_OUT, reason="Ave subprocess exceeded its time budget")
-            atomic_write_json(run.result_json, result)
+        elif result["status"] == "running":
+            result.update(status=FAILED, reason=f"Ave subprocess exited before completion (rc={returncode})")
+        atomic_write_json(run.result_json, result)
         response = {"result_json": str(run.result_json), "returncode": returncode, "optimization": result}
         return {**response, "status": result["status"], "integrate_params": publish_candidate(run, result)}
 
@@ -175,15 +184,17 @@ class AveLoop:
         measured = measure(self.run, directory)
         scores = measured.scores(self.result["baseline_case_ms"])
         if changed:
-            git("add", "--", *step.files, cwd=self.run.workspace)
-            git(
+            app_git(self.run.workspace, "add", "--", *step.files, check=True)
+            app_git(
+                self.run.workspace,
+                *COMMIT_IDENTITY,
                 "commit",
                 "-m",
                 f"Apply Ave optimization step: {step.id}",
-                cwd=self.run.workspace,
+                check=True,
             )
         self.result.update(
-            final_commit=git("rev-parse", "HEAD", cwd=self.run.workspace).strip(),
+            final_commit=app_git(self.run.workspace, "rev-parse", "HEAD", check=True).stdout.strip(),
             final_case_ms=measured.case_ms,
             mean_case_speedup=statistics.fmean(scores),
         )
@@ -202,9 +213,12 @@ class AveLoop:
             try:
                 await self.run_step_agent(step, directory, timeout_sec)
                 record = self.evaluate(step, directory, workspace)
+            except (DeadlineExceeded, CancelledError):
+                raise
             except asyncio.TimeoutError:
                 record = {"status": FAILED, "reason": f"Claude session timed out after {timeout_sec:g}s"}
-            except (MeasurementError, WorkspaceError) as error:
+            except Exception as error:  # isolation boundary: one optimization attempt
+                log.warning("Ave step %s attempt %s failed", step.id, attempt, exc_info=True)
                 record = {"status": FAILED, "reason": str(error)}
             finally:
                 workspace.restore(self.result["final_commit"])
@@ -233,7 +247,10 @@ class AveLoop:
                     return self.checkpoint(FAILED, f"step {step.id} failed after {STEP_ATTEMPTS} attempts")
         except DeadlineExceeded as error:
             return self.checkpoint(TIMED_OUT, str(error))
-        except (OSError, RuntimeError) as error:
+        except (asyncio.CancelledError, CancelledError) as error:
+            self.checkpoint("cancelled", str(error))
+            raise
+        except Exception as error:
             self.checkpoint(FAILED, str(error))
             raise
         return self.checkpoint("completed")

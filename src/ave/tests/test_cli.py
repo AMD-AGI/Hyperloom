@@ -11,10 +11,10 @@ from dataclasses import asdict
 
 from ave import __main__ as cli
 from ave.tests.test_loop import session_result
-from ave.workspace import git
+from hyperloom_common.git_safety import repo_git
 
 
-def test_cli_passes_ordered_prompts_and_preserves_prefix_when_provider_fails(prepared_run, monkeypatch, capsys):
+def test_cli_passes_ordered_prompts_and_preserves_prefix_when_provider_fails(prepared_run, monkeypatch, capsys, caplog):
     context = json.dumps(asdict(prepared_run), default=str)
     path = prepared_run.result_json.parent / "run.json"
     path.write_text(context)
@@ -42,12 +42,17 @@ def test_cli_passes_ordered_prompts_and_preserves_prefix_when_provider_fails(pre
 
     monkeypatch.setattr("claude_agent_sdk.query", query)
     assert cli.main(["optimize", str(path)]) == 1
-    assert "subscription unavailable" in capsys.readouterr().err
+    assert "ave: failed" in capsys.readouterr().out
+    assert "subscription unavailable" in caplog.text
     result = json.loads(prepared_run.result_json.read_text())
     assert result["status"] == "failed"
     assert result["correctness_passed"] is True
     assert result["completed_steps"] == ["prepare_layout"]
-    assert [context["prompt"] for context in prompts] == [step.prompt for step in prepared_run.steps]
-    assert sources[1] == "VALUE = 7\nLATENCY = 1.0\n"
-    assert git("rev-parse", "HEAD", cwd=prepared_run.workspace).strip() == result["final_commit"]
-    assert git("diff", "HEAD", cwd=prepared_run.workspace) == ""
+    assert [context["prompt"] for context in prompts] == [
+        prepared_run.steps[0].prompt,
+        *[prepared_run.steps[1].prompt] * 3,
+    ]
+    assert all("subscription unavailable" in attempt["reason"] for attempt in result["attempts"][1:])
+    assert all(source == "VALUE = 7\nLATENCY = 1.0\n" for source in sources[1:])
+    assert repo_git(prepared_run.workspace, "rev-parse", "HEAD").stdout.strip() == result["final_commit"]
+    assert repo_git(prepared_run.workspace, "diff", "HEAD").stdout == ""

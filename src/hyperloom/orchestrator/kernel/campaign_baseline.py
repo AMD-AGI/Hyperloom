@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from kernelforge.workflows.rewrite_controller import (
     CAMPAIGN_BRANCH_PREFIX,
     reclaim_campaign_branch,

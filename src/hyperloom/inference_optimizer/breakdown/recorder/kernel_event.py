@@ -56,7 +56,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_NO_MATERIAL,

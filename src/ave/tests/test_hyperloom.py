@@ -19,7 +19,7 @@ from ave.optimizer import AveLoop
 from ave.preparation import PreparedKernel
 from ave.task import DEFAULT_PROMPT, PromptStep, read_env_prompts
 from ave.tests.test_loop import FakeClaude, session_result
-from ave.workspace import git
+from hyperloom_common.git_safety import repo_git
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
@@ -42,15 +42,15 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "decision, timeout, custom_prompts",
-    [("KEEP", False, False), ("REVERT", True, True), ("CANCELLED", False, True)],
+    "decision, unfinished_exit, custom_prompts",
+    [("KEEP", None, False), ("REVERT", -9, True), ("KEEP", 1, True), ("KEEP", 0, True), ("CANCELLED", None, True)],
 )
 async def test_hyperloom_cli_selects_ave_and_integrates(
     prepared_run,
     coord,
     monkeypatch,
     decision,
-    timeout,
+    unfinished_exit,
     custom_prompts,
 ):
     session = coord.session_dir
@@ -138,15 +138,15 @@ async def test_hyperloom_cli_selects_ave_and_integrates(
     monkeypatch.setattr("claude_agent_sdk.query", select_kernel)
     source = prepared_run.workspace / "kernel.py"
     source.write_text(source.read_text() + "# Existing serving patch\n")
-    git("add", "kernel.py", cwd=prepared_run.workspace)
-    original_index = git("diff", "--cached", cwd=prepared_run.workspace)
+    repo_git(prepared_run.workspace, "add", "kernel.py")
+    original_index = repo_git(prepared_run.workspace, "diff", "--no-ext-diff", "--cached").stdout
 
     async def run_loop(run, *, devices):
         runs.append(run)
         assert run.workspace != prepared_run.workspace
         assert run.base_commit != prepared_run.base_commit
-        assert git("rev-parse", "HEAD", cwd=prepared_run.workspace).strip() == prepared_run.base_commit
-        assert git("diff", "--cached", cwd=prepared_run.workspace) == original_index
+        assert repo_git(prepared_run.workspace, "rev-parse", "HEAD").stdout.strip() == prepared_run.base_commit
+        assert repo_git(prepared_run.workspace, "diff", "--no-ext-diff", "--cached").stdout == original_index
         assert "Existing serving patch" in (run.workspace / "kernel.py").read_text()
         assert [step.prompt for step in run.steps] == [step["prompt"] for step in state.ave_prompts]
         assert all(step.files == ("kernel.py",) for step in run.steps)
@@ -154,12 +154,12 @@ async def test_hyperloom_cli_selects_ave_and_integrates(
         claude = FakeClaude([*proposals, "VALUE = 7\nLATENCY = 1.0\n"])
         monkeypatch.setattr("claude_agent_sdk.query", claude.query)
         result = await AveLoop(run).optimize()
-        if timeout:
+        if unfinished_exit is not None:
             result["status"] = "running"
             run.result_json.write_text(json.dumps(result))
         if decision == "CANCELLED":
             raise CancelledError("Hyperloom stopped the worker")
-        return -9 if timeout else 0
+        return unfinished_exit if unfinished_exit is not None else 0
 
     monkeypatch.setattr(coord.phase_kernel, "_run_ave_subprocess", run_loop)
 
@@ -194,6 +194,10 @@ async def test_hyperloom_cli_selects_ave_and_integrates(
         recorded_keep.assert_not_called()
         return
     result = state.ave_result
+    assert result["status"] == (
+        "completed" if unfinished_exit is None else "timed_out" if unfinished_exit == -9 else "failed"
+    )
+    assert json.loads(runs[0].result_json.read_text())["status"] == result["status"]
     assert state.kernel_optimizer == "ave"
     free_gpus.assert_called_once()
     assert "integration" in result, result
@@ -412,6 +416,7 @@ async def test_other_backends_do_not_prepare_ave(coord, tmp_path, monkeypatch, b
         "invalid_driver",
         "timeout",
         "provider_failure",
+        "sdk_error",
         "missing_sdk",
     ],
 )
@@ -441,6 +446,8 @@ async def test_ave_preparation_failure_settles_without_another_backend(prepared_
             raise asyncio.TimeoutError
         if selection == "provider_failure":
             raise RuntimeError("provider unavailable")
+        if selection == "sdk_error":
+            raise Exception("SDK control request failed")
         if selection == "missing_sdk":
             raise ModuleNotFoundError("No module named 'claude_agent_sdk'")
         kernel = (
@@ -479,6 +486,7 @@ async def test_ave_preparation_failure_settles_without_another_backend(prepared_
             "invalid_driver": "failed",
             "timeout": "timed_out",
             "provider_failure": "failed",
+            "sdk_error": "failed",
             "missing_sdk": "failed",
         }[selection]
     )
@@ -492,7 +500,7 @@ async def test_ave_preparation_failure_settles_without_another_backend(prepared_
     coord.phase_kernel._maybe_reprofile_for_kernel.assert_awaited_once()
     worker.assert_not_called()
     free_gpus.assert_not_called()
-    assert git("status", "--porcelain", cwd=prepared_run.workspace) == ""
+    assert repo_git(prepared_run.workspace, "status", "--porcelain").stdout == ""
 
 
 def test_prompt_environment_validates_instructions(tmp_path, monkeypatch):

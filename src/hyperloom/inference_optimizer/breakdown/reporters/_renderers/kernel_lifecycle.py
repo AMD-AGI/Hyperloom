@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 
 from ..base import (
     Decision,

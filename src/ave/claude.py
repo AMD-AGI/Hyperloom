@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ave import AVE_BACKEND
+from hyperloom_common.kernel_backend import AVE_BACKEND
 from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, claude_sdk_env_options
 
 if TYPE_CHECKING:

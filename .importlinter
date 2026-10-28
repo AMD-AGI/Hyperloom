@@ -30,6 +30,7 @@ root_packages =
     hyperloom_common
     hyperloom_kb
     kernelforge
+    ave
 include_external_packages = False
 exclude_type_checking_imports = True
 
@@ -127,11 +128,24 @@ forbidden_modules =
     hyperloom
     hyperloom_kb
     kernelforge
+    ave
 ignore_imports =
     hyperloom_common.tests.** -> **
     hyperloom_common.llm.tests.** -> **
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:ave-only-common]
+name = ave may depend on hyperloom_common only
+type = forbidden
+source_modules = ave
+forbidden_modules =
+    hyperloom
+    kernelforge
+ignore_imports =
+    ave.tests.** -> **
 unmatched_ignore_imports_alerting = none
 
 
@@ -210,6 +224,7 @@ forbidden_modules =
     hyperloom.inference_optimizer
     hyperloom.agents
     kernelforge
+    ave
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **

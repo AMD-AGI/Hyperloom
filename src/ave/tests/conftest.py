@@ -12,20 +12,22 @@ import time
 import pytest
 
 from ave.task import OptimizationRun, read_prompts, scope_prompts
-from ave.workspace import git
+from hyperloom_common.git_safety import repo_git
 
 
 @pytest.fixture
 def prepared_run(tmp_path: Path) -> OptimizationRun:
     repo = tmp_path / "kernel-repo"
     repo.mkdir()
-    git("init", cwd=repo)
-    git("config", "user.name", "Ave test", cwd=repo)
-    git("config", "user.email", "ave-test@localhost", cwd=repo)
+    repo_git(repo, "init")
+    repo_git(repo, "config", "user.name", "Ave test")
+    repo_git(repo, "config", "user.email", "ave-test@localhost")
     (repo / "kernel.py").write_text("VALUE = 7\nLATENCY = 2.0\n")
     (repo / "LANGUAGE.md").write_text("The kernel must preserve VALUE = 7.\n")
-    git("add", "kernel.py", "LANGUAGE.md", cwd=repo)
-    git("commit", "-m", "baseline", cwd=repo)
+    repo_git(repo, "add", "kernel.py", "LANGUAGE.md")
+    repo_git(repo, "commit", "-m", "baseline")
+    workspace = tmp_path / "workspace"
+    repo_git(repo, "worktree", "add", "--detach", str(workspace), "HEAD")
     task_dir = tmp_path / "prepared"
     task_dir.mkdir()
     driver = task_dir / "driver.py"
@@ -57,12 +59,12 @@ def prepared_run(tmp_path: Path) -> OptimizationRun:
     )
     return OptimizationRun(
         repo_root=repo,
-        base_commit=git("rev-parse", "HEAD", cwd=repo).strip(),
+        base_commit=repo_git(repo, "rev-parse", "HEAD").stdout.strip(),
         kernel_path="kernel.py",
         source_files=("kernel.py",),
         operator_name="kernel",
         steps=scope_prompts(read_prompts(task_dir / "prompts.json"), ("kernel.py",)),
-        workspace=repo,
+        workspace=workspace,
         driver=driver,
         result_json=tmp_path / "result.json",
         deadline_unix=time.time() + 120,
