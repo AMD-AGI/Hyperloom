@@ -107,11 +107,7 @@ def decode_module_lines(trace: Any, *, module: str = "") -> list[str]:
     capture = resolve_capture(trace)
     if not capture:
         return []
-    try:
-        mtime = Path(capture).stat().st_mtime
-    except OSError:
-        return []
-    table = _table(capture, mtime)
+    table = _table(capture, Path(capture).stat().st_mtime)
     if module:
         table = {
             window_class: {**entry, "modules": [row for row in entry["modules"] if row["module"] == module]}
