@@ -1058,7 +1058,8 @@ test for one of its sentences, or for a sentence of *Clean design*, *Trust the c
 *Simplify by removing a mechanism*. A finding names the owner, the type or the split that would
 satisfy it; one that cannot is taste and goes.
 
-Four of this family's rules are gone: A9, A10, A11 and A12 are decided mechanically by the
+Four of this family's rules are gone: A9, A10, A11 and A12's single-implementation case are
+decided mechanically by the
 `code-metrics` job, which runs `tuple_return_problems`, `raw_vocabulary_problems`,
 `global_write_problems`, `forwarder_problems` and `single_implementation_problems` in
 `scripts/code_metrics_design.py` under those same rule ids. A9, A10, A11 and A12's

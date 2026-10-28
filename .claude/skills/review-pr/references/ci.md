@@ -4,8 +4,11 @@
 
 `scripts/code_metrics_design.py` runs `tuple_return_problems`, `raw_vocabulary_problems`,
 `global_write_problems`, `forwarder_problems` and `single_implementation_problems` on every PR,
-reporting them as A9, A10, A11 and A12. Those four are not review rules: a finding on one of them
-belongs to the `code-metrics` job, and a card that re-derives it is re-flagging a gated rule.
+reporting them as A9, A10, A11 and A12. A9, A10, A11 and A12's single-implementation case are not
+review rules: a finding on one of them belongs to the `code-metrics` job, and a card that
+re-derives it is re-flagging a gated rule. A12's forwarder is split: `forwarder_problems` has the
+one that takes a parameter, and the parameterless one is A12's, because `_forwarded_to` returns
+`None` on an empty parameter list (`:692-693`).
 
 Two cautions before reading any gate as total coverage. First, scope: `private_reach_problems`
 resolves ownership with `Packages.unit()`, built from `.importlinter`, which makes

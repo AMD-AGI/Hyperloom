@@ -171,8 +171,10 @@ gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' 
 PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
 # jq writes CRLF on some platforms; a login carrying CR matches no author and makes the
 # permission URL below unparseable, which empties comments.txt without failing the fetch.
-# The loop reads a file rather than a pipe: in a pipeline it runs in a subshell, where `die`
-# exits that subshell only, leaving the fetch to finish with a short trusted.json and status 0.
+# Two shapes cost this block a silent failure already. A bare `perm=$(gh api ...)` trips errexit
+# on any non-zero exit, so the test below it never ran and the fetch died with no message on the
+# 404 it means to accept -- `Copilot`, which GitHub's code review posts under, 404s here. And a
+# loop on the left of a pipe runs in a subshell, where `die` ends only that subshell.
 jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u > "$raw/logins.txt"
 : > "$raw/trusted.txt"
 while IFS= read -r login; do
