@@ -305,7 +305,7 @@ def test_a_task_without_gpu_pct_is_still_valid(task_dir: Path, task_payload: dic
 
 
 def test_shape_cases_are_carried_verbatim(task_dir: Path, task_payload: dict) -> None:
-    """No code reads a case, so a shape the contract disagrees with still ships."""
+    """A shape the contract disagrees with still ships as written."""
     task_payload["shape_cases"] = [1, {"name": "decode"}]
 
     task = parse_task_payload(task_payload, task_dir=task_dir)
@@ -314,12 +314,56 @@ def test_shape_cases_are_carried_verbatim(task_dir: Path, task_payload: dict) ->
 
 
 def test_shape_cases_that_are_not_a_list_are_not_reshaped(task_dir: Path, task_payload: dict) -> None:
-    """Wrapping a value nothing reads decides as little as refusing it would."""
+    """Wrapping the agent's value would cost the reader the answer it actually wrote."""
     task_payload["shape_cases"] = {"name": "decode"}
 
     task = parse_task_payload(task_payload, task_dir=task_dir)
 
     assert task.shape_cases == {"name": "decode"}
+
+
+def test_a_decode_case_at_a_batch_size_the_trace_never_ran_is_refused(task_dir: Path, task_payload: dict) -> None:
+    """GLM-5.3 CONC10 ran VERIFY at bs=2..9, and a session still benchmarked verify_bs10."""
+    task_payload["shape_cases"] = [
+        {"name": "verify_bs3", "phase": "decode", "batch_size": 3, "shape": {"M": 9}},
+        {"name": "verify_bs10", "phase": "decode", "shape": {"M": 30}},
+        {"name": "decode_wide", "phase": "decode", "shape": {"bs": 12}},
+    ]
+
+    with pytest.raises(ValueError) as refused:
+        parse_task_payload(task_payload, task_dir=task_dir, decode_batch_sizes=frozenset({2, 3}))
+
+    assert str(refused.value) == (
+        "decode shape case(s) 'verify_bs10' at bs=10, 'decode_wide' at bs=12 use a batch size the trace never "
+        "ran: the observed decode batch sizes are 2, 3 (Observed Decode Classes in trace-evidence.md). Give "
+        "every decode case one of those batch sizes, or drop the case."
+    )
+
+
+def test_a_decode_case_is_kept_when_its_batch_size_was_observed_or_cannot_be_read(
+    task_dir: Path, task_payload: dict
+) -> None:
+    cases = [
+        {"name": "verify_bs2", "phase": "decode", "shape": {"M": 6}},
+        {"name": "decode_small", "phase": "decode", "shape": {"M": 6}},
+        {"name": "prefill_bs10", "phase": "prefill", "batch_size": 10},
+        "opaque",
+    ]
+    task_payload["shape_cases"] = cases
+
+    task = parse_task_payload(task_payload, task_dir=task_dir, decode_batch_sizes=frozenset({2, 3}))
+
+    assert task.shape_cases == cases
+
+
+def test_decode_cases_are_not_checked_when_no_decode_class_was_observed(task_dir: Path, task_payload: dict) -> None:
+    """A trace without step annotations bounds nothing, so the agent's cases stand as written."""
+    cases = [{"name": "verify_bs10", "phase": "decode", "batch_size": 10}]
+    task_payload["shape_cases"] = cases
+
+    task = parse_task_payload(task_payload, task_dir=task_dir)
+
+    assert task.shape_cases == cases
 
 
 def test_a_producer_other_than_forge_loop_is_refused(task_dir: Path, task_payload: dict) -> None:
