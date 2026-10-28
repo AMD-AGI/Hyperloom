@@ -82,7 +82,7 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     PhaseRecorder,
 )
-from hyperloom.measure.points import launch_carriers
+from hyperloom.measure.points import AMBIENT_SHAPE_ENVS, launch_carriers
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
@@ -491,7 +491,9 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     if call.kind == _PROFILE and (body := _point_envs(call.points[0]).get(_PROFILE_BODY_ENV)):
         settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
-    saved = {key: os.environ.get(key) for key in settings}
+    saved = {key: os.environ.get(key) for key in (*AMBIENT_SHAPE_ENVS, *settings)}
+    for key in AMBIENT_SHAPE_ENVS:
+        os.environ.pop(key, None)
     os.environ.update(settings)
     try:
         yield list(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))

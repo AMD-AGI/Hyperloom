@@ -12,6 +12,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 import yaml
@@ -20,6 +21,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.points import AMBIENT_SHAPE_ENVS
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
@@ -62,6 +64,7 @@ class _Grid:
         self.answers: dict[str, VariantResult] = {}
         self.env_seen: list[dict[str, str | None]] = []
         self.configs: list[dict[str, Any]] = []  # what each call's point held while it ran: a copy is gone after
+        self.shapes: list[dict[str, str]] = []  # the round's shape run_grid would read from the environment
 
     def result(self, name: str, **kwargs: Any) -> VariantResult:
         workspace = self.tmp_path / "ws" / name
@@ -79,6 +82,7 @@ class _Grid:
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         self.calls.append(kwargs)
         self.configs.append(yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text()))
+        self.shapes.append({key: os.environ[key] for key in AMBIENT_SHAPE_ENVS if key in os.environ})
         self.env_seen.append(
             {
                 key: os.environ.get(key)
@@ -589,17 +593,23 @@ def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
 BOOT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
 
 
-def _envs_handed_to_magpie(tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
-    """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and ``base_extra_envs``."""
+def _envs_handed_to_magpie(grid: _Grid, tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
+    """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and ``base_extra_envs``
+    over the round's shape the process environment held while the call ran."""
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
-    candidate = _build_variant_yaml(
-        Path(call["base_yaml_path"]),
-        "",
-        call["grid"][0],
-        output_subdir=tmp_path / "candidates" / str(len(list((tmp_path / "candidates").glob("*")))),
-        base_extra_envs=call.get("base_extra_envs"),
-    )
+    shape = grid.shapes[next(index for index, recorded in enumerate(grid.calls) if recorded is call)]
+    with mock.patch.dict(os.environ):
+        for key in AMBIENT_SHAPE_ENVS:
+            os.environ.pop(key, None)
+        os.environ.update(shape)
+        candidate = _build_variant_yaml(
+            Path(call["base_yaml_path"]),
+            "",
+            call["grid"][0],
+            output_subdir=tmp_path / "candidates" / str(len(list((tmp_path / "candidates").glob("*")))),
+            base_extra_envs=call.get("base_extra_envs"),
+        )
     return yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
 
 
@@ -630,9 +640,14 @@ def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestC
     return _call(tmp_path, *points, prep="conc_sweep", accuracy=run_eval == "true")
 
 
+@pytest.mark.parametrize("ambient_conc", [None, "64"], ids=["clean", "conc_left_in_the_process"])
 def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_measured_round_changes(
-    grid, server, tmp_path
+    grid, server, tmp_path, monkeypatch, ambient_conc
 ):
+    if ambient_conc is None:
+        monkeypatch.delenv("CONC", raising=False)
+    else:
+        monkeypatch.setenv("CONC", ambient_conc)
     grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="no_benchmark_workspace")
     call = _graded_sweep(tmp_path, 8, 4, 2)
     points = [Path(p).read_text() for p in call.points]
@@ -648,16 +663,17 @@ def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no
     assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
     for index, boot in enumerate(boots):
         level = (8, 4)[index]
-        envs = _envs_handed_to_magpie(tmp_path, boot)
+        envs = _envs_handed_to_magpie(grid, tmp_path, boot)
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
         assert "MAGPIE_RUN_PHASE" not in envs and envs["CONC"] == level
         assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
     for level, round_ in zip((4, 2), measured, strict=True):
-        envs = _envs_handed_to_magpie(tmp_path, round_)
+        envs = _envs_handed_to_magpie(grid, tmp_path, round_)
         assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"], envs["NUM_WARMUPS"]) == ("true", level * 10, min(level, 8))
         assert "MAGPIE_RUN_PHASE" not in envs
     assert [r.phase for r in outcome.rounds if r.point == 1] == ["measure", "accuracy"]
     assert outcome.returncode == 0
+    assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
 
 
 def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
