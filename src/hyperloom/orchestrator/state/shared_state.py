@@ -602,10 +602,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     warm_replay_min_confidence: float = 0.7
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    # Measured winners ``lift_to_current_best`` refused, newest last. A KEEP is recorded by the lane that measured it,
-    # while promotion is decided here, so without this record a refusal is invisible: the report reads an empty stack
-    # and prints 0% for a session that did measure a win.
-    unpromoted_keeps: list[dict[str, Any]] = field(default_factory=list)
     # Authored patches this session spent a benchmark round on, keyed by the lines they changed rather than by what
     # they were named, so a later proposal can be told it repeats one. Newest last, capped.
     measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
@@ -2290,12 +2286,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
             self.working_recipe_generation
         ) != int(self.validated_recipe_generation)
-
-    def record_unpromoted_keep(self, *, action: str, reason: str, detail: str) -> None:
-        """Record a measured winner that was refused promotion onto ``current_best``."""
-        self.unpromoted_keeps.append(
-            {"action": action, "reason": reason, "detail": detail, "ts": now_iso()},
-        )
 
     def record_measured_patch_set(
         self,

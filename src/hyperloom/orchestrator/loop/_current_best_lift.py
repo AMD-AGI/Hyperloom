@@ -253,7 +253,7 @@ class CurrentBestLiftMixin:
         return True
 
     def _hold_current_best(self, task_kind: str, reason: str, detail: str) -> bool:
-        """Record and log a measured winner refused promotion; returns ``True``, the refusal outcome.
+        """Log a measured winner refused promotion; returns ``True``, the refusal outcome.
 
         Warning, not info: a refusal here is the whole measured round being
         discarded, and the lane that measured it has already filed its KEEP
@@ -261,7 +261,6 @@ class CurrentBestLiftMixin:
         did do.
         """
         log.warning("current_best held: %s winner %s (%s)", task_kind, reason, detail)
-        self.shared_state.record_unpromoted_keep(action=task_kind, reason=reason, detail=detail)
         return True
 
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:

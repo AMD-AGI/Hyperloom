@@ -437,7 +437,6 @@ def _build_summary_dict(
         "has_unvalidated_keeps": state.optimization_stack_has_unvalidated_keeps(),
         "untried_hot_reusable_kernels": kernel_decisions.untried_hot_reusable_kernels(state),
         "pending_keep_kernels": kernel_decisions.pending_keep_kernel_ids(state),
-        "unpromoted_keeps": list(getattr(state, "unpromoted_keeps", None) or []),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
@@ -703,12 +702,11 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
-    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate, refused promotions)."""
+    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
     untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
-    unpromoted = list(summary.get("unpromoted_keeps") or [])
-    if not (unvalidated or untried or pending_keeps or unpromoted):
+    if not (unvalidated or untried or pending_keeps):
         return []
     lines: list[str] = ["## Completeness annotations", ""]
     if unvalidated:
@@ -721,26 +719,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
         lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
-    lines.extend(_format_unpromoted_keeps(unpromoted))
     lines.append("")
-    return lines
-
-
-def _format_unpromoted_keeps(unpromoted: list[dict[str, Any]]) -> list[str]:
-    """Render the measured winners promotion refused, so an empty stack states why it is empty."""
-    if not unpromoted:
-        return []
-    lines = [
-        f"- ⚠ {len(unpromoted)} measured winner(s) were refused promotion onto `current_best`; "
-        "a headline gain of 0% with refusals listed here means the session measured a win it did not keep.",
-        "",
-        "| action | reason | detail |",
-        "|---|---|---|",
-    ]
-    lines.extend(
-        f"| `{entry.get('action', '?')}` | `{entry.get('reason', '?')}` | {entry.get('detail', '')} |"
-        for entry in unpromoted
-    )
     return lines
 
 
