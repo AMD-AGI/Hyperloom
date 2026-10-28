@@ -4,11 +4,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import kernelforge.loop.insession_gate as gate_module
+import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 import pytest
-from kernelforge.loop.gate_settings import GateMeasurement, GateScope
-from kernelforge.loop.insession_gate import InSessionGate
-from kernelforge.tools.git import GitError
+from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
+from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
+from kernelforge.utils.git import GitError
 
 
 def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:

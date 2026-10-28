@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 _AITER_DISPATCH_MARKER = "shape is M:"
 
 #: The MoE half of the same question. The resolved log is not only a dense-shape
-#: source: ``kernelforge.gemm_tune.router`` reads it for MoE stage coverage and
+#: source: ``kernelforge.workflows.gemm_tune.router`` reads it for MoE stage coverage and
 #: 1-stage ASM detection, and those parse ``[fused_moe]`` dispatch lines, which
 #: aiter prints from a different code path than the dense ``shape is M:`` ones.
 #: Requiring the dense marker alone would reject a log that is fully informative

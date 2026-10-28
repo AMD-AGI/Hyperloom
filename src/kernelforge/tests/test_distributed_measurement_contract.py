@@ -23,8 +23,12 @@ import types
 
 import pytest
 
-from kernelforge.loop import task_preflight
-from kernelforge.loop.task_preflight import PROBE_DISTRIBUTED_VIOLATION, PROBE_FAILED, _read_graph_probe_shards
+from kernelforge.workflows.forge_loop.preparation import task_preflight
+from kernelforge.workflows.forge_loop.preparation.task_preflight import (
+    PROBE_DISTRIBUTED_VIOLATION,
+    PROBE_FAILED,
+    _read_graph_probe_shards,
+)
 
 
 def _shard(tmp_path, name: str, payload: dict | str) -> None:

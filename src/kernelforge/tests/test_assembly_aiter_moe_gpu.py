@@ -24,7 +24,7 @@ from aiter.fused_moe import moe_sorting
 from aiter.ops.flydsl.moe_kernels import _s1_args_std, compile_flydsl_moe_stage1
 from aiter.ops.shuffle import pack_int8_to_packed_int4, shuffle_scale_for_int4, shuffle_weight
 
-from kernelforge.assembly.flydsl import with_assembly
+from kernelforge.kernel_backends.assembly.flydsl import with_assembly
 
 
 def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path, monkeypatch):

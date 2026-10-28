@@ -9,9 +9,9 @@ import json
 
 from click.testing import CliRunner
 
-from kernelforge.fusion import harness_noise
+from kernelforge.workflows.forge_fusion import harness_noise
 from kernelforge.cli.forge_fuse_command import forge_fuse as main
-from kernelforge.fusion.validate import BenchOutcome
+from kernelforge.workflows.forge_fusion.validate import BenchOutcome
 
 
 def _run(tmp_path, monkeypatch, benches, repeat=None):

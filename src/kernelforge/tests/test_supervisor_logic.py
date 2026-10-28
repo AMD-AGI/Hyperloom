@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from kernelforge.orchestrator.supervisor import (
+from kernelforge.workflows.forge_loop.roles.supervisor import (
     SupervisorInteraction,
     _build_task_prompt,
     _persist_interaction,

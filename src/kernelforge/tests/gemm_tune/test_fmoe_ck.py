@@ -13,9 +13,9 @@ import time
 
 import pytest
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners import fmoe_ck as fm
-from kernelforge.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners import fmoe_ck as fm
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 
 def _moe_ctx(tmp_path, **overrides) -> TuneContext:

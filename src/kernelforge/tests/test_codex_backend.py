@@ -48,9 +48,9 @@ from kernelforge.agent_backends.codex import (
 )
 from kernelforge.config import Config
 from kernelforge.config import AgentRuntimeOptions, agent_runtime_overrides
-from kernelforge.orchestrator import agent as agent_module
-from kernelforge.tracker.usage import UsageAccumulator
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_loop.roles import agent as agent_module
+from kernelforge.agent_backends.usage import UsageAccumulator
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -1153,7 +1153,7 @@ def test_outer_gate_counts_only_incremental_resume_target_edits(
 
     monkeypatch.setattr(agent_module, "create_registered_backend", fake_factory)
     monkeypatch.setattr(
-        "kernelforge.loop.insession_gate.InSessionGate._on_stop",
+        "kernelforge.workflows.forge_loop.gate.insession_gate.InSessionGate._on_stop",
         fake_on_stop,
     )
     kernel = tmp_path / "kernel.py"

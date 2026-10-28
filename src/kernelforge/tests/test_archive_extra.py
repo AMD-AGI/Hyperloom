@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.archive import CandidateArchive, CandidateRecord
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 
 
 # ── numeric helpers ────────────────────────────────────────────────────────────

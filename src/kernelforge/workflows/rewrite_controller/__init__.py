@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Autonomous multi-operator coordination for KernelForge rewrite campaigns."""
+
+from kernelforge.workflows.rewrite_controller.contracts import (
+    HandoffBundle,
+    HandoffContractError,
+    KernelRewriteTask,
+    TaskContractError,
+    TaskParseResult,
+    TaskState,
+    TaskStateError,
+)
+from kernelforge.workflows.rewrite_controller.controller import (
+    ControllerRunError,
+    ControllerRunState,
+    run_controller,
+)
+from kernelforge.workflows.rewrite_controller.dispatcher import (
+    SingleTaskResult,
+    dispatch_single_task,
+)
+from kernelforge.workflows.rewrite_controller.handoff import read_handoff
+from kernelforge.workflows.rewrite_controller.opportunity_agent import (
+    OpportunityAnalysisAgent,
+    OpportunityAnalysisResult,
+    run_opportunity_analysis,
+)
+from kernelforge.workflows.rewrite_controller.paths import ControllerLayout, TaskLayout, operator_directory_name
+from kernelforge.workflows.rewrite_controller.publisher import (
+    OperatorPublication,
+    PublicationError,
+    publish_operator_result,
+    published_operator_dirs,
+)
+from kernelforge.workflows.rewrite_controller.recovery import (
+    RecoveryResult,
+    recover_all_task_results,
+    recover_task_result,
+)
+from kernelforge.workflows.rewrite_controller.scheduler import (
+    ANALYSIS_BUDGET_SEC,
+    FORGE_LOOP_BUDGET_SEC,
+    MIN_TASK_START_REMAINING_SEC,
+    ScheduleResult,
+    dispatch_prepared_tasks,
+)
+from kernelforge.workflows.rewrite_controller.state import TaskStateStore
+from kernelforge.workflows.rewrite_controller.task import (
+    discover_task_dirs,
+    load_task,
+    parse_task_payload,
+    sort_tasks,
+)
+from kernelforge.workflows.rewrite_controller.task_publisher import (
+    TaskPublicationResult,
+    publish_complete_staged_tasks,
+    publish_staged_task,
+)
+from kernelforge.workflows.rewrite_controller.worktree import (
+    CAMPAIGN_BRANCH_PREFIX,
+    reclaim_campaign_branch,
+    untracked_paths,
+)
+
+__all__ = [
+    "ANALYSIS_BUDGET_SEC",
+    "CAMPAIGN_BRANCH_PREFIX",
+    "ControllerLayout",
+    "FORGE_LOOP_BUDGET_SEC",
+    "MIN_TASK_START_REMAINING_SEC",
+    "OperatorPublication",
+    "OpportunityAnalysisAgent",
+    "OpportunityAnalysisResult",
+    "PublicationError",
+    "RecoveryResult",
+    "ScheduleResult",
+    "ControllerRunError",
+    "ControllerRunState",
+    "HandoffBundle",
+    "HandoffContractError",
+    "KernelRewriteTask",
+    "SingleTaskResult",
+    "TaskContractError",
+    "TaskLayout",
+    "TaskParseResult",
+    "TaskPublicationResult",
+    "TaskState",
+    "TaskStateError",
+    "TaskStateStore",
+    "discover_task_dirs",
+    "dispatch_single_task",
+    "dispatch_prepared_tasks",
+    "load_task",
+    "parse_task_payload",
+    "publish_complete_staged_tasks",
+    "publish_operator_result",
+    "publish_staged_task",
+    "published_operator_dirs",
+    "read_handoff",
+    "recover_all_task_results",
+    "recover_task_result",
+    "run_controller",
+    "operator_directory_name",
+    "reclaim_campaign_branch",
+    "run_opportunity_analysis",
+    "sort_tasks",
+    "untracked_paths",
+]

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.dense_shapes import MGrid, compute_decode_m_values
-from kernelforge.gemm_tune.tuners import _aiter_dense_common as adc
+from kernelforge.workflows.gemm_tune.dense_shapes import MGrid, compute_decode_m_values
+from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as adc
 
 
 class _Ctx:

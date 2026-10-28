@@ -17,7 +17,7 @@ fx = pytest.importorskip("flydsl.expr")
 if not torch.version.hip or not torch.cuda.is_available():
     pytest.skip("requires an AMD GPU and ROCm PyTorch", allow_module_level=True)
 
-from kernelforge.assembly.flydsl import with_assembly
+from kernelforge.kernel_backends.assembly.flydsl import with_assembly
 
 
 @flyc.kernel

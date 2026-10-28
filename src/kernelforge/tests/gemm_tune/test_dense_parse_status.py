@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.gemm_tune.report import build_report
-from kernelforge.gemm_tune.tuners.base import TuneContext, TuneResult
-from kernelforge.gemm_tune.tuners._aiter_dense_common import (
+from kernelforge.workflows.gemm_tune.report import build_report
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext, TuneResult
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import (
     _parse_candidate_csv,
     _parse_tuner_stdout,
     _summarize_shape_results,

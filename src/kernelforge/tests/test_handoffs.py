@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.loop.handoffs import HandoffStore, IterationHandoff
+from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore, IterationHandoff
 
 
 def _handoff(iteration: int = 1) -> IterationHandoff:

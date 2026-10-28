@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.bootstrap import lanes as cli_lanes
+from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
 from kernelforge.config import Config
-from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
-from kernelforge.loop import fanout
-from kernelforge.loop.lessons import SummaryOutcome
-from kernelforge.tools.process_reaping import ReapReport
-from kernelforge.loop.fanout import (
+from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, ImplementerTask
+from kernelforge.workflows.forge_loop.iteration import fanout
+from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
+from kernelforge.utils.process_reaping import ReapReport
+from kernelforge.workflows.forge_loop.iteration.fanout import (
     SERIALIZED_DRIVER_NAME,
     DeviceBenchmarkLock,
     LanePlan,

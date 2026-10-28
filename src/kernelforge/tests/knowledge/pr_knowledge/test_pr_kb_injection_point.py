@@ -31,7 +31,7 @@ def build_agent_fn(monkeypatch):
     stub.HookMatcher = object
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", stub)
 
-    import kernelforge.orchestrator.agent as agent_mod
+    import kernelforge.workflows.forge_loop.roles.agent as agent_mod
     from kernelforge.agent_backends.base import (
         AgentCapabilities,
         AgentRuntimeConfig,
@@ -125,7 +125,7 @@ def system_prompt_for(monkeypatch):
     stub.HookMatcher = object
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", stub)
 
-    import kernelforge.orchestrator.agent as agent_mod
+    import kernelforge.workflows.forge_loop.roles.agent as agent_mod
     from kernelforge.agent_backends.base import (
         AgentCapabilities,
         AgentRuntimeConfig,

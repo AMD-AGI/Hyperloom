@@ -24,7 +24,7 @@ _UNPACKAGED_ASSETS = (
     "hyperloom/inference_optimizer/assets/quick-start/*",
     # The gemm-tune subpackage's own docs describe the source tree (how to run the tuner from a checkout), not the
     # installed package.
-    "kernelforge/gemm_tune/*.md",
+    "kernelforge/workflows/gemm_tune/*.md",
 )
 
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.

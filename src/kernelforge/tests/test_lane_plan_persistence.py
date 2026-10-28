@@ -13,13 +13,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.loop.fanout import LaneResult
-from kernelforge.loop.iteration import lane_runtime
-from kernelforge.loop.lessons import SummaryOutcome
-from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
-from kernelforge.loop.runner import IterationConfig, IterationLoop
-from kernelforge.orchestrator.contracts import PlanCriticOutcome
-from kernelforge.tracker import ExperimentTracker
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
+from kernelforge.workflows.forge_loop.iteration import lane_runtime
+from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
+from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState, make_event
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
+from kernelforge.workflows.forge_loop.roles.contracts import PlanCriticOutcome
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.tests.conftest import silence_jit_rebuild
 
 

@@ -8,8 +8,8 @@ import textwrap
 
 import pytest
 
-from kernelforge.rewrite_by_flydsl import driver_contract
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.workflows.flydsl_rewrite import driver_contract
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 # A driver that satisfies the whole contract: it distinguishes both bench modes and only reaches the candidate when
 # the ported kernel is importable.

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.fusion.locate import FrameworkInstall
-from kernelforge.fusion.discover import DiscoveryTarget
-from kernelforge.fusion.discover import parse_discovered_recipes
-from kernelforge.fusion.locate import PassState
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.locate import PassState
 
 SHAPES = {"batch": 16}
 SOURCE = "/sp/vllm/model_executor/models/qwen3.py"

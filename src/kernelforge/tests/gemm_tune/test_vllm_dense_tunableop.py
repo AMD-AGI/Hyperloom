@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import (
+from kernelforge.workflows.gemm_tune.tuners.vllm_dense_tunableop import (
     _candidate_pythonpath,
     _generate_candidate_sitecustomize,
     count_tunableop_result_lines,

@@ -205,13 +205,13 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
 | `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
 | `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
-| `kf-tools-foundation` | `kernelforge.tools` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
+| `kf-tools-foundation` | `kernelforge.utils` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
 | `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `orchestrator.specialist_probe_server`) do not reach `agent_backends`, `cli` or `loop`, so a server starts without the agent runtime |
 | `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
 | `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
-| `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.loop.api` for the loop), never one of its modules |
+| `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.workflows.forge_loop.api` for the loop), never one of its modules |
 | `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
 
 Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package is added to the `kf-public-interfaces` list.

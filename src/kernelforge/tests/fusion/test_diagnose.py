@@ -8,7 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 
-from kernelforge.fusion import diagnose as dg
+from kernelforge.workflows.forge_fusion import diagnose as dg
 
 
 class TestCategorizeKernelName:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.external_artifacts import (
+from kernelforge.workflows.forge_loop.preparation.external_artifacts import (
     ExternalArtifactError,
     ExternalArtifactTransaction,
 )

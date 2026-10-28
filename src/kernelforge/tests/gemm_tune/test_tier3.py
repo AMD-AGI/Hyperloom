@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.router import TunerSpec
-from kernelforge.gemm_tune.tier3 import (
+from kernelforge.workflows.gemm_tune.router import TunerSpec
+from kernelforge.workflows.gemm_tune.tier3 import (
     build_mandate,
     contract,
     coverage_gaps,
@@ -19,10 +19,10 @@ from kernelforge.gemm_tune.tier3 import (
     time_paired,
     validate_output_csv,
 )
-from kernelforge.gemm_tune.tier3.coverage import CoverageGap
-from kernelforge.gemm_tune.tier3.referee import ShapeHarness
-from kernelforge.gemm_tune.tier3.dispatch import MAX_MOE_MEAN_ERROR, MOE_CORRECTNESS_TRIALS, MOE_TABLE
-from kernelforge.gemm_tune.tuners.base import TuneResult
+from kernelforge.workflows.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.workflows.gemm_tune.tier3.referee import ShapeHarness
+from kernelforge.workflows.gemm_tune.tier3.dispatch import MAX_MOE_MEAN_ERROR, MOE_CORRECTNESS_TRIALS, MOE_TABLE
+from kernelforge.workflows.gemm_tune.tuners.base import TuneResult
 
 
 def _demand(table="odd_tuned_gemm.csv", tuner=None, misses=40, keys=7):
@@ -336,7 +336,7 @@ class _Clock:
 @pytest.fixture
 def clock(monkeypatch):
     c = _Clock([])
-    monkeypatch.setattr("kernelforge.gemm_tune.tier3.referee.time.perf_counter", c.perf_counter)
+    monkeypatch.setattr("kernelforge.workflows.gemm_tune.tier3.referee.time.perf_counter", c.perf_counter)
     return c
 
 
@@ -351,7 +351,7 @@ class TestReferee:
 
     def test_interference_on_one_side_only_is_refused(self, clock):
         # One clean baseline window and four disturbed ones.
-        from kernelforge.gemm_tune.tier3 import referee
+        from kernelforge.workflows.gemm_tune.tier3 import referee
 
         calls = {"n": 0}
 
@@ -375,7 +375,7 @@ class TestReferee:
         assert not t.usable and "RuntimeError" in t.reason
 
     def test_a_candidate_that_fails_after_warmup_is_data_not_a_crash(self, clock):
-        from kernelforge.gemm_tune.tier3 import referee
+        from kernelforge.workflows.gemm_tune.tier3 import referee
 
         calls = {"n": 0}
 
@@ -478,14 +478,14 @@ class TestReferee:
 @pytest.mark.parametrize("bad", ["", "16x1536", "16x1536x7168x4", "16xNx7168", "not-a-shape"])
 def test_shape_key_rejects_a_shape_it_cannot_turn_into_m_n_k(bad: str) -> None:
     """It used to answer ``()`` here, which helped nobody."""
-    from kernelforge.gemm_tune.tier3.dispatch import shape_key
+    from kernelforge.workflows.gemm_tune.tier3.dispatch import shape_key
 
     with pytest.raises(ValueError, match="MxNxK"):
         shape_key(bad)
 
 
 def test_shape_key_parses_the_well_formed_case() -> None:
-    from kernelforge.gemm_tune.tier3.dispatch import shape_key
+    from kernelforge.workflows.gemm_tune.tier3.dispatch import shape_key
 
     assert shape_key("16x1536x7168") == (16, 1536, 7168)
 
@@ -494,7 +494,7 @@ class TestAWinHasToClearTheNoise:
     """Require a speedup above the measured 1.00925x null-comparison noise."""
 
     def test_the_floor_sits_above_every_null_reading_we_measured(self):
-        from kernelforge.gemm_tune.tier3 import referee
+        from kernelforge.workflows.gemm_tune.tier3 import referee
 
         assert referee.MIN_SPEEDUP > 1.00925
 
@@ -513,7 +513,7 @@ class TestAWinHasToClearTheNoise:
         assert not j.improved, "the unmodified path is not an improvement over itself"
 
     def test_a_win_that_clears_the_floor_still_counts(self, clock):
-        from kernelforge.gemm_tune.tier3 import referee
+        from kernelforge.workflows.gemm_tune.tier3 import referee
 
         clearly_over = (referee.MIN_SPEEDUP + 0.01) * 1e-6
         j = judge_candidates(
@@ -577,7 +577,7 @@ class TestHipblasltCannotTakeTheRunDownWithIt:
     def adapter(self, monkeypatch):
         import types
 
-        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+        from kernelforge.workflows.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
 
         a = _Bf16DenseAdapter()
         operand = types.SimpleNamespace(t=lambda: "bt")
@@ -626,7 +626,7 @@ class TestTheAuthorIsToldWhatACandidateHasToLookLike:
         return build_mandate(self._gap(table), [{"M": 16, "N": 1536, "K": 7168}]).render()
 
     def test_every_backend_the_referee_can_run_is_named_in_the_brief(self):
-        from kernelforge.gemm_tune.tier3.dispatch import DENSE_BF16_BACKENDS
+        from kernelforge.workflows.gemm_tune.tier3.dispatch import DENSE_BF16_BACKENDS
 
         text = self._brief()
         for backend in DENSE_BF16_BACKENDS:
@@ -665,7 +665,7 @@ class TestTheVocabularyIsOneObject:
     """Keep the advertised and dispatchable backend sets identical."""
 
     def test_a_backend_nobody_advertised_is_refused_before_anything_is_touched(self, monkeypatch):
-        from kernelforge.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
+        from kernelforge.workflows.gemm_tune.tier3.dispatch import _Bf16DenseAdapter
 
         adapter = _Bf16DenseAdapter()
 
@@ -680,7 +680,7 @@ class TestTheVocabularyIsOneObject:
         import sys
         import types
 
-        from kernelforge.gemm_tune.tier3 import dispatch as d
+        from kernelforge.workflows.gemm_tune.tier3 import dispatch as d
 
         # Enough of aiter to be imported; the branches are reached and then
         # bail on their own missing config, which is the point.
@@ -707,7 +707,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
         return d
 
     def test_an_output_directory_becomes_a_worktree_of_its_own(self, tmp_path):
-        from kernelforge.gemm_tune.tier3.generate import _isolate
+        from kernelforge.workflows.gemm_tune.tier3.generate import _isolate
 
         work = self._work_dir(tmp_path)
         assert _isolate(work) is None
@@ -717,7 +717,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
         """Exactly what the guard asks for, asked the same way it asks."""
         import subprocess
 
-        from kernelforge.gemm_tune.tier3.generate import _isolate
+        from kernelforge.workflows.gemm_tune.tier3.generate import _isolate
 
         work = self._work_dir(tmp_path)
         _isolate(work)
@@ -732,7 +732,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
         """Otherwise the guard judges the operator's real tree, not the sandbox."""
         import subprocess
 
-        from kernelforge.gemm_tune.tier3.generate import _isolate
+        from kernelforge.workflows.gemm_tune.tier3.generate import _isolate
 
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
         work = self._work_dir(tmp_path)
@@ -744,7 +744,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
 
     def test_an_existing_worktree_is_left_alone(self, tmp_path):
         """The retry loop calls this twice; the second must not wipe the first."""
-        from kernelforge.gemm_tune.tier3.generate import _isolate
+        from kernelforge.workflows.gemm_tune.tier3.generate import _isolate
 
         work = self._work_dir(tmp_path)
         _isolate(work)
@@ -755,7 +755,7 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
     def test_git_missing_is_a_reason_not_a_traceback(self, tmp_path, monkeypatch):
         import subprocess
 
-        from kernelforge.gemm_tune.tier3 import generate
+        from kernelforge.workflows.gemm_tune.tier3 import generate
 
         def no_git(*_a, **_k):
             raise OSError("No such file or directory: 'git'")
@@ -767,8 +767,8 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
 
     def test_the_session_is_not_started_when_the_sandbox_cannot_be_made(self, tmp_path, monkeypatch):
         """A failure here is reported, not walked past into a doomed session."""
-        from kernelforge.gemm_tune.tier3 import generate
-        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+        from kernelforge.workflows.gemm_tune.tier3 import generate
+        from kernelforge.workflows.gemm_tune.tier3.mandate import TunerMandate
 
         monkeypatch.setattr(
             generate,
@@ -791,8 +791,8 @@ class TestTheAuthoringSessionIsAllowedToDoTheJob:
     """Pre-authorize the write and Python tools required to generate a tuner."""
 
     def _spec(self, monkeypatch, tmp_path):
-        from kernelforge.gemm_tune.tier3 import generate
-        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+        from kernelforge.workflows.gemm_tune.tier3 import generate
+        from kernelforge.workflows.gemm_tune.tier3.mandate import TunerMandate
 
         seen = {}
 
@@ -833,8 +833,8 @@ class TestTheAuthoringSessionIsAllowedToDoTheJob:
 
     def test_what_the_agent_said_survives_into_the_reason(self, monkeypatch, tmp_path):
         """Otherwise every failure reads the same and explains nothing."""
-        from kernelforge.gemm_tune.tier3 import generate
-        from kernelforge.gemm_tune.tier3.mandate import TunerMandate
+        from kernelforge.workflows.gemm_tune.tier3 import generate
+        from kernelforge.workflows.gemm_tune.tier3.mandate import TunerMandate
 
         class Silent:
             name = "fake"

@@ -13,9 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernelforge.loop import task_preparer
-from kernelforge.loop import task_preflight
-from kernelforge.tools.git import git_head
+from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preflight
+from kernelforge.utils.git import git_head
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
@@ -327,7 +327,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
     monkeypatch.setattr(task_preparer, "_preflight_async", recording_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
 
-    with caplog.at_level("WARNING", logger="kernelforge.loop.task_preparer"):
+    with caplog.at_level("WARNING", logger="kernelforge.workflows.forge_loop.preparation.task_preparer"):
         asyncio.run(
             task_preparer.prepare_task(
                 config=SimpleNamespace(
@@ -390,7 +390,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(task_preparer, "PREPARE_MIN_RETRY_SEC", 0)
 
-    with caplog.at_level("WARNING", logger="kernelforge.loop.task_preparer"):
+    with caplog.at_level("WARNING", logger="kernelforge.workflows.forge_loop.preparation.task_preparer"):
         asyncio.run(
             task_preparer.prepare_task(
                 config=SimpleNamespace(

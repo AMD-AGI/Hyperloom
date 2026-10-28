@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.gemm_tune.tuners.vllm_moe_triton import SweepGrid, _generate_sweep_script
+from kernelforge.workflows.gemm_tune.tuners.vllm_moe_triton import SweepGrid, _generate_sweep_script
 
 _PROFILE = SimpleNamespace(
     num_experts=8,

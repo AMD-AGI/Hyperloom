@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.loop import knowledge_integration as integration
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.config import KnowledgeConfig
@@ -24,7 +24,7 @@ from kernelforge.knowledge.kb_store.record_store import (
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
 from kernelforge.tests.conftest import kb_store_run_config as _remote_config_with_token
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.knowledge_integration import WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import WarmStartHarness
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")

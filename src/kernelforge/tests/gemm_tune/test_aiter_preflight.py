@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from kernelforge.gemm_tune.aiter_preflight import classify, collect, is_aligned, serve_aiter_path
+from kernelforge.workflows.gemm_tune.aiter_preflight import classify, collect, is_aligned, serve_aiter_path
 
 
 def test_is_aligned_exact_and_editable_subpath():
@@ -69,7 +69,9 @@ def test_collect_aligned(monkeypatch, tmp_path):
     root.mkdir()
     serve = root / "aiter"
     serve.mkdir()
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve)))
+    monkeypatch.setattr(
+        "kernelforge.workflows.gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve))
+    )
     st = collect({"AITER_ROOT_DIR": str(root), "AITER_COMMIT": "abc123"})
     assert st["aligned"] is True
     assert st["hard"] == [] and st["soft"] == []
@@ -79,7 +81,7 @@ def test_collect_aligned(monkeypatch, tmp_path):
 def test_collect_misaligned_reports_hard(monkeypatch, tmp_path):
     root = tmp_path / "aiter_src"
     root.mkdir()
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter")
+    monkeypatch.setattr("kernelforge.workflows.gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter")
     st = collect({"AITER_ROOT_DIR": str(root)})
     assert st["aligned"] is False
     assert any("MISALIGNED" in h for h in st["hard"])
@@ -89,7 +91,7 @@ def test_collect_misaligned_reports_hard(monkeypatch, tmp_path):
 def test_collect_falls_back_to_package_version_when_commit_unset(monkeypatch, tmp_path):
     # AITER_COMMIT unset must still yield a real provenance pin (not None), and the value must be unmistakably a
     # distribution version, never a fake sha.
-    from kernelforge.gemm_tune import aiter_preflight as ap
+    from kernelforge.workflows.gemm_tune import aiter_preflight as ap
 
     root = tmp_path / "aiter_src"
     root.mkdir()
@@ -103,7 +105,7 @@ def test_collect_falls_back_to_package_version_when_commit_unset(monkeypatch, tm
 
 
 def test_collect_commit_env_wins_over_package_version(monkeypatch, tmp_path):
-    from kernelforge.gemm_tune import aiter_preflight as ap
+    from kernelforge.workflows.gemm_tune import aiter_preflight as ap
 
     root = tmp_path / "aiter_src"
     root.mkdir()
@@ -116,7 +118,7 @@ def test_collect_commit_env_wins_over_package_version(monkeypatch, tmp_path):
 
 
 def test_collect_commit_is_none_when_nothing_resolvable(monkeypatch, tmp_path):
-    from kernelforge.gemm_tune import aiter_preflight as ap
+    from kernelforge.workflows.gemm_tune import aiter_preflight as ap
 
     root = tmp_path / "aiter_src"
     root.mkdir()
@@ -128,7 +130,7 @@ def test_collect_commit_is_none_when_nothing_resolvable(monkeypatch, tmp_path):
 
 def test_collect_wheel_layout_is_not_reported_as_misaligned(monkeypatch, tmp_path):
     # End-to-end guard for the false HARD alarm: a wheel-shaped install must come back aligned with no hard problems.
-    from kernelforge.gemm_tune import aiter_preflight as ap
+    from kernelforge.workflows.gemm_tune import aiter_preflight as ap
 
     sp = tmp_path / "dist-packages"
     (sp / "aiter").mkdir(parents=True)
@@ -140,7 +142,7 @@ def test_collect_wheel_layout_is_not_reported_as_misaligned(monkeypatch, tmp_pat
 
 
 def test_collect_no_serve_aiter_is_hard(monkeypatch):
-    monkeypatch.setattr("kernelforge.gemm_tune.aiter_preflight.serve_aiter_path", lambda: None)
+    monkeypatch.setattr("kernelforge.workflows.gemm_tune.aiter_preflight.serve_aiter_path", lambda: None)
     st = collect({})
     assert st["aligned"] is False
     assert any("not importable" in h for h in st["hard"])
@@ -183,7 +185,7 @@ def test_serve_aiter_path_returns_package_dir(monkeypatch, tmp_path):
 def test_splitk_trial_key_matches_blockscale_tuner():
     # #2 guard: the per-shape-trial gate constant must stay in sync with the tuner that actually passes --splitK, or
     # the trial silently falls back to static cap.
-    from kernelforge.gemm_tune.tuners._aiter_dense_common import SPLITK_TRIAL_SCRIPT_KEY
-    from kernelforge.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
+    from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import SPLITK_TRIAL_SCRIPT_KEY
+    from kernelforge.workflows.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
 
     assert A8W8BlockscaleTuner.name == SPLITK_TRIAL_SCRIPT_KEY

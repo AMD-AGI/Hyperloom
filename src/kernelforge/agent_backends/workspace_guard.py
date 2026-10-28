@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.tools.git import git, git_bytes
-from kernelforge.tools.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
-from kernelforge.tools.protected_paths import ProtectedPathRules
+from kernelforge.utils.git import git, git_bytes
+from kernelforge.utils.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
+from kernelforge.utils.protected_paths import ProtectedPathRules
 
 log = logging.getLogger(__name__)
 

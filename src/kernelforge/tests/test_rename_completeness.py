@@ -15,12 +15,12 @@ import pytest
 _PATTERN = re.compile(r"kernel_agents|kernel-agents|KERNEL_AGENTS")
 
 # The second move: the two sibling top-level packages became subpackages, so ``forge_llm`` -> ``kernelforge.llm``,
-# ``forge_llm.agent_backends`` -> ``kernelforge.agent_backends``, ``forge_gemm_tune`` -> ``kernelforge.gemm_tune``.
+# ``forge_llm.agent_backends`` -> ``kernelforge.agent_backends``, ``forge_gemm_tune`` -> ``kernelforge.workflows.gemm_tune``.
 _COLLAPSE_PATTERN = re.compile(r"\bforge_llm\b|\bforge_gemm_tune\b")
 
 _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/gemm_tune/tune_robustness.py",
+        "src/kernelforge/workflows/gemm_tune/tune_robustness.py",
         r"~/\.forge_gemm_tune/",
         "A user-home cache directory, not a module path. Renaming it would orphan "
         "every faulted-shape blocklist an operator has already accumulated.",
@@ -93,7 +93,7 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
 
 
 # The fourth move: ``kernelforge.llm`` dissolved into the packages that own each of its modules -- the gateway into
-# ``kernelforge.agent_backends``, git and process reaping into ``kernelforge.tools``, the edit policy into
+# ``kernelforge.agent_backends``, git and process reaping into ``kernelforge.utils``, the edit policy into
 # ``kernelforge.workspace``.
 _LLM_PATTERN = re.compile(r"\bkernelforge[./]llm\b")
 
@@ -219,7 +219,7 @@ def test_no_stray_llm_package_references() -> None:
     ]
     assert not stray, (
         "references to kernelforge.llm, whose modules now live in kernelforge.agent_backends, "
-        "kernelforge.tools and kernelforge.workspace:\n  " + "\n  ".join(stray[:40])
+        "kernelforge.utils and kernelforge.workspace:\n  " + "\n  ".join(stray[:40])
     )
 
 

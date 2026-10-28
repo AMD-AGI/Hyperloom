@@ -1,0 +1,538 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""OPTIMIZE phase — hand the correct FlyDSL kernel to the existing forge-loop."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from kernelforge.utils.git import git
+from kernelforge.config import Config
+from kernelforge.workflows.forge_loop.api import RESULT_SENTINEL, forge_loop_command, parse_forge_loop_result
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
+
+log = logging.getLogger(__name__)
+
+# forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see loop.runner), so it is
+# present in the captured output even when the loop is later hard-killed.
+_EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
+
+# How often the supervising loop wakes to check on forge-loop. It also floors how often the result file is read for
+# new bests: asking more often than the loop itself ticks cannot observe anything sooner.
+_TICK_SEC = 0.1
+
+
+@dataclass(frozen=True)
+class OptimizeOptions:
+    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
+
+    git_branch: str = "forge-rewrite-optimize"
+    supervisor_backend: str = "codex"
+    profile_timeout_sec: int = 1800
+
+
+@dataclass(frozen=True)
+class OptimizeRequest:
+    """One nested forge-loop run: where it writes, how it runs, when it stops, what anchors it, who hears its KEEPs.
+
+    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
+    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
+    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
+    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
+    per-case ratios does not multiply.
+
+    ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
+    loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
+    rewrite layer publishes from it and publishing is not worth losing an optimization run over.
+    """
+
+    experiments_dir: str
+    options: OptimizeOptions = OptimizeOptions()
+    roofline_ceiling: bool = False
+    permission_mode: str | None = None
+    max_hours: float = 1.0
+    deadline_unix: float | None = None
+    stop_at_unix: float | None = None
+    source_ms: float | None = None
+    source_case_ms: dict[str, float] | None = None
+    result_json: str | None = None
+    on_new_best: Callable[[dict], None] | None = None
+    new_best_poll_sec: float = 5.0
+
+    @property
+    def result_path(self) -> str:
+        """Where forge-loop writes its result: ``result_json``, or a file in the experiments directory."""
+        if self.result_json is None:
+            return str(Path(self.experiments_dir) / "forge_loop_result.json")
+        return self.result_json
+
+
+def _announced_experiment_id(stdout_text: str) -> str | None:
+    """The experiment_id forge-loop announced on stdout this run, or None."""
+    m = _EXPERIMENT_RE.search(stdout_text)
+    return m.group(1) if m else None
+
+
+def _result_for_this_run(result_json: str, stdout_text: str) -> dict | None:
+    """Parse ``--result-json`` when it belongs to the run producing this output.
+
+    forge-loop refreshes this file on every KEEP, which is what lets a caller observe the KEEP stream. A file left by
+    an earlier run is rejected on the experiment id; before the loop announces one, the file is not trusted yet.
+    """
+    announced = _announced_experiment_id(stdout_text)
+    if not announced:
+        return None
+    try:
+        payload = json.loads(Path(result_json).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("experiment_id") or "") != announced:
+        return None
+    return payload
+
+
+def _experiment_llm_usage(experiments_dir: str, experiment_id: str) -> dict:
+    """The token ledger forge-loop last checkpointed onto its own experiment record.
+
+    forge-loop refreshes that record at every session boundary, while ``--result-json`` is only rewritten on a KEEP
+    and the stdout sentinel is only emitted on a clean exit. The record is therefore what survives a run that is cut
+    off at the optimize deadline, or one that never keeps anything — the two cases where the run's whole spend would
+    otherwise go unreported.
+    """
+    if not experiment_id:
+        return {}
+    try:
+        usage = ExperimentTracker(experiments_dir).get(experiment_id).llm_usage
+    except (OSError, TypeError, ValueError, KeyError):
+        # A missing, unreadable, or malformed record leaves the caller with whatever the result file carried.
+        return {}
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
+def _ledger_progress(record: dict) -> tuple[int, int]:
+    """How far along one cumulative ledger snapshot is, for picking the latest."""
+    calls = 0
+    tokens = 0
+    with contextlib.suppress(TypeError, ValueError):
+        calls = int(record.get("calls") or 0)
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ):
+        with contextlib.suppress(TypeError, ValueError):
+            tokens += int(record.get(key) or 0)
+    return calls, tokens
+
+
+def _latest_ledger(*snapshots: dict | None) -> dict:
+    """Pick the furthest-along snapshot of ONE forge-loop ledger — never a sum.
+
+    Both the result file and the experiment record report the same accumulator's running totals, so combining them
+    would double-count; the later snapshot simply supersedes the earlier one.
+    """
+    latest: dict = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict) or not snapshot:
+            continue
+        if not latest or _ledger_progress(snapshot) > _ledger_progress(latest):
+            latest = dict(snapshot)
+    return latest
+
+
+def _poll_process(proc) -> int | None:
+    """Return a subprocess status while remaining compatible with test doubles."""
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        return poll()
+    return getattr(proc, "returncode", 0)
+
+
+def _wait_process(proc, timeout: float | None = None) -> int | None:
+    """Wait for a subprocess, tolerating minimal test doubles."""
+    wait = getattr(proc, "wait", None)
+    if not callable(wait):
+        return _poll_process(proc)
+    try:
+        return wait(timeout=timeout)
+    except TypeError:
+        return wait()
+
+
+def _terminate_process_group(proc, grace_sec: float = 10.0) -> None:
+    """Terminate the complete forge-loop process group, then force-kill it."""
+    if _poll_process(proc) is not None:
+        return
+    pid = getattr(proc, "pid", None)
+    try:
+        if pid:
+            os.killpg(pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except (AttributeError, OSError):
+        # The process may have exited between poll and signal delivery.
+        pass
+    try:
+        _wait_process(proc, timeout=grace_sec)
+        return
+    except subprocess.TimeoutExpired:
+        # Escalate below when the graceful termination window expires.
+        pass
+    try:
+        if pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (AttributeError, OSError):
+        # A concurrent process exit makes the force-kill unnecessary.
+        pass
+    try:
+        _wait_process(proc, timeout=5.0)
+    except subprocess.TimeoutExpired:
+        # Best-effort final reap; the caller will still restore the verified best.
+        pass
+
+
+def _restore_best_kernel(
+    spec: RewriteSpec,
+    *,
+    best_commit: str,
+    fallback_content: bytes | None,
+    fallback_mode: int | None,
+) -> bool:
+    """Restore the last verified FlyDSL kernel after a clean exit or hard stop."""
+    kernel = Path(spec.flydsl_kernel)
+    workspace = Path(spec.workspace).resolve()
+    try:
+        relative = kernel.resolve().relative_to(workspace)
+    except ValueError:
+        relative = None
+
+    if best_commit and relative is not None:
+        exists = git(
+            "-C",
+            str(workspace),
+            "cat-file",
+            "-e",
+            f"{best_commit}^{{commit}}",
+            check=False,
+        )
+        if exists.returncode == 0:
+            restored = git(
+                "-C",
+                str(workspace),
+                "restore",
+                "--source",
+                best_commit,
+                "--staged",
+                "--worktree",
+                "--",
+                relative.as_posix(),
+                check=False,
+            )
+            if restored.returncode == 0:
+                return True
+
+    if fallback_content is None:
+        return False
+    kernel.parent.mkdir(parents=True, exist_ok=True)
+    kernel.write_bytes(fallback_content)
+    if fallback_mode is not None:
+        kernel.chmod(fallback_mode)
+    return True
+
+
+def _source_baseline_json(experiments_dir: str, source_ms, source_case_ms) -> str:
+    """Write the source kernel's timings for the loop to anchor its score on, when both halves are known.
+
+    Both or neither: a wall time without per-case times cannot anchor the score,
+    and per-case times without a wall time leave the published aggregate on a
+    different kernel than the score.
+    """
+    if not (source_ms and source_case_ms):
+        return ""
+    baseline_path = Path(experiments_dir) / "forge_loop_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps({"wall_ms": float(source_ms), "case_times": dict(source_case_ms)}, indent=2))
+    return str(baseline_path)
+
+
+def _forge_loop_cmd(
+    spec: RewriteSpec,
+    driver_path: str,
+    config: Config,
+    request: OptimizeRequest,
+    baseline_json: str,
+) -> list[str]:
+    """The forge-loop invocation this rewrite optimizes its ported kernel with."""
+    options = request.options
+    cmd = forge_loop_command(
+        "--kernel",
+        spec.flydsl_kernel,
+        "--driver",
+        driver_path,
+        "--workspace",
+        spec.workspace,
+        "--experiments-dir",
+        str(request.experiments_dir),
+        "--result-json",
+        request.result_path,
+        "--snr-threshold",
+        str(spec.snr_threshold),
+        "--max-hours",
+        str(max(1.0, request.max_hours)),
+        "--git-branch",
+        options.git_branch,
+        "--gpu-target",
+        config.gpu_target,
+        "--kernel-backend",
+        "flydsl",
+        "--task-type",
+        "flydsl2flydsl",
+        "--source-files",
+        spec.flydsl_kernel,
+        "--target-functions",
+        spec.builder_symbol,
+        # The outer rewrite pipeline exclusively owns rewrite KB read/write.
+        "--no-experience-kb",
+        # The rewrite driver has already passed its independent dual-path preparation and preflight.
+        "--no-prepare-task",
+        "--supervisor-backend",
+        options.supervisor_backend,
+        "--profile-timeout-sec",
+        str(options.profile_timeout_sec),
+        # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
+        "--roofline-ceiling",
+        "on" if request.roofline_ceiling else "off",
+    )
+    if baseline_json:
+        cmd += ["--baseline-json", baseline_json]
+    if config.gpu_type:
+        cmd += ["--gpu-type", config.gpu_type]
+    if request.deadline_unix and request.deadline_unix > 0:
+        cmd += ["--deadline-unix", str(request.deadline_unix)]
+    # Propagate the selected model only when one is configured; an empty agent_model lets forge-loop resolve its own
+    # default from the environment (CLAUDE_MODEL / CODEX_MODEL / DSH_MODEL). ``Config`` exposes the model as
+    # ``agent_model`` -- there is no ``config.model``.
+    if config.agent_model:
+        cmd += ["--model", config.agent_model]
+    if request.permission_mode:
+        cmd += ["--permission-mode", request.permission_mode]
+    return cmd
+
+
+def _trusted_loop_result(result_json: str, stdout_text: str, *, returncode) -> tuple[dict, str]:
+    """The forge-loop result that belongs to THIS run, and the experiment id it was keyed on.
+
+    ``--result-json`` is trusted only when its ``experiment_id`` matches the one
+    this run announced on stdout: forge-loop writes that file on every new best,
+    not only at the end. Otherwise the stdout sentinel answers -- inherently this
+    run's output, captured live, and only emitted on a clean exit.
+    """
+    expected_id = _announced_experiment_id(stdout_text)
+    try:
+        parsed = json.loads(Path(result_json).read_text())
+    except (OSError, ValueError):
+        parsed = None
+    result: dict = {}
+    if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
+        result = parsed
+    if not result:
+        result = parse_forge_loop_result(stdout_text) or {}
+    if not result:
+        log.warning(
+            "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",
+            returncode,
+            expected_id,
+        )
+    return result, expected_id or ""
+
+
+def _annotated_optimize_result(
+    result: dict,
+    *,
+    terminated_for_deadline: bool,
+    restored: bool,
+    nested_usage,
+) -> dict:
+    """The loop's result with what only this layer knows about the run folded in."""
+    if not result and not terminated_for_deadline and not nested_usage:
+        return {}
+    annotations: dict = {
+        "terminated_for_deadline": terminated_for_deadline,
+        "best_kernel_restored": restored,
+    }
+    if nested_usage:
+        annotations["llm_usage"] = nested_usage
+    return {**result, **annotations}
+
+
+def run_optimize(
+    spec: RewriteSpec,
+    driver_path: str,
+    config: Config,
+    request: OptimizeRequest,
+) -> dict:
+    """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
+
+    ``llm_usage`` on the returned dict is the run's furthest-along token ledger, recovered from the experiment record
+    when the result file could not carry it. ``llm_usage_complete`` is set only when the loop exited cleanly with a
+    result of its own, which is the one case where that ledger is final.
+    """
+    experiments_dir = request.experiments_dir
+    result_json = request.result_path
+    on_new_best = request.on_new_best
+    stop_at_unix = request.stop_at_unix
+
+    baseline_json = _source_baseline_json(experiments_dir, request.source_ms, request.source_case_ms)
+
+    cmd = _forge_loop_cmd(spec, driver_path, config, request, baseline_json)
+
+    log.info("optimize: launching forge-loop over %s", spec.flydsl_kernel_name)
+    print(f"  [forge-rewrite] optimize: {' '.join(cmd)}", flush=True)
+
+    # Stream forge-loop output through stdout for the caller while collecting it to parse the sentinel-wrapped result.
+    collected: list[str] = []
+    kernel_path = Path(spec.flydsl_kernel)
+    fallback_content = kernel_path.read_bytes() if kernel_path.is_file() else None
+    fallback_mode = kernel_path.stat().st_mode & 0o777 if kernel_path.is_file() else None
+    terminated_for_deadline = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=spec.workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+
+        def _stream_output() -> None:
+            for line in proc.stdout:
+                collected.append(line)
+                # The outer rewrite publishes the same result contract as forge-loop.
+                if RESULT_SENTINEL in line:
+                    continue
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        stream_thread = threading.Thread(
+            target=_stream_output,
+            name="forge-rewrite-optimize-output",
+            daemon=True,
+        )
+        stream_thread.start()
+        published_commit = ""
+
+        def _publish_new_best() -> str:
+            """Hand the caller the current best once per distinct commit."""
+            if on_new_best is None:
+                return published_commit
+            payload = _result_for_this_run(result_json, "".join(collected))
+            if payload is None:
+                return published_commit
+            commit = str(payload.get("best_commit") or "")
+            if not commit or commit == published_commit:
+                return published_commit
+            try:
+                on_new_best(payload)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                log.warning(
+                    "optimize: new-best callback failed (%s: %s)",
+                    type(error).__name__,
+                    error,
+                )
+            return commit
+
+        next_poll = time.monotonic()
+        while _poll_process(proc) is None:
+            if stop_at_unix and time.time() >= stop_at_unix:
+                terminated_for_deadline = True
+                print(
+                    "  [forge-rewrite] optimize cutoff reached; terminating forge-loop "
+                    "and restoring the latest verified best",
+                    flush=True,
+                )
+                _terminate_process_group(proc)
+                break
+            if on_new_best is not None and time.monotonic() >= next_poll:
+                published_commit = _publish_new_best()
+                next_poll = time.monotonic() + max(_TICK_SEC, request.new_best_poll_sec)
+            time.sleep(_TICK_SEC)
+        _wait_process(proc)
+        stream_thread.join(timeout=5.0)
+        # The loop may have recorded a KEEP between the last poll and its exit,
+        # including one it produced while being terminated for the deadline.
+        published_commit = _publish_new_best()
+    except (OSError, ValueError) as e:
+        # A missing executable, a bad interpreter or a malformed command is a launch failure: the contract is to
+        # return what was recovered rather than raise out of run_rewrite, which would skip the final result.
+        log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
+        print(
+            f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",
+            flush=True,
+        )
+        _restore_best_kernel(
+            spec,
+            best_commit="",
+            fallback_content=fallback_content,
+            fallback_mode=fallback_mode,
+        )
+        # A loop that started and then lost its supervisor still spent tokens the caller must answer for.
+        failed: dict = {}
+        recovered = _experiment_llm_usage(
+            experiments_dir,
+            _announced_experiment_id("".join(collected)) or "",
+        )
+        if recovered:
+            failed["llm_usage"] = recovered
+        if terminated_for_deadline:
+            failed["terminated_for_deadline"] = True
+        return failed
+    stdout_text = "".join(collected)
+
+    result, expected_id = _trusted_loop_result(result_json, stdout_text, returncode=proc.returncode)
+
+    restored = _restore_best_kernel(
+        spec,
+        best_commit=str(result.get("best_commit") or ""),
+        fallback_content=fallback_content,
+        fallback_mode=fallback_mode,
+    )
+
+    # The result file only carries the ledger as of the KEEP that wrote it, so a cut-off or never-keeping run leaves
+    # the experiment record holding more of the run's spend than the result does.
+    nested_usage = _latest_ledger(
+        result.get("llm_usage"),
+        _experiment_llm_usage(experiments_dir, expected_id),
+    )
+    annotated = _annotated_optimize_result(
+        result,
+        terminated_for_deadline=terminated_for_deadline,
+        restored=restored,
+        nested_usage=nested_usage,
+    )
+    # Only a loop that reported its own result on a clean exit has closed its ledger; every other exit truncates it at
+    # the last session boundary it managed to checkpoint.
+    if annotated and result and not terminated_for_deadline and _poll_process(proc) == 0:
+        annotated["llm_usage_complete"] = True
+    return annotated

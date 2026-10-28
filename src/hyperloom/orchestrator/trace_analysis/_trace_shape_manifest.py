@@ -41,7 +41,7 @@ _OP_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 #: GEMM-family ops -> ``is_gemm`` (broad coverage denominator).
 _GEMM_FAMILY = frozenset({"gemm", "moe"})
 
-#: dtype tokens a kernelforge.gemm_tune tuner can address today (best-effort match on
+#: dtype tokens a kernelforge.workflows.gemm_tune tuner can address today (best-effort match on
 #: the Kineto ``Input type`` strings). Refined further on the consumer side.
 _TUNER_DTYPE_RE = re.compile(
     r"bf16|bfloat16|fp16|float16|half|fp8|float8|e4m3|e5m2|fp4|float4|f8|f4",

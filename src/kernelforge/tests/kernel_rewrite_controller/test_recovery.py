@@ -9,15 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import (
+from kernelforge.workflows.rewrite_controller import (
     ControllerLayout,
     TaskStateStore,
     load_task,
 )
-from kernelforge.kernel_rewrite_controller import recovery
-from kernelforge.kernel_rewrite_controller.contracts import TaskStateError
-from kernelforge.kernel_rewrite_controller.publisher import PublicationError, published_operator_dirs
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller import recovery
+from kernelforge.workflows.rewrite_controller.contracts import TaskStateError
+from kernelforge.workflows.rewrite_controller.publisher import PublicationError, published_operator_dirs
+from kernelforge.workflows.rewrite_controller.worktree import (
     WorktreeError,
     create_operator_worktree,
     export_patch_from_base,
@@ -26,7 +26,7 @@ from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
 )
-from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
+from kernelforge.workflows.forge_loop.campaign.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.tests.kernel_rewrite_controller.conftest import _git
 
 recover_task_result = recovery.recover_task_result

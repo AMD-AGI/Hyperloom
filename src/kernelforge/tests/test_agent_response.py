@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from kernelforge.agent_backends.base import AgentRunResult
-from kernelforge.orchestrator.agent_response import (
+from kernelforge.workflows.forge_loop.roles.agent_response import (
     AgentResponseIncompleteError,
     validated_agent_text,
 )

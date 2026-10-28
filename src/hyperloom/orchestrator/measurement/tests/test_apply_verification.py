@@ -40,7 +40,7 @@ def _log(tmp_path, lines):
 def parser(request, monkeypatch):
     """Run every case against a stand-in parser, and against forge when present."""
     if request.param == "real_forge":
-        pytest.importorskip("kernelforge.gemm_tune", reason="real parser unavailable")
+        pytest.importorskip("kernelforge.workflows.gemm_tune", reason="real parser unavailable")
         return
 
     import re
@@ -67,9 +67,9 @@ def parser(request, monkeypatch):
             "consulted_tables": sorted(consulted),
         }
 
-    fake = types.ModuleType("kernelforge.gemm_tune")
+    fake = types.ModuleType("kernelforge.workflows.gemm_tune")
     fake.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
+    monkeypatch.setitem(sys.modules, "kernelforge.workflows.gemm_tune", fake)
     return
 
 
@@ -199,7 +199,9 @@ class TestTheEnvToTableMapDoesNotDrift:
     """The same mapping exists here and in KernelForge, and cannot be shared."""
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
-        forge_utils = pytest.importorskip("kernelforge.gemm_tune.utils", reason="KernelForge not installed here")
+        forge_utils = pytest.importorskip(
+            "kernelforge.workflows.gemm_tune.utils", reason="KernelForge not installed here"
+        )
         from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
 
         forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())

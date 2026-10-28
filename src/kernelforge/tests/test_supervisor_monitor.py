@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.supervisor import SupervisionMonitor
+from kernelforge.workflows.forge_loop.search.supervisor import SupervisionMonitor
 
 
 def test_monitor_triggers_after_three_stalls_with_no_intervention_cap():

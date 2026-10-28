@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.loop.task_preparer_prompts import _distributed_contract_note
+from kernelforge.workflows.forge_loop.preparation.task_preparer_prompts import _distributed_contract_note
 
 
 @pytest.fixture(scope="module")

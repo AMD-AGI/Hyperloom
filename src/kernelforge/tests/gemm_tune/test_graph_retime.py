@@ -12,13 +12,13 @@ from pathlib import Path
 
 import pytest
 
-import kernelforge.gemm_tune.aiter_graph_retime as retime
-import kernelforge.gemm_tune.aiter_splitk_validate as validate
-import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
-from kernelforge.gemm_tune.aiter_graph_retime import Kernel, RetimeError, RetimeTarget, Timing, make_retime_fn
-from kernelforge.gemm_tune.tuners._graph_retime import retime_decode_rows
-from kernelforge.gemm_tune.tuners._serve_safe import _SplitKLimit
-from kernelforge.gemm_tune.tuners.base import TuneContext
+import kernelforge.workflows.gemm_tune.aiter_graph_retime as retime
+import kernelforge.workflows.gemm_tune.aiter_splitk_validate as validate
+import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
+from kernelforge.workflows.gemm_tune.aiter_graph_retime import Kernel, RetimeError, RetimeTarget, Timing, make_retime_fn
+from kernelforge.workflows.gemm_tune.tuners._graph_retime import retime_decode_rows
+from kernelforge.workflows.gemm_tune.tuners._serve_safe import _SplitKLimit
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 _HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
 _OP = "a8w8_blockscale_bpreshuffle"

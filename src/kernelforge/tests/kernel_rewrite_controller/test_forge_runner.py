@@ -9,16 +9,16 @@ import sys
 import time
 from pathlib import Path
 
-from kernelforge.kernel_rewrite_controller import parse_task_payload
-from kernelforge.kernel_rewrite_controller.forge_runner import (
+from kernelforge.workflows.rewrite_controller import parse_task_payload
+from kernelforge.workflows.rewrite_controller.forge_runner import (
     ForgeLoopInvocation,
     _read_result,
     build_forge_loop_invocation,
     run_forge_loop,
 )
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
-from kernelforge.loop.api import RESULT_SENTINEL
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.forge_loop.api import RESULT_SENTINEL
+from kernelforge.workflows.rewrite_controller.worktree import (
     DRIVER_STAGE_PREFIX,
     OperatorWorktree,
     stage_operator_driver,
@@ -263,7 +263,7 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     def _always_raises() -> None:
         raise RuntimeError("recovery is broken")
 
-    with caplog.at_level(logging.WARNING, logger="kernelforge.kernel_rewrite_controller.forge_runner"):
+    with caplog.at_level(logging.WARNING, logger="kernelforge.workflows.rewrite_controller.forge_runner"):
         outcome = run_forge_loop(invocation, on_checkpoint=_always_raises)
 
     assert outcome.timed_out is True

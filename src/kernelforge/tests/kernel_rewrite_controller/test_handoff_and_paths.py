@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import (
+from kernelforge.workflows.rewrite_controller import (
     ControllerLayout,
     HandoffContractError,
     read_handoff,
 )
-from kernelforge.kernel_rewrite_controller.contracts import (
+from kernelforge.workflows.rewrite_controller.contracts import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
 )
-from kernelforge.kernel_rewrite_controller.paths import (
+from kernelforge.workflows.rewrite_controller.paths import (
     operator_directory_name,
     safe_operator_id,
     safe_relative_path,

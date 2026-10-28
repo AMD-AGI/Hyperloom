@@ -10,11 +10,16 @@ import os
 import subprocess
 import sys
 
-from kernelforge.fusion.discover import DiscoveryTarget
-from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.discover import parse_discovered_recipes
-from kernelforge.fusion.locate import FrameworkInstall, build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
-from kernelforge.fusion.vllm_passes import (
+from kernelforge.workflows.forge_fusion.discover import DiscoveryTarget
+from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
+from kernelforge.workflows.forge_fusion.discover import parse_discovered_recipes
+from kernelforge.workflows.forge_fusion.locate import (
+    FrameworkInstall,
+    build_recipes,
+    vllm_compile_pass_state,
+    vllm_pass_config_flag,
+)
+from kernelforge.workflows.forge_fusion.vllm_passes import (
     _PROBE_SRC,
     _VLLM_PASS_PROBE_MARKER,
     PassState,

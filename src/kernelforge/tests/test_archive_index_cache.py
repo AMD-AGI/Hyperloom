@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.archive import CandidateArchive, CandidateRecord
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 
 
 def _rec(iteration: int, decision: str = "KEEP", **kw) -> CandidateRecord:

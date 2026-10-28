@@ -7,7 +7,7 @@ import ast
 
 import pytest
 
-from kernelforge.resources import resource_path
+from kernelforge.config.resources import resource_path
 
 from kernelforge.tests.conftest import PACKAGE_ROOT
 

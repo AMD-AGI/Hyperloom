@@ -16,7 +16,7 @@ from kernelforge.agent_backends.base import (
 )
 from kernelforge.agent_backends.codex import resolve_codex_gateway
 from kernelforge.config import Config
-from kernelforge.orchestrator.supervisor import (
+from kernelforge.workflows.forge_loop.roles.supervisor import (
     SupervisorBackendFailure,
     make_supervisor_fn,
 )

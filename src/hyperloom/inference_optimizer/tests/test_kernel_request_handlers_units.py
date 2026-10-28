@@ -33,7 +33,7 @@ from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
-from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS
+from kernelforge.workflows.gemm_tune.evidence import MOE_KEY_FIELDS
 from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import _forge_fusion_run as forge_fusion_run
 from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
@@ -626,7 +626,7 @@ class TestForgeGemmHelperCoverage:
         assert forge_fusion_run._forge_fusion_available() is True
         # Probing kernelforge alone would pass on a KernelForge predating the fusion absorption and only fail once the
         # subprocess rejected forge-fuse.
-        assert probed == ["kernelforge.fusion"]
+        assert probed == ["kernelforge.workflows.forge_fusion"]
 
         monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
         assert forge_fusion_run._forge_fusion_available() is False

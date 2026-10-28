@@ -10,10 +10,10 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
-from kernelforge.loop.bootstrap import run as forge_loop_run
-from kernelforge.loop.bootstrap.relay import SearchActorBuildContext
+from kernelforge.workflows.forge_loop.bootstrap import run as forge_loop_run
+from kernelforge.workflows.forge_loop.bootstrap.relay import SearchActorBuildContext
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
-from kernelforge.loop.bootstrap.pr_references import (
+from kernelforge.workflows.forge_loop.bootstrap.pr_references import (
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -164,7 +164,7 @@ def test_position_a_never_writes_events_itself(tmp_path):
 
 def test_loop_appends_the_event_only_after_the_campaign_guard():
     """Append the event only after campaign initialization."""
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
     assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
@@ -250,7 +250,7 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
 
 def test_the_event_append_cannot_abort_the_campaign():
     """A failed observability write may only print, never propagate."""
-    from kernelforge.loop.runner import IterationLoop
+    from kernelforge.workflows.forge_loop.iteration.runner import IterationLoop
 
     source = inspect.getsource(IterationLoop._persist_pr_knowledge)
     append = source.index("pr_refs_refreshed")

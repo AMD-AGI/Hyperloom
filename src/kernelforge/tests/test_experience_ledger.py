@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.experience import (
+from kernelforge.workflows.forge_loop.memory.experience import (
     ExperienceLedger,
     _extract_signature,
 )
@@ -147,8 +147,8 @@ def test_flush_writes_file(tmp_path):
 
 def test_both_ledgers_keep_their_own_truncation_and_cap():
     """One mechanism, two calibrations: the wording and limits stay per-ledger."""
-    from kernelforge.fusion.loop import FusionExperienceLedger
-    from kernelforge.fusion.loop import _extract_signature as fusion_signature
+    from kernelforge.workflows.forge_fusion.loop import FusionExperienceLedger
+    from kernelforge.workflows.forge_fusion.loop import _extract_signature as fusion_signature
 
     long_line = "error: " + "x" * 400
 

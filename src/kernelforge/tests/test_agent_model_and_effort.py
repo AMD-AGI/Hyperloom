@@ -60,10 +60,10 @@ def test_no_call_site_pins_a_reasoning_effort() -> None:
     allowed = {
         "config.py",
         "cli.py",
-        "orchestrator/agent.py",
-        "orchestrator/supervisor.py",
-        "fusion/agent_selection.py",
-        "gemm_tune/tier3/generate.py",
+        "workflows/forge_loop/roles/agent.py",
+        "workflows/forge_loop/roles/supervisor.py",
+        "workflows/forge_fusion/agent_selection.py",
+        "workflows/gemm_tune/tier3/generate.py",
         "roofline_ceiling/standalone.py",
     }
     unexpected = [entry for entry in offenders if entry.rsplit(":", 1)[0] not in allowed]
@@ -90,10 +90,10 @@ def test_every_runtime_is_built_where_the_switches_are_read() -> None:
                 found.append(str(path.relative_to(_SRC)))
     allowed = {
         "config.py",
-        "fusion/agent_selection.py",
-        "gemm_tune/tier3/generate.py",
-        "orchestrator/agent.py",
-        "orchestrator/supervisor.py",
+        "workflows/forge_fusion/agent_selection.py",
+        "workflows/gemm_tune/tier3/generate.py",
+        "workflows/forge_loop/roles/agent.py",
+        "workflows/forge_loop/roles/supervisor.py",
         "roofline_ceiling/standalone.py",
     }
     unexpected = sorted(set(found) - allowed)
@@ -177,7 +177,7 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
 #: rather than one call because the cap travels in the partition's ``_Turn``
 #: to the spec ``_run_spec`` builds from it; the cap is still written in
 #: exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
-_CAPPED_CALL_SITES = {"orchestrator/plan_critic.py", "orchestrator/orchestration.py"}
+_CAPPED_CALL_SITES = {"workflows/forge_loop/roles/plan_critic.py", "workflows/forge_loop/roles/orchestration.py"}
 
 
 def test_effort_ceilings_are_confined_to_the_two_argued_call_sites() -> None:

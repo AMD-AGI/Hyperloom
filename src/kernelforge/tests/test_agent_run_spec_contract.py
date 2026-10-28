@@ -78,13 +78,13 @@ def test_the_safety_verdict_marker_is_declared_where_providers_can_find_it():
 
 def test_the_consumer_reads_the_published_marker():
     """Keep one spelling of the marker, so the two sides cannot drift apart."""
-    from kernelforge.fusion import llm_failure
+    from kernelforge.workflows.forge_fusion import llm_failure
 
     assert llm_failure.AGENT_SAFETY_REJECTION_ATTR is AGENT_SAFETY_REJECTION_ATTR
 
 
 def test_an_unmarked_provider_error_is_not_a_verdict():
     """Treat an unmarked error as retryable, which is the recoverable mistake."""
-    from kernelforge.fusion.llm_failure import is_agent_safety_error
+    from kernelforge.workflows.forge_fusion.llm_failure import is_agent_safety_error
 
     assert is_agent_safety_error(AgentProviderError("something went wrong")) is False

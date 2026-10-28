@@ -5,11 +5,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.kernel_rewrite_controller import ControllerLayout, TaskStateStore
-from kernelforge.kernel_rewrite_controller import dispatcher
-from kernelforge.kernel_rewrite_controller.forge_runner import ForgeLoopOutcome
-from kernelforge.kernel_rewrite_controller.recovery import RecoveryResult
-from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
+from kernelforge.workflows.rewrite_controller import ControllerLayout, TaskStateStore
+from kernelforge.workflows.rewrite_controller import dispatcher
+from kernelforge.workflows.rewrite_controller.forge_runner import ForgeLoopOutcome
+from kernelforge.workflows.rewrite_controller.recovery import RecoveryResult
+from kernelforge.workflows.rewrite_controller.worktree import OperatorWorktree
 
 
 def _fake_worktree(task, layout: ControllerLayout) -> OperatorWorktree:

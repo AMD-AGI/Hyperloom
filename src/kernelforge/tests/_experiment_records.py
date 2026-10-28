@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kernelforge.tracker import Experiment
+from kernelforge.workflows.forge_loop.campaign.schema import Experiment
 
 
 def persisted_experiments(experiments_dir: str | Path) -> list[Experiment]:

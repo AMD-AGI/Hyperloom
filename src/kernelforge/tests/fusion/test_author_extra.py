@@ -17,8 +17,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 
-from kernelforge.fusion import author, emit
-from kernelforge.fusion.author import (
+from kernelforge.workflows.forge_fusion import author, emit
+from kernelforge.workflows.forge_fusion.author import (
     AUTHOR_RC_FAILED,
     AUTHOR_RC_SAFETY,
     AUTHOR_RC_TIMEOUT,
@@ -28,8 +28,8 @@ from kernelforge.fusion.author import (
     build_multi_author_prompt,
     run_author,
 )
-from kernelforge.fusion.llm_failure import AGENT_SAFETY_REJECTION_ATTR
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_fusion.llm_failure import AGENT_SAFETY_REJECTION_ATTR
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)

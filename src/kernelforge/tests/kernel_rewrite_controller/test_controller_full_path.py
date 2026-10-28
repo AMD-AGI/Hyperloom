@@ -13,9 +13,9 @@ from kernelforge.agent_backends.base import (
     AgentRunResult,
     AgentRuntimeConfig,
 )
-from kernelforge.kernel_rewrite_controller import controller, dispatcher, recovery
-from kernelforge.kernel_rewrite_controller.forge_runner import ForgeLoopOutcome
-from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+from kernelforge.workflows.rewrite_controller import controller, dispatcher, recovery
+from kernelforge.workflows.rewrite_controller.forge_runner import ForgeLoopOutcome
+from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     run_opportunity_analysis,
 )
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (

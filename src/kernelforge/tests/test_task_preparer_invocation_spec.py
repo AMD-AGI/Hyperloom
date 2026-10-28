@@ -12,10 +12,10 @@ from click.testing import CliRunner
 
 from kernelforge.agent_backends.base import AgentRuntimeConfig
 from kernelforge.cli import main
-from kernelforge.loop import task_preparer
-from kernelforge.loop import task_preparer_prompts
-from kernelforge.loop import task_preflight
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preparer_prompts
+from kernelforge.workflows.forge_loop.preparation import task_preflight
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.mark.asyncio
@@ -383,7 +383,7 @@ def test_required_git_workspace_reports_setup_failures(
 
 def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
     """Persist the declared spec even when preparation is skipped."""
-    from kernelforge.loop.bootstrap.preparation import _persist_declared_spec
+    from kernelforge.workflows.forge_loop.bootstrap.preparation import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
     driver_dir.mkdir()
@@ -400,7 +400,7 @@ def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
 
 def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
     """Say so and carry on: the driver conformed without the spec beside it."""
-    from kernelforge.loop.bootstrap.preparation import _persist_declared_spec
+    from kernelforge.workflows.forge_loop.bootstrap.preparation import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
     driver_dir.mkdir()
@@ -419,7 +419,7 @@ def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
 
 def test_persisting_the_spec_is_optional_when_none_was_supplied(tmp_path):
     """Do nothing at all when the operator named no spec."""
-    from kernelforge.loop.bootstrap.preparation import _persist_declared_spec
+    from kernelforge.workflows.forge_loop.bootstrap.preparation import _persist_declared_spec
 
     driver = tmp_path / "driver.py"
     driver.write_text("# already conforms\n", encoding="utf-8")

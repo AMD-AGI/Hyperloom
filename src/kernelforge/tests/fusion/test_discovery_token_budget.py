@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import inspect
 
-from kernelforge.fusion import discover, discovery_stage
+from kernelforge.workflows.forge_fusion import discover, discovery_stage
 
 
 def test_discovery_requires_an_injected_llm() -> None:

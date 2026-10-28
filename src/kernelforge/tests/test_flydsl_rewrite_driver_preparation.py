@@ -14,12 +14,12 @@ from pathlib import Path
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.rewrite_by_flydsl import (
+from kernelforge.workflows.flydsl_rewrite import (
     driver_contract,
     flydsl_rewrite_driver_preparation as driver_preparation,
 )
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.tracker import UsageAccumulator
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
+from kernelforge.agent_backends.usage import UsageAccumulator
 
 
 def _spec(tmp_path: Path) -> RewriteSpec:
@@ -153,7 +153,7 @@ def test_preparation_is_independent_from_forge_loop():
     imported_modules = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     imported_modules.update(node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom))
 
-    assert not any(name.startswith("kernelforge.loop") for name in imported_modules)
+    assert not any(name.startswith("kernelforge.workflows.forge_loop") for name in imported_modules)
 
 
 def test_missing_driver_is_authored_without_modifying_kernel_evidence(

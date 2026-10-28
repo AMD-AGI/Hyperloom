@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import optional_positive_int
-from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
+from kernelforge.workflows.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
 from ..actions.executors._kernel_agent_tool import HandlerResult, _run_subprocess, _shape_tool_result
@@ -678,7 +678,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
                 rel_paths=rel_paths,
             ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
-            provenance="kernelforge.gemm_tune",
+            provenance="kernelforge.workflows.gemm_tune",
             extra={
                 "env_keys": [env_key for env_key, _, _ in pending],
                 "model": slug,
