@@ -393,7 +393,7 @@ def _multibranch(run, **placement):
     run.spec.write_text(json.dumps(doc))
 
 
-def test_multibranch_execs_into_its_entry_with_the_environment_unchanged(run, monkeypatch):
+def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for_path(run, monkeypatch):
     _multibranch(run)
     before = dict(os.environ)
     calls = []
@@ -402,9 +402,43 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged(run, mo
     fake = FakeOptimize(monkeypatch)
     entry.main(["run"])
     assert [(c[0], c[1]) for c in calls] == [("hyperloom-multibranch", ["hyperloom-multibranch", "hosted", "run"])]
+    bin_dir = str(Path(sys.executable).parent)
+    assert calls[0][2].pop("PATH").split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
+    before.pop("PATH", None)
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
     assert os.environ.get(entry.ENV_IMAGE) is None
+
+
+def _multibranch_order(run, monkeypatch, *, exit_code=0):
+    _multibranch(run)
+    _recording_installer(run, None, exit_code=exit_code)
+
+    def fake_exec(file, argv):
+        with (run.work / "order").open("a") as order:
+            order.write("exec\n")
+
+    monkeypatch.setattr(entry.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(entry.os, "execvp", fake_exec)
+
+
+def test_multibranch_runs_the_installer_before_the_exec_without_host_secrets(run, monkeypatch):
+    _multibranch_order(run, monkeypatch)
+    run.installer.write_text(
+        run.installer.read_text().replace(
+            "exit 0", f'echo "${{HYPERLOOM_MCP_TOKEN:-unset}}" >> {run.work}/order\nexit 0'
+        )
+    )
+    entry.main(["run"])
+    assert _order(run) == ["installer 0", "unset", "exec"]
+
+
+def test_multibranch_installer_failure_stops_before_the_exec(run, monkeypatch):
+    _multibranch_order(run, monkeypatch, exit_code=7)
+    assert entry.main(["run"]) == 2
+    written = _exit(run)
+    assert (written["final"], written["returncode"]) == (True, 2) and "install.sh failed" in written["error"]
+    assert _order(run) == ["installer 0"]
 
 
 def test_multibranch_without_its_command_is_final_with_return_code_2(run, monkeypatch):

@@ -18,8 +18,9 @@ Before ``optimize`` starts or resumes, on every leg, the entry runs the packaged
 legacy launchers run at every pod start -- with its output in ``$HYPERLOOM_STATE_DIR/install.log``; an installer that
 fails ends the run finally (return code 2).  The session directory is a function of the run (see :func:`hyperloom.inference_optimizer.session.paths.hosted_session_dir`),
 so a restart finds it again; a directory that holds every file of :data:`SESSION_FILES` is resumed, any other is
-started fresh, after the stray files of a session that never finished its first write are removed.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed, environment unchanged, to
-the ``hyperloom-multibranch`` command, which reads the host inputs itself.
+started fresh, after the stray files of a session that never finished its first write are removed.  A spec whose ``flow`` is ``multibranch`` is validated here and then handed to the ``hyperloom-multibranch`` command, which reads the host inputs itself,
+after the same installer run; its environment is the entry's own, with the running interpreter's directory first on ``PATH`` (as for ``optimize``) so the
+command resolves to, and runs with, the interpreter the installer installed into.  The installer itself never sees the host-only inputs.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from typing import Any
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
-from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
+from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.inference_optimizer.breakdown.session_package import ENV_PACKAGE_DEST_ROOT
@@ -111,6 +112,9 @@ def _run() -> int:
     if not Path(os.environ.get(ENV_USER_DATA_PATH, "")).is_absolute():
         raise Refused(f"{ENV_USER_DATA_PATH} must be set to an absolute path")
     if spec.flow == FLOW_MULTIBRANCH:
+        # The command is the wheel's own; install.sh installs the wheel's ``hosted`` extra (e2b, ...) that it imports.
+        _put_interpreter_first_on_path()
+        _run_installer(info.state_dir)
         _exec_multibranch()
         return 0
     lock = _plug_lock(spec)
@@ -171,7 +175,7 @@ def _installer_environment() -> dict[str, str]:
     Without ``INFERENCE_OPTIMIZER_FORCE_PYTHON`` the script prefers the image's ``/opt/venv`` over ``PYTHON``, where this
     wheel is not installed.
     """
-    environment = dict(os.environ)
+    environment = {name: value for name, value in os.environ.items() if name not in HOST_ONLY_VARS}
     environment["PYTHON"] = sys.executable
     environment["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
     if sys.prefix != sys.base_prefix:
