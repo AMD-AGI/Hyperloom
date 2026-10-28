@@ -9,6 +9,10 @@ the count is not persisted). A single non-reproducing unclear failure does not q
 ``avoid_nodes``; it never blocks a test: on a single node, avoiding it still creates the sandbox there and the result is
 marked same-node (design 4.9.3), so a toolbox with one node counts the failures of its node (:meth:`count_failure`) and
 never quarantines it.
+
+A failure that says nothing about its node (``attempts.NODE_BLAMELESS_INFRA_REASONS``) never quarantines it, and a node
+quarantine the notebook holds from such a failure (one recorded before that rule) is not read back: :meth:`load` leaves
+it out, so the node is in service again without an operator.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from collections.abc import Iterable, Mapping
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent
 from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import NodeHealth
+from hyperloom_multibranch.toolbox.attempts import node_blameless
 
 
 class Quarantine:
@@ -29,9 +34,11 @@ class Quarantine:
         self._failures: Counter[str] = Counter()
 
     async def load(self) -> None:
-        """Read the list the notebook holds; called once when the toolbox starts."""
+        """Read the list the notebook holds, less the node quarantines a blameless failure recorded; called once when the
+        toolbox starts."""
 
-        self._nodes = {event.node for event in await self._health.quarantined() if not event.gpu_ids}
+        events = await self._health.quarantined()
+        self._nodes = {event.node for event in events if not event.gpu_ids and not node_blameless(event.reason)}
 
     async def cards(self) -> tuple[QuarantineEvent, ...]:
         """The card-level events the notebook holds (cards lost for good), not the whole-node ones."""

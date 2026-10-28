@@ -4,7 +4,9 @@
 """The direction menu: the families a specialist could try next, ranked by what a test of each may bring.
 
 :func:`direction_menu` ranks, for a branch on a commit, the direction families (:mod:`notebook.families`) the archive or
-this session holds evidence of, by commit odds times the gain within reach over the cost of a test:
+this session holds evidence of, and each op family whose ops take :data:`HOT_OP_SHARE_PCT` of the commit's profile
+that no test or claim has acted on yet, its mechanism and layer left open, by commit odds times the gain within reach
+over the cost of a test:
 
 * the commit odds are a Thompson draw from the family's Beta distribution: its layer's base rate worth
   :data:`~.family_stats.PRIOR_TRIALS` tests, then the archive's evidence (:mod:`rsi.family_stats`) and this session's,
@@ -28,7 +30,7 @@ import json
 import logging
 import random
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -44,7 +46,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.notebook.codec import key_sorted
-from hyperloom_multibranch.notebook.families import OP_FAMILIES, Family, family_of, op_family
+from hyperloom_multibranch.notebook.families import OP_FAMILIES, Family, Mechanism, family_of, op_family
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.family_stats import (
     MAX_TRIALS,
@@ -68,6 +70,9 @@ CONTROL_SHARE = 0.25
 ELSEWHERE_FAILURE = 0.5
 #: The gain within reach when no commit's gain is known yet.
 DEFAULT_GAIN_PCT = 1.0
+#: The share of a commit's profile, in percent, an op family's ops take for the menu to offer it before any test.
+HOT_OP_SHARE_PCT = 5.0
+UNTOUCHED = "no test or claim has acted on it yet"
 MENU_LOG = "menus.jsonl"
 MENU_LOG_FORMAT = "multibranch.menu-log.v1"
 TRIED_HERE = "tried on this commit"
@@ -171,6 +176,23 @@ def _within_reach(family: Family, typical: float, shares: OpShares | None, headr
         share = sum(value for op, value in (shares.shares.items() if shares else ()) if op_family(op) == family.target)
         return min(typical, amdahl_ceiling_pct(share)) if share > 0 else typical
     return min(typical, headroom) if headroom is not None else typical
+
+
+def _untouched(shares: OpShares | None, known: Iterable[Family]) -> dict[Family, str]:
+    """The op families whose ops take at least :data:`HOT_OP_SHARE_PCT` of ``shares`` and that no family of ``known``
+    acts on, each with its mechanism and layer open and the mark its line carries."""
+
+    acted = {family.target for family in known}
+    by_target: dict[str, float] = {}
+    for op, share in shares.shares.items() if shares is not None else ():
+        target = op_family(op)
+        if target is not None:
+            by_target[target] = by_target.get(target, 0.0) + share
+    return {
+        Family(target, Mechanism.OTHER, None): f"{UNTOUCHED}; its ops take {share:.0f}% of this commit's profile"
+        for target, share in by_target.items()
+        if share >= HOT_OP_SHARE_PCT and target not in acted
+    }
 
 
 def _costs(snapshot: NotebookSnapshot) -> dict[IntentLayer | None, float]:
@@ -277,8 +299,11 @@ def direction_menu(
     usual = statistics.median([*gains, *(gain for item in seen.values() for gain in item.gains)] or [DEFAULT_GAIN_PCT])
     shares, headroom = snapshot.op_shares.get(commit), _headroom(snapshot, branch, commit, metric)
     costs, marks = _costs(snapshot), _marks(snapshot, branch, commit)
+    untouched = _untouched(shares, {*evidence.archived, *seen, *marks})
+    for family, mark in untouched.items():
+        marks[family] = [mark]
     scored = []
-    for family in sorted({*evidence.archived, *seen}, key=lambda item: item.label):
+    for family in sorted({*evidence.archived, *seen, *untouched}, key=lambda item: item.label):
         archived, here = evidence.archived.get(family), seen.get(family)
         odds = _odds(family, archived, here)
         known = [*(archived.gains if archived is not None else ()), *(here.gains if here is not None else ())]
@@ -419,11 +444,13 @@ __all__ = [
     "DEFAULT_GAIN_PCT",
     "ELSEWHERE_FAILURE",
     "EXPLORE_TRIALS",
+    "HOT_OP_SHARE_PCT",
     "MENU_ITEMS",
     "MENU_LOG",
     "MENU_LOG_FORMAT",
     "ON_INTEGRATION",
     "TRIED_HERE",
+    "UNTOUCHED",
     "DirectionMenu",
     "DirectionMenus",
     "FamilyOdds",

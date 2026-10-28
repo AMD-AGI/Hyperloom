@@ -47,10 +47,12 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
     session_stores,
     session_tools,
     started_backend,
+    with_long_context,
     with_short_prompts,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
+from hyperloom_multibranch.toolbox.long_context import environment_long_context
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
@@ -63,6 +65,7 @@ __all__ = [
     "HostedToolbox",
     "HostedToolboxInputs",
     "build_hosted_toolbox",
+    "parallel_tests_for",
 ]
 
 #: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads; the others are the sub-runs'.
@@ -190,7 +193,8 @@ class HostedOptions:
     host environment, whose hash is read from the manifest of the entry in this host's own view of the runner cache
     (``HYPERLOOM_RUNNER_CACHE``) and which refuses the build when it is not staged there; ``off`` there runs no check.
     Without either the check is on with the session model's own set when this host finds it staged
-    (``short_prompts.default_short_prompts``), and off, logged, when it does not.
+    (``short_prompts.default_short_prompts``), and off, logged, when it does not. The long-context check is found the
+    same way from ``acceptance.long_context``, ``HYPERLOOM_LONG_CONTEXT`` and ``long_context.default_long_context``.
     """
 
     policy: QueuePolicy | None = None
@@ -280,8 +284,16 @@ def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: Leas
     return HostedBranchLeases(provider, grant, DevSession(inputs.run_id, inputs.tp, dev), tuning)
 
 
-def _parallel_tests(grant: GrantLimits | None, tp: int) -> int:
-    """At most as many tests at once as the grant's GPUs and sandboxes allow; the pool's default without a grant."""
+def parallel_tests_for(grant: GrantLimits | None, tp: int) -> int:
+    """How many tests of TP=``tp`` may run at once under ``grant``: ``min(max_gpus // tp, max_sandboxes)``, at least 1.
+
+    This is the one source of the grant's parallel-tests rule agreed in #112 section 1a; the hosted toolbox sizes its
+    measurement pool with it, and anything else that needs the number (a scheduler's cap, a planner) calls it rather
+    than repeating the arithmetic. Without a grant it is the pool's default.
+
+    Raises:
+        ValueError: When the grant has fewer GPUs than one test of TP=``tp`` needs.
+    """
     if grant is None:
         return DEFAULT_MAX_PARALLEL_TESTS
     if grant.max_gpus < tp:
@@ -293,16 +305,20 @@ def _acceptance_with_prompts(
     acceptance: AcceptanceSetup, options: HostedOptions, environ: Mapping[str, str], model_dir: Path | None
 ) -> AcceptanceSetup:
     """``acceptance`` with the short-prompt set the options (else the acceptance setup, else ``HYPERLOOM_SHORT_PROMPTS``)
-    name.
+    name, and the long-context set the acceptance setup (else ``HYPERLOOM_LONG_CONTEXT``, else the model's own set this
+    host finds staged) names.
 
     Raises:
         ShortPromptsNotStaged: The environment names a key that is not staged in this host's view of the runner cache.
+        LongContextNotStaged: The same for the long-context check.
         ValueError: The options and the acceptance setup name different sets.
     """
     named = with_short_prompts(acceptance, options.short_prompts)
-    if named.short_prompts is not None:
-        return named
-    return with_short_prompts(named, environment_short_prompts(environ, model_dir))
+    if named.short_prompts is None:
+        named = with_short_prompts(named, environment_short_prompts(environ, model_dir))
+    if named.long_context is None:
+        named = with_long_context(named, environment_long_context(environ, model_dir))
+    return named
 
 
 def build_hosted_toolbox(
@@ -347,7 +363,7 @@ def build_hosted_toolbox(
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
     grant = inputs.grant()
-    parallel = _parallel_tests(grant, inputs.tp)
+    parallel = parallel_tests_for(grant, inputs.tp)
     config = HostedConfig(
         session_dir=directory,
         run_id=inputs.run_id,

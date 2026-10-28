@@ -18,9 +18,16 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure.boot_watch import HUNG_BEFORE_READY
-from hyperloom.measure.failures import JIT_BUILD_TIMEOUT
+from hyperloom.measure import hosted
+from hyperloom.measure.failures import INFRA_ERROR_CLASSES, JIT_BUILD_TIMEOUT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
-from hyperloom_multibranch.toolbox.attempts import AttemptRunner, TestJob
+from hyperloom_multibranch.toolbox.attempts import (
+    NODE_BLAMELESS_INFRA_REASONS,
+    RUNNER_LOST,
+    RUNNER_START_FAILED,
+    AttemptRunner,
+    TestJob,
+)
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
 PORT_REASON = "port_in_use: [Errno 98] address already in use"
@@ -103,3 +110,29 @@ async def test_a_jit_build_timeout_is_retried_once_and_not_held_against_the_node
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == JIT_REASON
     assert reported == [], "the tables, not the node, made the server build past its watchdog"
+
+
+#: What W227's hosted runs reported, word for word but for the cache path.
+KEY_READ_ONLY_REASON = f"{RUNNER_START_FAILED}: signing key file cannot be removed: OSError"
+CACHE_REASON = (
+    f"{RUNNER_START_FAILED}: runner bootstrap, step cache, exit 1: the source in /cache/2ebadc612/source is not what "
+    "the manifest recorded: 3980 files and 54915363 bytes, the manifest has 3457 and 46986171"
+)
+LOST_REASON = f"{RUNNER_LOST}: the sandbox could not be read"
+
+
+@pytest.mark.parametrize(
+    "reason", [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON], ids=["signing_key", "runner_cache", "runner_lost"]
+)
+async def test_a_runner_that_could_not_start_or_was_lost_is_retried_and_not_held_against_the_node(reason) -> None:
+    result, executor, reported = await _run(reason)
+    assert len(executor.jobs) == 4, "retried in fresh sandboxes like any infrastructure failure"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
+    assert reported == [], "the sandbox's delivery or the platform's reclaim, not the node, ended the attempt"
+
+
+def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() -> None:
+    assert NODE_BLAMELESS_INFRA_REASONS == {"runner_start_failed", "runner_lost"}
+    assert NODE_BLAMELESS_INFRA_REASONS <= INFRA_ERROR_CLASSES
+    assert RUNNER_LOST == hosted.RUNNER_LOST

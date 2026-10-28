@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
-from hyperloom.orchestrator.kernel.request_handlers import run_fusion_handler
 from hyperloom_multibranch.toolbox.tools import (
     InvalidRequest,
     JobStatus,
@@ -18,7 +17,6 @@ from hyperloom_multibranch.toolbox.tools import (
     accuracy_tool,
     all_tools,
     build_tool,
-    forge_fusion_tool,
     roofline_tool,
     tracelens_tool,
 )
@@ -31,7 +29,6 @@ def test_the_tool_names_are_unique_and_complete() -> None:
     assert sorted(names) == [
         "accuracy",
         "build",
-        "forge_fusion",
         "profile",
         "roofline",
         "tracelens",
@@ -46,7 +43,6 @@ def test_each_tool_is_bound_to_the_existing_implementation(tmp_path: Path) -> No
     assert isinstance(accuracy, BaselineExecutor)
     assert Path(accuracy.session_dir) == tmp_path
     assert tracelens_tool()._handler is tracelens_handler
-    assert forge_fusion_tool()._handler is run_fusion_handler
 
 
 def test_the_accuracy_tool_refuses_to_switch_the_evaluation_off() -> None:

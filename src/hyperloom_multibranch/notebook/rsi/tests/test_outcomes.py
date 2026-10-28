@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.notebook.families import Family, Mechanism
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
 from hyperloom_multibranch.notebook.rsi.menu import LoggedMenu, record_family
 from hyperloom_multibranch.notebook.rsi.outcomes import (
@@ -49,6 +51,20 @@ def test_each_explore_test_counts_for_its_branchs_group_and_against_the_menu_dra
     assert (total.after_menu, total.on_top, total.listed, total.listed_commits) == (1, 1, 1, 0)
     assert (total.odds_sum, total.squared_error) == (pytest.approx(0.3), pytest.approx(0.09))
     assert found.render().startswith("# Specialist outcomes of sess-1\n\n| group | branches | explore tests |")
+
+
+def test_an_open_line_of_an_op_family_lists_every_test_of_that_op(snapshot: NotebookSnapshot) -> None:
+    drawn = _menu_before_r4(snapshot)
+    r4 = next(record for record in snapshot.records if record.request_id == "r4")
+    family = record_family(snapshot, r4)
+    assert family is not None
+    open_line = Family(family.target, Mechanism.OTHER, None).label
+
+    found = specialist_outcomes(snapshot, (dataclasses.replace(drawn, families=(open_line,), odds=(0.2,)),), ())
+
+    total = sum(found.groups.values(), GroupOutcome())
+    assert (total.after_menu, total.on_top, total.listed, total.listed_commits) == (1, 1, 1, 0)
+    assert total.odds_sum == pytest.approx(0.2)
 
 
 def test_the_pool_keeps_each_sessions_outcomes_once_and_the_studies_add_them_up(

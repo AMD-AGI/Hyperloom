@@ -19,7 +19,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import (
+    AttachmentRef,
+    FailureClass,
+    Purpose,
+    TestKind,
+    TestRequest,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     ClaimLost,
@@ -51,7 +59,7 @@ from hyperloom_multibranch.toolbox.analysis import (
     analysis_request,
     root_profile_request,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, EarlierBaselines, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import landed_agentx_baseline
@@ -66,6 +74,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
     median_test_seconds,
 )
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
+from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey, ShortPromptPool, pooled_result
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -149,6 +158,7 @@ class RealToolbox:
             is_accepted=self._is_accepted,
             live_profile=self._live_profile,
             pooled=self._pool_count,
+            earlier_baselines=self._earlier_baselines,
         )
         self._runner = AttemptRunner(
             executor,
@@ -562,6 +572,22 @@ class RealToolbox:
                 return entry.request_id
         return None
 
+    def _earlier_baselines(self, request: TestRequest, recipe_digest: str) -> EarlierBaselines:
+        """The BASELINE tests of the recipe whose digest is ``recipe_digest`` the submit log holds as accepted before
+        ``request`` (all of them for a request not logged yet), and how many of those have no outcome. Read from the log,
+        so a restarted toolbox re-preparing a request counts what the one before it counted, less what has ended since."""
+        accepted = unfinished = 0
+        for entry in self._log.entries():
+            if request.request_id is not None and entry.request_id == request.request_id:
+                break
+            if entry.aborted or entry.recipe_digest != recipe_digest:
+                continue
+            if entry.request.get("purpose") != Purpose.BASELINE.value:
+                continue
+            accepted += 1
+            unfinished += entry.outcome is None and not entry.settled
+        return EarlierBaselines(accepted, unfinished)
+
     @staticmethod
     def _holds_profile(entry: LogEntry) -> bool:
         if entry.outcome is None:
@@ -659,6 +685,7 @@ class RealToolbox:
             )
         builds = self._builds.charges(item.request_id)
         result = await asyncio.to_thread(self._pooled, item.request_id, result)
+        result = with_root_reading(item.request, result, self._log.entries())
         return replace(result, request_id=item.request_id, queued_at=item.queued_at, builds=builds)
 
     def _pool_count(self, key: PoolKey) -> int:

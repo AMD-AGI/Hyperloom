@@ -31,6 +31,7 @@ from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool
+from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
@@ -191,6 +192,8 @@ def build(
     builds: BuildDriver | None = None,
     short_prompt_pool: ShortPromptPool | None = None,
     aiter_builds_missing: str | None = None,
+    short_prompts: ShortPromptSetup | None = None,
+    root_tests: int = 0,
 ) -> Rig:
     """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for."""
@@ -214,7 +217,15 @@ def build(
     toolbox = RealToolbox(
         stores,
         executor,
-        AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
+        AcceptanceSetup(
+            repo,
+            planner,
+            active_image,
+            workload_kind,
+            short_prompts=short_prompts,
+            aiter_builds_missing=aiter_builds_missing,
+            root_tests=root_tests,
+        ),
         tools=tools(notebook) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(policy=policy, clock=clock),
     )

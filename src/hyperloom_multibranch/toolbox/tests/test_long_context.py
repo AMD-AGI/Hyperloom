@@ -18,6 +18,7 @@ from hyperloom.contracts.long_context import (
     PROMPT_ERROR,
     PROMPT_NOT_RUN,
     PROMPT_OK,
+    LongContextRoot,
 )
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE
@@ -38,6 +39,7 @@ from hyperloom_multibranch.toolbox.long_context import (
     rederive,
     staged_long_context,
 )
+from hyperloom_multibranch.toolbox.short_prompts import no_patch_files
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_short_prompts import PARENT, _accepted, _Planner
 
@@ -78,22 +80,27 @@ def _write(directory: Path, document: dict) -> None:
 # --- when ------------------------------------------------------------------------------------------------------------
 
 
+def _decided(request, setup: LongContextSetup | None = SETUP):  # type: ignore[no-untyped-def]
+    """The check ``request`` runs on a change that touches nothing the lever list names."""
+    return decide(request, PARENT, PARENT, setup, no_patch_files)
+
+
 def test_a_request_that_forces_the_check_gets_the_plan_the_setup_names_and_says_why() -> None:
-    plan = decide(req(long_context_check=True), SETUP)
+    plan = _decided(req(long_context_check=True))
 
     assert plan is not None and (plan.prompt_set, plan.prompts_sha256, plan.length) == (*SETUP.__dict__.values(),)
     assert (plan.max_new_tokens, plan.concurrency, plan.trigger) == (128, 4, ("request long_context_check",))
 
 
 @pytest.mark.parametrize("forced", [None, False])
-def test_a_request_that_does_not_force_the_check_runs_none(forced) -> None:
-    assert decide(req(long_context_check=forced), SETUP) is None
+def test_a_request_that_does_not_force_the_check_and_touches_no_lever_runs_none(forced) -> None:
+    assert _decided(req(long_context_check=forced)) is None
 
 
 def test_a_toolbox_with_no_prompt_set_and_a_kind_the_check_does_not_cover_run_none() -> None:
-    assert decide(req(long_context_check=True), None) is None
-    assert decide(req(long_context_check=True, kind=TestKind.PROFILE), SETUP) is None
-    assert decide(req(long_context_check=True, purpose=Purpose.FINAL), SETUP) is not None
+    assert _decided(req(long_context_check=True), None) is None
+    assert _decided(req(long_context_check=True, kind=TestKind.PROFILE)) is None
+    assert _decided(req(purpose=Purpose.FINAL)) is not None
 
 
 class _Accept:
@@ -260,8 +267,11 @@ def test_outputs_for_another_prompt_set_than_the_test_asked_for_are_not_read_as_
 def test_a_check_derived_again_from_the_verified_bundle_agrees_with_the_one_recorded(tmp_path) -> None:
     directory, plan = _landed(tmp_path, broken={"words"})
     recorded = long_context_of(plan, directory)  # type: ignore[arg-type]
+    root = LongContextRoot(recorded.prompt_set_sha256, ("root-1",), 64, 64, 1.0, 0.94, 1.0)
 
     assert first_difference(recorded, rederive(recorded, directory)) is None
+    with_root = replace(recorded, root=root)
+    assert first_difference(with_root, rederive(with_root, directory)) is None, "the root's reading is other bundles'"
 
 
 def test_a_recorded_score_the_bundles_answers_do_not_support_is_named(tmp_path) -> None:

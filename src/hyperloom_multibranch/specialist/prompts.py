@@ -380,7 +380,8 @@ not spend tests on them.
 
 A blocked candidate held its gain on the retest and was held back on both measurements by the same defect: the accuracy \
 gate, on InferenceX requests it did not complete (dropped_requests) or short prompts its server processes answered \
-more inconsistently than the baseline's did (short_prompts_inconsistent), or on AgentX a guard (P90, output \
+more inconsistently than the baseline's did (short_prompts_inconsistent) or long-context prompts it answered worse \
+than the root beyond the check's noise (long_context_dropped), or on AgentX a guard (P90, output \
 throughput) or more failed requests than its parent. It waits for your diagnosis; conclude it before your next \
 candidate. Read both results with test_result and find the cause.
 - A fixable defect is one a concrete change removes while the gain stays: quantization scales computed per tensor \

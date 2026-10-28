@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE
+from hyperloom.contracts.long_context import refuses
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom_multibranch.contracts.judgement import Judgement
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords
@@ -63,7 +64,8 @@ class Rule(Protocol):
 @dataclass(frozen=True)
 class InferenceXRule(Rule):
     """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's, no request
-    the graded rounds sent left uncompleted, and short prompts answered no more inconsistently than the baselines did.
+    the graded rounds sent left uncompleted, short prompts answered no more inconsistently than the baselines did, and
+    long-context answers no worse than the root's beyond the check's own noise.
 
     Only an explore whose accepted request records that the eval was skipped is judged without a score; any other test
     without one is unreadable.
@@ -99,9 +101,16 @@ class InferenceXRule(Rule):
         result = _result(record)
         dropped = dropped_requests(result, self.concurrency)
         inconsistent = exceeds_floor(result, baseline.short_prompt_floor)
+        long_context = result.long_context
+        long_context_dropped = long_context is not None and refuses(long_context, long_context.root)
         skipped = record.request.purpose is Purpose.EXPLORE and not ran_accuracy(record.request, self)
         read = unscored_reading if skipped else inferencex_reading
-        return replace(read(result, self.concurrency), dropped=dropped, inconsistent=inconsistent)
+        return replace(
+            read(result, self.concurrency),
+            dropped=dropped,
+            inconsistent=inconsistent,
+            long_context_dropped=long_context_dropped,
+        )
 
 
 class AgentXRule(Rule):

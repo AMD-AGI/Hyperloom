@@ -16,7 +16,6 @@ from hyperloom_multibranch.toolbox.tools.base import (
 )
 from hyperloom_multibranch.toolbox.tools.accuracy import ACCURACY_TOOL, accuracy_tool
 from hyperloom_multibranch.toolbox.tools.build import BUILD_TOOL, build_tool
-from hyperloom_multibranch.toolbox.tools.kernel import FORGE_FUSION_TOOL, forge_fusion_tool
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, KernelTuneTool, kernel_tune_tool
 from hyperloom_multibranch.toolbox.tools.profile import PROFILE_TOOL, profile_tool
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL, roofline_tool, tracelens_tool
@@ -35,14 +34,12 @@ def all_tools() -> tuple[AsyncTool, ...]:
         tracelens_tool(),
         build_tool(),
         accuracy_tool(),
-        forge_fusion_tool(),
     )
 
 
 __all__ = [
     "ACCURACY_TOOL",
     "BUILD_TOOL",
-    "FORGE_FUSION_TOOL",
     "KERNEL_TUNE_TOOL",
     "PROFILE_TOOL",
     "ROOFLINE_TOOL",
@@ -62,7 +59,6 @@ __all__ = [
     "accuracy_tool",
     "all_tools",
     "build_tool",
-    "forge_fusion_tool",
     "kernel_tune_tool",
     "profile_tool",
     "roofline_tool",

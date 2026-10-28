@@ -9,7 +9,9 @@ attempts into the request's single result:
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
   ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
   repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
-  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`) is retried once, and its node is not reported either.
+  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`) is retried once, and its node is not reported either. One that
+  says nothing about the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost) is
+  retried like any other, and its node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -48,6 +50,18 @@ UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH})
 #: an aiter module rebuilt past the server's watchdog builds again in the next sandbox, unless the shared compiled-code
 #: cache took the first build.
 ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT})
+#: The runner's ``error_class`` when it could not start (``hyperloom.measure.runner``).
+RUNNER_START_FAILED = "runner_start_failed"
+#: The hosted backend's ``error_class`` when it lost the sandbox (``hyperloom.measure.hosted.RUNNER_LOST``).
+RUNNER_LOST = "runner_lost"
+#: Infrastructure failures retried like any other but never held against the node they ran on. A runner that could not
+#: start failed on what its sandbox was given (the template, an entry of the runner cache that is not what its manifest
+#: recorded, a signing key mounted read-only), which any node gives it alike. A lost runner is most often the platform
+#: taking its sandbox back when the node's allocation ended, which the toolbox cannot tell from a node that died; a node
+#: that is sick shows it in the failures that stay held against it (the card guard, GPU and node faults).
+NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset({RUNNER_START_FAILED, RUNNER_LOST})
+#: Infrastructure failures whose node is not reported.
+_UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | NODE_BLAMELESS_INFRA_REASONS
 #: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
 UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 
@@ -105,6 +119,11 @@ and True for an infrastructure failure the executor classified."""
 def _reason_name(reason: str | None) -> str:
     """The name a failure's ``reason`` starts with, before its ``: <detail>``."""
     return (reason or "").partition(":")[0].strip()
+
+
+def node_blameless(reason: str | None) -> bool:
+    """Whether a failure's ``reason`` names one never held against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`)."""
+    return _reason_name(reason) in NODE_BLAMELESS_INFRA_REASONS
 
 
 def _retry_refused(reason: str | None, attempts: list[Attempt]) -> bool:
@@ -198,7 +217,7 @@ class AttemptRunner:
                     attempts,
                     _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, result.failure_reason),
                 )
-            if _reason_name(result.failure_reason) not in ONCE_RETRIED_INFRA_REASONS:
+            if _reason_name(result.failure_reason) not in _UNREPORTED_INFRA_REASONS:
                 await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
                 reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"

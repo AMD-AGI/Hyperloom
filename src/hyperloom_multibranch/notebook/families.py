@@ -106,6 +106,9 @@ MECHANISMS: tuple[tuple[Mechanism, str], ...] = (
     (Mechanism.TUNING, r"raise|lower|increas|decreas|size|=\s*\d|\b\d+\b"),
 )
 OTHER_TARGET = "other"
+#: What a family's label says for a family of no one layer.
+ANY_LAYER = "any layer"
+_LABEL_SEPARATOR = " · "
 _FLAG = re.compile(r"--[a-z0-9][a-z0-9-]*")
 _ENV = re.compile(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b")
 _Named = TypeVar("_Named")
@@ -121,8 +124,21 @@ class Family:
 
     @property
     def label(self) -> str:
-        layer = self.layer.value if self.layer is not None else "any layer"
-        return f"{self.target} · {self.mechanism.value} · {layer}"
+        layer = self.layer.value if self.layer is not None else ANY_LAYER
+        return _LABEL_SEPARATOR.join((self.target, self.mechanism.value, layer))
+
+    @classmethod
+    def from_label(cls, label: str) -> Family | None:
+        """The family whose :attr:`label` is ``label``; ``None`` for a label no family has."""
+
+        parts = label.split(_LABEL_SEPARATOR)
+        if len(parts) != 3:
+            return None
+        target, mechanism, layer = parts
+        try:
+            return cls(target, Mechanism(mechanism), None if layer == ANY_LAYER else IntentLayer(layer))
+        except ValueError:
+            return None
 
     def covers(self, other: Family) -> bool:
         """Whether ``other`` is of this family where this one says anything: its target, its mechanism unless this
@@ -211,6 +227,7 @@ def note_family(target: str, mechanism: str, layer: IntentLayer | None, content:
 
 
 __all__ = [
+    "ANY_LAYER",
     "COMPONENTS",
     "MECHANISMS",
     "OP_FAMILIES",

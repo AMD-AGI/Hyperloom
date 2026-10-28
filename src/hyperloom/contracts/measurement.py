@@ -878,7 +878,8 @@ class TestResult:
     of short prompts answered by fresh server processes, compared with each other, as counts and positions only.
     ``long_context`` is the check of a test the toolbox asked it for (``None`` for any other test): a frozen set of long
     synthetic prompts answered by the candidate's own server and graded by substring match, as per-task and total scores,
-    per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``.
+    per-prompt outcomes and, when it did not answer every prompt, the reason it is ``incomplete``; a candidate's carries
+    the root's reading it is judged after (``LongContextResult.root``).
     ``builds`` has one charge for each native build the test's stack needed (none for a stack that needs none, and none in
     a document written before builds existed); ``gpu_seconds`` and ``queued_at`` never include build time.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they

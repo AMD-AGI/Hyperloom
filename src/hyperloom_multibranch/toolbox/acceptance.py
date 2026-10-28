@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
 from hyperloom_multibranch.toolbox.long_context import decide as decide_long_context
 from hyperloom_multibranch.toolbox.short_prompt_pool import PoolKey
+from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom_multibranch.toolbox.short_prompts import (
     ShortPromptSetup,
     blob_patch_files,
@@ -167,6 +168,19 @@ def _nothing_pooled(key: PoolKey) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class EarlierBaselines:
+    """The BASELINE tests of one recipe the toolbox accepted before a request: how many, and how many of them have no
+    outcome yet (each of those adds its own server to the recipe's short-prompt pool when it ends)."""
+
+    accepted: int = 0
+    unfinished: int = 0
+
+
+def _no_earlier_baselines(request: TestRequest, recipe_digest: str) -> EarlierBaselines:
+    return EarlierBaselines()
+
+
 def _no_live_profile(request: TestRequest, recipe_digest: str) -> str | None:
     return None
 
@@ -200,8 +214,8 @@ class AcceptanceSetup:
     acceptance as ``unsupported_kind``, and ``None`` accepts every kind. ``short_prompts`` is the staged prompt set of the
     short-prompt consistency check: with it, a test whose change touches attention, the KV cache or prefill (the rule
     pack says which), whose purpose the pack always checks, or whose request forces it, runs the check; ``None`` runs none.
-    ``long_context`` is the staged prompt set of the long-context check, which a request that sets ``long_context_check``
-    runs; ``None`` runs none.
+    ``long_context`` is the staged prompt set of the long-context check, which runs under the short-prompt check's lever
+    list and always purposes, or when a request sets ``long_context_check``; ``None`` runs none.
 
     ``explore_accuracy`` off leaves the accuracy evaluation (GSM8K) out of a plain ``explore`` test (one that does not
     force the consistency check), whose accepted request then records ``accuracy=False``: the check was skipped, and the
@@ -209,6 +223,12 @@ class AcceptanceSetup:
     that forces the consistency check (a lead being adopted), still run it. It is on by default because the rule gate
     still reads an eval score from every explore (``rulegate.readings.eval_score``); once the gate judges an explore
     without one, the default turns off and this field goes.
+
+    ``root_tests`` is how many BASELINE tests PRELUDE submits for the root (the rule gate's ``baseline_test_count``; 0, the
+    default, for a campaign that submits none, such as AgentX, whose root is first tested at FINAL). The last of them, the
+    ``root_tests``-th BASELINE test of the root's recipe, tops the root's short-prompt pool up to the pack's ``processes``
+    once per session: it boots as many fresh processes as the pool lacks once the earlier ones that have not ended add their
+    own servers, so the floor rests on the same count as every candidate held to it.
 
     ``aiter_builds_missing`` says why this toolbox's tests cannot build the aiter modules a patch to aiter's ``csrc`` or
     ``hsa`` touches (its runners would refuse every attempt of such a test); with it such a candidate is refused at
@@ -224,6 +244,7 @@ class AcceptanceSetup:
     long_context: LongContextSetup | None = None
     explore_accuracy: bool = True
     aiter_builds_missing: str | None = None
+    root_tests: int = 0
 
 
 @dataclass(frozen=True)
@@ -243,17 +264,21 @@ class Acceptance:
         is_accepted: Callable[[str], bool],
         live_profile: Callable[[TestRequest, str], str | None] = _no_live_profile,
         pooled: Callable[[PoolKey], int] = _nothing_pooled,
+        earlier_baselines: Callable[[TestRequest, str], EarlierBaselines] = _no_earlier_baselines,
     ) -> None:
         """``live_profile`` answers, for a PROFILE request and the digest of the recipe it measures, the id of a profile
         of the same recipe that is queued, running or measured, or ``None``; the toolbox reads it from its submit log.
         ``pooled`` answers how many server processes have answered the short prompts for a recipe so far (the toolbox's
-        ``short_prompt_pool``)."""
+        ``short_prompt_pool``). ``earlier_baselines`` answers, for a BASELINE request and the digest of its recipe, the
+        BASELINE tests of that recipe accepted before it (the toolbox reads its submit log)."""
         self._repo = setup.repo
         self._planner = setup.planner
         self._image = setup.active_image_digest
         self._is_accepted = is_accepted
         self._live_profile = live_profile
         self._pooled = pooled
+        self._earlier_baselines = earlier_baselines
+        self._root_tests = setup.root_tests
         self._workload = setup.workload_kind
         self._short_prompts = setup.short_prompts
         blobs = setup.planner.blobs
@@ -301,24 +326,36 @@ class Acceptance:
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)
         accepted = self._with_short_prompts(planned, recipe, candidate, request)
-        return Prepared(self._with_long_context(accepted, request), digest)
+        return Prepared(self._with_long_context(accepted, recipe, candidate, request), digest)
 
     def _with_short_prompts(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the consistency check this request runs, when it runs one and ``accepted`` can carry it: on the
-        test's own server, and on as many fresh ones as the recipe's pool lacks for a merge test or a final candidate."""
+        test's own server, and on as many fresh ones as the recipe's pool lacks for a merge test, a final candidate or the
+        root's top-up."""
         plan = decide(request, parent, candidate, self._short_prompts, self._patch_files)
         if plan is not None:
-            pooled = self._pooled(PoolKey(candidate.digest(), plan.prompts_sha256, plan.max_new_tokens))
-            plan = with_extra_processes(plan, request, pooled)
+            digest = candidate.digest()
+            plan = self._topped_up(
+                plan, request, digest, self._pooled(PoolKey(digest, plan.prompts_sha256, plan.max_new_tokens))
+            )
         return (
             replace(accepted, short_prompts=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)
             else accepted
         )
 
-    def _with_long_context(self, accepted: object, request: TestRequest) -> object:
+    def _topped_up(self, plan: ShortPromptPlan, request: TestRequest, digest: str, pooled: int) -> ShortPromptPlan:
+        """``plan`` with the fresh processes ``request`` boots; the session's last BASELINE test (``root_tests``) counts the
+        earlier ones that have not ended as pooled, since each adds its own server when it does."""
+        if request.purpose is Purpose.BASELINE and self._root_tests:
+            earlier = self._earlier_baselines(request, digest)
+            if earlier.accepted + 1 == self._root_tests:
+                return with_extra_processes(plan, request, pooled + earlier.unfinished, root_top_up=True)
+        return with_extra_processes(plan, request, pooled)
+
+    def _with_long_context(self, accepted: object, parent: Recipe, candidate: Recipe, request: TestRequest) -> object:
         """``accepted`` with the long-context check this request runs, when it runs one and ``accepted`` can carry it."""
-        plan = decide_long_context(request, self._long_context)
+        plan = decide_long_context(request, parent, candidate, self._long_context, self._patch_files)
         return (
             replace(accepted, long_context=plan)
             if plan is not None and isinstance(accepted, AcceptedMeasurement)
