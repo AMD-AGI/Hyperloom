@@ -15,16 +15,15 @@ from collections import Counter
 from code_metrics_collect import METRICS, MODULE, MODULE_LINES, PENDING, Finding, Key
 
 MARKER = "<!-- code-metrics-report -->"
-UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
 OVERRIDE_LABEL = "baseline-raise"
 GATE_CHANGED = "Gate implementation changed (needs review)"
 WAIVED = f" (waived by the `{OVERRIDE_LABEL}` label)"
 ADVISORY = " (advisory, never fails)"
 _MAX_ROWS = 25
 _SEP = " | "
-_UNIT, _DIMENSION, _BASELINE, _BASE, _NOW = "Unit", "Dimension", "Baseline", "Base", "Now"
-_ENTRY = "Baseline entry"
-_UNIT_CHANGE = [_UNIT, _DIMENSION, _BASELINE, _NOW]
+_UNIT, _DIMENSION, _BASE, _NOW = "Unit", "Dimension", "Base", "Now"
+_UNIT_CHANGE = [_UNIT, _DIMENSION, _BASE, _NOW]
+_UNIT_LIMIT = [_UNIT, _DIMENSION, "Value", "Limit"]
 #: Section title and how-to-fix line of each check in ``code_metrics_checks``.
 CHECKS = {
     "comments": (
@@ -90,25 +89,22 @@ class Outcome:
     """Everything one run decided; ``failed`` is the gate verdict."""
 
     error: str | None = None
-    baseline_path: str = ""
     thresholds: dict[str, int] = dataclasses.field(default_factory=dict)
     versions: dict[str, str] = dataclasses.field(default_factory=dict)
-    baseline: dict[Key, int] = dataclasses.field(default_factory=dict)
-    base_baseline: dict[Key, int] | None = None
-    #: Files the change touches; None judges every file (no base to diff against).
+    #: Every unit over a threshold in this tree, and in the tree at the base (None without a base).
+    findings: dict[Key, Finding] = dataclasses.field(default_factory=dict)
+    base: dict[Key, Finding] | None = None
+    #: Files the change touches; None without a base to diff against.
     touched: set[str] | None = None
+    #: Units over a threshold the base did not have over it; (finding, base value) for units worse than there.
     new: list[Finding] = dataclasses.field(default_factory=list)
     worsened: list[tuple[Finding, int]] = dataclasses.field(default_factory=list)
-    #: (baseline key, recorded value, the tree's finding: None when gone, another key when moved)
-    stale: list[tuple[Key, int, Finding | None]] = dataclasses.field(default_factory=list)
-    #: Out-of-date entries the base had already outgrown: (key, recorded, base value or None, finding).
-    base_drift: list[tuple[Key, int, int | None, Finding | None]] = dataclasses.field(default_factory=list)
-    #: New, worse or out-of-date units in files the change does not touch: (key, recorded or None, finding).
-    untouched: list[tuple[Key, int | None, Finding | None]] = dataclasses.field(default_factory=list)
-    #: New or worse units the base already had at that value or worse: (finding, base value).
-    base_backlog: list[tuple[Finding, int]] = dataclasses.field(default_factory=list)
-    #: (key, base value or None when added, head value)
-    growth: list[tuple[Key, int | None, int]] = dataclasses.field(default_factory=list)
+    #: (base key, base value, the tree's finding: None when within the limit or gone, another key when moved)
+    improved: list[tuple[Key, int, Finding | None]] = dataclasses.field(default_factory=list)
+    #: New or worse units in files the change does not touch: (key, base value or None, finding).
+    untouched: list[tuple[Key, int | None, Finding]] = dataclasses.field(default_factory=list)
+    #: List every unit over a threshold in full (no base, or a push run's job summary).
+    listed: bool = False
     loosened: list[str] = dataclasses.field(default_factory=list)
     #: Edits to the gate's own implementation or tool pins; reported, not a failure.
     gate_changes: list[str] = dataclasses.field(default_factory=list)
@@ -122,7 +118,7 @@ class Outcome:
     design: list = dataclasses.field(default_factory=list)
     #: Design findings the A rules rate advisory (A9, A10, A11, A12 single implementation).
     advisories: list = dataclasses.field(default_factory=list)
-    #: The PR carries the override label: new, worse, growth and design are listed but do not fail.
+    #: The PR carries the override label: new, worse and design are listed but do not fail.
     waived: bool = False
     notes: list[str] = dataclasses.field(default_factory=list)
 
@@ -134,13 +130,13 @@ class Outcome:
 
     @property
     def waivable_failed(self) -> bool:
-        """Findings the override label waives: new, worse, baseline growth and failing design checks."""
-        return bool(self.new or self.worsened or self.growth or self.design)
+        """Findings the override label waives: new, worse and failing design checks."""
+        return bool(self.new or self.worsened or self.design)
 
     @property
     def failed(self) -> bool:
         waivable = self.waivable_failed and not self.waived
-        return bool(self.error or waivable or self.stale or self.loosened or self.problems)
+        return bool(self.error or waivable or self.loosened or self.problems)
 
 
 def render(outcome: Outcome, link_base: str = "", max_rows: int | None = _MAX_ROWS) -> str:
@@ -164,7 +160,7 @@ def render(outcome: Outcome, link_base: str = "", max_rows: int | None = _MAX_RO
 
 def _scope(outcome: Outcome) -> str:
     if outcome.touched is None:
-        return "Judged: every file (no base to compare with).\n"
+        return "No base to compare with: every unit over a threshold is listed below, none fails.\n"
     return (
         f"Judged: the {len(outcome.touched)} files this change touches. Files it does not touch never fail it; "
         "anything found there is listed under *Outside this change* for information.\n"
@@ -175,17 +171,17 @@ def _summary(outcome: Outcome) -> str:
     counts = {
         "new": Counter(f.metric for f in outcome.new),
         "worse": Counter(f.metric for f, _ in outcome.worsened),
-        "stale": Counter(key[0] for key, _, _ in outcome.stale),
-        "head": Counter(key[0] for key in outcome.baseline),
-        "base": Counter(key[0] for key in outcome.base_baseline or {}),
+        "improved": Counter(key.metric for key, _, _ in outcome.improved),
+        "head": Counter(key.metric for key in outcome.findings),
+        "base": Counter(key.metric for key in outcome.base or {}),
     }
-    rows = ["| Dimension | Limit | New | Worse | Baseline out of date | Baseline entries | vs base |"]
+    rows = ["| Dimension | Limit | New | Worse | Improved | Over the limit | vs base |"]
     rows.append("|---|---:|---:|---:|---:|---:|---:|")
     for name, metric in METRICS.items():
         if name in PENDING and name not in outcome.thresholds:
             continue
-        delta = "n/a" if outcome.base_baseline is None else f"{counts['head'][name] - counts['base'][name]:+d}"
-        cells = [counts[c][name] for c in ("new", "worse", "stale", "head")]
+        delta = "n/a" if outcome.base is None else f"{counts['head'][name] - counts['base'][name]:+d}"
+        cells = [counts[c][name] for c in ("new", "worse", "improved", "head")]
         rows.append(
             f"| {metric.label} | {_dimension_limit(name, outcome)} | " + _SEP.join(map(str, cells)) + f" | {delta} |"
         )
@@ -225,27 +221,15 @@ def _sections(outcome: Outcome, link_base: str, max_rows: int | None) -> list[st
     waived = WAIVED if outcome.waived else ""
     sections = [
         _table(
-            f"New violations (not in the baseline){waived}",
-            [_UNIT, _DIMENSION, "Value", "Limit"],
+            f"New violations (not at the base){waived}",
+            _UNIT_LIMIT,
             [[_unit(f, link_base), _label(f.metric), f.value, _limit(f.metric, limits)] for f in outcome.new],
             max_rows,
         ),
         _table(
-            f"Worse than the baseline{waived}",
+            f"Worse than at the base{waived}",
             _UNIT_CHANGE,
             [[_unit(f, link_base), _label(f.metric), was, f.value] for f, was in outcome.worsened],
-            max_rows,
-        ),
-        _table(
-            f"Baseline out of date (run `{UPDATE_COMMAND}`)",
-            [_ENTRY, _DIMENSION, _BASELINE, _NOW],
-            [[_key(key), _label(key[0]), was, _now(key, now, link_base)] for key, was, now in outcome.stale],
-            max_rows,
-        ),
-        _table(
-            f"Baseline grew relative to the base branch{waived}",
-            [_ENTRY, _DIMENSION, _BASE, "This change"],
-            [[_key(key), _label(key[0]), "absent" if was is None else was, now] for key, was, now in outcome.growth],
             max_rows,
         ),
     ]
@@ -273,29 +257,34 @@ def _informational(outcome: Outcome, link_base: str, max_rows: int | None) -> li
         [[f"`{path}`", lines, _warn_limit(outcome)] for path, lines in outcome.module_warnings],
         max_rows,
     )
-    backlog = _table(
-        "Already over at the base (backlog, not this change's)",
-        [_UNIT, _DIMENSION, _BASE, _NOW],
-        [[_unit(f, link_base), _label(f.metric), was, f.value] for f, was in outcome.base_backlog],
+    improved = _table(
+        "Improved by this change (informational)",
+        _UNIT_CHANGE,
+        [[_key(key), _label(key.metric), was, _now(key, now, link_base)] for key, was, now in outcome.improved],
         max_rows,
     )
     rows = [
-        [_key(key), _label(key[0]), "absent" if was is None else was, _now(key, now, link_base)]
+        [_key(key), _label(key.metric), "absent" if was is None else was, _now(key, now, link_base)]
         for key, was, now in outcome.untouched
     ]
-    outside = _table("Outside this change (informational)", _UNIT_CHANGE, rows, max_rows)
-    if outside:
-        outside = f"<details><summary>{len(rows)} findings in files this change does not touch</summary>\n\n{outside}\n</details>\n"
-    drift = _table(
-        f"Baseline already out of date at the base (not this change's; `{UPDATE_COMMAND}` tightens it)",
-        [_ENTRY, _DIMENSION, _BASELINE, _BASE, _NOW],
-        [
-            [_key(key), _label(key[0]), was, "under the limit" if base is None else base, _now(key, now, link_base)]
-            for key, was, base, now in outcome.base_drift
-        ],
-        max_rows,
+    outside = _folded(
+        f"{len(rows)} findings in files this change does not touch",
+        _table("Outside this change (informational)", _UNIT_CHANGE, rows, max_rows),
     )
-    return [warn, backlog, drift, outside]
+    # Every row, whatever ``max_rows``: this list is what the backlog is.
+    rows = [
+        [_unit(f, link_base), _label(f.metric), f.value, _limit(f.metric, outcome.thresholds)]
+        for _, f in sorted(outcome.findings.items())
+    ]
+    inventory = _folded(
+        f"{len(rows)} units over a threshold in this tree",
+        _table("Over the limit in this tree", _UNIT_LIMIT, rows if outcome.listed else [], None),
+    )
+    return [warn, improved, outside, inventory]
+
+
+def _folded(summary: str, table: str) -> str:
+    return f"<details><summary>{summary}</summary>\n\n{table}\n</details>\n" if table else ""
 
 
 def _all_problems(outcome: Outcome) -> list:
@@ -359,12 +348,7 @@ def _how_to_fix(outcome: Outcome) -> str:
         "### How to fix\n",
         (
             "- **New or worse**: split the unit (extract a function, a class, a module) until it is back under the "
-            "limit, or no worse than its recorded value. The baseline cannot absorb a new violation: CI refuses any "
-            "baseline entry added or raised relative to the base branch."
-        ),
-        (
-            f"- **Baseline out of date**: something improved. Run `{UPDATE_COMMAND}` and commit "
-            f"`{outcome.baseline_path}`; the command only lowers or removes entries."
+            "limit, or no worse than the base branch has it. There is nothing to record: the base is the reference."
         ),
     ]
     lines += [
@@ -373,7 +357,7 @@ def _how_to_fix(outcome: Outcome) -> str:
         if any(p.check == name for p in _all_problems(outcome))
     ]
     lines.append(
-        f"- **Override**: the `{OVERRIDE_LABEL}` PR label waives new, worse and baseline-growth findings and the "
+        f"- **Override**: the `{OVERRIDE_LABEL}` PR label waives new and worse findings and the "
         "failing design checks (they stay listed here). Use it only with the reason in the PR description; it "
         "waives nothing else."
     )
