@@ -143,8 +143,7 @@ def _port_agent(
     spec: RewriteSpec, driver_path: str, config: Config, request: PortRequest, usage: UsageAccumulator | None
 ):
     """The implementer session every PORT attempt runs: only the FlyDSL kernel is editable, correctness is the gate."""
-    from kernelforge.loop.gate_settings import GateMeasurement
-    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
+    from kernelforge.loop.api import GateMeasurement, ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
 
     return make_agent_fn(
         config,

@@ -535,7 +535,6 @@ def test_warm_recipe_proven_items(coord: Coordinator) -> None:
 def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
     """The whole tag dict, because these keys are the warm-start reader's filter."""
     monkeypatch.delenv("EP", raising=False)
-    monkeypatch.delenv("PP", raising=False)
     ss = coord.shared_state
     ss.framework = "sglang"
     ss.model_class = "moe"
@@ -588,15 +587,13 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
 
 
 def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(coord: Coordinator, monkeypatch) -> None:
-    """``$EP`` is the legacy-SDK fallback; ``$PP`` is the only source there is for ``pp``."""
+    """``$EP`` is the legacy-SDK fallback."""
     monkeypatch.setenv("EP", "2")
-    monkeypatch.setenv("PP", " 3 ")
     ss = coord.shared_state
     ss.ep = 8
 
     tags = workload_kb_tags(coord.shared_state)
     assert tags["ep"] == 8
-    assert tags["pp"] == 3
 
     ss.ep = 0
     assert workload_kb_tags(coord.shared_state)["ep"] == 2
@@ -604,17 +601,14 @@ def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(co
 
 def test_an_unparseable_or_non_positive_parallelism_env_is_not_tagged(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("EP", "two")
-    monkeypatch.setenv("PP", "0")
 
     tags = workload_kb_tags(coord.shared_state)
     assert "ep" not in tags
-    assert "pp" not in tags
 
 
 def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinator, monkeypatch) -> None:
     """``state.json`` is a system boundary: a null where a dict is declared must not raise here."""
     monkeypatch.delenv("EP", raising=False)
-    monkeypatch.delenv("PP", raising=False)
     ss = coord.shared_state
     ss.framework = "vllm"
     ss.model_class = ""
@@ -626,7 +620,6 @@ def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinato
 
 def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("EP", raising=False)
-    monkeypatch.delenv("PP", raising=False)
     ss = coord.shared_state
     ss.framework = "vllm"
     ss.model_class = ""

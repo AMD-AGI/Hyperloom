@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-import kernelforge.loop.editable_repo as editable_repo
+import kernelforge.tools.editable_repo as editable_repo
 
 
 @pytest.fixture(autouse=True)

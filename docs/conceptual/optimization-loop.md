@@ -630,6 +630,19 @@ CONC. The independent MLPerf backend keeps its optional sweep, disabled by
 default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
 for supported workload controls.
 
+Each arm runs the session's own CONC first, then the rest of the ladder
+cheapest first: low to high for a synthetic workload, whose rungs send requests
+in proportion to CONC, and high to low for an agentic one, whose rungs replay a
+fixed set of trajectories on more lanes the higher CONC goes.
+A pair needs both arms, so the baseline arm runs first: its first rung may use
+the whole budget, and each later rung must fit in half of what was left when
+the arm started. The optimized arm then runs only the concurrencies the
+baseline reached. A budget that runs out therefore drops whole pairs, and the
+anchor pair is the last one it drops. A rung is not started once the time left
+is shorter than the last benchmark measured after the anchor, since none past
+it runs faster. SWEEP dispatches the sweep only when the time it can grant holds
+one pair: two of the session's measured baseline rounds.
+
 Results update `last_conc_sweep` and feed the final report and breakdown.
 A ladder that fails closes the phase as `sweep_failed`; one that finishes
 (`sweep_done`) loops back or closes on the reason below. While the sweep it

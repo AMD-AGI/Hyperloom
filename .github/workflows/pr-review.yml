@@ -201,7 +201,8 @@ jobs:
             base-tree/; every head-tree read or grep targets pr-head/.
           - You may install missing tools and run the smallest scoped test needed to verify a finding.
             Never run the full test suite. Do not modify or push the PR branch.
-          - Step 7's independent reader is a Task sub-agent given only card.md, diff.txt and base.txt.
+          - Step 7's independent reader is a Task sub-agent given only the surviving findings as
+            they will appear on the card, diff.txt and base.txt.
           - Complete every skill step before writing card.md. The following non-empty artifacts are
             mandatory: rules.txt, answers.txt, core_files.txt, verdicts.txt, ai_diagnostic.txt,
             refutations.txt and independent.txt, and prior_verdicts.txt when comments.txt holds an

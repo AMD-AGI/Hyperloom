@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -22,12 +21,11 @@ from typing import Callable
 
 from kernelforge.tools.git import git
 from kernelforge.config import Config
+from kernelforge.loop.api import RESULT_SENTINEL, forge_loop_command, parse_forge_loop_result
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.tracker import ExperimentTracker
 
 log = logging.getLogger(__name__)
-
-_RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
 
 # forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see loop.runner), so it is
 # present in the captured output even when the loop is later hard-killed.
@@ -159,14 +157,6 @@ def _latest_ledger(*snapshots: dict | None) -> dict:
     return latest
 
 
-def _forge_loop_argv() -> list[str]:
-    """Invoke forge-loop with the SAME interpreter + package as THIS process."""
-    if sys.executable:
-        return [sys.executable, "-m", "kernelforge.cli"]
-    exe = shutil.which("kernelforge")
-    return [exe] if exe else ["kernelforge"]
-
-
 def _poll_process(proc) -> int | None:
     """Return a subprocess status while remaining compatible with test doubles."""
     poll = getattr(proc, "poll", None)
@@ -293,8 +283,7 @@ def _forge_loop_cmd(
 ) -> list[str]:
     """The forge-loop invocation this rewrite optimizes its ported kernel with."""
     options = request.options
-    cmd = _forge_loop_argv() + [
-        "forge-loop",
+    cmd = forge_loop_command(
         "--kernel",
         spec.flydsl_kernel,
         "--driver",
@@ -332,7 +321,7 @@ def _forge_loop_cmd(
         # Spelled out either way, so the nested loop does what this caller asked rather than whatever its default is.
         "--roofline-ceiling",
         "on" if request.roofline_ceiling else "off",
-    ]
+    )
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
@@ -366,12 +355,7 @@ def _trusted_loop_result(result_json: str, stdout_text: str, *, returncode) -> t
     if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
         result = parsed
     if not result:
-        match = _RESULT_RE.search(stdout_text)
-        if match is not None:
-            try:
-                result = json.loads(match.group(1))
-            except ValueError:
-                log.warning("optimize: could not parse forge-loop sentinel JSON")
+        result = parse_forge_loop_result(stdout_text) or {}
     if not result:
         log.warning(
             "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",
@@ -445,8 +429,8 @@ def run_optimize(
         def _stream_output() -> None:
             for line in proc.stdout:
                 collected.append(line)
-                # The outer rewrite publishes the same __FORGE_RESULT__ contract as forge-loop.
-                if "__FORGE_RESULT__" in line:
+                # The outer rewrite publishes the same result contract as forge-loop.
+                if RESULT_SENTINEL in line:
                     continue
                 sys.stdout.write(line)
                 sys.stdout.flush()

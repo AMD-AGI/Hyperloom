@@ -54,8 +54,8 @@ def _resolve_fusion_decode_trace(state) -> str:
     ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
     round that merged its ranks, and the capture directory otherwise --
     ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
-    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
-    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    ``trace_dir`` when no ``merged-*`` file exists, which is every non-AgentX
+    sglang/vLLM profile. A directory therefore resolves to the
     newest capture in it, which is this run's too: the directory is the round's own
     ``trace_dir``.
     """

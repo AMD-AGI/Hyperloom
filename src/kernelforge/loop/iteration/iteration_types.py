@@ -12,7 +12,7 @@ from typing import Any, NamedTuple
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.lessons import SummaryOutcome
-from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
+from kernelforge.tools.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.loop.run_state import IterationVerdict
 from kernelforge.loop.search_actors import SearchActorPool
 

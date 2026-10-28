@@ -20,9 +20,10 @@ from kernelforge.agent_backends import (
     resolve_agent_runtime,
     StdioMcpServer,
 )
+from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_settings
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.orchestrator.gate_tag import gate_outcome_tag
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
@@ -184,7 +185,7 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
     They differ when the requested provider is unavailable and the registry
     falls back, which is said out loud rather than left for a later surprise.
     """
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             agent_backend,
@@ -193,7 +194,7 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
             # The executable and provider options, like the model, belong to the resolved provider.
-            settings=replace(config.agent_runtime_settings(), executable="", options={}),
+            settings=replace(agent_runtime_settings(config), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
@@ -211,6 +212,13 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             flush=True,
         )
     return backend, requested_backend
+
+
+def _session_cwd(kernel_path: str, workspace: Path | None, backend: Any) -> str:
+    """Where an implementer session runs: beside the kernel, or at the workspace root for a provider that needs it."""
+    if backend.capabilities.requires_workspace_cwd and workspace is not None and workspace.is_dir():
+        return str(workspace.resolve())
+    return str(Path(kernel_path).parent)
 
 
 def _bullet_list(items: list[str]) -> str:
@@ -745,15 +753,8 @@ Make your change(s) now.
 
         # One fixed interaction budget per candidate Session.
         turn_cap = config.max_turns
-        cwd = str(Path(kernel_path).parent)
-        run_cwd = cwd
         configured_workspace = Path(config.workspace) if config.workspace else None
-        if (
-            backend.capabilities.requires_workspace_cwd
-            and configured_workspace is not None
-            and configured_workspace.is_dir()
-        ):
-            run_cwd = str(configured_workspace.resolve())
+        run_cwd = _session_cwd(kernel_path, configured_workspace, backend)
 
         gate = None
         system_prompt = base_system_prompt
@@ -799,6 +800,7 @@ Make your change(s) now.
             target_files=(source_files or [kernel_path]),
             commit_new_paths=list(commit_new_paths),
             driver_script=driver_script or "",
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=list(gate_scope.extra_protected_globs),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
             # leaves a JIT cache there, so every iteration starts from a worktree the caller already dirtied.
@@ -915,9 +917,15 @@ def _make_session_summarizer(
 
     from kernelforge.loop.lessons import SUMMARIZER_ROLE
 
+    implementer_policy = spec.tool_policy or AgentToolPolicy()
     summary_spec = replace(
         spec,
-        system_prompt=SUMMARIZER_ROLE,
+        # The implementer's system prompt and tool definitions open the cached prefix the whole session was billed
+        # against; changing either makes the summary rewrite that prefix instead of reading it. The summarizer role
+        # travels in the user turn, and a provider that describes tools beyond the narrower tool_policy below must
+        # refuse them whatever the permission mode or settings say (the Claude backend denies them in a PreToolUse
+        # hook).
+        declared_tool_policy=implementer_policy,
         writable=False,
         hooks=None,
         allow_dirty_targets=True,
@@ -926,18 +934,20 @@ def _make_session_summarizer(
         protected_globs=["*"],
         # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
-        tool_policy=AgentToolPolicy(
+        tool_policy=replace(
+            implementer_policy,
             read=True,
             search=True,
             write=False,
             shell=False,
+            extra_tools=(),
             # Enough turns to check a path or a number it half-remembers, not enough to start exploring the workspace.
             max_turns=4,
         ),
     )
 
     async def summarize(prompt: str) -> str:
-        result = await backend.resume(summary_spec, session_id, prompt, usage=usage)
+        result = await backend.resume(summary_spec, session_id, f"{SUMMARIZER_ROLE}\n\n{prompt}", usage=usage)
         return result.text or ""
 
     return summarize

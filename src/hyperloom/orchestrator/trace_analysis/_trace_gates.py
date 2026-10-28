@@ -142,10 +142,10 @@ def _evaluate_low_compute_gate(
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 
 # Alternate must beat the requested mode by this margin to avoid thrashing.
-_CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
+CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
 
 
-def _resolve_min_busy_ratio() -> float:
+def resolve_min_busy_ratio() -> float:
     """Return the minimum chunk busy-ratio threshold for the N36 quality gate.
 
     Reads ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` and falls back
@@ -245,7 +245,7 @@ def _check_chunk_quality(
         return None
     if sel_ratio is None:
         sel_ratio = 0.0
-    threshold = _resolve_min_busy_ratio()
+    threshold = resolve_min_busy_ratio()
     if sel_ratio >= threshold:
         return None
 
@@ -263,7 +263,7 @@ def _check_chunk_quality(
         if sel_events == 0:
             if oth_ratio > 0.0:
                 alternates.append((other_mode, oth_ratio))
-        elif oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+        elif oth_ratio >= threshold and (oth_ratio - sel_ratio) >= CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
     if not alternates and sel_events > 0:
         return None  # No better mode exists; let roofline_failure_streak path handle.

@@ -11,8 +11,7 @@ import logging
 import os
 from typing import Any, NamedTuple
 
-from kernelforge.knowledge.kb_store.identity.implementation import normalize_operator_name
-from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
+from kernelforge.knowledge import KERNEL_RECIPE_PRODUCERS, normalize_operator_name
 
 from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.env import env_flag

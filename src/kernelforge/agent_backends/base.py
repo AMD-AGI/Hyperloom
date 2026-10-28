@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, REASONING_EFFORT_RANK
+from kernelforge.tools.protected_paths import ProtectedPathRules
 
 
 #: Environment overlay applied to every session started inside the current
@@ -88,6 +89,9 @@ class AgentCapabilities:
     requires_workspace_cwd: bool = False
     # Whether the provider applies ``AgentRunSpec.env`` over the environment it spawns the session with.
     session_env: bool = False
+    # Whether ``AgentRunSpec.shared_prompt_prefix`` becomes a cache entry of its own that a later session sending the
+    # same prefix reads, and whether the provider reports ``on_response_started``.
+    shared_prompt_cache: bool = False
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,23 @@ class AgentRunSpec:
     # surface. Unlike ``protected_globs=["*"]`` it reaches no ignored file, so a build the session runs is neither
     # snapshotted nor counted. Appended for the same reason as the fields above.
     allow_tracked_changes: bool = True
+    # The caller's rules for which workspace paths this session must leave as they are; ``protected_paths`` and
+    # ``protected_globs`` add to them per session. A session that can write is refused without them, so a caller that
+    # forgets them cannot run with nothing protected. Appended for the same reason as the fields above.
+    protected_path_rules: ProtectedPathRules | None = None
+    # The tools a provider describes to the model, when they must differ from the ones ``tool_policy`` lets this
+    # session use. A resumed follow-up keeps the definitions of the conversation it continues, because they open the
+    # cached prefix every earlier turn was billed against. The provider refuses every described tool ``tool_policy``
+    # does not allow, whatever its permission mode or settings would approve.
+    # Appended for the same reason as the fields above.
+    declared_tool_policy: AgentToolPolicy | None = None
+    # A leading part of ``user_prompt`` that sibling sessions send verbatim. ``user_prompt`` stays the whole prompt;
+    # a provider with ``shared_prompt_cache`` caches this part on its own, so a sibling started after the first reads
+    # it instead of writing it again. Appended for the same reason as the fields above.
+    shared_prompt_prefix: str = ""
+    # Called once, when the model starts answering this session's first request: from then on a prefix that request
+    # wrote can be read by another session. A provider without ``shared_prompt_cache`` never calls it.
+    on_response_started: Callable[[], None] | None = None
 
     def resolved(self, runtime: AgentRuntimeConfig) -> AgentRunSpec:
         """Settle this session's model, effort and environment.

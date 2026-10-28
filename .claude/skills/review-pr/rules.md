@@ -6,12 +6,16 @@ index below to pick the rules the diff at hand can actually break, then read onl
 Every rule here was clustered from real review history on this repository. `Seen in` cites the
 PR the rule was learned from.
 
-Severity is `blocking` under one of the three kinds SKILL.md's output contract names: the current
-behaviour is wrong, something that had to move in the same PR did not (title, description,
-docstring), or the diff breaks a rule `AGENTS.md` states outright. Everything else is `advisory`:
-it is adjudicated in `verdicts.txt` like any other rule and then **not published**, because a
-review that ships it has stopped being two parts. An advisory `FIRE` is a note for the reviewer
-answering a later question from the author, not a line on the card.
+Severity is `blocking` under one of the four kinds SKILL.md's output contract names: the current
+behaviour is wrong, the premise does not reproduce or the named failure survives the change,
+something that had to move in the same PR did not (title, description, docstring), or the diff
+breaks a rule `AGENTS.md` states outright. Everything else is `advisory`: it takes no verdict line
+and is **not published**, because a review that ships it has stopped being two parts. Adjudicate an
+advisory rule only when it fires, and then as a note for the reviewer answering a later question
+from the author, never a line on the card. A rule that is blocking in one shape and advisory in
+another takes its line for the blocking shape alone. A `SKIPPED:` line is not a finding and none of
+this reaches it: it states what the review did not check, so V4's `# PARTIAL:` lines go on the card
+under SKILL.md's SKIPPED protocol whatever V4's severity.
 
 Rules that duplicate a static gate (ruff, pylint, bandit, CodeQL, gitleaks, REUSE) or that restate
 [`AGENTS.md`](../../../AGENTS.md) are deliberately absent. See
@@ -20,6 +24,28 @@ statement of the same review posture.
 
 ---
 
+## Adding a rule
+
+When a human reviewer catches something the skill missed:
+
+1. Add the rule body under its family, with the real PR it was learned from quoted as evidence. A
+   rule with no PR behind it is a hypothetical and does not go in.
+2. Put its id on an index row whose trigger a reviewer can match against `files.txt` and the diff,
+   or add a row. A rule on no row is never read.
+3. Write the false-positive self-check into the body: the condition under which the shape is
+   correct and the rule must stay silent.
+4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
+5. Run every command the rule body names, in this repo, and paste what it printed into the commit.
+   A rule whose evidence step cannot be executed is not a rule: #2227 shipped `git merge-tree <base>
+   HEAD origin/main`, the deprecated three-argument form, which prints a diff listing and no tree
+   sha for the `git grep` that follows it, and shipped a trigger reading a label out of `ci.txt`,
+   where fetch.sh writes no labels.
+6. Run this skill on the PR that carries the change, against the version of it on `main`, and read
+   the card. A change to the review process is reviewed by the review process; skipping that is
+   how #2227 shipped two rounds of the same defect -- a deleted rule whose gate was confirmed by
+   matching ids rather than by reading what the gate measures -- both caught by a human who did
+   run it.
+
 ## Index
 
 Pick every row whose left column matches the changed files and a skim of the diff, then read only
@@ -27,7 +53,12 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/` | X1 X3 D12 X8 |
+| changes any non-test file under `src/` | X1 X3 X8 |
+| removes, narrows or skips a check because another mechanism is said to cover it: a CI job, a linter, a gate script, a type checker, another rule | E5 |
+| gives a measurement or a causal claim as the reason for the change: a function over a ceiling, a run truncated by a cap or timeout, a named session's duration or termination reason, a percentage or baseline entry | E1 |
+| names a concrete failure it addresses: an error string, a session id, an RSI problem, `Fixes #N` | E2 E4 |
+| is typed `refactor`, or gives simplification, complexity or structure as the reason | E1 E3 |
+| adds a guard, validation or abort where a bad value was detected, or a gate that absorbs an existing cap, budget or counter's consequences | E4 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 V8 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 D11 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
@@ -49,13 +80,13 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds a helper that uses only stdlib (io, json, stat, hashing, subprocess, retry, time), or edits a module under `hyperloom/common/` or whose name says utility (`*utils*`, `io`, `jsonio`, `proctree`, `timeutil`, `_subprocess_kill`) | A3 |
 | adds a new module, or adds methods, fields or imports to a module or class already over a size trigger | A5 |
 | extracts a function from a long one, or cites the complexity or size trigger as the reason for a split | A6 |
-| branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 A10 |
-| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | D14 A8 A9 A11 |
-| adds a `Protocol`, `ABC`, base class, factory, registry, or a function whose body is one forwarding call | A12 |
+| branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 |
+| carries a `baseline-raise` label in `meta.txt`, waiving the `code-metrics` gate, and adds or widens a `def`/`async def` under `src/` outside `tests/` | D12 D14 |
+| adds a `def` or `async def` under `src/`, or adds a parameter to one | A8 |
+| adds a function whose body is one forwarding call | A12 |
 | adds an `isinstance`/`is None`/`or {}` guard on an internal value, a renaming local, or an `except ...: raise` | A13 |
 | adds or renames a function, parameter, module binding or import alias | A14 |
 | reaches through two or more collaborators (`a.b.c.method()`), or adds a module function that mostly reads one parameter's fields | A4 |
-| adds a `global` statement, or a query-named function (`is_`/`get_`/`resolve_`/property) that writes | A11 |
 
 V1-V8 apply to every PR: they govern how the review is run and published, not what the diff
 contains. X2 does too — it reads `title.txt`, `body.txt` and `commits.txt`, so no row can trigger
@@ -116,14 +147,76 @@ file-shaped row would miss.
 **Evidence:** `$WORK/diff.txt` for the deleted inference and the new default; `$WORK/files.txt` to see whether the protocol, gate or schema moved with it.
 **Report as:** `C5 <file>:<line> -- <field> defaults silently when absent; an out-of-tree producer gets <wrong behaviour>`
 
+---
+
+## E -- Premise and efficacy
+
+C asks whether the change reaches every consumer. E asks the two questions on either side of it: was
+the reason for the change true, and does the change end the failure it names. Both are answered
+against the merge base and the failure itself, never against the description -- a PR whose premise or
+whose effect goes unchecked is the one shape a review can pass in full while the problem it was
+opened for stays live.
+
+### E1 -- Verify the premise on the merge base before judging the fix
+
+**Severity:** blocking
+**Fires when:** `body.txt` or `title.txt` gives a measurement or a causal claim as the reason for the change: a function over a complexity, length or parameter ceiling; a run truncated by a cap, budget or timeout; a named session's duration or termination reason; a percentage, count or baseline entry.
+**The rule:** the premise is reproduced with the repo's own tool at `base.txt` before the implementation is judged, and *the repo's own tool* is the binding half. Cyclomatic complexity is `radon cc` at the version `scripts/code_metrics.py` pins, never Ruff's `C901`: the two disagree by a factor on the same function, because radon counts every `and`, `or`, ternary, comprehension and `assert` and mccabe does not. Parameter count is `ruff --select PLR0913`. Read either against `pyproject.toml`'s `[tool.hyperloom.code_metrics.thresholds]` and against `scripts/code_metrics_baseline.txt`, or let `scripts/code_metrics.py --base-ref $(cat "$WORK/base.txt")` do both. A claim resting on one run is read out of that run's artifacts or logs -- its real elapsed time and its real termination reason -- not out of the prose. A premise that does not reproduce makes the whole change unmotivated, however correct its implementation: report it against the premise, not against the code.
+**Seen in:** PR #1981 -- the cap was raised because a round was said to hit it, while the three profile attempts in the named session ran about 128 s each and ended `orchestrator_cancelled` against a 7200 s cap; the PR was closed. The inverse, and the reason this rule names its tool: reviewing PR #2009 and PR #2046 with `ruff --select C901` put `_validate_restore_record` at 8 and `load_controller_publication` at 18, both far under the ceiling, and made two correctly-motivated refactors look unmotivated -- `radon cc`, which the gate pins, puts the same two functions at 23 and 30, and #2046's body had said 30 all along. A premise checked with the wrong tool is worse than one not checked at all, because it arrives with a number attached.
+**Not a finding when:** the premise reproduces, or it rests on state no artifact retained and the body says so -- then the figure is `[unverified]` and E2 decides on the mechanism instead. Never when your own measurement came from a tool the gate does not run.
+**Evidence:** the tool invocation and its output at `base.txt`, quoted with the threshold it is read against; `$WORK/body.txt` for the claim.
+**Report as:** `E1 -- the body gives <claim> as the reason; at <base sha> <tool> measures <actual> against <threshold> -- the premise does not hold`
+
+### E2 -- A fix must end the failure it names, and the review proves which branch does it
+
+**Severity:** blocking
+**Fires when:** the body names a concrete failure -- an error string, a session, an RSI problem, an issue -- and claims this diff addresses it.
+**The rule:** reconstruct what that failure requires, independently of the description, then trace which branch the new code takes under exactly those conditions and say what the outcome becomes. The description's account of the mechanism is the thing under test, not the evidence for it. Where the trace shows the failure recurring, the change may still be worth landing for what it does improve, but it does not close the problem and the body may not say it does. The original failure's own output -- the pip stderr, the traceback, the log line -- is what pins the conditions; when the body quotes none and none survives in an artifact, that gap is itself the finding, because every later step rests on a guess.
+**Seen in:** PR #2102 -- the retry spec was rebuilt from the installed version so it could no longer be vacuously satisfied, which the review verified; the symptom needs the *retry* to exit 0, which happens either when pip really installed ray (same branch, same spec, unchanged) or when ray already satisfied the floor, and then the pinned install's failure came from `click<8.3.0` or the environment and the new retry is `click<8.3.0` in that same environment. The host could not write to a root-owned `/opt/venv`; the PR was closed. PR #1982 -- the guard aborted a grid variant at the last line while the proposals were admitted several layers upstream, which is where it moved.
+**Not a finding when:** the trace shows the failure ending, or the body already states that the change improves the diagnostic rather than repairing the case and does not claim to close the problem.
+**Evidence:** the reconstructed conditions, the branch the head takes under them, and the resulting outcome -- all three on the card; `$WORK/base.txt` for what the old code did with the same input.
+**Report as:** `E2 -- the body files this against <failure>; under <conditions> the head takes <branch> and still <outcome> -- <problem> is not closed by this diff`
+
+### E3 -- A refactor accounts for the mechanism it removed, in net lines
+
+**Severity:** blocking
+**Fires when:** `title.txt` or a commit subject is typed `refactor`, or the body gives simplification, complexity or structure as the reason, and `numstat.txt` shows the diff adding more production lines than it deletes.
+**The rule:** count `src/` paths outside a `tests/` directory from `numstat.txt`; added minus deleted is the number, and it goes on the card beside the mechanism the change removed. A refactor that grows production code has to name what it took away -- a branch, a state, a copy, a layer -- and a new helper, a new module or a named unit around existing code is not that. `AGENTS.md` *Simplify by removing a mechanism* is the bullet. The comparison that settles it is the delete-first alternative: what the same goal costs when the duplicated or dead code goes first, which is frequently negative where the PR is positive.
+**Seen in:** no single PR -- a window of thirteen. The seven refactors a card cleared with no finding landed at net +395 (#2010), +260 (#2014), +116 (#2016), +109 (#2018), +27 (#2012), +24 (#2007) and +13 (#2009) production lines; the six a human sent back over the same weeks landed at net -184 (#2019), -134 (#2020), -94 (#1961), -73 (#1992), -43 (#1998) and -26 (#1964). Same authors, same kind of change; the variable was whether anyone counted. #2046 went from +40 lines and 7 new functions to +0 once the count was asked for.
+**Not a finding when:** the body states the net figure and the mechanism removed, and the growth is a stated one-off -- a split that deletes a duplicated copy at a second site in the same diff, or a staged first half whose follow-up the body names.
+**Evidence:** `$WORK/netlines.txt` -- `net:` is the number, already summed over `src/` paths outside `tests/`; `$WORK/body.txt` for the mechanism the PR claims to remove.
+**Report as:** `E3 -- refactor adds <N> net production lines and removes no mechanism; <alternative> reaches the same state at <M>`
+
+### E4 -- Fix where the input is admitted, not where it finally breaks
+
+**Severity:** blocking
+**Fires when:** the diff adds a guard, a validation or an abort to the place a bad value was detected, and that place is a consumer rather than the boundary the value entered through.
+**The rule:** name the link in the call chain the guard sits on, then name the first boundary upstream that could have refused the same input. Where that boundary exists and the diff leaves it open, every other consumer of the same value keeps the defect and the next one fails the same way; the guard is a backstop and the body must say which layer owns the refusal. `AGENTS.md` *Fix upstream, not around it* is the bullet. The question also runs the other way: where a PR adds a gate to absorb the consequences of an existing value, that value's own definition -- its unit, its scope, its reset point -- is checked before the gate is accepted, because a gate over a broken quantity is the same defect one layer out.
+**Seen in:** PR #1982 -- `_grid_runner` aborted variants whose `AITER_CONFIG` file was missing, six lines at the last moment, while the proposals carrying those paths were admitted in the specialist dispatch; the fix moved to `specialists/patch_safety.py` and `run_grid` kept the check as a backstop. PR #2090 -- the PR added a `optimize_caps_spent` fact to close a cycle gracefully, while `phase_cap_seconds` computed a single-cycle share from `PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES` and compared it against `phase_cumulative_seconds`, which sums every entry and never resets; the cap itself was the defect and the PR became its deletion.
+**Not a finding when:** the consumer is the boundary (the value enters there), or the upstream owner is named in the body with the follow-up that moves the refusal.
+**Evidence:** the call chain from where the value enters to where the diff guards it; the upstream module in the head tree that already parses or admits it.
+**Report as:** `E4 <file>:<line> -- guards <value> at <consumer> while <boundary> admits it; <other consumer> keeps the defect`
+
+### E5 -- A claim that something else already checks this is evidence about a function body, not about a name
+
+**Severity:** blocking
+**Fires when:** the diff removes, narrows or declines to apply a check on the grounds that another mechanism covers it -- a CI job, a linter, a gate script, a type checker, a test, another rule -- or the body says "already caught by", "the gate decides", "CI covers", "redundant with".
+**The rule:** the evidence is the covering mechanism's own decision, quoted: the line that returns, the condition it tests, the set it iterates. A name, an id, a rule number or a job title is not evidence, because the thing that drifts is what the function measures, never what it is called. Read the predicate and state its boundary: what it iterates (`change.new_functions()` yields only names absent from the base tree), what it returns early on (`not params`), what granularity it resolves at (`Packages.unit()` from `.importlinter`, coarser than a subpackage), what shape it requires (`body[0]` an `ast.If` ending in `return`). Then state what falls outside that boundary and say explicitly who has it -- the reviewer, or nobody. Coverage asserted without that quotation is a premise, and E1's answer applies: it does not hold until it reproduces. This is E1's other half: E1 is for a premise with a number to re-run, E5 for one with a boundary to read.
+**Seen in:** PR #2227 -- four rules deleted as gated across three rounds, each wrong, each time the gate function existing and carrying the matching id. `private_reach_problems` resolves at `.importlinter` granularity, so a private import inside `hyperloom.orchestrator` is reported by nobody; `flag_argument_problems` walks `change.new_functions()`, so a flag added to an existing function is invisible; `_forwarded_to` returns `None` when `not params`, so a parameterless forwarder is invisible; and `code_metrics_report.py:136-138` waives all of their findings on a `baseline-raise` PR. Every one of those is a line in a body that the matching id did not reveal.
+**Not a finding when:** the body quotes the covering predicate and states its boundary, and the boundary genuinely contains the shape being dropped; or the mechanism is a hard schema or type that cannot admit the shape at all.
+**Evidence:** the covering function's own lines, quoted with their file and line; the shape that falls outside, and who owns it.
+**Report as:** `E5 <file>:<line> -- drops <check> as covered by <mechanism>; <mechanism> decides <narrower thing> at <file>:<line>, leaving <shape> to nobody`
+
+---
+
 ## S -- Silent failure and fail-open defaults
 
 ### S1 -- No swallowed failure, and no error return indistinguishable from a valid negative
 
 **Severity:** blocking
-**Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch.
-**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. S8 covers the broad ones; this rule is about the narrow ones that still swallow.
-**Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success.
+**Fires when:** added lines introduce `contextlib.suppress`, an `except` whose body is `pass` / `continue` / a falsy return, `ignore_errors=True`, a narrowed `except (...)` tuple, or a wrapper returning `""` / `None` / `False` on its error branch; a statement moves across a `try`, `except` or `with` boundary; a cleanup, rollback or undo function the diff adds discards the result of a subprocess, file or network call; or the diff fixes a defect that reached production unnoticed.
+**The rule:** a suppressed failure does not continue as success. The success log sits outside the suppressed region, the `except` tuple covers what the callee actually raises (SDK transports and resolvers raise outside the obvious set), and an error return is distinguishable from a legitimate negative answer. Where the caller emits a verdict, the failure reaches the status or the exit code. S8 covers the broad ones; this rule is about the narrow ones that still swallow. Read it in both directions: a statement leaving a `try` body stops being caught, which is a behaviour change however pure the refactor claims to be, and a guard the diff deletes or copies is judged like one it adds. The last trigger is the one a fix hides: ask why the defect this PR repairs ran in production without an error, and where the answer is a default, a wide annotation or a discarded return that converted it to silence, that swallow is part of the defect and stays blocking until the diff closes it or the body names who will.
+**Seen in:** PR #1564 -- a failed archive was swallowed with no trace because the `log.warning` sat inside the suppressed block and fired only on success. PR #2010 -- a refactor declaring no observable change moved `state.save` out of the `try`, so a KEEP that had been marked `dispatch_failed` and drained now raised and stopped the drain. PR #2122 -- `uncommit_promoted_overlays` returned `None` and dropped the exit code of its `git reset`, so a rollback whose reset never happened still reported `ok=True`. PR #2169 -- `_record_run` took `task: Any` and resolved the id through `getattr(task, "task_id", "") or ""` before returning on a falsy one, so a tuple passed where a `Task` belonged produced no error, no log and no row, for as long as the bug had been in the tree.
 **Not a finding when:** the suppressed call is genuinely advisory (best-effort telemetry, cache warm) and the caller has an independent signal for the same condition, or the handler logs and re-raises.
 **Evidence:** `$WORK/diff.txt` -- the guarded region, the position of the log, and the caller's use of the return value.
 **Report as:** `S1 <file>:<line> -- <failure> is swallowed; <caller> cannot distinguish it from <valid negative>`
@@ -587,7 +680,7 @@ copies, the dead one reporting failure as `(None, stderr)` was deleted and the t
 **Not a finding when:** the existing helper cannot serve the case for a reason the diff or
 the body states, or the new code is the canonical path and the diff deletes the old one. A
 private copy of a helper another module exports is D10's finding, an empty base class or a pure
-forwarder is A12's, and a tuple, dict-bag or second-channel result is A9's, not this one.
+forwarder or a tuple-shaped result is the `code-metrics` design checks', not this one.
 **Evidence:** `$WORK/diff.txt` for the added implementation; `$WORK/files.txt` to confirm the
 existing owner module is untouched.
 **Report as:** `D1: <file>:<line> re-implements <operation> already owned by <module> --
@@ -648,15 +741,25 @@ sibling modules, check whether the copies have diverged -- divergence at the tim
 proves the next schema change will miss one site. Relocated constants must equal the
 literals they replaced, and the untouched path must be shown byte-identical afterwards. A
 rule that exists in two languages needs a parity test exercising the real other side, not a
-re-spelled copy of it.
+re-spelled copy of it. The copy this rule starts from is one the tree already had twice; the
+other direction matters as much -- a normaliser, validator, parser or predicate the diff adds
+is searched for by the field names it handles and by its own shape before it is accepted, and
+a second implementation of a rule that already has an owner is `AGENTS.md` *Clean design*'s
+"a second copy of a behaviour is a bug" whether or not the two have diverged yet. The same
+goes for a guard carried along by a move and landing in three places at once.
 **Seen in:** PR #1368 -- the new `_trace_reader.stream_events` was byte-identical to the
 pre-`c6cbccbff` implementation and so reverted that fix, measured ~5x slower on a 32MB trace
 (0.28s to 1.46s); PR #1341's copied `_attach_grid_launch_evidence` body had already diverged
-on `warm_reuse`.
+on `warm_reuse`. PR #2012 -- `Gap/Pitfall/Lesson.from_dict` normalised on read what
+`local_store.put_recipe` already normalised on write, so one rule acquired two owners.
+PR #2009 -- the added `_is_sha256` was at least the sixth "64 lowercase hex" check in the
+tree. PR #2018 -- the same `isinstance(rc, dict)` guard arrived in three copies in one new
+module, with a single production writer that always writes a dict.
 **Not a finding when:** the diff shows the moved block unchanged against the current head
 version, or the divergence is intentional and named in the body.
 **Evidence:** `$WORK/diff.txt`, `$WORK/base.txt` -- compare the added block against the old
-home at the merge base.
+home at the merge base; for an added helper, a tree-wide grep on the field names it reads and
+on its distinctive literals, which is what finds the owner it duplicates.
 **Report as:** `D4: <file>:<line> copies the pre-<sha> version of <symbol>, reverting <fix>
 -- <measured cost>`
 
@@ -848,9 +951,11 @@ publishes it and is untouched, so <other reader>:<line> still resolves it as <ol
 ### D12 -- A function this diff adds, or whose complexity it raises, may not exceed cyclomatic complexity 20
 
 **Severity:** blocking
-**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory,
-or adds branches to an existing one, and the measurement below puts that function above 20 at
-the head while the merge base had it at 20 or below, absent, or at a lower number.
+**Fires when:** `meta.txt` carries a `label: baseline-raise` line, which waives the `code-metrics` job, and the
+diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds branches to an
+existing one. Without that label the job already fails this ceiling on the files the PR touches and
+reports the two numbers itself, so the rule stays silent: re-measuring a green gate produced 22
+verdict lines and no finding across 23 recorded reviews.
 **The rule:** measure, do not estimate -- the verdict is a comparison of two numbers, and a
 function that reads long is not the same claim. Run the ceiling against the changed files at the
 head, then against the same paths at `base.txt`, and match per function name:
@@ -880,7 +985,7 @@ this diff did not grow it); the file is a test, or sits in `extend-exclude`, whi
 the `grep -v` already settles; the added branches are a flat dispatch or validation table
 whose arms share no state and the body says so -- that is the trigger's accepted answer, and it
 survives at the ceiling only when the arms are genuinely independent.
-**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+**Evidence:** both radon invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
 for the branches that moved the number.
 **Report as:** `D12 <file>:<line> -- <function> is complexity <head> (base: <base|absent>), over
 the ceiling of 20; split it or keep <added branch> out of it`
@@ -919,9 +1024,10 @@ resolves this shape -- reuse it`
 ### D14 -- A function this diff adds, or whose signature it widens, may not exceed five parameters
 
 **Severity:** blocking
-**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or
-adds a parameter to an existing one, and the measurement below puts that function above five
-parameters at the head while the merge base had it at five or fewer, absent, or with fewer.
+**Fires when:** `meta.txt` carries a `label: baseline-raise` line, which waives the `code-metrics` job, and the
+diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to
+an existing one. Without that label the job already fails this limit on the files the PR touches,
+so the rule stays silent; it fired on none of 9 adjudications in the recorded reviews.
 **The rule:** measure, do not estimate. `self`/`cls` and `*args`/`**kwargs` do not count,
 keyword-only parameters do. Run the limit against the changed files at the head, then against the
 same paths at `base.txt`, and match per function name:
@@ -938,7 +1044,7 @@ ruff check --select PLR0913 --config "lint.pylint.max-args=5" --isolated \
 Present at head and absent at base, or a higher number at head than at base, fires; the same number
 on both sides is backlog and is silent (the two switches do what D12's paragraph says they do). The
 fix is not a shorter name: the values that travel together become one frozen keyword-only dataclass
-built where they are resolved, or the callee takes the object its callers unpack -- A8's clump, and
+built where they are resolved, or the callee takes the object its callers unpack, and
 A6 when the long list is a caller's local variable table threaded into an extracted slice. The
 `code-metrics` CI job measures the same two cases, but its `baseline-raise` label waives them, so
 the rule stays for the one question CI cannot answer: whether a labelled PR gives the reason.
@@ -951,8 +1057,8 @@ was introduced, which is the backlog the comparison exists to keep out of the fi
 this diff did not widen it); the file is a test, or sits in `extend-exclude`, which
 `--force-exclude` already settles; the parameters are a typed parameter object; the function is a
 CLI entry point whose parameters are the operator's flags, or its signature is fixed by a
-`Protocol`, a callback or a sibling implementation of one interface -- A8's exemptions, which this
-rule counts but does not overrule.
+`Protocol`, a callback or a sibling implementation of one interface, which this rule counts but
+does not overrule.
 **Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
 for the parameters the diff added.
 **Report as:** `D14 <file>:<line> -- <fn> takes <head> parameters (base: <base|absent>), over the
@@ -968,29 +1074,36 @@ test for one of its sentences, or for a sentence of *Clean design*, *Trust the c
 *Simplify by removing a mechanism*. A finding names the owner, the type or the split that would
 satisfy it; one that cannot is taste and goes.
 
-Severity follows a calibration: A1-A14 were replayed on 30 recent merged PRs and every fire was
+Which A-family ids belong to the `code-metrics` job and which to the review is one table, in
+[`references/ci.md`](../review-pr/references/ci.md); where a split id's boundary falls is each
+rule's own `Severity:` line. Neither is restated here. What this paragraph is for is the reason the
+split exists: #2227 deleted four of these rules because a function in `code_metrics_design.py`
+carried the matching id, and was wrong every time -- the function judged something narrower than
+the rule did. A matching id is not matching coverage; E5 is the check that says what evidence is.
+In 23 recorded reviews this family produced 119 verdict lines and no finding, which is why the ids
+the gate really does decide are gone rather than kept as a second opinion.
+
+Severity follows a calibration: A2-A7, A13 and A14 were replayed on 30 recent merged PRs and every fire was
 judged by an independent adversarial judge (2026-10-11). A rule or a clearly delimited sub-case is
 `blocking` when it measured precision >= 0.8 on at least two real findings and rests on an
-`AGENTS.md` sentence that states it outright: A1's added non-test import (5/5), A2 (2/2), A12's pure
-forwarder (2/2) and A13's redundant re-check (2/2). A8's flag-with-dummies case had no fire and
-keeps its first-landing `blocking`. Three narrow shapes are `blocking` by owner decision
-(2026-10-12) on a 1/1 replay, each resting on a *Code shape* sentence that states it outright, and
-each goes back to `advisory` on its first confirmed false-positive block: A3's generic helper beside
-an existing `common` home or business vocabulary in a utility module, A7's consumer branch on a
-framework, backend or arch name, and A8's unread or test-only parameter. Everything else is
-`advisory` -- below two real findings, below 0.8, or never fired -- so it is adjudicated in
-`verdicts.txt` and not published. Each rule's Severity line records its own count. Wrong behaviour
+`AGENTS.md` sentence that states it outright: A2 (2/2) and A13's redundant re-check (2/2). Two
+narrow shapes are `blocking` by owner decision (2026-10-12) on a 1/1 replay, each resting on a
+*Code shape* sentence that states it outright, and each goes back to `advisory` on its first
+confirmed false-positive block: A3's generic helper beside an existing `common` home or business
+vocabulary in a utility module, and A7's consumer branch on a framework, backend or arch name.
+Everything else is `advisory` -- below two real findings, below 0.8, or never fired -- so it takes
+no verdict line and is not published. Each rule's Severity line records its own count. Wrong behaviour
 that a shape defect causes is still blocking, under the C or S rule it breaks, not under the A rule.
 
-### A1 -- Cross a module boundary only through the names its owner exports
+### A1 -- Cross a subpackage boundary only through the names its owner exports
 
-**Severity:** blocking only for an added `import`/`from ... import` line in non-test code that takes an `_`-name or passes an `_`-prefixed module segment of another package (5/5 real in a 30-PR replay, 2026-10-11; `AGENTS.md` *Code shape*: "A module is used through the names its owner exports; outside its owning package, an `_`-name or an `_internal` package is not an interface"; *Clean design*: "a minimal typed interface outward"). Every other shape -- test code, an `_attr` read or write, a `getattr`/`hasattr` probe -- is advisory: the rule as a whole measured 5/10 real (precision 0.50), so it was demoted from blocking; all five false positives were tests or an unchanged line. A finding that cannot name the owner module and the export to add is taste and goes.
-**Fires when:** an added line imports `_name` from, or imports through an `_`-prefixed module segment (`._internal.`, `executors._multi_node_env`) of, a package other than the importer's own (package = `hyperloom.<layer>.<subpkg>`); reads or assigns another object's `_attr` where the receiver is not `self`/`cls`; or probes it with `getattr(obj, "_x", None)` or `hasattr(obj, "_x")`.
-**The rule:** a leading underscore and an `_internal` package both mean "not part of the interface". Reaching for one couples the caller to the owner's implementation, and the owner can no longer change it without breaking a caller it cannot see. When the caller genuinely needs the value, the fix is in the owner: promote the name to a public export, add a method or property that answers the question, or move the state onto the collaborator that owns it (#1794). A move that relocates a module without promoting the names its callers already used is the replacement left unfinished; re-exporting the private name under the same alias (`_X as _X`) across packages is the same reach, laundered. The `self._coord` handle a `CoordinatorCollaborator` holds is the layer's declared collaboration pattern and is not itself a finding; a hop past it into another object's `_field` is.
-**Seen in:** PR #1794 -- `ConversationCollaborator` wrote `self._coord._kb_last_read = evidence` and `IntentRouter` read it back with `getattr(router._coord, "_kb_last_read", None)`; the fix moved the state to its owner (`self.kb_last_read = evidence`). PR #1650 moved `_grid_server_args.py` down to `inference_optimizer/grid_server_args.py` without promoting its names, so `orchestrator/actions/executors/_grid_runner.py::_SPACE_VALUE_FLAGS` and `::_shell_safe_dedupe` are now imported `as` themselves across packages. `orchestrator/actions/executors/_multi_node_server_lifecycle.py::filter_forward_env` comes from `inference_optimizer.multi_node._internal.env_safety` at module level, beside an import from `.server_args_safety`, plus function-level `_internal` imports in `_multi_node_server_lifecycle.py::restart_server_for_round`, `::_probe_generated_tokens`, `::_collect_worker_server_logs`, `::_wait_for_server_health_async` and `::_wait_for_published_service_ready_async`, although `_internal/__init__.py` says "the CLI is the only public surface".
-**Not a finding when:** importer and imported module are in the same owning package and the underscore means package-private; the `_attr` access is in the module or owning package that defines the receiver's class; the code is a test module, conftest or fixture under any `tests/` directory -- a package's own, a layer-level `hyperloom.<layer>/tests`, or another layer's `tests/` that hosts the unit tests of the module it reaches -- importing, calling, asserting on or monkeypatching (directly or through `sys.modules`) a private name of the module under test or of a module production code already imports across packages on the merge base (tests are not the interface boundary; an owner that lacks a public export is the owner's gap, reported when production code reaches it); the added or changed line is only the module's load (a flat `sys.path` import replaced by a package import) and the `_` access on an unchanged line predates the diff (V1); the name belongs to stdlib or a third-party library with no public equivalent (`sys._getframe`, namedtuple `_replace`/`_asdict`); the identifier lives in a standalone script shipped to a remote host or injected as source text (`multi_node/scripts/`, patcher payloads); the name is a dunder (`__name__`, `__wrapped__`, `__dict__`); the access predates the diff (V1).
-**Evidence:** `$WORK/diff.txt` for the added import or attribute access; the owner module in the head tree to confirm the name is private and what public export would serve.
-**Report as:** `A1 <file>:<line> -- reaches <owner>.<_name>; export <public name> from <owner> (or add <method>) and use that`
+**Severity:** blocking (`AGENTS.md` *Code shape*: "A module is used through the names its owner exports; outside its owning package, an `_`-name or an `_internal` package is not an interface"). 5/5 real in a 30-PR replay, 2026-10-11, for an added import in non-test code. Narrowed to what the gate cannot see, which is a matter of scope rather than of shape: `scripts/code_metrics_design.py::private_reach_problems` reports the same import, but resolves ownership with `Packages.unit()`, built from `.importlinter`'s `root_packages` plus each contract's `layers`/`modules` entries -- 19 units on this tree, of which `hyperloom.orchestrator` is one. This rule's owner is `hyperloom.<layer>.<subpkg>`, which is finer, so an added private import between two subpackages of one unit resolves to the same unit for the gate and is reported by nobody. The gate's own findings are also waived by the `baseline-raise` label (`code_metrics_report.py:136-138` puts `design` in `waivable_failed`, and `PRIVATE_REACH` is not in `ADVISORY`), so a labelled PR returns the cross-unit case here too.
+**Fires when:** the diff adds, in non-test code, an `import`/`from ... import` taking an `_`-name or passing through an `_`-prefixed module segment, and either (a) both modules resolve to the same `.importlinter` unit while belonging to different `hyperloom.<layer>.<subpkg>` packages -- `orchestrator.actions` reaching into `orchestrator.trace_analysis._capture_shapes` is the live shape; or (b) `meta.txt` carries a `baseline-raise` label, which waives the gate's cross-unit finding.
+**The rule:** a leading underscore and an `_internal` package both mean "not part of the interface". Reaching for one couples the caller to the owner's implementation, and the owner can no longer change it without breaking a caller it cannot see. When the caller genuinely needs the value, the fix is in the owner: promote the name to a public export, add a method or property that answers the question, or move the state onto the collaborator that owns it. Re-exporting the private name under the same alias (`_X as _X`) across subpackages is the same reach, laundered.
+**Seen in:** PR #1794 -- `ConversationCollaborator` wrote `self._coord._kb_last_read` and `IntentRouter` read it back with `getattr`; the fix moved the state to its owner. PR #2227 -- deleting this rule as gated was wrong for exactly case (a): `orchestrator/actions/executors/profile.py:19,22` import `_capture_shapes` and `_trace_rank` from `orchestrator.trace_analysis`, and four more files in `predictor/` and `kernel/` carry the same shape, all invisible to a gate whose unit is `hyperloom.orchestrator`.
+**Not a finding when:** importer and imported module are in the same `hyperloom.<layer>.<subpkg>` package, where the underscore means package-private; the access is in a test module, conftest or fixture under any `tests/` directory; the name belongs to stdlib or a third-party library with no public equivalent (`sys._getframe`, namedtuple `_replace`); the identifier lives in a standalone script shipped to a remote host or injected as source text; the name is a dunder; the import predates the diff and was only moved (V1); or the two modules resolve to different `.importlinter` units on a PR with no `baseline-raise` label, which the gate reports.
+**Evidence:** `$WORK/diff.txt` for the added import; `$WORK/meta.txt` for a `label:` line; the owner module in the head tree to confirm the name is private and what public export would serve.
+**Report as:** `A1 <file>:<line> -- reaches <owner>.<_name> across a subpackage the gate counts as one unit; export <public name> from <owner> (or add <method>) and use that`
 
 ### A2 -- Dependencies point one way down the layers; an upward or cyclic edge is not made legal by deferring or hiding it
 
@@ -1014,7 +1127,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 
 ### A4 -- Ask the owner: no navigation through a collaborator's collaborators, and logic beside the state it reads
 
-**Severity:** advisory: 0/1 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Code shape*: "Ask the owner of a state rather than navigating its collaborators, and keep logic beside the state it reads"). The finding names the accessor to add or the class to move onto; without it the item goes. Pure forwarding layers are A12; private hops are A1.
+**Severity:** advisory: 0/1 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Code shape*: "Ask the owner of a state rather than navigating its collaborators, and keep logic beside the state it reads"). The finding names the accessor to add or the class to move onto; without it the item goes. Pure forwarding layers and private hops are the `code-metrics` design checks'.
 **Fires when:** the diff adds an attribute chain that starts from a non-`self` receiver and passes two or more repo-owned collaborators before reading a field or calling a method (`a.b.c.method()`; a third-party SDK's fluent API such as `client.chat.completions.create` is not navigation); or adds a module-level function that reads five or more fields of one parameter, writes at least one of them, and uses almost none of its own module's state; or reaches past a collaborator to a store it owns (its connection, table or file) instead of calling it.
 **The rule:** a caller that walks three objects to read one value depends on the shape of all three. Give the first object a method or property that answers the question, or pass the needed value in. A function that mostly reads and writes one parameter's fields belongs on that parameter's class, next to the data, rather than in a sibling module reached through a forwarding shim and a function-level import. When moving it back would push the owner over a size trigger, the size problem is solved by splitting the owner along a real seam (A5), not by keeping its logic outside it.
 **Seen in:** PR #1662 -- "the conversation builder and the sub-agent runner reached past their collaborators to the shared connection and wrote their own SQL against messages and tasks, so a schema each module owns had readers it could not see. Both now ask the owner": the queries moved behind named `MessageBus` and `TaskRegistry` methods. `orchestrator/state/shared_state.py` carries 11 methods documented "Forwarding shim -- implementation in `._kernel_decisions`" (the first is `shared_state.py::SharedState._resolve_kernel_patch_identity`), while `orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result(state, ...)` reads and writes `state.kernel_integrate_attempts` and `state.pending_kernel_integrations` and calls `state._is_integrate_fault`: the logic sits one module away from its data.
@@ -1052,59 +1165,29 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Evidence:** `$WORK/diff.txt` for the added branch; `git grep` over the head tree for other switches on the same dimension; the owner spec for a matching field.
 **Report as:** `A7 <file>:<line> -- branches on <dimension> == "<value>" for <fact>; add <field> to <Spec> (other switches: <sites>)`
 
-### A8 -- Parameters are few, cohesive and non-redundant: no flag argument, no data clump, no derivable or unread parameter
+### A8 -- No parameter only tests vary, and no flag argument added to a function that already exists
 
-**Severity:** blocking for (a): no fire in a 30-PR replay, 2026-10-11, so it keeps its first-landing severity (`AGENTS.md` *Code shape*: "no flag argument that selects between two bodies"; *Simplify by removing a mechanism*: "rather than become one function with modes"). Blocking for (d), and for (c)'s parameter only tests set to a non-default value: blocking by owner decision 2026-10-12 on a 1/1 replay; demote back to advisory on the first confirmed false-positive block (*Code shape*: "no parameter that is derivable, unread or set only by tests"). (b) and (c)'s derivable parameter are advisory: 1/1 real (a parameter no caller sets), below the two real findings promotion needs (no `AGENTS.md` sentence names a clump).
-**Fires when:** the diff adds a parameter to, or adds a `def` under `src/` with: (a) a `bool` (or two-value `Literal`) that selects between two bodies -- its first use is `if <param>:` ending in `return` -- and a production caller passing one value also passes dummies (`""`, `0`, `None`) for parameters only the other body reads; a flag with no such dummy-passing caller is advisory; (b) a group of three or more names passed together in the same order to more than one function, or unpacked from one object at every call site; (c) a parameter every production caller derives from another argument, or that only tests set to a non-default value; (d) a parameter the body never reads.
-**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. Values that always travel together become one frozen, keyword-only dataclass built once where they are resolved (`_SweepRun`, `_Round` are the house pattern). When every caller unpacks the same object to feed the callee, pass the object -- unless taking it would make the callee import a type from a layer above it, in which case pass the fields. A parameter that is derivable, unread or varied only by tests is plumbing the change introduced. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameters go.
-**Seen in:** PR #1660 -- "_sweep_one_arm_single_server took 28 parameters ... and 18 of them were the same sweep-wide values threaded through every call" (clump -> `_SweepRun`); "has_budget was always total_budget_sec is not None" (derivable); "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests" (test-only). PR #1707 -- "_reject took eleven positional parameters, four consecutive str among them"; the callers in `enablement/lane.py` now pass `round_row` instead of unpacking it. `inference_optimizer/multi_node/_internal/infera_support.py::build_node_launch_args(..., kill_only=False)` (the flag dates from PR #548, in what was then `dynamo_support.py`; PR #893 renamed the module) branches on `if kill_only: ... return`, and `inference_optimizer/multi_node/commands/infera.py::_infera_kill_inference` passes `model=""`, `tp=0`, `kill_only=True` to satisfy the other branch's signature.
-**Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); passing the owning object would invert a layer; the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface (a no-op or null-object alternate in a union, a subclass override) that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; a static gate in CI already reports the unread parameter.
-**Evidence:** `$WORK/diff.txt` for the signature; `git grep` for the production call sites and what they pass.
-**Report as:** `A8 <file>:<line> -- <fn> <takes flag <name> selecting <two behaviours>|repeats clump <a,b,c> across <N> signatures|takes <param> derivable from <other>|takes <param> only tests set|never reads <param>>; <split|introduce <Type>|pass <object>|drop it>`
+**Severity:** blocking (`AGENTS.md` *Code shape*: "no flag argument that selects between two bodies"; "no parameter that is derivable, unread or set only by tests"). Narrowed to what no gate measures, which is not the same scope for both shapes. The flag argument is reported by `scripts/code_metrics_design.py::flag_argument_problems`, but only on a function absent from the base tree (it walks `change.new_functions()`), so this rule keeps the flag added to a function that already existed. The test-only parameter is measured by nothing, on any function: `pyproject.toml` selects no `ARG` rule; vulture reports a parameter no body reads, not a read one whose only non-default caller is a test; and `_selecting_flag` (`code_metrics_design.py:405-410`) matches only a body whose first statement is `if <flag>:` ending in `return` or `raise`, which a test seam usually is not. So the two shapes below carry different triggers -- do not read the first one's limit onto the second.
+**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to one, and the parameter is either (a) a `bool` or two-value `Literal` whose first use is `if <param>:` ending in `return`, with a production caller that also passes dummies (`""`, `0`, `None`) for parameters only the other body reads -- this shape where the function exists at the merge base, the gate having the rest, or on any function when `meta.txt` carries a `label: baseline-raise` line, which waives the gate's finding; or (b) one that only tests set to a non-default value, on any function, new or widened alike.
+**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. A parameter varied only by tests is plumbing the change introduced -- the production path has one value, so the parameter is a seam for the test rather than an input, and the branch it guards is untested in the shape production runs. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameter goes.
+**Seen in:** PR #1660 -- "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests", both on functions that already existed; the same PR's 28-parameter `_sweep_one_arm_single_server` is D14's and A4's, not this rule's.
+**Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; or, for shape (a) alone, the function is new at this head on a PR with no `baseline-raise` label, where `flag_argument_problems` decides it -- a labelled PR waives that finding (`FLAG_ARGUMENT` is not in the gate's `ADVISORY` set), so shape (a) returns here; shape (b) has no exemption either way.
+**Evidence:** `$WORK/diff.txt` for the signature; `$WORK/base.txt` to confirm the function existed there; `git grep` for the production call sites and what each passes.
+**Report as:** `A8 <file>:<line> -- <fn> <takes flag <name> selecting two bodies|takes <param> only tests set>; <split it|drop it>`
 
-### A9 -- Return one named shape: no positional tuple of loosely related values, no dict bag for a type, no second channel through an argument
+### A12 -- A parameterless method that only forwards to one collaborator
 
-**Severity:** advisory: 0/1 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Code shape*: "A result is one named type: no positional tuple of loosely related values, no dict whose optional keys stand for states, no second channel written into an argument"). A second channel that makes a caller misread the outcome is wrong behaviour, reported under the C or S rule it breaks. None-versus-empty on a return is S1/S5's concern.
-**Fires when:** the diff adds or widens a return so that a function under `src/` (a) returns a tuple of three or more elements where two share a type or the elements are not one value's coordinates, or adds an element to such a tuple; (b) returns a `dict[str, Any]` built from literal keys, some present only on some paths, to an in-repo caller that branches on them; (c) returns a value while also writing a key or attribute on a parameter that a caller reads to interpret the return.
-**The rule:** a function answers with one shape the reader can name. Several loosely related results become a frozen dataclass or `NamedTuple` whose fields carry the meaning the position carried; adding an element to a positional tuple is the moment to make that change, not to widen it. A dict passed around inside the repo whose optional keys stand for states becomes a dataclass or `TypedDict` with the states explicit. A result does not travel in two channels: when the outcome needs more than the return value holds (refused vs reverted, failed vs empty), widen the return type (`Verdict`, a result dataclass) instead of stamping the caller's argument.
-**Seen in:** PR #1739 -- "Promoters now return Verdict (adopted/refused/reverted/failed/recorded) instead of the bool-plus-PROMOTION_REFUSED_KEY side-channel ... so a lift-refused integrate_patch ... [is] no longer journalled as KEEP"; before it, `orchestrator/loop/writeback.py` set `result[PROMOTION_REFUSED_KEY] = True` and `inference_optimizer/session/optimization_journal.py` read it back with `if result.get(PROMOTION_REFUSED_KEY):`. PR #1120 widened `orchestrator/roles/claude.py::ClaudeBackend._invoke_and_collect` to `tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]`; the two `str | None` are told apart only by position. `orchestrator/phases/prelude.py::PreludePhase._resolve_kernel_target_paths(self, entry) -> list[str]` (PR #1199) writes `entry["resolution_error"] = reason` and returns `[]`, and `prelude.py::PreludePhase._prepare_warm_kernel_kb` reads `entry.get("resolution_error")` to tell failure from empty.
-**Not a finding when:** the dict is a JSON, subprocess, LLM or persisted payload at a system boundary and nothing branches on its optional keys; the dict is a persisted, replayed payload with a JSON schema (`workflow_predicate_inputs`), its key set is selected by an explicit discriminator field (the phase), and the reader's `.get()` exists to read records persisted before a key was added; the tuple is one value's coordinates (`(m, n, k)`, `(lo, hi)`) or a `(value, reason)` pair unpacked by one caller; the argument mutation is the function's declared job and it returns nothing or the same object (`apply_*`, `stamp_*`, `fill_*`); the diff only forwards an existing return.
-**Evidence:** `$WORK/diff.txt` for the return annotation and statements; the callers in the head tree for how they read it.
-**Report as:** `A9 <file>:<line> -- <fn> returns <N-tuple|dict bag with optional <keys>|<value> and writes <arg>[<key>]>; return <Type> carrying <fields>`
-
-### A10 -- A closed vocabulary gets a type where it enters, not a raw string compared at every reader
-
-**Severity:** advisory: 1/3 real in a 30-PR replay, 2026-10-11 (precision 0.33; both false positives were the normalise-then-compare idiom below) (`AGENTS.md` *Code shape*: "a closed vocabulary is one Enum or registry entry, converted where the value enters"). A raw-string branch that takes the wrong arm for a valid member, or falls silently to a default on an unknown value, is wrong behaviour, reported under the C or S rule it breaks. A re-spelled copy of a vocabulary the owner exports is D10's finding, and a branch on a framework, backend or arch is A7's, not this one.
-**Fires when:** the diff, outside the vocabulary's owner and outside the parser that converts it, compares a value to a string literal from a closed set the repo already names (decision `"KEEP"`/`"kept"`, status, phase, role, intent type) while an Enum, registry entry or constant exists (`Verdict`, `IntentType`, `OUTCOME_*`); normalises case before such a comparison away from the boundary; or introduces a new set of two or more literals that branches dispatch on, typed as `str`.
-**The rule:** a value from a closed set is converted to its type once, where it enters (record parse, CLI argument, LLM output), and travels as that type. Readers compare against `Verdict.ADOPTED` or a spec field, never a literal they spelled themselves; an `.upper()` before a comparison in a reader is the reader repairing a type nobody gave the value. A new vocabulary that code branches on is a `str` Enum in the module that owns the concept, so an added member breaks the non-exhaustive readers instead of falling into the `else`.
-**Seen in:** PR #1739 -- "Introduce settlement Verdict to replace the kept boolean": it deleted `_JOURNAL_KEEP_STATUSES = frozenset({"kept"})` and `_JOURNAL_REVERT_STATUSES = frozenset({"reverted", "accuracy_unavailable_reject", "regression"})` for `class Verdict(str, Enum)`. `orchestrator/knowledge/remote_recipe/values.py::build_kernel_gemm_value`: `str(last.get("decision") or "").upper() == "KEEP" or str(last.get("status") or "").lower() == "kept"` while `inference_optimizer/session/optimization_journal.py::OUTCOME_KEEP` is exported.
-**Not a finding when:** the literal belongs to an external format the repo does not own (a framework CLI flag, an SDK `stop_reason`) and only one adapter branches on it; the comparison is inside the parser or adapter that performs the conversion; the vocabulary is open (model ids, paths, task ids); the added reader repeats the normalisation its owner and the repo's other readers already apply to a field the owner stores as `str` (`str(shared_state.phase or "").strip().upper()`) and compares the result to the owner's exported constant (`PHASE_PRELUDE`, `PHASE_FRAMEWORK_AGENT`), not to a literal -- the fix is typing the field in its owner, a cross-module change outside the diff. A raw literal compared where the owner exports the constant still fires.
-**Evidence:** `$WORK/diff.txt` for the comparison; the owner module for the Enum, constant or registry that already names the value.
-**Report as:** `A10 <file>:<line> -- compares <var> to raw "<literal>"; <Type>.<MEMBER> (<owner>:<line>) names it -- convert at <boundary> and compare the type`
-
-### A11 -- A query-named function changes nothing, and a function that changes state is named for the change
-
-**Severity:** advisory: 0/1 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Code shape*: "A function named as a query changes nothing"; module-level mutable state written outside one named setter has no `AGENTS.md` sentence at all). An unstated observable side effect in the description is X1's finding.
-**Fires when:** the diff adds or edits a function named as a query (`is_`/`has_`/`should_`/`can_`/`get_`/`find_`/`derive_`/`compute_`, or a property) whose body writes a parameter, assigns `self.<attr>`, writes module state, starts a process that changes something (a write, a kill, a launch; a read-only probe such as `grep` or `git rev-parse` is not), or exits; or a `resolve_*`/`parse_*` function that mutates its arguments or module state (reading files is not the trigger); or adds a `global` statement or a module-level mutable written by functions other than one named setter.
-**The rule:** a query reads state and returns a value; calling it twice, or not at all, changes nothing. When a decision also has to be applied, split it into the pure computation and a command whose verb names the effect (`spend_on_session_reserve`, `write_*`, `record_*`, `apply_*`), and let the caller sequence them. Module-level mutable state is written only through one named setter in its owner, with the reason it cannot be threaded through a signature stated where it is declared; per-action state uses a `ContextVar`. The pure core then gets a unit test without a filesystem, and the effect has one place to fail.
-**Seen in:** PR #1660 -- "session_closing() looked like a predicate but" wrote the budget state; after the fix "session_closing() is now a pure query" and callers spend the reserve through a new `spend_on_session_reserve()`. `inference_optimizer/cli/__init__.py::_resolve_models_for_run(args, ...) -> None` (PR #1112) rewrites `args.claude_model`/`args.codex_model`, probes the model catalog and exits; its own comment says "mutates args.claude_model on fallback; sys.exit(2) on failure". Counter-example: `common/llm_attribution.py::set_current_phase` writes a module global under a setter name with the reason stated beside it, and `common/llm_attribution.py::_current_action` is a `ContextVar`.
-**Not a finding when:** the function returns a value and writes an argument the caller reads to interpret it, which is A9's second channel; the write is a memo cache keyed by the arguments and invisible to callers (`functools.cache`, a lazy import of an optional dependency); a lazily-created, idempotent, process-private resource whose docstring says so (`_patch_snapshot._isolation_root`); logging or metrics inside a query; the verb already names the effect (`apply_`, `stamp_`, `ensure_`, `record_`, `observe_`), even when it returns its outcome as a `bool`; the mutated object was created by the function itself; a `warnings.append` collector the caller passes in for that purpose; the diff splits a `resolve_*` slice out of a function that already wrote the same `args.<field>` of an `argparse.Namespace` in place on the merge base, and the write moved with it unchanged -- the in-place write predates the diff (V1); the naming finding belongs to that existing convention, not to the moved slice. A new `resolve_*` that adds a write the parent did not make still fires.
-**Evidence:** `$WORK/diff.txt` for the function body; callers in the head tree for whether they call it more than once or conditionally.
-**Report as:** `A11 <file>:<line> -- <fn> is named as a query but <writes <arg>|mutates <module state>|exits>; split into <pure fn> and <effect fn>`
-
-### A12 -- No abstraction before its second real implementation, and no layer that only forwards
-
-**Severity:** blocking for the pure forwarding `def` (the third shape below): 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Simplify by removing a mechanism*: "a forwarding layer with no job of its own"). The single-implementation abstraction and the memberless base class are advisory: no fire, so no evidence either way (*Code shape*: "An abstraction — Protocol, ABC, base class, factory, registry — arrives with its second implementation, not before"; *Simplify by removing a mechanism* for the memberless base). A config knob with one value is C3's. A forwarder or single-caller helper that exists only to keep another part of the same fix from colliding is one of D13's counted mechanisms: report the set once under D13, not each part here.
-**Fires when:** the diff adds a `Protocol`, `ABC`, factory whose job is to choose an implementation (`select_*`, or a `make_*`/`build_*` typed to return an abstraction), registry or strategy dict with fewer than two production implementations or entries in the head tree; or adds a base class that declares no members of its own, whatever its subclass count; or adds a `def` whose body after the docstring is one `return`/`await` of another callable with the same arguments in the same order -- an `_impl` twin, a private alias of an imported function, a method forwarding to one collaborator method.
-**The rule:** an abstraction is paid for by its second user. A Protocol, base class, factory or registry with one production implementation gives the reader an extra hop that decides nothing, and agents copying the file add more of the same seam. Use the concrete class, and introduce the seam in the PR that adds the second implementation. A function that only renames and forwards its arguments is a forwarding layer: call the target by its own name. The finding names the abstraction or forwarder, the single implementation or target, and the call sites that would bind to it directly.
-**Seen in:** PR #1665 deleted `phases/base.py`'s `class PhaseHandler(CoordinatorCollaborator)`, which declared no members, so "every phase that named it reached its collaborator through one hop that decided nothing". PR #1642 -- "`_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature", and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. `orchestrator/actions/executors/profile.py::_is_capture_trace(path, root=None)` (PR #1249) only returns `_shared_is_capture_fragment(path, root)`, with the same private wrapper at `orchestrator/trace_analysis/_bypass_trace_reader.py::_is_capture_fragment` and `orchestrator/trace_analysis/tracelens_analysis.py::_is_capture_fragment`.
-**Not a finding when:** the memberless base is an exception family that callers catch to handle its subclasses together; a builder does real construction work (assembles a parser, a config, an argv) rather than choosing an implementation; the seam is an exported contract consumed out of tree or by plugins (`agent_backends/registry.py`, a client interface with HTTP and in-memory implementations); the second implementation lands in the same PR; the Protocol is declared by a lower layer so a higher layer can implement it without an upward import (dependency inversion, A2); the forwarder adapts something (adds a default, converts or checks a type at runtime, binds `self` state, converts units, computes an argument) -- narrowing only the annotation is not adapting; it is a staged-migration adapter that names its remaining consumer (*Finish the replacement*); it is a documented test monkeypatch point.
-**Evidence:** `$WORK/diff.txt` for the new class or def; `git grep` over the head tree, excluding tests, for implementations and callers.
-**Report as:** `A12 <file>:<line> -- <abstraction> has one implementation <impl>|<fn> only forwards to <target>; use <impl|target> directly at <call sites>`
+**Severity:** blocking (`AGENTS.md` *Simplify by removing a mechanism*: "a forwarding layer with no job of its own"). 2/2 real in a 30-PR replay, 2026-10-11. Narrowed to what the gate's own code cannot reach: `scripts/code_metrics_design.py::_forwarded_to` computes `params = _parameter_names(function, receiver)` and returns `None` when `not params` (`:692-693`), so a forwarder that takes an argument is reported by `forwarder_problems` and a parameterless one is reported by nobody. The gate's finding is also waived by a `baseline-raise` label (`FORWARDER` is absent from `code_metrics_design.py`'s `ADVISORY`, and `code_metrics_report.py:136-142` stops failing on `design` once waived), which returns the parameter-taking shape here too.
+**Fires when:** the diff adds, in non-test code, a `def` or `async def` whose body after the docstring is a single `return`/`await` of one call on a collaborator, with the same arguments in the same order, and either (a) the function takes no parameter other than `self`/`cls`; or (b) `meta.txt` carries a `label: baseline-raise` line.
+**The rule:** a function that only renames and forwards is a layer with no job: call the target by its own name. The finding names the forwarder, its target, and the call sites that would bind to the target directly.
+**Seen in:** PR #1642 -- `_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature, and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. PR #2227 -- deleting this rule as gated was wrong for the parameterless shape, which `_forwarded_to` returns `None` for before it ever reaches `_forwards_to`.
+**Not a finding when:** the forwarder adapts something -- adds a default, converts or checks a type at runtime, binds `self` state, converts units, computes an argument -- narrowing only the annotation is not adapting; it is a staged-migration adapter that names its remaining consumer (*Finish the replacement*); it is a documented test monkeypatch point; or it takes a parameter on a PR with no `baseline-raise` label, which the gate reports.
+**Evidence:** `$WORK/diff.txt` for the new def; `$WORK/meta.txt` for a `label:` line; `git grep` over the head tree, excluding tests, for the target and the forwarder's callers.
+**Report as:** `A12 <file>:<line> -- <fn> only forwards to <target> and takes no parameter the gate can see; call <target> directly at <call sites>`
 
 ### A13 -- No ceremony the types or the callers already rule out
 
-**Severity:** blocking for (1), the redundant re-check or re-conversion: 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Trust the caller*: "redundant re-checks, layered fallbacks, and belt-and-braces defaults buy nothing"). (2)'s pure rename and (3) are advisory: no fire of either shape, so no evidence either way. The finding names the guarantee, and without it the item goes. An unread parameter is A8's.
+**Severity:** blocking for (1), the redundant re-check or re-conversion: 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Trust the caller*: "redundant re-checks, layered fallbacks, and belt-and-braces defaults buy nothing"). (2)'s pure rename and (3) are advisory: no fire of either shape, so no evidence either way. The finding names the guarantee, and without it the item goes. An unread parameter is vulture's, which the gate runs as a ratchet.
 **Fires when:** added lines (1) re-check with `isinstance`, `is None`, `or {}`/`or ""` or a membership fallback, or re-convert with an identity conversion (`Path(p)` of a `Path`, `str(s)` of a `str`), a value that its non-Optional annotation and every in-tree caller already guarantee, or that the same function has already dereferenced unconditionally; (2) bind a local that only renames a parameter, import or local and is never rebound (`x_fn = x`, `filtered = list(items)` with no filter); (3) add `except E: raise` or `except E: log(...); raise` with no cleanup.
 **The rule:** validate at the boundary, then trust internal callers. A guard for a state the types and callers make impossible is not safety: its else-branch is dead code a reader has to reason about, and agents copy the guard into the next function. Delete it with the defaulted branch it feeds. A local that only renames, a copy that filters nothing and a handler that only re-raises are the same ceremony. This rule is the concrete check for *Trust the caller*; a broad `except` is *Don't grow the debt*'s.
 **Seen in:** PR #1658 deleted `if level not in _LEVELS:` from `inference_optimizer/multi_node/_internal/log.py` (its only callers pass a level they own) and `filtered_patches: list[Path] = list(patches)`, which filtered nothing, from `_server_patcher._discover_sglang_plan`. PR #1642 deleted the one-use alias `_tracelens_patch_enabled_fn = _tracelens_patch_enabled`. PR #1620 -- "getattr-with-default, dict.get, isinstance, str/bool/int coercions ... cannot raise. The except handlers in these try blocks were dead code."
@@ -1114,7 +1197,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 
 ### A14 -- A name states what the code does, and one name keeps one contract within a package
 
-**Severity:** advisory: no fire in a 30-PR replay, 2026-10-11, so no evidence either way (`AGENTS.md` *Code shape*: "A name states what the code does; an alias or a shared role such as `log` keeps the meaning its package gives it"). When a colliding name has already sent a caller to the wrong behaviour in the diff, report the wrong behaviour under C1 or D10. A query name on a function with an effect is A11's.
+**Severity:** advisory: no fire in a 30-PR replay, 2026-10-11, so no evidence either way (`AGENTS.md` *Code shape*: "A name states what the code does; an alias or a shared role such as `log` keeps the meaning its package gives it"). When a colliding name has already sent a caller to the wrong behaviour in the diff, report the wrong behaviour under C1 or D10. A query name on a function with an effect is the `code-metrics` design checks'.
 **Fires when:** the diff adds or renames a function, method, parameter, module-level binding or import alias, and the name describes something the body does not do (a phase, state or effect that does not exist); or it gives a name a second contract where a reader takes one for the other: an import alias that takes a name the package already uses for a different contract (`import a as b` where `b` already means something else), or a module-level binding of a role its sibling modules all bind one way (a `log` that is not a `logging.Logger`).
 **The rule:** agents pick a function by its name, not its body. A name that states a different job, or that collides with a sibling holding the opposite contract, sends the next caller to the wrong behaviour with no error. Name the function for the decision it returns or the effect it has, and keep one meaning for an alias or a shared role, such as a module-level `log`, within a package. Comment quality is X8's (*Comment below the local average*), not this rule's.
 **Seen in:** PR #1658 -- "should_reloop_to_explore decides whether SWEEP opens another macro-cycle ... there is no EXPLORE phase in PHASE_NAMES"; "baseline imported _patch_touched_paths_from_text under the name _patch_touched_paths, which _patch_snapshot already uses for the opposite contract"; "Every sibling module in multi_node/_internal binds log to a logging.Logger; this one bound it to a function taking (level, msg)"; and the misspelt method `_find_frameworkoposal`.
@@ -1149,13 +1232,17 @@ with <encoding defect>, <N> occurrences vs <M> at base`
 **Severity:** blocking
 **Fires when:** always. This rule governs every candidate finding and the shape of the card.
 **The rule:** the PR description's account of the defect and of the fix is not accepted as
-evidence. The changed function is called directly on a constructed case, the matrix of shapes
+evidence. The changed function is called directly on a constructed case; where it cannot be and a
+stand-in runs instead, the stand-in's context is listed against the real one item by item -- the
+shell's `set` options, the position in a pipeline, the redirection target, the interpreter version,
+what is mocked -- because a `die` that aborts a script at top level exits only a subshell in the
+middle of a pipeline, and the conclusion reverses. The matrix of shapes
 the fix must cover is enumerated, and only the tests scoped to the change are run -- CI covers
 the full suite. The published review has two parts: what the PR does and how, then blocking
 issues only. When there are none, that is stated explicitly, with the head commit, the merge
 base, the cases run and the tests run, so the author sees the depth rather than a bare LGTM.
 Non-blocking observations are not appended in any form.
-**Seen in:** PR #1412 -- the review listed what was verified rather than taking the description
+**Seen in:** PR #2227 -- a shell failure was "reproduced" on a hand-written probe that called `die` directly, concluding the script printed a message and continued; the real block was under `set -euo pipefail` where a bare assignment tripped errexit first, so `die` was dead code and the fetch exited 1 in silence. The wrong conclusion reached a commit message and a code comment. PR #1412 -- the review listed what was verified rather than taking the description
 at face value; PR #1420 ran four cases through the real `_seal_repository` on a repository a
 killed session had left on `forge/controller/dead-1`.
 **Not a finding when:** n/a -- this is a precondition for writing the card, not a finding.
@@ -1169,17 +1256,25 @@ killed session had left on `forge/controller/dead-1`.
 **Severity:** blocking
 **Fires when:** always. This rule governs every review, and its correction half fires whenever
 the body or a commit message states a causal claim.
-**The rule:** the root cause is stated in one sentence and the diff is checked against it.
-Accept that the symptom is real, then ask whether the change removes the cause or only narrows
-the failure window -- a description listing several mitigations rather than one causal change
-is the tell. Causal claims in the body and commit messages are verified against the data flow:
-if the consumer named does not read that value, or the described failure cannot occur in this
-system's execution model, the text must be corrected, because a wrong stated motivation
-distorts the cost/benefit of the change for every future maintainer. `AGENTS.md` tells the
-author to treat review feedback as a hypothesis; this is the reviewer-side obligation.
+**The rule:** the root cause is stated in one sentence and the diff is checked against it. Do
+not accept the symptom on the body's word either -- E1 reproduces the premise, and a symptom
+that never occurred makes every question below it moot. Then ask whether the change removes the
+cause or only narrows the failure window -- a description listing several mitigations rather
+than one causal change is the tell. Causal claims in the body and commit messages are verified
+against the data flow: if the consumer named does not read that value, or the described failure
+cannot occur in this system's execution model, the text must be corrected, because a wrong
+stated motivation distorts the cost/benefit of the change for every future maintainer.
+`AGENTS.md` tells the author to treat review feedback as a hypothesis; this is the
+reviewer-side obligation. This rule is adjudicated on its own evidence whatever else the review
+has already found: a mechanical finding -- a line-ending rewrite, `mergeable: CONFLICTING`, a
+stale number -- is cheap to prove and ends no review, and a card carrying one while V3 reads
+`CLEAR` for lack of looking is the shape this sentence exists to stop.
 **Seen in:** PR #1258 -- the false `no_promote` was real but the cause was a cross-system
 comparison, not the guard the PR added; PR #1097's body attributed the KB hardware dimension
-to `detect_gfx_arch()` when it comes from `kb_hardware_slug(gpu_type, ...)`.
+to `detect_gfx_arch()` when it comes from `kb_hardware_slug(gpu_type, ...)`. PR #1982 and
+PR #1981 -- two cards each, and every one of the four reported only the CRLF rewrite or the
+description's wording while the first was guarding the wrong layer (E4) and the second rested
+on a cap no run had reached (E1); both were redirected or closed by a human afterwards.
 **Not a finding when:** the body's stated cause matches the data flow, even if the fix is
 narrower than you would have written -- narrowness on its own is taste. It stops being taste
 when the narrow fix leaves the cause in place and adds a second way to resolve something the
@@ -1297,10 +1392,21 @@ suddenly needed `resume_from`, precision cases still calling the half that no lo
 ladder cases that now had to start from an empty environment. A `git grep -l` on `_resolve_workload_knobs`
 reaches two of those three in under a second; the topology-gate file names that symbol nowhere and is reached
 only by grepping `_run_optimize`, the entry point the moved call sits inside.
+Where the symbol moves module or disappears, the grep runs on the *merge* tree, not on this branch: a PR that
+landed on `main` after this one forked can add a file importing the old name, which conflicts semantically while
+`merge-tree` stays textually clean. `merge-tree` reporting no conflict is not the same claim as the merge still
+importing.
 **Not a finding when:** the symbol is new in this PR and has no callers outside it, or the enumeration was run
 and the card states its scope.
 **Evidence:** `git grep -ln '<symbol>' -- src` against `$WORK/files.txt` -- any file in the first list and not
 the second is a caller the diff did not visit. Run it once per reshaped symbol and once for the function a moved
-call now sits inside: a test driving the entry point names neither half of a split.
+call now sits inside: a test driving the entry point names neither half of a split. For a moved or deleted
+symbol, run it again against the merge:
+`git merge-tree --write-tree HEAD origin/main` prints the merged tree's sha on its first line, and
+`git grep -l '<symbol>' <tree-sha>` is the list that matters. The three-argument
+`git merge-tree <base> <ours> <theirs>` is the deprecated form: it prints a diff listing, not a sha.
 **Report as:** `V8 -- <symbol> changed shape; <file>:<line> still calls the old one` / `V8 -- callers were not
-enumerated: <N> files reference <symbol>, <M> of them untouched by this PR`
+enumerated: <N> files reference <symbol>, <M> of them untouched by this PR` / `V8 -- <symbol> moved to <module>;
+<file>:<line>, added to main by #<N>, still imports it from <old module>`
+**CI:** PR #2132 moved `IntegrateRecoveryIncomplete` out of `loop/writeback.py` with a clean `merge-tree`, while
+#2130 had just added a test importing it from there; collection failed on every shard of `main` until #2149.

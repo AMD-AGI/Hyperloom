@@ -420,7 +420,9 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
 
 #: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
 #: them. A heading of ``None`` is a block the prompt emits without one. Section order is prompt content: the
-#: model reads these in this sequence, so a reordering is a change to what it was asked.
+#: model reads these in this sequence, so a reordering is a change to what it was asked. The session-stable
+#: advisories lead, in the cached context; the plateau advisory moves with the session, so it is rendered per
+#: tick and lands last.
 _ORCHESTRATION_ADVISORIES = (
     ("=== Warm start (Recipe KB T0) ===", "shared_state", "to_warm_start_summary"),
     ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
@@ -429,10 +431,10 @@ _ORCHESTRATION_ADVISORIES = (
     ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
     ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
     ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
-    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
     ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
     ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
     ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
+    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
 )
 
 
