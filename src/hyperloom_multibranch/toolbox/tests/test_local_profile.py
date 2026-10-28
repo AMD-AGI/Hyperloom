@@ -22,9 +22,9 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Valid
 from hyperloom.measure.tests._inferencex import stock_repo
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
@@ -61,13 +61,13 @@ def _runner_python(tmp_path: Path) -> str:
     return str(script)
 
 
-def _toolbox(tmp_path: Path, notebook: LocalNotebook, commit: str, repo: Path, point: str) -> LocalHostedToolbox:
+def _toolbox(tmp_path: Path, blackboard: LocalBlackboard, commit: str, repo: Path, point: str) -> LocalHostedToolbox:
     session = tmp_path / "session"
     point_path = tmp_path / "profile-point.yaml"
     point_path.write_text(point)
     return build_local_toolbox(
         LocalSession(session, "run-1", range(2)),
-        notebook,
+        blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(point_path), IMAGE, WorkloadKind.AGENTX),
         spec_context(
             tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
@@ -104,8 +104,8 @@ async def test_a_profile_test_leaves_a_verified_trace_that_tracelens_is_started_
     tmp_path: Path, checkout: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(op_shares_module, "read_op_shares", lambda result: {"gemm": 0.5})
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, notebook, checkout[1], checkout[0], PROFILE_POINT)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox(tmp_path, blackboard, checkout[1], checkout[0], PROFILE_POINT)
     try:
         await toolbox.start()
         result = await _profile(toolbox)
@@ -127,8 +127,8 @@ async def test_a_profile_point_that_does_not_turn_the_profiler_on_is_not_run_as_
     tmp_path: Path, checkout: tuple[Path, str]
 ) -> None:
     point = PROFILE_POINT.replace("enabled: true", "enabled: false")
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, notebook, checkout[1], checkout[0], point)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox(tmp_path, blackboard, checkout[1], checkout[0], point)
     try:
         await toolbox.start()
         result = await _profile(toolbox)
@@ -144,8 +144,8 @@ async def test_a_profile_test_on_an_inferencex_that_cannot_be_patched_fails_nami
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, notebook, commit, repo, PROFILE_POINT)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox(tmp_path, blackboard, commit, repo, PROFILE_POINT)
     try:
         await toolbox.start()
         result = await _profile(toolbox)

@@ -16,8 +16,8 @@ import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from hyperloom_multibranch.notebook import STALL_TESTS
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
+from hyperloom_multibranch.blackboard import STALL_TESTS
+from hyperloom_multibranch.blackboard.rsi.frontier import SETTLED_TESTS
 from hyperloom_multibranch.scheduling.budget import MB_EXPLORE_SHARE, MB_FINAL_SHARE
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP
 from hyperloom_multibranch.scheduling.final import MB_SWEEP_DEGRADATION_PCT

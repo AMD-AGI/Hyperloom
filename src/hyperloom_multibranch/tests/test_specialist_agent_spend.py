@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
 
 MODEL = "claude-sonnet-5-5"

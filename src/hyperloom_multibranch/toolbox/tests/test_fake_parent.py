@@ -18,7 +18,7 @@ import pytest
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ComponentChange, ComponentPatches, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring

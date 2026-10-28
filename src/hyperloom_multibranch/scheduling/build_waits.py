@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import BuildState, BuildStatus, Toolbox
 
 

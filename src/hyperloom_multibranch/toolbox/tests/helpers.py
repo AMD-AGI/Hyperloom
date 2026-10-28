@@ -24,8 +24,8 @@ from hyperloom.contracts.measurement import (
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
@@ -165,13 +165,13 @@ class Rig:
     executor: ScriptedExecutor
     planner: FakePlanner
     repo: FakeRepo
-    notebook: LocalNotebook
+    blackboard: LocalBlackboard
     root: Path
     clock: Callable[[], float]
 
-    def open_notebook(self, role: Role, branch: str = "", name: str = "") -> LocalNotebook:
-        return LocalNotebook(
-            self.root / "notebook", Writer(role, name or branch or role.value, branch), clock=self.clock
+    def open_blackboard(self, role: Role, branch: str = "", name: str = "") -> LocalBlackboard:
+        return LocalBlackboard(
+            self.root / "blackboard", Writer(role, name or branch or role.value, branch), clock=self.clock
         )
 
 
@@ -184,30 +184,30 @@ def build(
     active_image: str | None = IMAGE,
     with_claims: bool = True,
     clock: Callable[[], float] | None = None,
-    wrap_sink: Callable[[LocalNotebook], object] | None = None,
+    wrap_sink: Callable[[LocalBlackboard], object] | None = None,
     planner: object | None = None,
-    tools: Callable[[LocalNotebook], object] | None = None,
+    tools: Callable[[LocalBlackboard], object] | None = None,
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     builds: BuildDriver | None = None,
     short_prompt_pool: ShortPromptPool | None = None,
     aiter_builds_missing: str | None = None,
 ) -> Rig:
-    """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
+    """A toolbox over a blackboard directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for."""
 
-    from hyperloom_multibranch.notebook.tests.factories import FakeClock
+    from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 
     clock = clock or FakeClock()
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
     executor = executor or ScriptedExecutor()
     fake, repo = FakePlanner(), repo or FakeRepo()
     planner = planner or fake
     stores = ToolboxStores(
         log=SubmissionLog(tmp_path / "toolbox" / "submissions.jsonl", "campaign-1"),
-        sink=wrap_sink(notebook) if wrap_sink else notebook,  # type: ignore[arg-type]
-        health=notebook,
-        claims=notebook if with_claims else None,
-        records=notebook,
+        sink=wrap_sink(blackboard) if wrap_sink else blackboard,  # type: ignore[arg-type]
+        health=blackboard,
+        claims=blackboard if with_claims else None,
+        records=blackboard,
         builds=builds,
         short_prompt_pool=short_prompt_pool,
     )
@@ -215,10 +215,10 @@ def build(
         stores,
         executor,
         AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
-        tools=tools(notebook) if tools else None,  # type: ignore[arg-type]
+        tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(policy=policy, clock=clock),
     )
-    return Rig(toolbox, executor, fake, repo, notebook, tmp_path, clock)
+    return Rig(toolbox, executor, fake, repo, blackboard, tmp_path, clock)
 
 
 async def settle() -> None:

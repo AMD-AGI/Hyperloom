@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A branch's long-term memory: the specialist writes and reads it, the notebook stores it."""
+"""A branch's long-term memory: the specialist writes and reads it, the blackboard stores it."""
 
 from __future__ import annotations
 

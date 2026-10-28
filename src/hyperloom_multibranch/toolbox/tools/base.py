@@ -5,7 +5,7 @@
 
 A tool is one coroutine: a request in, a JSON-serialisable result out. :class:`ToolJobs` accepts a request and returns
 a job id at once; when the tool ends, whatever way it ends (success, failure, cancellation), the runner writes the
-result file and pushes a :class:`~hyperloom_multibranch.contracts.notebook.records.ToolResultPointer` to the branch
+result file and pushes a :class:`~hyperloom_multibranch.contracts.blackboard.records.ToolResultPointer` to the branch
 that asked. A push the sink refuses is retried and, when it still fails, kept for :meth:`ToolJobs.redeliver`, so a
 finished job is never silent.
 
@@ -30,7 +30,7 @@ from urllib.parse import quote
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
-from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class AsyncTool(Protocol):
 
 
 class ToolResultSink(Protocol):
-    """The inbox pushes; the notebook's ``TestRecordSink`` satisfies it."""
+    """The inbox pushes; the blackboard's ``TestRecordSink`` satisfies it."""
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None: ...
 

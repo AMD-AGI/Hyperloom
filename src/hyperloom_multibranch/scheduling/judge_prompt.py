@@ -13,8 +13,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass
 
-from hyperloom_multibranch.notebook import STALL_TESTS
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS
+from hyperloom_multibranch.blackboard import STALL_TESTS
+from hyperloom_multibranch.blackboard.rsi.frontier import SETTLED_TESTS
 from hyperloom_multibranch.scheduling.branches import REPAIR_BRANCH_SECONDS, REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP
 from hyperloom_multibranch.specialist.prompts import VERSION_HEX

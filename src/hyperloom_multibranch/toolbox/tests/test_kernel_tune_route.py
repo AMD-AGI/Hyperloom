@@ -18,9 +18,9 @@ import pytest
 import pytest_asyncio
 
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import (
     McpSpecialistTokens,
@@ -51,12 +51,12 @@ async def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         rig = await build(cards=cards, tp=tp)
         if landed:
             rig.landed()
-            await record_test(rig.notebook)
+            await record_test(rig.blackboard)
         server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w117")
         register_specialist_tools(
             server,
             toolbox=rig.box,
-            notebooks=lambda b: LocalNotebook(rig.session / "notebook", Writer(Role.SPECIALIST_RUNTIME, b, b)),
+            blackboards=lambda b: LocalBlackboard(rig.session / "blackboard", Writer(Role.SPECIALIST_RUNTIME, b, b)),
             options=SpecialistToolOptions(analysis=rig.box, toolbox_loop=asyncio.get_running_loop()),
         )
         server.start()
@@ -141,7 +141,7 @@ async def test_a_specialist_starts_the_tuner_on_a_test_and_its_rows_reach_its_in
 
     assert await served.rig.finished(job) is JobStatus.SUCCEEDED
 
-    page = await LocalNotebook(served.rig.notebook.root, Writer(Role.SPECIALIST_RUNTIME, "b1", "b1")).poll("b1")
+    page = await LocalBlackboard(served.rig.blackboard.root, Writer(Role.SPECIALIST_RUNTIME, "b1", "b1")).poll("b1")
     (pointer,) = [item for item in page.items if item.pointer == job]
     assert pointer.kind.value == "tool_result"
     (table,) = served.rig.result(job)["result"]["tables"]
@@ -230,7 +230,7 @@ async def test_a_test_that_landed_no_output_inside_the_session_is_refused_by_nam
     )
     (served.rig.session / "tests" / "t1").mkdir(parents=True)
     (served.rig.session / "tests" / "t1" / "link").symlink_to(outside)
-    await record_test(served.rig.notebook, output_dir=where)
+    await record_test(served.rig.blackboard, output_dir=where)
 
     with pytest.raises(RequestRejected) as refused:
         await served.rig.submit(test_request_id=TEST_ID)
@@ -239,7 +239,7 @@ async def test_a_test_that_landed_no_output_inside_the_session_is_refused_by_nam
     assert untouched(served.rig)
 
 
-async def test_a_test_of_another_branch_may_be_tuned_for_as_the_notebooks_records_are_shared(make: Any) -> None:
+async def test_a_test_of_another_branch_may_be_tuned_for_as_the_blackboards_records_are_shared(make: Any) -> None:
     served = await make(cards=2)
 
     job = await served.rig.submit(branch="b2", test_request_id=TEST_ID)

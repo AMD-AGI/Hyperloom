@@ -14,8 +14,8 @@ from hyperloom.contracts.long_context import (
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue
 from hyperloom.contracts.tests.long_context_checks import long_context_check
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
-from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.blackboard.tests.factories import intent, request, result
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.inferencex import LONG_CONTEXT_DROPPED
 from hyperloom_multibranch.rulegate.readings import UnreadableResult

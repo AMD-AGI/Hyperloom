@@ -7,13 +7,13 @@ A module hands the toolbox a :class:`~hyperloom.contracts.measurement.TestReques
 once the toolbox accepted it. Acceptance is the toolbox's checks of design section 4.17 (the request validates, the
 parent recipe is read, the delta applies, the measurement surface matches), so a request that cannot be measured is
 refused here and never queues. The result does not come back through this interface: the toolbox writes it to the
-notebook, which pushes it to the submitting branch's inbox. The writer protocols it uses are the notebook's
-:class:`~hyperloom_multibranch.contracts.notebook.interfaces.TestRecordSink` (``write_request`` when it accepts,
+blackboard, which pushes it to the submitting branch's inbox. The writer protocols it uses are the blackboard's
+:class:`~hyperloom_multibranch.contracts.blackboard.interfaces.TestRecordSink` (``write_request`` when it accepts,
 ``write_result`` when the result is in, ``write_withdrawal`` when it takes a test back unmeasured) and
-:class:`~hyperloom_multibranch.contracts.notebook.interfaces.NodeHealth` (the quarantine list); both are re-exported
+:class:`~hyperloom_multibranch.contracts.blackboard.interfaces.NodeHealth` (the quarantine list); both are re-exported
 so a toolbox is wired against one module.
 
-Like the notebook's interfaces, every method is a coroutine.
+Like the blackboard's interfaces, every method is a coroutine.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Literal, Protocol
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
-from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, TestRecordSink
+from hyperloom_multibranch.contracts.blackboard.interfaces import NodeHealth, TestRecordSink
 
 
 class ToolboxError(Exception):
@@ -63,7 +63,7 @@ class UnknownTestRequest(ToolboxError, LookupError):
 
 
 class TestWithdrawn(ToolboxError):
-    """The test was withdrawn before it produced a result; ``reason`` is what the toolbox wrote to the notebook."""
+    """The test was withdrawn before it produced a result; ``reason`` is what the toolbox wrote to the blackboard."""
 
     __test__ = False
 
@@ -283,10 +283,10 @@ class Toolbox(Protocol):
     """The toolbox's external interface; the real one and the fake implement it."""
 
     async def submit_test(self, request: TestRequest) -> str:
-        """Accept ``request`` and return its ``request_id``; the result is written to the notebook later.
+        """Accept ``request`` and return its ``request_id``; the result is written to the blackboard later.
 
         Acceptance is synchronous: when this returns, the request is in the toolbox's submit log and in the queue and
-        the notebook holds its request row. Raises :class:`RequestRejected` when a check of acceptance refuses it and
+        the blackboard holds its request row. Raises :class:`RequestRejected` when a check of acceptance refuses it and
         :class:`Backpressure` when the branch's queue is full (nothing is written in either case).
         """
 

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors._kernel_agent_tool import _run_subprocess
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.tests.helpers import build
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest
@@ -59,7 +59,7 @@ async def _pids(workdir: Path) -> tuple[int, int]:
 
 
 async def test_close_cancels_a_running_analysis_and_ends_its_child_processes(tmp_path: Path) -> None:
-    rig = build(tmp_path, tools=lambda notebook: ToolJobs([_LongAnalysis()], notebook, tmp_path / "tool-results"))
+    rig = build(tmp_path, tools=lambda blackboard: ToolJobs([_LongAnalysis()], blackboard, tmp_path / "tool-results"))
     await rig.toolbox.start()
     job_id = rig.toolbox.submit_tool(ToolRequest("tracelens", "b1", {"trace_input": "t"}))
     child, grandchild = await _pids(tmp_path / "tool-results" / job_id)
@@ -77,8 +77,8 @@ async def test_close_cancels_a_running_analysis_and_ends_its_child_processes(tmp
 async def test_close_waits_for_the_children_of_a_job_cancelled_earlier(tmp_path: Path) -> None:
     jobs: list[ToolJobs] = []
 
-    def make(notebook: LocalNotebook) -> ToolJobs:
-        jobs.append(ToolJobs([_LongAnalysis()], notebook, tmp_path / "tool-results"))
+    def make(blackboard: LocalBlackboard) -> ToolJobs:
+        jobs.append(ToolJobs([_LongAnalysis()], blackboard, tmp_path / "tool-results"))
         return jobs[0]
 
     rig = build(tmp_path, tools=make)
@@ -95,7 +95,7 @@ async def test_close_waits_for_the_children_of_a_job_cancelled_earlier(tmp_path:
 
 
 async def test_a_closed_toolbox_starts_no_further_tool_job(tmp_path: Path) -> None:
-    rig = build(tmp_path, tools=lambda notebook: ToolJobs([_LongAnalysis()], notebook, tmp_path / "tool-results"))
+    rig = build(tmp_path, tools=lambda blackboard: ToolJobs([_LongAnalysis()], blackboard, tmp_path / "tool-results"))
     await rig.toolbox.start()
     await rig.toolbox.close()
     with pytest.raises(InvalidRequest, match="closed"):

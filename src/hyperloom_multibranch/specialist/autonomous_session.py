@@ -5,7 +5,7 @@
 
 The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
 (:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a crash
-resumes the agent in the same sandbox without onboarding again, and records the manifest in the notebook for CLOSE's
+resumes the agent in the same sandbox without onboarding again, and records the manifest in the blackboard for CLOSE's
 archive; the lease goes back when the branch stops. A run then
 watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
@@ -45,9 +45,9 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, PatchRef, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.notebook.records import Learning
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.contracts.blackboard.records import Learning
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
@@ -59,7 +59,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     with_tables,
     read_kept_change,
 )
-from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
+from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.specialist.agent_knowledge import NOTES_FILE, IntegrationNotes
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, LedgerSource, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
@@ -189,7 +189,7 @@ class AutonomousSession:
         self._setup = setup
         self._place = place
         self._agent_dir = place.workspace / AGENT_DIR
-        self._notes = IntegrationNotes(setup.repo, place.notebook, self._agent_dir / NOTES_FILE)
+        self._notes = IntegrationNotes(setup.repo, place.blackboard, self._agent_dir / NOTES_FILE)
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
         self._sandbox: AgentSandbox | None = None
@@ -207,7 +207,7 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         await self._notes.refresh()
-        baseline = (await self._place.notebook.snapshot()).baseline
+        baseline = (await self._place.blackboard.snapshot()).baseline
         spec = replace(
             self._setup.spec,
             server_args=launch.server_args,
@@ -224,7 +224,7 @@ class AutonomousSession:
         self._manifest, self._process = ready.manifest, ready.process
         document = ready.manifest.to_document()
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
-        await self._place.notebook.record_agent_manifest(self._start.branch, document)
+        await self._place.blackboard.record_agent_manifest(self._start.branch, document)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 
@@ -322,7 +322,7 @@ class AutonomousSession:
         deadline = self._start.task.deadline
         if manifest.keep is not None or watch.collected or not deadline:
             return
-        records = (await self._place.notebook.snapshot()).records
+        records = (await self._place.blackboard.snapshot()).records
         if self._setup.clock() < deadline - collection_margin(records, self._setup.cutoff_seconds):
             return
         watch.collected = True
@@ -449,7 +449,7 @@ class AutonomousSession:
 
     async def _learn(self, ledger: LedgerSource | None, watch: KeepWatch) -> None:
         """Append each finding of the agent's ``ledger`` the branch has not learnt as it reads now as the branch's
-        learning, superseding the one an earlier version of it became; one the notebook refuses is noted once.
+        learning, superseding the one an earlier version of it became; one the blackboard refuses is noted once.
 
         The watch is saved after each finding: :meth:`stop` reads it from its file, and a finding learnt by a run that
         ended before saving it would be learnt again."""
@@ -463,7 +463,7 @@ class AutonomousSession:
                 continue
             learning = Learning(self._start.branch, finding.kind, finding.content, supersedes=earlier or None)
             try:
-                earlier = (await self._place.notebook.append_learning(learning)).entry_id
+                earlier = (await self._place.blackboard.append_learning(learning)).entry_id
             except ValueError as error:
                 await self._note(f"the agent's finding {finding.id} is not learnt: {error}")
             watch.learnt[finding.id] = [earlier, digest]
@@ -627,7 +627,7 @@ class AutonomousSession:
     async def _busy(self) -> bool:
         """Whether a test of the branch is in flight, or measured and not judged yet within the settle time."""
 
-        snapshot = await self._place.notebook.snapshot()
+        snapshot = await self._place.blackboard.snapshot()
         settled_before = self._setup.clock() - self._setup.settle_seconds
         return any(
             record.request.branch == self._start.branch and (record.in_flight or _being_judged(record, settled_before))
@@ -636,7 +636,7 @@ class AutonomousSession:
 
     async def _note(self, content: str) -> None:
         entry = BranchLogEntry(self._start.branch, BranchLogType.RESULT, f"{NOTICE} {content}")
-        await self._place.notebook.append_branch_log(entry)
+        await self._place.blackboard.append_branch_log(entry)
 
 
 @dataclass(frozen=True)

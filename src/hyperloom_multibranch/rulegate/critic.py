@@ -21,10 +21,10 @@ from typing import Protocol
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed, CompletionReply
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT, DIAGNOSIS_FILE, FixCase
 
 logger = logging.getLogger(__name__)

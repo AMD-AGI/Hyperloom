@@ -27,8 +27,8 @@ class Slow:
 def _with_tools(tmp_path: Path, tool: Slow | None = None):
     made: list[ToolJobs] = []
 
-    def make(notebook):
-        made.append(ToolJobs([tool] if tool else list(all_tools()), notebook, tmp_path / "tool-results"))
+    def make(blackboard):
+        made.append(ToolJobs([tool] if tool else list(all_tools()), blackboard, tmp_path / "tool-results"))
         return made[0]
 
     return build(tmp_path, tools=make), made[0]

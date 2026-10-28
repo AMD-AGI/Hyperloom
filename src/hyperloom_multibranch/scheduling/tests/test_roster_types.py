@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,

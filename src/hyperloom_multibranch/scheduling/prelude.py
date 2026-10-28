@@ -23,7 +23,7 @@ the root instead: its report and per-request export are copied to ``MB-prelude/b
 as it reads a test's round, and that run's wall time is the reserve.
 
 Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
-profile, so the root has operator shares in the notebook; PRELUDE does not wait for it, and a child without a profile
+profile, so the root has operator shares in the blackboard; PRELUDE does not wait for it, and a child without a profile
 or a refusal only leaves a PRELUDE decision naming why. The toolbox reads a trace only inside its own directory, and the
 child's session lies outside the session, so the trace and its point config are copied there first.
 
@@ -31,7 +31,7 @@ A session given the PRELUDE of an earlier one (:func:`reused_prelude`) starts no
 that PRELUDE rooted on, which it only reads, the same way. The warm-start leads are read again, as their replays' files
 go to this session's blob store, and the baseline is measured as ever.
 
-Apart from that AgentX baseline the child's measurements never reach the notebook, and nothing records the card time
+Apart from that AgentX baseline the child's measurements never reach the blackboard, and nothing records the card time
 they took, so the session keeps an upper bound of it under its own name: the child's wall time from spawn to exit
 times the workload's TP, which counts the child's time off the cards as well.
 """
@@ -59,12 +59,12 @@ from hyperloom.inference_optimizer.model_config_utils import summarize_model_con
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, SessionGate
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, SessionProfile
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook.knowledge.warm_start import (
+from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     LAUNCH_ONLY_REASON,
     PreparedReplay,
     RecipeDownloader,
@@ -164,7 +164,7 @@ class _DerivedRoot:
 @dataclass(frozen=True)
 class PreludeResult:
     """The root commit the session starts from, the profile it runs on, the Recipe KB's leads for it and the upper
-    bound of the GPU seconds the main-flow child used; the rest is in the notebook and ``MB-prelude/``."""
+    bound of the GPU seconds the main-flow child used; the rest is in the blackboard and ``MB-prelude/``."""
 
     root_commit: str
     profile: SessionProfile
@@ -254,7 +254,7 @@ class Prelude:
         self._layout = context.layout
         self._warm_start_source = warm_start
         self._processes = context.processes
-        self._notebook = context.notebook
+        self._blackboard = context.blackboard
         self._repo = services.repo
         self._gate = services.gate
         self._tests = services.tests
@@ -304,12 +304,12 @@ class Prelude:
         child, artifacts, recipe = derived.child, derived.artifacts, derived.recipe
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
         root = await self._repo.init_root(recipe)
-        await self._notebook.record_lineage(
+        await self._blackboard.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
         )
         model_config = await asyncio.to_thread(summarize_model_config, workload.model)
         profile = _session_profile(self._layout.session_id, workload, artifacts, model_config)
-        await self._notebook.write_session_profile(profile)
+        await self._blackboard.write_session_profile(profile)
         self._decisions.record(
             Decision(
                 DecisionKind.PRELUDE,
@@ -464,7 +464,7 @@ class Prelude:
             baseline = await self._gate.establish_baseline(root, request_ids)
         except NotMeasured as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
-        records = [await self._notebook.record(request_id) for request_id in baseline.request_ids]
+        records = [await self._blackboard.record(request_id) for request_id in baseline.request_ids]
         longest = _longest_wall_seconds(record.result for record in records if record.result is not None)
         self._decisions.record(
             Decision(

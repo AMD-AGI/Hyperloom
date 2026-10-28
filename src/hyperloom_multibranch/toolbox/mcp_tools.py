@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a specialist can call on the campaign's MCP service: tests, results, the queue, the notebook.
+"""What a specialist can call on the campaign's MCP service: tests, results, the queue, the blackboard.
 
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
 and :class:`McpSpecialistTokens` issues and revokes the token each specialist gets. Every handler takes the branch from the token and never
 from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
-only; the notebook's search and record reads are shared across branches, as the notebook contract has them:
+only; the blackboard's search and record reads are shared across branches, as the blackboard contract has them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
@@ -16,13 +16,13 @@ only; the notebook's search and record reads are shared across branches, as the 
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
-* the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
-  brief), bound per call to the notebook handle of the caller's branch.
+* the ``blackboard_*`` tools are the blackboard's own specialist tools (lookup, claim, release, search, record, branch log,
+  brief), bound per call to the blackboard handle of the caller's branch.
 
 Every reply to a specialist also carries what reached its branch's inbox since the token's last reply, as one more text
 block after the tool's own content (:func:`reply_inbox`); ``poll_inbox`` keeps a cursor of its own. A cursor is the
-notebook's, or, in the middle of a feed too long for one page, that cursor with the number of its items already
-returned and a fingerprint of the last (``page:<n>:<fingerprint>:<notebook cursor>``); callers treat both as opaque.
+blackboard's, or, in the middle of a feed too long for one page, that cursor with the number of its items already
+returned and a fingerprint of the last (``page:<n>:<fingerprint>:<blackboard cursor>``); callers treat both as opaque.
 """
 
 from __future__ import annotations
@@ -60,8 +60,8 @@ from hyperloom.hosted.mcp_server import (
     ToolForbidden,
 )
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS
-from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError, StartupBriefProvider
-from hyperloom_multibranch.contracts.notebook.records import InboxItem
+from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, BlackboardError, StartupBriefProvider
+from hyperloom_multibranch.contracts.blackboard.records import InboxItem
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     SpecialistGrant,
@@ -71,14 +71,14 @@ from hyperloom_multibranch.contracts.toolbox import (
     Toolbox,
     ToolboxError,
 )
-from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
+from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
 if TYPE_CHECKING:
-    from hyperloom_multibranch.notebook.learning_search import LearningFinder
+    from hyperloom_multibranch.blackboard.learning_search import LearningFinder
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 _OBJECT = "object"
@@ -326,7 +326,7 @@ _CONFIRM_REFUSED_REASON = (
     "and a confirm of your own would be measured and never used; submit purpose=explore instead"
 )
 
-NotebookFor = Callable[[str], Notebook]
+BlackboardFor = Callable[[str], Blackboard]
 BriefingFor = Callable[[str], StartupBriefProvider]
 
 
@@ -386,17 +386,17 @@ async def _on(home: asyncio.AbstractEventLoop | None, call: Awaitable[Any]) -> A
 
 
 async def _own_record(
-    notebooks: NotebookFor, ctx: CallContext, request_id: str, *, profiles_shared: bool = False
+    blackboards: BlackboardFor, ctx: CallContext, request_id: str, *, profiles_shared: bool = False
 ) -> Any:
-    """The notebook's record of ``request_id``, when the caller's branch asked for it.
+    """The blackboard's record of ``request_id``, when the caller's branch asked for it.
 
     With ``profiles_shared`` a PROFILE test of any branch is also readable: ``submit_test`` refuses a second profile
     of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller waits on
     it. Taking a test back stays with its own branch.
     """
     try:
-        record = await notebooks(ctx.principal.branch).record(request_id)
-    except NotebookError as exc:
+        record = await blackboards(ctx.principal.branch).record(request_id)
+    except BlackboardError as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
     shared = profiles_shared and record.request.kind is TestKind.PROFILE
     if record.request.branch != ctx.principal.branch and not shared:
@@ -485,7 +485,7 @@ def _start_analysis(
 
 
 def _result_document(request_id: str, record: Any) -> dict[str, Any]:
-    """What ``test_result`` answers for the notebook's ``record`` of ``request_id``."""
+    """What ``test_result`` answers for the blackboard's ``record`` of ``request_id``."""
     if record.withdrawn_at is not None:
         state = "withdrawn"
     else:
@@ -500,10 +500,10 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
     }
 
 
-def _test_result(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _test_result(blackboards: BlackboardFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
-        return _result_document(request_id, await _own_record(notebooks, ctx, request_id, profiles_shared=True))
+        return _result_document(request_id, await _own_record(blackboards, ctx, request_id, profiles_shared=True))
 
     return handle
 
@@ -522,7 +522,7 @@ def wait_budget(requested: int | None) -> int:
 def _waiting_document(request_id: str, waited: float, progress: TestProgress | None) -> dict[str, Any]:
     """What ``wait_test`` answers for a test that is not over: its state and the toolbox's progress, in seconds.
 
-    A test the toolbox neither queues nor runs (its outcome is logged but not yet in the notebook) is ``in_flight``
+    A test the toolbox neither queues nor runs (its outcome is logged but not yet in the blackboard) is ``in_flight``
     with no progress. A ``pending_build`` test's progress lists its native builds: key, component, state and eta.
     """
     document: dict[str, Any] = {
@@ -545,15 +545,15 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
 
 
 def _wait_test(
-    toolbox: Toolbox, notebooks: NotebookFor, home: asyncio.AbstractEventLoop | None, poll_seconds: float
+    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, poll_seconds: float
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
         budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
-        record = await _own_record(notebooks, ctx, request_id, profiles_shared=True)
+        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
         while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
             await asyncio.sleep(min(poll_seconds, left))
-            record = await _own_record(notebooks, ctx, request_id, profiles_shared=True)
+            record = await _own_record(blackboards, ctx, request_id, profiles_shared=True)
         if _is_over(record):
             return _result_document(request_id, record)
         progress = await _on(home, toolbox.progress(request_id))
@@ -563,10 +563,10 @@ def _wait_test(
 
 
 def _cancel_test(
-    toolbox: Toolbox, notebooks: NotebookFor, home: asyncio.AbstractEventLoop | None
+    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
-        await _own_record(notebooks, ctx, arguments["request_id"])
+        await _own_record(blackboards, ctx, arguments["request_id"])
         try:
             return {"outcome": (await _on(home, toolbox.cancel(arguments["request_id"]))).value}
         except ToolboxError as exc:
@@ -587,9 +587,9 @@ def _queue_state(
 
 @dataclasses.dataclass(frozen=True)
 class _Feed:
-    """The inbox items of a branch not yet returned from one cursor: ``base`` is the notebook's cursor they were read
+    """The inbox items of a branch not yet returned from one cursor: ``base`` is the blackboard's cursor they were read
     from, ``skipped`` how many of its items earlier pages returned, ``anchor`` the fingerprint of the last of those,
-    and ``end`` the notebook's cursor past all."""
+    and ``end`` the blackboard's cursor past all."""
 
     base: str
     skipped: int
@@ -611,8 +611,8 @@ def _fingerprint(item: InboxItem) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:_FINGERPRINT_CHARS]
 
 
-async def _read_feed(notebook: Notebook, branch: str, cursor: str) -> _Feed:
-    """The feed of ``branch`` from ``cursor``. The notebook computes some items from the claims the branch holds, so
+async def _read_feed(blackboard: Blackboard, branch: str, cursor: str) -> _Feed:
+    """The feed of ``branch`` from ``cursor``. The blackboard computes some items from the claims the branch holds, so
     a feed can change between two pages: a page cursor resumes after the item its page ended with, found by its
     fingerprint, and by the count only where that item is gone."""
     base, skipped, anchor = cursor, 0, ""
@@ -622,7 +622,7 @@ async def _read_feed(notebook: Notebook, branch: str, cursor: str) -> _Feed:
             raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
         skipped, anchor, base = int(parts[0]), parts[1], parts[2]
     try:
-        page = await notebook.poll(branch, base)
+        page = await blackboard.poll(branch, base)
     except ValueError as exc:
         raise InvalidParamsError(
             f"{exc}; pass the cursor of an earlier reply, or none to read the whole inbox"
@@ -640,7 +640,7 @@ def _item_size(item: InboxItem) -> int:
 
 def _page_of(feed: _Feed) -> tuple[InboxItem, ...]:
     """The first items of ``feed`` one ``poll_inbox`` reply holds: at most :data:`POLL_INBOX_MAX_ITEMS` and
-    :data:`POLL_INBOX_MAX_BYTES` with the cursor counted in, but always one so that every page moves on (the notebook
+    :data:`POLL_INBOX_MAX_BYTES` with the cursor counted in, but always one so that every page moves on (the blackboard
     bounds one item well under the budget)."""
     page: list[InboxItem] = []
     used = _POLL_PAGE_OVERHEAD + len(json.dumps(feed.end))
@@ -652,10 +652,10 @@ def _page_of(feed: _Feed) -> tuple[InboxItem, ...]:
     return tuple(page)
 
 
-def _poll_inbox(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _poll_inbox(blackboards: BlackboardFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         branch = ctx.principal.branch
-        feed = await _read_feed(notebooks(branch), branch, str(arguments.get("cursor") or ""))
+        feed = await _read_feed(blackboards(branch), branch, str(arguments.get("cursor") or ""))
         page = _page_of(feed)
         remaining = len(feed.items) - len(page)
         document: dict[str, Any] = {
@@ -680,21 +680,21 @@ def _inbox_block(items: Sequence[InboxItem]) -> str:
     return "\n".join([REPLY_INBOX_HEADER, *lines])
 
 
-def reply_inbox(notebooks: NotebookFor) -> ReplyAnnotator:
+def reply_inbox(blackboards: BlackboardFor) -> ReplyAnnotator:
     """The reply annotator that adds what arrived in the caller's branch inbox since its token's last reply.
 
     A token's first call is asked with no cursor, so the whole feed is read and the service drops that text: a late
-    first call or a restarted service starts from the end. The cursor is the notebook's own, kept by the service per
+    first call or a restarted service starts from the end. The cursor is the blackboard's own, kept by the service per
     token, apart from ``poll_inbox``'s. A ``poll_inbox`` reply carries no block, and only the items it returned count
     as seen: the cursor moves past the leading ones of the unread items that it returned, and no further.
     """
 
     async def annotate(call: ReplyCall, cursor: str | None) -> ReplyNote:
         branch = call.principal.branch
-        notebook = notebooks(branch)
-        unread = await _read_feed(notebook, branch, cursor or "")
+        blackboard = blackboards(branch)
+        unread = await _read_feed(blackboard, branch, cursor or "")
         if call.tool == _POLL_INBOX_TOOL and cursor is not None:
-            returned = set() if call.is_error else await _returned_by_poll(notebook, call)
+            returned = set() if call.is_error else await _returned_by_poll(blackboard, call)
             seen = sum(1 for _ in itertools.takewhile(returned.__contains__, unread.items))
             return ReplyNote("", unread.after(seen))
         asked = call.arguments.get("request_id") if call.tool in _CARRIES_REQUEST and not call.is_error else None
@@ -703,15 +703,15 @@ def reply_inbox(notebooks: NotebookFor) -> ReplyAnnotator:
     return annotate
 
 
-async def _returned_by_poll(notebook: Notebook, call: ReplyCall) -> set[InboxItem]:
+async def _returned_by_poll(blackboard: Blackboard, call: ReplyCall) -> set[InboxItem]:
     """The items the ``poll_inbox`` call returned, read again from the cursor it was given."""
-    feed = await _read_feed(notebook, call.principal.branch, str(call.arguments.get("cursor") or ""))
+    feed = await _read_feed(blackboard, call.principal.branch, str(call.arguments.get("cursor") or ""))
     return set(_page_of(feed))
 
 
-def _notebook_handler(
+def _blackboard_handler(
     name: str,
-    notebooks: NotebookFor,
+    blackboards: BlackboardFor,
     ttl_seconds: float,
     learnings: LearningFinder | None = None,
     briefing_for: BriefingFor | None = None,
@@ -719,7 +719,9 @@ def _notebook_handler(
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> str:
         branch = ctx.principal.branch
         briefing = briefing_for(branch) if briefing_for is not None else None
-        bound = notebook_tools(notebooks(branch), briefing, branch=branch, ttl_seconds=ttl_seconds, learnings=learnings)
+        bound = blackboard_tools(
+            blackboards(branch), briefing, branch=branch, ttl_seconds=ttl_seconds, learnings=learnings
+        )
         tools = {tool.name: tool for tool in bound}
         text = await tools[name].handler(arguments)
         if text.startswith(ERROR):
@@ -731,15 +733,15 @@ def _notebook_handler(
 
 @dataclasses.dataclass(frozen=True)
 class SpecialistToolOptions:
-    """What :func:`register_specialist_tools` may be told besides the toolbox and the notebooks.
+    """What :func:`register_specialist_tools` may be told besides the toolbox and the blackboards.
 
     ``claim_ttl_seconds`` is how long a claim a specialist takes lives. ``toolbox_loop`` is the loop the toolbox was started on; every call to the toolbox is made on it. When omitted it is
     the running loop of the caller, so registering from the coroutine that started the toolbox is enough; without a
     running loop the toolbox is called on the loop of each request, which suits a toolbox that keeps no tasks.
-    ``learnings`` is the session's one finder of the specialists' learnings (the notebook's ``LearningRecall``, which
-    adds past sessions' from the Experience KB); without it ``notebook_learnings`` finds this session's only.
-    ``briefing_for`` gives the provider of the brief of a branch (the notebook's ``SessionBriefs.for_branch``), called
-    with the caller's branch from the token at every ``notebook_brief``; without it the notebook's own brief is returned.
+    ``learnings`` is the session's one finder of the specialists' learnings (the blackboard's ``LearningRecall``, which
+    adds past sessions' from the Experience KB); without it ``blackboard_learnings`` finds this session's only.
+    ``briefing_for`` gives the provider of the brief of a branch (the blackboard's ``SessionBriefs.for_branch``), called
+    with the caller's branch from the token at every ``blackboard_brief``; without it the blackboard's own brief is returned.
     ``analysis`` starts ``start_analysis`` jobs (the real toolbox is one); without it that tool refuses by name.
     ``wait_poll_seconds`` is how often ``wait_test`` reads the record of the test it waits for.
     """
@@ -756,21 +758,21 @@ def register_specialist_tools(
     server: McpServer,
     *,
     toolbox: Toolbox,
-    notebooks: NotebookFor,
+    blackboards: BlackboardFor,
     options: SpecialistToolOptions = SpecialistToolOptions(),
 ) -> None:
-    """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch."""
+    """Register every specialist tool; ``blackboards(branch)`` is the blackboard handle that writes as that branch."""
     toolbox_loop = options.toolbox_loop
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
-    server.attach_reply_annotator(reply_inbox(notebooks))
+    server.attach_reply_annotator(reply_inbox(blackboards))
     _register_submit_test(server, toolbox, toolbox_loop)
     _register_put_kernel_artifact(server, toolbox, toolbox_loop)
-    _register_test_queries(server, toolbox, notebooks, toolbox_loop, options)
+    _register_test_queries(server, toolbox, blackboards, toolbox_loop, options)
     _register_start_analysis(server, options.analysis, toolbox_loop)
-    _register_poll_inbox(server, notebooks)
-    _register_notebook_tools(server, notebooks, options)
+    _register_poll_inbox(server, blackboards)
+    _register_blackboard_tools(server, blackboards, options)
 
 
 def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
@@ -779,7 +781,7 @@ def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.Abs
         description=(
             "Submit a test of a recipe change for this branch; returns the request id once accepted. A profile of a "
             "commit that already has one queued, running or measured is refused as profile_exists and names that "
-            "request: wait_test on it, or read the commit's op shares from the notebook."
+            "request: wait_test on it, or read the commit's op shares from the blackboard."
         ),
         schema=_SUBMIT_TEST,
         handler=_submit_test(toolbox, home),
@@ -790,7 +792,7 @@ def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.Abs
 def _register_test_queries(
     server: McpServer,
     toolbox: Toolbox,
-    notebooks: NotebookFor,
+    blackboards: BlackboardFor,
     home: asyncio.AbstractEventLoop | None,
     options: SpecialistToolOptions,
 ) -> None:
@@ -799,7 +801,7 @@ def _register_test_queries(
         "test_result",
         description=_TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
-        handler=_test_result(notebooks),
+        handler=_test_result(blackboards),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
@@ -811,14 +813,14 @@ def _register_test_queries(
             "eta_seconds), not stuck."
         ),
         schema=_WAIT_TEST,
-        handler=_wait_test(toolbox, notebooks, home, options.wait_poll_seconds),
+        handler=_wait_test(toolbox, blackboards, home, options.wait_poll_seconds),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "cancel_test",
         description="Take back a test of this branch that has not finished.",
         schema=_REQUEST_ID,
-        handler=_cancel_test(toolbox, notebooks, home),
+        handler=_cancel_test(toolbox, blackboards, home),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
@@ -843,7 +845,7 @@ def _register_start_analysis(
     )
 
 
-def _register_poll_inbox(server: McpServer, notebooks: NotebookFor) -> None:
+def _register_poll_inbox(server: McpServer, blackboards: BlackboardFor) -> None:
     server.register(
         _POLL_INBOX_TOOL,
         description=(
@@ -852,21 +854,21 @@ def _register_poll_inbox(server: McpServer, notebooks: NotebookFor) -> None:
             "to read the next page."
         ),
         schema=_POLL_INBOX,
-        handler=_poll_inbox(notebooks),
+        handler=_poll_inbox(blackboards),
         scopes=_SPECIALIST_SCOPES,
     )
 
 
-def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options: SpecialistToolOptions) -> None:
-    """Register the notebook's tools, whose definitions the notebook itself owns."""
-    # Binding to no notebook is enough to read the definitions; no handler of this probe is ever called.
-    for tool in notebook_tools(cast(Notebook, None), branch="", ttl_seconds=options.claim_ttl_seconds):
+def _register_blackboard_tools(server: McpServer, blackboards: BlackboardFor, options: SpecialistToolOptions) -> None:
+    """Register the blackboard's tools, whose definitions the blackboard itself owns."""
+    # Binding to no blackboard is enough to read the definitions; no handler of this probe is ever called.
+    for tool in blackboard_tools(cast(Blackboard, None), branch="", ttl_seconds=options.claim_ttl_seconds):
         server.register(
             tool.name,
             description=tool.description,
             schema=tool.input_schema,
-            handler=_notebook_handler(
-                tool.name, notebooks, options.claim_ttl_seconds, options.learnings, options.briefing_for
+            handler=_blackboard_handler(
+                tool.name, blackboards, options.claim_ttl_seconds, options.learnings, options.briefing_for
             ),
             scopes=_SPECIALIST_SCOPES,
         )
@@ -879,7 +881,7 @@ __all__ = [
     "REPLY_INBOX_LINES",
     "SPECIALIST_TOKEN_ENV",
     "BriefingFor",
-    "NotebookFor",
+    "BlackboardFor",
     "McpSpecialistTokens",
     "SpecialistToolOptions",
     "WAIT_POLL_SECONDS",

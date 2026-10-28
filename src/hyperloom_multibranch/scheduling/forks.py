@@ -21,7 +21,7 @@ measured against, a fork once the rule gate has landed its fix. The desk needs n
 handed to the specialist runtime, which builds its rule gates on it.
 
 An admitted repair carries its request, which the branch control hands the new specialist as its branch's task; the
-diagnosis is also kept in the ``REPAIR`` decision. The fix a fork lands reaches its specialist through the notebook.
+diagnosis is also kept in the ``REPAIR`` decision. The fix a fork lands reaches its specialist through the blackboard.
 """
 
 from __future__ import annotations

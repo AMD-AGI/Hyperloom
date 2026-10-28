@@ -32,24 +32,24 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.contracts.recipe import PatchRef
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, ResolvedPatch
 from hyperloom_multibranch.contracts.toolbox import QueueState
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
-from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
-from hyperloom_multibranch.notebook.knowledge.tests.test_recipe_writeback import final
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
-from hyperloom_multibranch.notebook.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
-from hyperloom_multibranch.notebook.rsi.lesson_curation import NO_LESSONS
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
-from hyperloom_multibranch.notebook.rsi.session import DISABLED, WRITTEN, KnowledgeClose, close_knowledge
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeRecipeStore
+from hyperloom_multibranch.blackboard.knowledge.tests.test_recipe_writeback import final
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
+from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
+from hyperloom_multibranch.blackboard.rsi.lesson_curation import NO_LESSONS
+from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay, WarmLead
+from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling import mb_fakes
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
-from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
+from hyperloom_multibranch.blackboard.tests.factories import FakeClock
+from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -129,21 +129,21 @@ class RecordingStopper:
         return self.report
 
 
-class BrokenNotebook:
-    """A notebook whose disk fails while CLOSE reads it; a failure double, not a placeholder."""
+class BrokenBlackboard:
+    """A blackboard whose disk fails while CLOSE reads it; a failure double, not a placeholder."""
 
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
-    async def snapshot(self) -> NotebookSnapshot:
+    async def snapshot(self) -> BlackboardSnapshot:
         self.events.append("snapshot")
         raise OSError("disk gone")
 
 
-class StuckNotebook:
-    """A notebook whose disk hangs while CLOSE reads it; a failure double, not a placeholder."""
+class StuckBlackboard:
+    """A blackboard whose disk hangs while CLOSE reads it; a failure double, not a placeholder."""
 
-    async def snapshot(self) -> NotebookSnapshot:
+    async def snapshot(self) -> BlackboardSnapshot:
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -183,8 +183,8 @@ def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def notebook(tmp_path: Path) -> LocalNotebook:
-    return await scripted_session(tmp_path / "notebook", FakeClock())
+async def blackboard(tmp_path: Path) -> LocalBlackboard:
+    return await scripted_session(tmp_path / "blackboard", FakeClock())
 
 
 @pytest.fixture
@@ -218,7 +218,7 @@ IMAGE_CHECK = ImageCheckReport(
 
 def _closer(
     layout: SessionLayout,
-    notebook: object,
+    blackboard: object,
     stopper: RecordingStopper,
     recipe: FinalRecipe,
     kb_client: RemoteRecipeClient | None,
@@ -233,15 +233,15 @@ def _closer(
 
     author = author or ScriptedCompletion()
     curator = curator or ScriptedCompletion()
-    progress = FrontierScoring(notebook, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
+    progress = FrontierScoring(blackboard, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
     blobs = LocalBlobStore(layout.blobs)
     for path in (
         *(patch.path for component in recipe.recipe.components for patch in component.patches),
         *(kernel.ref for kernel in recipe.recipe.kernels),
     ):
         blobs.put((recipe.files_root / path).read_bytes())
-    dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
-    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
+    dashboard = SessionDashboard(blackboard, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
+    sources = ExportSources(blackboard, ChosenRepo(recipe), blobs, dashboard, image_check, warm_leads)
     services = ExportServices(kb_client, CloseAuthoring(author, AUTHOR_MODEL), CloseAuthoring(curator, AUTHOR_MODEL))
     exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
@@ -253,7 +253,7 @@ def _clean() -> RecordingStopper:
 
 async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     layout: SessionLayout,
-    notebook: LocalNotebook,
+    blackboard: LocalBlackboard,
     final: FinalRecipe,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,7 +267,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     (layout.logs / "agents").mkdir(parents=True, exist_ok=True)
     (layout.logs / "agents" / "resources.jsonl").write_text(json.dumps(reading) + "\n", "utf-8")
 
-    closer = _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author, curator, IMAGE_CHECK)
+    closer = _closer(layout, blackboard, stopper, final, RemoteRecipeClient(store), author, curator, IMAGE_CHECK)
     report = await closer.close(SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP)
 
     assert report.exports is not None and report.exports.kb_write_back.status == "written"
@@ -314,16 +314,16 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
+    layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe
 ) -> None:
-    disabled = await _closer(layout, notebook, _clean(), final, None).close(
+    disabled = await _closer(layout, blackboard, _clean(), final, None).close(
         SessionStopReason.SIGNAL, CHOICE, "", HARD_STOP
     )
     assert disabled.exports is not None
     assert json.loads(disabled.exports.breakdown.read_text())["close"]["final"]["commit_id"] == CHOSEN
     assert not (layout.reports / IMAGE_CHECK_FILE).exists()
     no_choice = FinalChoice(None, (), "no candidate passed the final validation", METRIC, 64)
-    skipped = await _closer(layout, notebook, _clean(), final, RemoteRecipeClient(FakeRecipeStore())).close(
+    skipped = await _closer(layout, blackboard, _clean(), final, RemoteRecipeClient(FakeRecipeStore())).close(
         SessionStopReason.PRELUDE_FAILED, no_choice, "prelude failed", HARD_STOP
     )
 
@@ -361,7 +361,7 @@ def _rebased(path: str) -> RebasedPatch:
 
 
 async def test_close_counts_how_the_merges_went_and_met_conflicting_patches_from_the_merge_log(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
+    layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe
 ) -> None:
     swap = ReplacedPatch("vllm", ("patch/vllm/0001-old.patch",), PatchRef("patch/vllm/0002-new.patch", "a" * 64))
     written = (_model_patch("patch/vllm/0003-x.patch"), _model_patch("patch/vllm/0004-y.patch"))
@@ -401,7 +401,7 @@ async def test_close_counts_how_the_merges_went_and_met_conflicting_patches_from
     champion = {"champion": "kb-1", "onto": "c0", "request_id": "", "merged_commit": ""}
     merges.record(Decision(DecisionKind.MERGE, "its change is already on the integration head", "", champion))
 
-    closed = await _closer(layout, notebook, _clean(), final, None).close(REASON, CHOICE, "", HARD_STOP)
+    closed = await _closer(layout, blackboard, _clean(), final, None).close(REASON, CHOICE, "", HARD_STOP)
 
     assert closed.exports is not None
     assert json.loads(closed.exports.breakdown.read_text())["close"]["merges"] == {
@@ -426,7 +426,7 @@ def _lead(canonical_id: str, source_image: str | None) -> WarmLead:
 
 
 async def test_close_marks_the_replays_of_the_champions_prelude_prepared_from_another_image(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
+    layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed: list[Collection[str]] = []
 
@@ -437,16 +437,16 @@ async def test_close_marks_the_replays_of_the_champions_prelude_prepared_from_an
     monkeypatch.setattr(mb_fakes, "close_knowledge", spied)
     leads = (_lead("inference:other", "sha256:" + "b" * 64), _lead("inference:same", ""), _lead("inference:none", None))
 
-    await _closer(layout, notebook, _clean(), final, None, warm_leads=leads).close(REASON, CHOICE, "", HARD_STOP)
+    await _closer(layout, blackboard, _clean(), final, None, warm_leads=leads).close(REASON, CHOICE, "", HARD_STOP)
 
     assert closed == [frozenset({"inference:other"})]
 
 
 async def test_an_unreachable_kb_is_recorded_and_close_carries_on(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
+    layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe
 ) -> None:
     stopper = _clean()
-    closer = _closer(layout, notebook, stopper, final, RemoteRecipeClient(UnreachableStore()))
+    closer = _closer(layout, blackboard, stopper, final, RemoteRecipeClient(UnreachableStore()))
 
     report = await closer.close(SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP)
 
@@ -461,7 +461,7 @@ async def test_everything_is_stopped_before_the_exports_and_a_failed_export_is_r
     events: list[str] = []
     stopper = RecordingStopper(StopReport((), QueueState()), events)
 
-    report = await _closer(layout, BrokenNotebook(events), stopper, final, None).close(
+    report = await _closer(layout, BrokenBlackboard(events), stopper, final, None).close(
         SessionStopReason.SIGNAL, None, "", HARD_STOP
     )
 
@@ -474,7 +474,7 @@ async def test_everything_is_stopped_before_the_exports_and_a_failed_export_is_r
 async def test_exports_that_overrun_the_hard_stop_are_cut_and_the_report_still_written(
     layout: SessionLayout, final: FinalRecipe
 ) -> None:
-    report = await _closer(layout, StuckNotebook(), _clean(), final, None).close(
+    report = await _closer(layout, StuckBlackboard(), _clean(), final, None).close(
         SessionStopReason.TIME_EXHAUSTED, CHOICE, "", NOW + SHORT_GRACE
     )
 
@@ -484,11 +484,13 @@ async def test_exports_that_overrun_the_hard_stop_are_cut_and_the_report_still_w
 
 
 async def test_processes_and_tests_that_outlive_the_stop_are_reported(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
+    layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe
 ) -> None:
     stopper = RecordingStopper(StopReport((LEFTOVER,), QueueState(running_by_branch={"b01": 1})))
 
-    report = await _closer(layout, notebook, stopper, final, None).close(SessionStopReason.SIGNAL, None, "", HARD_STOP)
+    report = await _closer(layout, blackboard, stopper, final, None).close(
+        SessionStopReason.SIGNAL, None, "", HARD_STOP
+    )
 
     assert not report.stop.clean
     written = json.loads(layout.report.read_text())

@@ -6,7 +6,7 @@
 A branch's own change is what ``hyperloom.contracts.recipe.diff`` finds from the recipe of the commit it last followed
 to that of its head: each server argument and environment variable at its new value, each patch and kernel added or
 dropped by content hash, each component's new upstream ref, each item newly or no longer unexpressed, and a changed
-image. Both commits are read off the notebook's lineage: the head is the branch's head there, and the commit it
+image. Both commits are read off the blackboard's lineage: the head is the branch's head there, and the commit it
 followed is the first one, walking back from that head through parents, that is not the branch's own commit -- its
 start commit, or the integration commit a re-root moved it onto. It is not read from the root, because two branches
 that follow the same integration commit share every integration change they inherited, and from the root they would
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from itertools import combinations
 
 from hyperloom.contracts.recipe import Recipe, ValueChange, diff
-from hyperloom_multibranch.contracts.notebook.records import LineageView
+from hyperloom_multibranch.contracts.blackboard.records import LineageView
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStatus, Roster
 

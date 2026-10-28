@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.close import CloseReport
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice

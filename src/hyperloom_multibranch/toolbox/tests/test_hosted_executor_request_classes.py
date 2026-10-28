@@ -5,7 +5,7 @@
 
 The executor is the real one over the hosted backend and the local sandbox provider. The stand-in runner writes the
 round's per-request export (the lines of ``agentx_export``, in the shapes the pinned client writes) into the files the
-bundle signs; what is read is what the bundle landed and the notebook stored. The pointer is checked against the
+bundle signs; what is read is what the bundle landed and the blackboard stored. The pointer is checked against the
 archived manifest, which is the proof that the runner kept the export in the signed bundle.
 """
 
@@ -61,7 +61,7 @@ def _with_export(lines: list[str]) -> dict[str, object]:
     return {"fake_export": json.dumps(lines)}
 
 
-async def test_a_result_counts_each_failed_request_by_class_and_the_notebook_keeps_the_counts(
+async def test_a_result_counts_each_failed_request_by_class_and_the_blackboard_keeps_the_counts(
     tmp_path: Path, rig
 ) -> None:
     _, result = await _result(tmp_path, rig, **_with_export(_lines()))

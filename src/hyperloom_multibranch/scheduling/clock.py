@@ -17,7 +17,7 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class Clock:
-    """``now`` is Unix seconds, the time base of the notebook's records; ``sleep`` waits that many seconds."""
+    """``now`` is Unix seconds, the time base of the blackboard's records; ``sleep`` waits that many seconds."""
 
     now: Callable[[], float] = time.time
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep

@@ -24,9 +24,9 @@ from hyperloom.measure.short_prompts.staging import CACHE_ENV, EVALSETS_DIR, MAN
 from hyperloom.measure.short_prompts.tests.support import prompt_set, staged_plan
 from hyperloom.measure.tests.hosted_fixtures import point_yaml, spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _point
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, HostedToolbox, build_hosted_toolbox
 from hyperloom_multibranch.toolbox.leased_toolbox import with_short_prompts
 from hyperloom_multibranch.toolbox import local_hosted
@@ -271,7 +271,7 @@ def _local(tmp_path: Path, acceptance: AcceptanceSetup | None = None, **options:
     spec = spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs"))
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
-        LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox")),
+        LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox")),
         acceptance or _acceptance(tmp_path),
         spec,
         options=LocalOptions(
@@ -435,7 +435,7 @@ def _hosted(
     point = point_yaml(tmp_path, "planned.yaml")
     return build_hosted_toolbox(
         _inputs(None, tmp_path),
-        LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox")),
+        LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox")),
         acceptance or AcceptanceSetup(FakeRepo(), PointPlanner(point), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path),
         options=options or HostedOptions(policy=QueuePolicy(per_branch_k=2, global_concurrency=64)),

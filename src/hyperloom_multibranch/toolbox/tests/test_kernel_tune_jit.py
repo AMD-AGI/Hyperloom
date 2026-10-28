@@ -79,7 +79,7 @@ async def test_the_tuner_builds_into_a_jit_directory_of_the_job_and_never_into_t
     jit = image_jit(rig.configs)
     before = listing(jit)
     rig.landed()
-    await record_test(rig.notebook)
+    await record_test(rig.blackboard)
     job = await rig.submit(test_request_id=TEST_ID)
 
     assert await rig.finished(job) is (JobStatus.FAILED if fail else JobStatus.SUCCEEDED)
@@ -101,7 +101,7 @@ async def test_the_tuner_keeps_the_temporary_directory_it_inherits_where_forge_r
     monkeypatch.setenv("TMPDIR", str(inherited))
     rig = await build(cards=2)
     rig.landed()
-    await record_test(rig.notebook)
+    await record_test(rig.blackboard)
     job = await rig.submit(test_request_id=TEST_ID)
     assert await rig.finished(job) is JobStatus.SUCCEEDED
 

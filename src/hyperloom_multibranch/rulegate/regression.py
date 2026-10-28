@@ -26,9 +26,9 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome, ResultUnverified, ResultVerifier
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords, RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import RegressionCase, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch
+from hyperloom_multibranch.contracts.blackboard.records import RegressionCase, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.service import Polling
@@ -57,7 +57,7 @@ class ReproRun:
 
 
 class ReproRunner:
-    """Runs a case as a repro test through ``toolbox`` and reads its verdict back from ``notebook``.
+    """Runs a case as a repro test through ``toolbox`` and reads its verdict back from ``blackboard``.
 
     A verdict counts only once ``verifier`` re-verified the result behind it. A run never raises for how the test
     ended: a refusal, a withdrawal, a failure, a success without a verdict and a result that does not re-verify are each
@@ -65,10 +65,10 @@ class ReproRunner:
     """
 
     def __init__(
-        self, toolbox: Toolbox, notebook: RecordSearch, verifier: ResultVerifier, *, polling: Polling = Polling()
+        self, toolbox: Toolbox, blackboard: RecordSearch, verifier: ResultVerifier, *, polling: Polling = Polling()
     ) -> None:
         self._toolbox = toolbox
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._verifier = verifier
         self._polling = polling
 
@@ -103,7 +103,7 @@ class ReproRunner:
                 await self._polling.sleep(RESUBMIT_SECONDS)
 
     async def _ended(self, request_id: str) -> TestRecord:
-        while (record := await self._notebook.record(request_id)).in_flight:
+        while (record := await self._blackboard.record(request_id)).in_flight:
             await self._polling.sleep(self._polling.seconds)
         return record
 
@@ -123,7 +123,7 @@ class ReproRunner:
         return ReproRun(request_id, verdict=result.repro_verdict)
 
 
-class RegressionNotebook(RecordSearch, CommitQuery, Protocol):
+class RegressionBlackboard(RecordSearch, CommitQuery, Protocol):
     """What the regression set reads: the cases of a commit's ancestry and the repro test each case came from."""
 
 
@@ -135,8 +135,8 @@ class RegressionSet:
     case on the same recipe is not run again; a case that ran to no verdict runs again next time.
     """
 
-    def __init__(self, notebook: RegressionNotebook, runner: ReproRunner, repo: ExperimentRepo) -> None:
-        self._notebook = notebook
+    def __init__(self, blackboard: RegressionBlackboard, runner: ReproRunner, repo: ExperimentRepo) -> None:
+        self._blackboard = blackboard
         self._runner = runner
         self._repo = repo
         self._verdicts: dict[tuple[str, str], str] = {}
@@ -157,7 +157,7 @@ class RegressionSet:
 
         found: dict[str, RegressionCase] = {}
         for commit in commits:
-            for case in await self._notebook.regression_cases_for(commit):
+            for case in await self._blackboard.regression_cases_for(commit):
                 found.setdefault(case.request_id, case)
         return list(found.values())
 
@@ -165,7 +165,7 @@ class RegressionSet:
         key = (case.request_id, digest)
         if key in self._verdicts:
             return self._verdicts[key]
-        attachments = (await self._notebook.record(case.request_id)).request.attachments
+        attachments = (await self._blackboard.record(case.request_id)).request.attachments
         run = await self._runner.run(commit, delta, attachments, branch=INTEGRATION_BRANCH)
         if run.verdict:
             self._verdicts[key] = run.verdict
@@ -199,7 +199,7 @@ class FixProof:
 
 
 async def prove_fix(
-    runner: ReproRunner, notebook: CommitQuery, candidate: TestRequest, case: tuple[AttachmentRef, ...]
+    runner: ReproRunner, blackboard: CommitQuery, candidate: TestRequest, case: tuple[AttachmentRef, ...]
 ) -> FixProof:
     """Run ``case`` on ``candidate``'s branch, on its parent, on the parent with its delta and on the baseline's root
     commit, at once; the parent's run stands for the root's when the parent is the root.
@@ -207,7 +207,7 @@ async def prove_fix(
     Raises :class:`FixNotProven` unless the parent reproduced and the candidate ran clean.
     """
 
-    parent, root = candidate.parent_commit, (await notebook.baseline()).root_commit
+    parent, root = candidate.parent_commit, (await blackboard.baseline()).root_commit
     targets = [(parent, NO_DELTA), (parent, candidate.delta)]
     if root != parent:
         targets.append((root, NO_DELTA))
@@ -222,22 +222,22 @@ async def prove_fix(
 
 
 class CaseRegistry(RecordSearch, GateRecords, Protocol):
-    """Where a fix's case is registered: the rule gate's handle on the notebook."""
+    """Where a fix's case is registered: the rule gate's handle on the blackboard."""
 
 
-async def register_case(notebook: CaseRegistry, fix_commit: str, repro_request_id: str) -> RegressionCase:
+async def register_case(blackboard: CaseRegistry, fix_commit: str, repro_request_id: str) -> RegressionCase:
     """Register the case of the repro test ``repro_request_id`` as the regression case of ``fix_commit``.
 
     The test is the fix's candidate run: raises ``ValueError`` unless it is a repro test whose case ran clean.
     """
 
-    record = await notebook.record(repro_request_id)
+    record = await blackboard.record(repro_request_id)
     clean = record.result is not None and record.result.repro_verdict == NOT_REPRODUCED
     if record.request.kind is not TestKind.REPRO or not clean:
         raise ValueError(f"{repro_request_id} is not a repro test whose case ran clean")
     case_ref = ", ".join(attachment.id for attachment in record.request.attachments)
     case = RegressionCase(case_ref, fix_commit, repro_request_id)
-    await notebook.add_regression_case(case)
+    await blackboard.add_regression_case(case)
     return case
 
 
@@ -260,7 +260,7 @@ __all__ = [
     "CaseRegistry",
     "FixNotProven",
     "FixProof",
-    "RegressionNotebook",
+    "RegressionBlackboard",
     "RegressionSet",
     "ReproRun",
     "ReproRunner",

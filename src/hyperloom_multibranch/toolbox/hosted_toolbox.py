@@ -30,7 +30,7 @@ from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import Role, SandboxProvider
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_leases import (
@@ -179,7 +179,7 @@ def _whole(limits: Mapping[str, float], key: str) -> int:
 
 @dataclass(frozen=True)
 class HostedOptions:
-    """What :func:`build_hosted_toolbox` may be told besides the inputs, the notebook, acceptance and the spec.
+    """What :func:`build_hosted_toolbox` may be told besides the inputs, the blackboard, acceptance and the spec.
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to what the grant runs at once
     when higher. ``archive`` is the result archive, a directory archive below ``session_dir`` when omitted.
@@ -359,7 +359,7 @@ def _acceptance_with_prompts(
 
 def build_hosted_toolbox(
     inputs: HostedToolboxInputs,
-    notebook: LocalNotebook,
+    blackboard: LocalBlackboard,
     acceptance: AcceptanceSetup,
     spec: SpecContext,
     *,
@@ -379,7 +379,7 @@ def build_hosted_toolbox(
 
     Args:
         inputs: What the host gave, see :class:`HostedToolboxInputs`.
-        notebook: The notebook; it takes the requests and results, holds the quarantine list and the claims, and is
+        blackboard: The blackboard; it takes the requests and results, holds the quarantine list and the claims, and is
             searched when a restart recovers unfinished tests.
         acceptance: The repository the parent recipes are read from, the planner (its ``plan`` must return a
             ``hyperloom.measure.points.AcceptedMeasurement``; ``HostedPlanner`` does), the active framework image
@@ -418,10 +418,10 @@ def build_hosted_toolbox(
         backend, directory, timeout_sec=options.timeout_sec, workload_kind=acceptance.workload_kind
     )
     toolbox = HostedToolbox(
-        session_stores(notebook, directory, inputs.run_id, native.driver if native else None),
+        session_stores(blackboard, directory, inputs.run_id, native.driver if native else None),
         executor,
         acceptance,
-        tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), notebook, directory),
+        tools=session_tools(options.tools if options.tools is not None else (tracelens_tool(),), blackboard, directory),
         tuning=ToolboxTuning(
             policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
         ),

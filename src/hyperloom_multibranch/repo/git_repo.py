@@ -38,7 +38,7 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     locate_installed_package,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot, source_roots
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
@@ -51,7 +51,7 @@ _NO_COMMIT = "0" * 40
 # A re-rooted branch's old head stays under this prefix: its commits are still merge candidates, which a repack must
 # keep.
 _REROOTED = "refs/rerooted"
-# The notebook knows a state only by its full commit id; git would also resolve a branch name or a short id.
+# The blackboard knows a state only by its full commit id; git would also resolve a branch name or a short id.
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}")
 # The path ``_put_patch`` gives a patch it keeps, which names the blob it is kept in.
 _STORED_PATCH = re.compile(rf"{re.escape(PATCH_ROOT)}/[^/]+/(?P<sha256>[0-9a-f]{{64}})\.patch")

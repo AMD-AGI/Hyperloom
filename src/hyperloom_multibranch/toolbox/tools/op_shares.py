@@ -28,7 +28,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom_multibranch.contracts.notebook.records import MAX_OP_SHARES
+from hyperloom_multibranch.contracts.blackboard.records import MAX_OP_SHARES
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 
 log = logging.getLogger(__name__)

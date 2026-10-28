@@ -16,7 +16,7 @@ from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.fake_runner import REPORT_PATH
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor, _round_values
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -43,10 +43,10 @@ async def _run_accuracy(tmp_path: Path, r: Rig, **fake: object) -> tuple[TestRes
     await asyncio.wait_for(tb.toolbox.drain(), 60)
     entry = tb.toolbox._log.get(request_id)
     assert entry is not None and entry.outcome is not None
-    return TestResult.from_document(entry.outcome["result"]), await tb.notebook.record(request_id)
+    return TestResult.from_document(entry.outcome["result"]), await tb.blackboard.record(request_id)
 
 
-async def test_an_accuracy_test_carries_the_signed_score_into_the_notebook_result(tmp_path: Path, rig) -> None:
+async def test_an_accuracy_test_carries_the_signed_score_into_the_blackboard_result(tmp_path: Path, rig) -> None:
     result, record = await _run_accuracy(tmp_path, rig, fake_accuracy="0.64")
     assert result.validity is Validity.SUCCEEDED
     assert result.accuracy == (AccuracyValue("gsm8k", FLEX, 0.64),)
@@ -54,7 +54,7 @@ async def test_an_accuracy_test_carries_the_signed_score_into_the_notebook_resul
     assert [r.phase for r in result.rounds] == ["measure"], "the accuracy round is not a throughput round"
 
 
-async def test_the_score_version_reaches_the_result_and_the_notebook(tmp_path: Path, rig) -> None:
+async def test_the_score_version_reaches_the_result_and_the_blackboard(tmp_path: Path, rig) -> None:
     version = "lm_eval=0.4.13;gsm8k=3"
     result, record = await _run_accuracy(tmp_path, rig, fake_accuracy="0.64", fake_accuracy_version=version)
     assert [v.version for v in result.accuracy] == [version]

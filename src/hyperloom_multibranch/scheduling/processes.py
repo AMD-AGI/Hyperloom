@@ -37,7 +37,7 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.owner_scope import local_owner_scope, process_started_at, same_environment
 from hyperloom.common.proctree import collect_tree, descendants, group_members, kill_tree, proc_identity, running
-from hyperloom_multibranch.notebook.codec import decode
+from hyperloom_multibranch.blackboard.codec import decode
 from hyperloom_multibranch.scheduling.clock import Clock
 
 logger = logging.getLogger(__name__)

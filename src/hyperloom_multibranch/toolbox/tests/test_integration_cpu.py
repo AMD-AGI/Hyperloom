@@ -5,7 +5,7 @@
 
 Real: the toolbox (``build_local_toolbox``: queue, acceptance, attempts, the local-sandbox executor, signed bundles
 verified against each sandbox's key), the planner (``HostedPlanner``: environment compile with a real patch, point
-generation, surface check), the notebook (``LocalNotebook``), the experiment repository (``GitExperimentRepo``), the
+generation, surface check), the blackboard (``LocalBlackboard``), the experiment repository (``GitExperimentRepo``), the
 rule gate (``RuleGate`` and the InferenceX comparison) and the MCP service with one token per specialist.
 
 Faked, and nothing else: the specialists' decisions (a script instead of a model) and the runner inside each sandbox
@@ -31,7 +31,7 @@ from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.judgement import Verdict
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion
 from hyperloom_multibranch.rulegate.decision import Action
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.tests.integration_inputs import (
@@ -153,17 +153,17 @@ async def test_a_round_of_two_branches_through_every_module(tmp_path: Path, monk
         head = await stack.repo.head("s1")
         assert head != stack.baseline_commit
         assert await stack.repo.read_recipe(head) == apply(baseline_recipe(), patch)
-        assert (await stack.gate_notebook.record(t1)).conclusion is Conclusion.COMMITTED
+        assert (await stack.gate_blackboard.record(t1)).conclusion is Conclusion.COMMITTED
         # s2: +3.8% that the retest does not confirm: recorded, nothing committed
         assert out.judgements[t2].verdict is Verdict.FLAT and out.actions[t2] is Action.RECORD_ONLY
         assert await stack.repo.head("s2") == stack.baseline_commit
-        assert (await stack.gate_notebook.record(t2)).conclusion is Conclusion.RECORDED_ONLY
+        assert (await stack.gate_blackboard.record(t2)).conclusion is Conclusion.RECORDED_ONLY
         # the explore test that ran beside the retest is flat and only recorded; the integration branch never moved
         assert out.actions[out.explore2] is Action.RECORD_ONLY
         assert await stack.repo.head(INTEGRATION_BRANCH) == stack.baseline_commit
         # the confirm-retest ran beside s1's explore test although K is 1, and carried its accuracy value
         assert out.max_running_s1 == 2
-        assert (await stack.gate_notebook.record(out.retest["s1"])).result.accuracy[0].score == 0.80  # type: ignore[union-attr]
+        assert (await stack.gate_blackboard.record(out.retest["s1"])).result.accuracy[0].score == 0.80  # type: ignore[union-attr]
         # the patch was compiled for the tests that carry it (the first test of s1 and its retest) and for no other
         (planner,) = planners
         carrying = [(r.branch_id, r.purpose.value) for r, accepted in planner.planned if accepted.environment.roots]

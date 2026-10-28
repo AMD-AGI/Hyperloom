@@ -35,7 +35,7 @@ class _HitLogging:
     """What ``accept_measurement`` compiles with: ``compiler``'s environments, each asking its server for aiter's hits.
 
     The variable is carried by the environment, which the points are rendered with next to the recipe's own launch
-    variables, and is not put into the recipe: the commits and the deltas of the notebook are as the specialists wrote
+    variables, and is not put into the recipe: the commits and the deltas of the blackboard are as the specialists wrote
     them. ``accept_measurement`` calls ``compile`` and nothing else of its compiler.
     """
 

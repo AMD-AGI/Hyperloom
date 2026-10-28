@@ -4,7 +4,7 @@
 """CLOSE: stop everything, export the session, and report.
 
 The stop comes first: from then on no fork is admitted, no test runs and no process the scheduler started is left,
-and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a notebook that no longer changes. Stopping
+and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a blackboard that no longer changes. Stopping
 and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
 became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
 session through :meth:`Closer.write_report`.
@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from hyperloom.common.io import WriteOptions, atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
-from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
-from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
+from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports, step_lines
 from hyperloom_multibranch.scheduling.final import FinalChoice
@@ -35,8 +35,8 @@ from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopRe
 logger = logging.getLogger(__name__)
 
 #: What an export raises when it cannot finish: a timeout at the hard stop, the disk, a recipe the repository holds,
-#: or the notebook. Anything else is a bug and propagates once the report is written.
-EXPORT_FAILURES: tuple[type[BaseException], ...] = (asyncio.TimeoutError, OSError, RecipeError, NotebookError)
+#: or the blackboard. Anything else is a bug and propagates once the report is written.
+EXPORT_FAILURES: tuple[type[BaseException], ...] = (asyncio.TimeoutError, OSError, RecipeError, BlackboardError)
 
 
 @dataclass(frozen=True)

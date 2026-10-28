@@ -19,11 +19,11 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ReservedBranches
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, RegressionCase
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, intent, request, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, RegressionCase
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, intent, request, result
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
@@ -49,7 +49,7 @@ PROOF = FixProof(ReproRun("p0", REPRODUCED), ReproRun("p1", NOT_REPRODUCED), Rep
 class _Stalls:
     """Holds the judgement writes of ``conclusion`` until ``release`` is set; refuses them instead with ``refuse``."""
 
-    def __init__(self, inner: LocalNotebook, conclusion: Conclusion, *, refuse: bool = False) -> None:
+    def __init__(self, inner: LocalBlackboard, conclusion: Conclusion, *, refuse: bool = False) -> None:
         self.inner, self.conclusion, self.refuse = inner, conclusion, refuse
         self.writing, self.release = asyncio.Event(), asyncio.Event()
 
@@ -68,43 +68,43 @@ class _Stalls:
 @dataclass
 class _Rig:
     gate: RuleGate
-    notebook: LocalNotebook
-    scheduler: LocalNotebook
+    blackboard: LocalBlackboard
+    scheduler: LocalBlackboard
     repo: InMemoryRepo
     writes: object
 
     async def conclusion(self) -> Conclusion | None:
-        return (await self.notebook.record("r1")).conclusion
+        return (await self.blackboard.record("r1")).conclusion
 
     async def branch(self, branch: str = FORK):
         return {node.branch: node for node in (await self.scheduler.lineage()).branches}.get(branch)
 
 
 async def _rig(root, status: AdmissionStatus = AdmissionStatus.ACCEPTED, wrap=None) -> _Rig:
-    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"))
     await toolbox.write_request(request("r1", intent(BRANCH, ROOT), delta("--kv-cache-dtype fp8")))
     await toolbox.write_result(result("r1"))
     clean = request("p1", intent(BRANCH, ROOT), kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(CASE,))
     await toolbox.write_request(clean)
     await toolbox.write_result(TestResult("p1", Validity.SUCCEEDED, repro_verdict=NOT_REPRODUCED))
-    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
+    scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=ROOT))
     repo = InMemoryRepo(BASELINE)
     await repo.create_branch(BRANCH, await repo.head(INTEGRATION_BRANCH))
-    notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
-    writes = wrap(notebook) if wrap else notebook
+    blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
+    writes = wrap(blackboard) if wrap else blackboard
     gate = RuleGate(writes, repo, RecordingScheduler(status), RecordingVerifier())
-    return _Rig(gate, notebook, scheduler, repo, writes)
+    return _Rig(gate, blackboard, scheduler, repo, writes)
 
 
 async def _fork(rig: _Rig) -> str:
-    candidate = (await rig.notebook.record("r1")).request
+    candidate = (await rig.blackboard.record("r1")).request
     return (await rig.gate.fork(candidate, FIX, "fp8 scales overflow at 8k", fix=PROOF)).branch
 
 
 async def _repair(rig: _Rig) -> str:
-    candidate = (await rig.notebook.record("r1")).request
+    candidate = (await rig.blackboard.record("r1")).request
     return (await rig.gate.repair(candidate, BLOCKED, intent(BRANCH, ROOT), "scale per head")).branch
 
 
@@ -119,7 +119,7 @@ async def test_a_landed_fork_carries_the_fix_on_its_own_branch_cut_at_the_parent
     head = await rig.repo.head(branch)
     assert await rig.repo.read_recipe(head) == apply(BASELINE, delta("--kv-cache-dtype fp8"))
     assert await rig.repo.head(BRANCH) == ROOT
-    record = await rig.notebook.record("r1")
+    record = await rig.blackboard.record("r1")
     assert (record.conclusion, record.commit_id) == (Conclusion.SPLIT_COMMITTED, head)
     node = await rig.branch(branch)
     assert (node.origin, node.start_commit, node.from_branch, node.head_commit) == (
@@ -129,7 +129,7 @@ async def test_a_landed_fork_carries_the_fix_on_its_own_branch_cut_at_the_parent
         head,
     )
     assert (await rig.scheduler.lineage()).commit(head).branch == branch
-    assert await rig.notebook.regression_cases_for(head) == (RegressionCase(FIX_CASE_ID, head, "p1"),)
+    assert await rig.blackboard.regression_cases_for(head) == (RegressionCase(FIX_CASE_ID, head, "p1"),)
     assert not await gate.land_split(branch)
 
 
@@ -147,7 +147,7 @@ async def test_only_a_reserved_fork_is_landed(tmp_path):
 
 
 async def test_a_landing_waits_for_the_fork_to_record_where_the_candidate_stands(tmp_path):
-    rig = await _rig(tmp_path, wrap=lambda notebook: _Stalls(notebook, Conclusion.SPLIT_REQUESTED))
+    rig = await _rig(tmp_path, wrap=lambda blackboard: _Stalls(blackboard, Conclusion.SPLIT_REQUESTED))
     stalled = rig.writes
     forking = asyncio.create_task(_fork(rig))
     await stalled.writing.wait()
@@ -161,7 +161,7 @@ async def test_a_landing_waits_for_the_fork_to_record_where_the_candidate_stands
 
 
 async def test_a_fix_whose_judgement_cannot_be_written_is_taken_back(tmp_path):
-    rig = await _rig(tmp_path, wrap=lambda notebook: _Stalls(notebook, Conclusion.SPLIT_COMMITTED, refuse=True))
+    rig = await _rig(tmp_path, wrap=lambda blackboard: _Stalls(blackboard, Conclusion.SPLIT_COMMITTED, refuse=True))
     branch = await _fork(rig)
 
     with pytest.raises(OSError, match="no space"):
@@ -173,7 +173,7 @@ async def test_a_fix_whose_judgement_cannot_be_written_is_taken_back(tmp_path):
 
 
 async def test_a_landing_whose_waiter_gives_up_still_lands(tmp_path):
-    rig = await _rig(tmp_path, wrap=lambda notebook: _Stalls(notebook, Conclusion.SPLIT_COMMITTED))
+    rig = await _rig(tmp_path, wrap=lambda blackboard: _Stalls(blackboard, Conclusion.SPLIT_COMMITTED))
     branch = await _fork(rig)
     landing = asyncio.create_task(rig.gate.land_split(branch))
     await rig.writes.writing.wait()

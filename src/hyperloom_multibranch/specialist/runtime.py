@@ -44,11 +44,11 @@ from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
-from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
+from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, BlackboardError
+from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted, session_direction
-from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
+from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeBlackboard, Judging
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ MAX_LOSS_RESTARTS = 2
 MAX_IDLE_SESSIONS = 2
 
 
-class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
+class RuntimeBlackboard(JudgeBlackboard, ClaimService, Protocol):
     """A branch's runtime handle: what its judge reads and writes, and the claims its specialist holds."""
 
 
@@ -169,7 +169,7 @@ class _Branch:
     name: str
     start_commit: str
     task: BranchTask
-    notebook: RuntimeNotebook
+    blackboard: RuntimeBlackboard
     k: int = 1
     session: Session | None = None
     stopping: asyncio.Task[None] | None = None
@@ -210,13 +210,13 @@ class SpecialistRuntime:
 
     def __init__(
         self,
-        notebook_for: Callable[[str], RuntimeNotebook],
+        blackboard_for: Callable[[str], RuntimeBlackboard],
         judging: Judging,
         sessions: SessionFactory,
         *,
         pacing: RuntimePacing = RuntimePacing(),
     ) -> None:
-        self._notebook_for = notebook_for
+        self._blackboard_for = blackboard_for
         self._judging = judging
         self._sessions = sessions
         self._pacing = pacing
@@ -234,9 +234,9 @@ class SpecialistRuntime:
             task = replace(task, direction=self._least_held(start_commit))
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
-        state = _Branch(branch, start_commit, task, self._notebook_for(branch))
+        state = _Branch(branch, start_commit, task, self._blackboard_for(branch))
         self._branches[branch] = state
-        state.judge = BranchJudge(branch, state.notebook, self._judging)
+        state.judge = BranchJudge(branch, state.blackboard, self._judging)
         state.tasks = [
             asyncio.create_task(self._supervise(state), name=f"specialist of {branch}"),
             asyncio.create_task(self._judge(state, state.judge), name=f"judge of {branch}"),
@@ -390,7 +390,7 @@ class SpecialistRuntime:
         """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
         last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
         self._closed.add((state.start_commit, state.task.direction))
-        exhausted = latest_exhausted(await state.notebook.branch_log(state.name))
+        exhausted = latest_exhausted(await state.blackboard.branch_log(state.name))
         if exhausted is None:
             return ""
         self._closed.add((exhausted.head, state.task.direction))
@@ -398,7 +398,7 @@ class SpecialistRuntime:
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
-        for exhausted in exhausted_records(await state.notebook.branch_log(state.name)):
+        for exhausted in exhausted_records(await state.blackboard.branch_log(state.name)):
             direction = session_direction(exhausted.direction)
             if direction is None:
                 logger.warning(
@@ -435,18 +435,18 @@ class SpecialistRuntime:
         ttl = self._pacing.claim_ttl_seconds
         while True:
             await self._pacing.sleep(ttl / 3)
-            snapshot = await state.notebook.snapshot()
+            snapshot = await state.blackboard.snapshot()
             for claim in snapshot.claims:
                 if claim.holder != state.name or claim.status is not ClaimStatus.HELD or claim.request_id is not None:
                     continue
                 try:
-                    await state.notebook.renew(claim.key, ttl_seconds=ttl)
-                except NotebookError:
+                    await state.blackboard.renew(claim.key, ttl_seconds=ttl)
+                except BlackboardError:
                     logger.warning("the claim %s of %s ended before its renewal", claim.key, state.name, exc_info=True)
 
 
 async def _notice(state: _Branch, content: str) -> None:
-    await state.notebook.append_branch_log(BranchLogEntry(state.name, BranchLogType.RESULT, f"{NOTICE} {content}"))
+    await state.blackboard.append_branch_log(BranchLogEntry(state.name, BranchLogType.RESULT, f"{NOTICE} {content}"))
 
 
 #: How the notices of a crashed and of an idle session's restart open.

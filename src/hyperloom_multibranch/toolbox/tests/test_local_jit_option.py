@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import (
     JIT_STORE_ENV,
     LocalHostedToolbox,
@@ -40,8 +40,8 @@ def _runner_env(toolbox: LocalHostedToolbox) -> dict[str, str]:
 
 async def _closing_build(tmp_path: Path, **extra: Any) -> tuple[LocalHostedToolbox, dict[str, str]]:
     """A toolbox built with ``extra`` options, its facts read, and closed: ``(toolbox, what a branch sandbox gets)``."""
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox_of(notebook, tmp_path, tmp_path / "session", "a" * 40, **extra)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, tmp_path / "session", "a" * 40, **extra)
     try:
         branch_env = dict((await toolbox.lease_branch_sandbox("branch-1", 1)).env)
     finally:

@@ -108,7 +108,7 @@ def _restated_settings(delta: RecipeDelta) -> str:
 def _check_explore_changes_the_parent(parent: Recipe, candidate: Recipe, request: TestRequest) -> None:
     """An explore whose delta applies to no effect would re-measure the parent: every setting it names is there already.
 
-    The comparison is ``hyperloom.contracts.recipe.diff``, the one ``notebook.changes.same_recipe`` builds on (that
+    The comparison is ``hyperloom.contracts.recipe.diff``, the one ``blackboard.changes.same_recipe`` builds on (that
     module sits above the toolbox in the import layers). Confirm, integration, FINAL and baseline tests re-run a recipe
     on purpose and pass.
     """
@@ -329,7 +329,7 @@ class Acceptance:
         if existing is not None:
             raise RequestRejected(
                 f"the recipe of commit {request.parent_commit} already has a profile, request {existing}, queued, "
-                "running or measured; wait_test on it, or read the commit's op shares from the notebook",
+                "running or measured; wait_test on it, or read the commit's op shares from the blackboard",
                 "profile_exists",
                 existing_request_id=existing,
             )

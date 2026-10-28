@@ -5,7 +5,7 @@ import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLifecycle
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingLifecycle
 

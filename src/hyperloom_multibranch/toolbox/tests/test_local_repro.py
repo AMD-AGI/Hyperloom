@@ -27,10 +27,10 @@ from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.repro_fixtures import case_attachment
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom.measure.hosted_spec import MAX_ATTACHMENT_BYTES
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
@@ -56,7 +56,7 @@ def _runner_python(tmp_path: Path) -> str:
 
 class _Rig:
     def __init__(
-        self, tmp_path: Path, notebook: LocalNotebook, commit: str, repo: Path, timeout_sec: int, **envs: str
+        self, tmp_path: Path, blackboard: LocalBlackboard, commit: str, repo: Path, timeout_sec: int, **envs: str
     ) -> None:
         session = tmp_path / "session"
         self.session = session
@@ -65,7 +65,7 @@ class _Rig:
         )
         self.toolbox: LocalHostedToolbox = build_local_toolbox(
             LocalSession(session, "run-1", range(2)),
-            notebook,
+            blackboard,
             AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path, **envs)), IMAGE, WorkloadKind.AGENTX),
             self.spec,
             options=LocalOptions(
@@ -98,8 +98,8 @@ def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str
 
 
 async def _rig(tmp_path: Path, checkout: tuple[Path, str], timeout_sec: int = 120, **envs: str) -> _Rig:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    rig = _Rig(tmp_path, notebook, checkout[1], checkout[0], timeout_sec, **envs)
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    rig = _Rig(tmp_path, blackboard, checkout[1], checkout[0], timeout_sec, **envs)
     await rig.toolbox.start()
     return rig
 

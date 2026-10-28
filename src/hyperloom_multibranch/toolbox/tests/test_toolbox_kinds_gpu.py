@@ -4,7 +4,7 @@
 """The real toolbox on a GPU machine: the accuracy test, the concurrency sweep, a patched recipe and a profile (W13).
 
 Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`` whose planner is the real
-``HostedPlanner`` (compile, points, surface check), and reads the result back from the notebook. Needs SGLang, a model
+``HostedPlanner`` (compile, points, surface check), and reads the result back from the blackboard. Needs SGLang, a model
 directory and an InferenceX checkout; set ``HL_W13_MODEL``, ``HL_W13_INFERENCEX`` and ``HL_W13_OUT`` (an empty
 directory), and optionally ``HL_W13_CARDS`` (default ``6,7``) and ``HL_W13_BACKEND`` (``bypass``, the default, or
 ``magpie``, which needs the pinned Magpie importable by the GPU venv's python). Anywhere else the module is skipped.
@@ -43,10 +43,10 @@ from hyperloom.measure.profile_traces import PROFILE_DIR
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
     LocalOptions,
@@ -108,7 +108,7 @@ def _toolbox(
     timeout_sec: int = 2400,
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     **materialize: Any,
-) -> tuple[LocalHostedToolbox, LocalNotebook, LocalBlobStore]:
+) -> tuple[LocalHostedToolbox, LocalBlackboard, LocalBlobStore]:
     """The toolbox of one test; ``config_path`` names another workload than the shipped baseline (an AgentX one)."""
     session = root / "session"
     commit = subprocess.run(
@@ -124,7 +124,7 @@ def _toolbox(
         **CANONICAL_OPTIONS,
         **materialize,
     )
-    notebook = LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     spec = SpecContext(
         image_ref="local",
         image_digest=IMAGE,
@@ -139,7 +139,7 @@ def _toolbox(
     )
     toolbox = build_local_toolbox(
         LocalSession(session, name, CARDS, tp=tp),
-        notebook,
+        blackboard,
         AcceptanceSetup(
             FakeRepo(recipe_with()),
             HostedPlanner(compiler, canonical, root / "points"),
@@ -152,17 +152,17 @@ def _toolbox(
             timeout_sec=timeout_sec,
         ),
     )
-    return toolbox, notebook, blobs
+    return toolbox, blackboard, blobs
 
 
-async def _submit(toolbox: LocalHostedToolbox, notebook: LocalNotebook, request, root: Path, wait_sec: int = 3300):
+async def _submit(toolbox: LocalHostedToolbox, blackboard: LocalBlackboard, request, root: Path, wait_sec: int = 3300):
     await toolbox.start()
     request_id = await toolbox.submit_test(request)
     await asyncio.wait_for(toolbox.drain(), wait_sec)
     entry = toolbox._log.get(request_id)
     assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry and entry.outcome
     result = TestResult.from_document(entry.outcome["result"])
-    record = await notebook.record(request_id)
+    record = await blackboard.record(request_id)
     assert record.result is not None and record.result.manifest_sha256 == result.manifest_sha256
     assert record.result.accuracy == result.accuracy and record.result.rounds == result.rounds
     assert result.validity is Validity.SUCCEEDED, (result.validity, result.failure_class, result.failure_reason)
@@ -175,12 +175,12 @@ def _probe(label: str, **fields: object) -> None:
     print(f"PROBE {label} " + json.dumps(fields, default=str), flush=True)
 
 
-async def test_an_accuracy_test_puts_the_measured_score_in_the_notebook_result() -> None:
+async def test_an_accuracy_test_puts_the_measured_score_in_the_blackboard_result() -> None:
     root = _run_root("accuracy")
-    toolbox, notebook, *_ = _toolbox(root, "w13-accuracy")
+    toolbox, blackboard, *_ = _toolbox(root, "w13-accuracy")
     try:
         request = req(kind=TestKind.ACCURACY, purpose=Purpose.BASELINE, accuracy=True, change=RecipeDelta())
-        request_id, result, landed = await _submit(toolbox, notebook, request, root)
+        request_id, result, landed = await _submit(toolbox, blackboard, request, root)
         rounds = json.loads((landed / "rounds.json").read_text())
         _probe(
             "accuracy",
@@ -201,10 +201,10 @@ async def test_an_accuracy_test_puts_the_measured_score_in_the_notebook_result()
 
 async def test_a_concurrency_sweep_is_one_server_and_one_round_per_level() -> None:
     root = _run_root("sweep")
-    toolbox, notebook, *_ = _toolbox(root, "w13-sweep")
+    toolbox, blackboard, *_ = _toolbox(root, "w13-sweep")
     try:
         request = req(purpose=SWEEP_PURPOSE, change=RecipeDelta(), concurrency=LEVELS)
-        request_id, result, landed = await _submit(toolbox, notebook, request, root)
+        request_id, result, landed = await _submit(toolbox, blackboard, request, root)
         measured = [r for r in result.rounds if r.phase == "measure"]
         logs = sorted(landed.rglob("server*.log"))
         ready = {str(p.relative_to(landed)): p.read_text(errors="replace").count(READY_LINE) for p in logs}
@@ -234,13 +234,13 @@ def _marker_patch(workdir: Path, marker: Path) -> tuple[bytes, str]:
 
 async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_rebuilt_framework() -> None:
     root = _run_root("patched")
-    toolbox, notebook, blobs = _toolbox(root, "w13-patched")
+    toolbox, blackboard, blobs = _toolbox(root, "w13-patched")
     try:
         marker = root / "marker.txt"
         diff, patched = _marker_patch(root / "patch-repo", marker)
         patch = put_patch(blobs, "w13-marker.patch", diff)
         delta = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
-        request_id, result, landed = await _submit(toolbox, notebook, req(change=delta), root)
+        request_id, result, landed = await _submit(toolbox, blackboard, req(change=delta), root)
         inventory = json.loads(next(landed.rglob("farm_inventory.json")).read_text())
         imported = set(marker.read_text().split())
         _probe(
@@ -281,12 +281,12 @@ def _require_tracelens() -> None:
 
 
 class _Pointers:
-    """Remembers every tool-result pointer the toolbox hands to the notebook, then lets the notebook take it."""
+    """Remembers every tool-result pointer the toolbox hands to the blackboard, then lets the blackboard take it."""
 
-    def __init__(self, notebook: LocalNotebook) -> None:
+    def __init__(self, blackboard: LocalBlackboard) -> None:
         self.seen: list[ToolResultPointer] = []
-        self._deliver = notebook.notify_tool_result
-        notebook.notify_tool_result = self.notify_tool_result  # type: ignore[method-assign]
+        self._deliver = blackboard.notify_tool_result
+        blackboard.notify_tool_result = self.notify_tool_result  # type: ignore[method-assign]
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         self.seen.append(pointer)
@@ -312,11 +312,11 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
     _require_tracelens()
     monkeypatch.setenv("TP", "2")
     root = _run_root("profile")
-    toolbox, notebook, _ = _toolbox(root, "w45-profile", tp=2)
-    pointers = _Pointers(notebook)
+    toolbox, blackboard, _ = _toolbox(root, "w45-profile", tp=2)
+    pointers = _Pointers(blackboard)
     try:
         request = req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, change=RecipeDelta())
-        request_id, result, _ = await _submit(toolbox, notebook, request, root)
+        request_id, result, _ = await _submit(toolbox, blackboard, request, root)
         traces = _assert_profile_landed(root / "session", result)
         job = await toolbox.submit_analysis(
             request.branch_id, "tracelens", {"analysis_route": ANALYSIS_ROUTE, "framework": "sglang"}, request_id
@@ -340,7 +340,7 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
         # the complete per-op GPU time table, not the few optimisation tasks: the top ops cover most of the time
         assert sum(pointer.op_shares.values()) >= MIN_TOTAL_SHARE, pointer.op_shares
         print("TOP5_OP_SHARES", sorted(pointer.op_shares.items(), key=lambda item: -item[1])[:5])
-        shares = await notebook.op_shares(request.parent_commit)
+        shares = await blackboard.op_shares(request.parent_commit)
         assert shares is not None and shares.job_id == job and dict(shares.shares) == dict(pointer.op_shares)
     finally:
         await toolbox.close()

@@ -37,7 +37,7 @@ more files than ``--max-branches``, is a usage error.
 Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
 knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
 manifest, so every branch reads one fixed copy and the session says which. Only an InferenceX checkout named
-:data:`~hyperloom_multibranch.notebook.knowledge.reference_leads.INFERENCEX_REFERENCE` briefs the specialists on its
+:data:`~hyperloom_multibranch.blackboard.knowledge.reference_leads.INFERENCEX_REFERENCE` briefs the specialists on its
 reference launches for the workload. A ``DIR`` that is no readable directory
 in a git checkout, and a ``NAME`` given twice, are usage errors. A session never refreshes its copy; knowledge that
 lands after it starts is what the next session takes. A session whose toolbox has fewer
@@ -67,7 +67,7 @@ keeps a session from running, with exit code 2 for a refused spec or session and
 ``exit.json``, and the host starts the run again.
 ``final-only SESSION_DIR`` is the emergency recovery of a session that ended before FINAL ran, and takes nothing but
 that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
-manifest holds, the branches its roster and notebook hold -- and rewrites its report, dashboard and breakdown. It
+manifest holds, the branches its roster and blackboard hold -- and rewrites its report, dashboard and breakdown. It
 creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
 also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
 session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
@@ -107,8 +107,8 @@ from hyperloom.measure.short_prompts.staging import cache_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock

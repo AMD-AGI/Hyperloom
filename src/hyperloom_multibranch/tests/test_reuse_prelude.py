@@ -17,8 +17,8 @@ from hyperloom.contracts.measurement import Purpose
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom_multibranch import cli
-from hyperloom_multibranch.contracts.notebook import Role
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.contracts.blackboard import Role
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.prelude import reused_prelude

@@ -4,7 +4,7 @@
 """One multi-branch round as the multi-branch design describes it (6.1 one test, 7.3 MB1 acceptance), scripted.
 
 The specialists' decisions are scripted (no model): which change to try, when to ask for a retest. Everything they
-call is real: the MCP service and its tokens, the toolbox, the notebook, the experiment repository, the rule gate.
+call is real: the MCP service and its tokens, the toolbox, the blackboard, the experiment repository, the rule gate.
 :func:`run_round` returns what the variant's test asserts on; the checks every variant must pass are made here.
 """
 
@@ -24,8 +24,8 @@ from hyperloom.contracts.measurement import AccuracyValue, Purpose, TestKind, Te
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta, apply
 from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
 from hyperloom_multibranch.rulegate.decision import Action
 from hyperloom_multibranch.rulegate.inferencex import (
@@ -101,9 +101,9 @@ async def wait_until(check: Callable[[], Awaitable[Any]], what: str, timeout: fl
 
 
 async def submit(sp: Specialist, parent: str, probe: Probe, **fields: Any) -> str:
-    """Steps 3 and 4 of 6.1: claim the intent in the notebook, then submit the test with the specialist's own token."""
+    """Steps 3 and 4 of 6.1: claim the intent in the blackboard, then submit the test with the specialist's own token."""
     await sp.call(
-        "notebook_claim",
+        "blackboard_claim",
         parent_commit=parent,
         target=probe.target,
         mechanism=probe.mechanism,
@@ -156,7 +156,7 @@ async def baselines(stack: Stack, count: int = 2) -> tuple[list[TestResult], lis
         for _ in range(count)
     ]
     await asyncio.wait_for(stack.toolbox.drain(), _TOOL_WAIT_SEC)
-    records = [await stack.gate_notebook.record(request_id) for request_id in ids]
+    records = [await stack.gate_blackboard.record(request_id) for request_id in ids]
     assert all(r.result is not None and r.result.validity is Validity.SUCCEEDED for r in records), records
     return [r.result for r in records if r.result is not None], ids
 
@@ -173,12 +173,12 @@ async def parent_of(stack: Stack, commit: str) -> str:
 
 
 async def land(stack: Stack, record: TestRecord, judgement: Judgement, outcome: Outcome, branch: str) -> Action:
-    """Settle through the real rule gate and check that the repository and the notebook say what the table says."""
+    """Settle through the real rule gate and check that the repository and the blackboard say what the table says."""
     before = await stack.repo.head(branch)
     action = await stack.gate.settle(record.request, judgement)
     after = await stack.repo.head(branch)
     outcome.actions[record.request_id], outcome.judgements[record.request_id] = action, judgement
-    settled = await stack.gate_notebook.record(record.request_id)
+    settled = await stack.gate_blackboard.record(record.request_id)
     if action is Action.COMMIT:
         assert await parent_of(stack, after) == before == record.request.parent_commit, "a commit on the wrong parent"
         recipe = apply(await stack.repo.read_recipe(before), record.request.delta)
@@ -258,7 +258,7 @@ async def run_round(stack: Stack, probes: RoundProbes) -> Outcome:
     await cancel_what_waits(stack, s2, s3, queued, never)
     out.first, out.cancelled = {"s1": t1, "s2": t2}, (queued, *never)
     first = {"s1": await measured(s1, t1), "s2": await measured(s2, t2)}
-    records = {b: await stack.gate_notebook.record(rid) for b, rid in out.first.items()}
+    records = {b: await stack.gate_blackboard.record(rid) for b, rid in out.first.items()}
     firsts = {b: decided(baseline, parent, records[b]) for b in records}
 
     # s1 tries a second change and asks for the retest of its first at once: with K = 1 the retest must not wait for it.
@@ -297,38 +297,38 @@ async def settle_round(
             await land(stack, records[branch], first, out, branch)
             continue
         assert await land(stack, records[branch], first, out, branch) is Action.RETEST
-        assert (await stack.gate_notebook.record(records[branch].request_id)).judgement is None
+        assert (await stack.gate_blackboard.record(records[branch].request_id)).judgement is None
         final = confirm(first, reading(retests[branch]), baseline, parent, out.retest[branch])
         await land(stack, records[branch], final, out, branch)
     explore = Specialist(stack, "s1")
     await measured(explore, out.explore2)
-    record = await stack.gate_notebook.record(out.explore2)
+    record = await stack.gate_blackboard.record(out.explore2)
     await land(stack, record, decided(baseline, parent, record), out, "s1")
 
 
 async def check_audit(stack: Stack, out: Outcome, results: list[TestResult]) -> None:
     """Every test ran in a sandbox of its own, and its bundle verified against that sandbox's key."""
-    results = [*results, *[r for rid in [out.explore2] if (r := (await stack.gate_notebook.record(rid)).result)]]
+    results = [*results, *[r for rid in [out.explore2] if (r := (await stack.gate_blackboard.record(rid)).result)]]
     sandboxes = [r.sandbox.sandbox_id for r in results if r.sandbox is not None]
     assert len(sandboxes) == len(results) == len(set(sandboxes)), "two tests shared a sandbox"
     for result in results:
         assert result.manifest_sha256 and result.signing_key_fingerprint, result
         assert stack.toolbox.backend.journal.latest(result.request_id).extra["verified"] is True  # type: ignore[union-attr]
     for request_id in out.request_ids:
-        record = await stack.gate_notebook.record(request_id)
+        record = await stack.gate_blackboard.record(request_id)
         assert record.result is not None and record.withdrawn_at is None, request_id
     for request_id in out.cancelled:
-        assert (await stack.gate_notebook.record(request_id)).withdrawn_at is not None
+        assert (await stack.gate_blackboard.record(request_id)).withdrawn_at is not None
 
 
 async def check_specialist_view(
     stack: Stack, s1: Specialist, s2: Specialist, out: Outcome, probes: RoundProbes
 ) -> None:
-    """What the tokens and the notebook let a specialist see: its own tests, the others' intents, its inbox."""
+    """What the tokens and the blackboard let a specialist see: its own tests, the others' intents, its inbox."""
     other = await s2.raw("test_result", request_id=out.first["s1"])
     assert other["error"]["code"] == -32001, "a specialist read another branch's test"
     tried = await s2.refused(
-        "notebook_claim",
+        "blackboard_claim",
         parent_commit=stack.baseline_commit,
         target=probes.patch.target,
         mechanism=probes.patch.mechanism,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A runner that could not start or was lost leaves its node out of the quarantine the notebook keeps; a node fault
+"""A runner that could not start or was lost leaves its node out of the quarantine the blackboard keeps; a node fault
 still quarantines it, and that quarantine is read back when the toolbox starts again, while one a blameless failure
 recorded before is not."""
 
@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
-from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent
-from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
+from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tests.helpers import Rig, ScriptedExecutor, build, failed, ok, req
 from hyperloom_multibranch.toolbox.tests.test_attempts import (
@@ -71,7 +71,7 @@ async def test_a_runner_that_could_not_start_or_was_lost_does_not_quarantine_its
     assert result.validity is Validity.SUCCEEDED
     assert [a.failure_reason for a in result.attempts] == [reason, None]
     assert [a.node for a in result.attempts] == ["v3-1", "v3-2"], "the retry still went to another node"
-    assert rig.toolbox.quarantined == frozenset() and await rig.notebook.quarantined() == ()
+    assert rig.toolbox.quarantined == frozenset() and await rig.blackboard.quarantined() == ()
     assert await _restarted_quarantine(tmp_path) == frozenset()
 
 
@@ -81,8 +81,8 @@ async def test_a_node_fault_still_quarantines_its_node_and_a_restart_reads_it_ba
     await rig.toolbox.close()
     assert result.validity is Validity.SUCCEEDED
     assert rig.toolbox.quarantined == frozenset({"v3-1"})
-    assert [(e.node, e.reason) for e in await rig.notebook.quarantined()] == [("v3-1", NODE_FAULT_REASON)]
-    assert await _restarted_quarantine(tmp_path) == frozenset({"v3-1"}), "the notebook keeps it across restarts"
+    assert [(e.node, e.reason) for e in await rig.blackboard.quarantined()] == [("v3-1", NODE_FAULT_REASON)]
+    assert await _restarted_quarantine(tmp_path) == frozenset({"v3-1"}), "the blackboard keeps it across restarts"
 
 
 async def test_a_node_quarantine_recorded_for_a_blameless_failure_is_not_read_back(tmp_path: Path) -> None:
@@ -95,8 +95,8 @@ async def test_a_node_quarantine_recorded_for_a_blameless_failure_is_not_read_ba
     }
     for node, reason in recorded.items():
         event = QuarantineEvent(node=node, action=QuarantineAction.QUARANTINE, reason=reason, request_ids=("r1",))
-        await rig.notebook.record_quarantine(event)
+        await rig.blackboard.record_quarantine(event)
     await rig.toolbox.start()
     await rig.toolbox.close()
     assert rig.toolbox.quarantined == frozenset({"v3-099"}), "only the node fault still holds its node"
-    assert {e.node for e in await rig.notebook.quarantined()} == set(recorded), "the record itself stays as written"
+    assert {e.node for e in await rig.blackboard.quarantined()} == set(recorded), "the record itself stays as written"

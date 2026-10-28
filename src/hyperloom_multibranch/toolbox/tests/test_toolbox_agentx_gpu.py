@@ -147,10 +147,10 @@ def _assert_valid_on_magpies_terms(report: dict[str, Any]) -> dict[str, Any]:
 
 async def test_an_agentx_point_the_planner_renders_is_run_by_magpie_to_a_valid_measurement() -> None:
     root = _run_root("agentx-measure")
-    toolbox, notebook, *_ = _agentx_toolbox(root, "w71-measure")
+    toolbox, blackboard, *_ = _agentx_toolbox(root, "w71-measure")
     try:
         request = req(purpose=Purpose.EXPLORE, change=RecipeDelta())
-        request_id, result, landed = await _submit(toolbox, notebook, request, root, WAIT_SEC)
+        request_id, result, landed = await _submit(toolbox, blackboard, request, root, WAIT_SEC)
         report = _report(landed)
         metrics = _assert_valid_on_magpies_terms(report)
         _probe(
@@ -171,13 +171,13 @@ async def test_an_agentx_point_the_planner_renders_is_run_by_magpie_to_a_valid_m
 
 async def test_a_patched_agentx_recipe_reaches_the_server_magpie_launches() -> None:
     root = _run_root("agentx-patched")
-    toolbox, notebook, blobs = _agentx_toolbox(root, "w71-patched")
+    toolbox, blackboard, blobs = _agentx_toolbox(root, "w71-patched")
     try:
         marker = root / "marker.txt"
         diff, patched = _marker_patch(root / "patch-repo", marker)
         patch = put_patch(blobs, "w71-marker.patch", diff)
         delta = RecipeDelta(components=(ComponentChange("sglang", add_patches=(patch,)),))
-        request_id, result, landed = await _submit(toolbox, notebook, req(change=delta), root, WAIT_SEC)
+        request_id, result, landed = await _submit(toolbox, blackboard, req(change=delta), root, WAIT_SEC)
         report = _report(landed)
         metrics = _assert_valid_on_magpies_terms(report)
         launch = metrics["server_launch"]
@@ -222,10 +222,10 @@ def _assert_profile_landed(session: Path, result: TestResult) -> list[Path]:
 
 async def test_an_agentx_profile_captures_a_complete_trace_that_lands_under_the_profile_location() -> None:
     root = _run_root("agentx-profile")
-    toolbox, notebook, _ = _agentx_toolbox(root, "w71-profile")
+    toolbox, blackboard, _ = _agentx_toolbox(root, "w71-profile")
     try:
         request = req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, change=RecipeDelta())
-        request_id, result, landed = await _submit(toolbox, notebook, request, root, WAIT_SEC)
+        request_id, result, landed = await _submit(toolbox, blackboard, request, root, WAIT_SEC)
         traces = _assert_profile_landed(root / "session", result)
         report = _report(landed)
         capture = report["agentx_metrics"]["profile_capture"]

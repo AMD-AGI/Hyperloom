@@ -9,13 +9,13 @@ from types import SimpleNamespace
 from hyperloom.contracts.measurement import RoundValue
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.peers import Purpose
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, BranchProgress, LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.peers import Purpose
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.contracts.repo import PatchConflict
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import intent, request, result
 from hyperloom_multibranch.specialist.following import (
     SHORT,
     Followed,
@@ -39,25 +39,25 @@ REASON = "REROOT: the integration head took in chunked prefill"
 ASKED = BranchLogEntry(BRANCH, BranchLogType.PLAN, REASON)
 
 
-def _as(tmp_path: Path, role: Role) -> LocalNotebook:
-    return LocalNotebook(tmp_path / "notebook", Writer(role, role.value))
+def _as(tmp_path: Path, role: Role) -> LocalBlackboard:
+    return LocalBlackboard(tmp_path / "blackboard", Writer(role, role.value))
 
 
 async def _follow(rig: BranchRig, tmp_path: Path) -> Followed:
-    followed = await follow(rig.repo, rig.notebook, await rig.notebook.snapshot(), ASKED, tmp_path / "notes")
+    followed = await follow(rig.repo, rig.blackboard, await rig.blackboard.snapshot(), ASKED, tmp_path / "notes")
     assert followed is not None
     return followed
 
 
 async def _row(rig: BranchRig, branch: str) -> BranchProgress:
-    return next(row for row in (await rig.notebook.snapshot()).progress if row.branch == branch)
+    return next(row for row in (await rig.blackboard.snapshot()).progress if row.branch == branch)
 
 
 async def test_the_holdings_name_the_integration_launch_its_merged_intents_and_what_the_head_lacks(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
 
-    text = await integration_holdings(rig.repo, await rig.notebook.snapshot(), session.own)
+    text = await integration_holdings(rig.repo, await rig.blackboard.snapshot(), session.own)
 
     assert (
         f"The integration head is {session.onto}: server arguments --max-num-seqs 128 --enable-chunked-prefill" in text
@@ -71,9 +71,9 @@ async def test_the_holdings_name_the_integration_launch_its_merged_intents_and_w
 
 async def test_a_head_on_the_integration_head_lacks_nothing_of_it(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
 
-    text = await integration_holdings(rig.repo, await rig.notebook.snapshot(), session.onto)
+    text = await integration_holdings(rig.repo, await rig.blackboard.snapshot(), session.onto)
 
     assert f"Your head {session.onto} holds all of it." in text and "[not on your head]" not in text
     assert "Commits of your head" not in text
@@ -81,7 +81,7 @@ async def test_a_head_on_the_integration_head_lacks_nothing_of_it(tmp_path):
 
 async def test_following_moves_the_branch_and_carries_its_own_change_onto_the_integration_head(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
 
     followed = await _follow(rig, tmp_path)
 
@@ -94,7 +94,7 @@ async def test_following_moves_the_branch_and_carries_its_own_change_onto_the_in
 
 async def test_following_records_the_reroot_so_an_explore_on_the_new_head_waits_for_its_confirm(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
     baseline = BaselineRecord(rig.root, {METRIC: 1.0}, {METRIC: 0.8}, {METRIC: 1.6}, ("b1", "b2"))
     await _as(tmp_path, Role.GATE).write_baseline(baseline)
 
@@ -108,14 +108,14 @@ async def test_following_records_the_reroot_so_an_explore_on_the_new_head_waits_
     row = await _row(rig, BRANCH)
 
     assert (row.head_commit, [item.request_id for item in row.pending]) == (session.onto, ["r5"])
-    assert [hit.summary for hit in await rig.notebook.search("reroot")] == [
+    assert [hit.summary for hit in await rig.blackboard.search("reroot")] == [
         f"reroot {BRANCH} at {session.onto}: {REASON}"
     ]
 
 
-async def test_following_moves_onto_the_integration_head_the_notebook_recorded_not_one_still_unjudged(tmp_path):
+async def test_following_moves_onto_the_integration_head_the_blackboard_recorded_not_one_still_unjudged(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
     unjudged = await rig.repo.commit_integration(session.onto, OWN, (session.own,))
 
     followed = await _follow(rig, tmp_path)
@@ -127,7 +127,7 @@ async def test_following_moves_onto_the_integration_head_the_notebook_recorded_n
 
 async def test_following_a_stopped_branch_moves_nothing(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
     await _as(tmp_path, Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.STOP, BRANCH, reason="no progress"))
 
     followed = await _follow(rig, tmp_path)
@@ -138,24 +138,24 @@ async def test_following_a_stopped_branch_moves_nothing(tmp_path):
 
 async def test_a_branch_stopped_while_it_moves_is_taken_back_to_its_old_head(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
-    before = await rig.notebook.snapshot()
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    before = await rig.blackboard.snapshot()
     await _as(tmp_path, Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.STOP, BRANCH, reason="no progress"))
 
-    followed = await follow(rig.repo, rig.notebook, before, ASKED, tmp_path / "notes")
+    followed = await follow(rig.repo, rig.blackboard, before, ASKED, tmp_path / "notes")
 
     assert followed is not None and followed.detail == ""
     assert await rig.repo.head(BRANCH) == session.own and (await _row(rig, BRANCH)).head_commit == session.own
-    assert "the notebook refused the move" in followed.notice and "already stopped" in followed.notice
+    assert "the blackboard refused the move" in followed.notice and "already stopped" in followed.notice
 
 
-async def test_following_waits_while_the_notebook_has_not_started_the_branch(tmp_path):
+async def test_following_waits_while_the_blackboard_has_not_started_the_branch(tmp_path):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    session = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    session = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
     await rig.repo.create_branch("s9", rig.root)
 
     asked = replace(ASKED, branch="s9")
-    waited = await follow(rig.repo, rig.notebook, await rig.notebook.snapshot(), asked, tmp_path / "notes")
+    waited = await follow(rig.repo, rig.blackboard, await rig.blackboard.snapshot(), asked, tmp_path / "notes")
 
     assert waited is None and await rig.repo.head("s9") == rig.root != session.onto
 

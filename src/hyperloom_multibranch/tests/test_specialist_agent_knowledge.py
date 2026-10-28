@@ -4,11 +4,11 @@
 from pathlib import Path
 
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, MergeAttempt
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import TTL, delta, intent, judgement, request, result
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, MergeAttempt
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import TTL, delta, intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_knowledge import IntegrationNotes
 
 PATCH = PatchRef("patch/sglang/" + "a" * 64 + ".patch", "a" * 64)
@@ -38,11 +38,11 @@ class Repo:
             (destination / PATCH.path).write_text("--- a\n+++ b\n")
 
 
-async def _merged(root: Path) -> LocalNotebook:
+async def _merged(root: Path) -> LocalBlackboard:
     """b02 commits c1 with its intent, the integrator merges it as i1; b03's c2 is never merged."""
 
-    def open_as(role: Role, branch: str = "") -> LocalNotebook:
-        return LocalNotebook(root, Writer(role, branch or role.value, branch))
+    def open_as(role: Role, branch: str = "") -> LocalBlackboard:
+        return LocalBlackboard(root, Writer(role, branch or role.value, branch))
 
     scheduler, toolbox, gate = open_as(Role.SCHEDULER), open_as(Role.TOOLBOX), open_as(Role.GATE)
     integrator = open_as(Role.INTEGRATOR)
@@ -70,9 +70,9 @@ async def _merged(root: Path) -> LocalNotebook:
 async def test_the_notes_are_rewritten_when_the_integration_head_moves_with_its_launch_and_what_merged(
     tmp_path: Path,
 ) -> None:
-    repo, notebook = Repo(), await _merged(tmp_path / "notebook")
+    repo, blackboard = Repo(), await _merged(tmp_path / "blackboard")
     path = tmp_path / "agent" / "mb-integration.md"
-    notes = IntegrationNotes(repo, notebook, path)
+    notes = IntegrationNotes(repo, blackboard, path)
 
     assert await notes.refresh()
     assert "c0" in path.read_text() and "fp8_e4m3" not in path.read_text()

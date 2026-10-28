@@ -28,11 +28,11 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS
-from hyperloom_multibranch.notebook.tests.factories import result
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
+from hyperloom_multibranch.blackboard.tests.factories import result
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
@@ -175,11 +175,11 @@ class LocalSandbox:
 
 
 class Toolbox:
-    """Accepts each request and writes it to the notebook, so it is in flight until the test settles it; ``refusals``
+    """Accepts each request and writes it to the blackboard, so it is in flight until the test settles it; ``refusals``
     are raised first, one a submit."""
 
-    def __init__(self, notebook: LocalNotebook) -> None:
-        self._notebook, self.requests, self.refusals = notebook, [], []
+    def __init__(self, blackboard: LocalBlackboard) -> None:
+        self._blackboard, self.requests, self.refusals = blackboard, [], []
         self.refused_envs: set[str] = set()
         self.leases: list[tuple[str, int]] = []
         self.released: list[str] = []
@@ -196,7 +196,7 @@ class Toolbox:
         if self.cards_left < cards:
             raise RequestRejected("leasing would leave no card to measure on", "lease_leaves_no_measurement")
         self.leases.append((branch_id, cards))
-        root = self._notebook.root.parent / "lease"
+        root = self._blackboard.root.parent / "lease"
         return BranchLease(f"L{len(self.leases)}", branch_id, (3,), root, {"HIP_VISIBLE_DEVICES": "3"}, 1)
 
     async def release_branch_sandbox(self, lease_id: str) -> None:
@@ -214,7 +214,7 @@ class Toolbox:
         await self.check_test(request)
         accepted = TestRequest(**{**request.__dict__, "request_id": f"r{len(self.requests) + 1}"})
         self.requests.append(accepted)
-        await self._notebook.write_request(accepted)
+        await self._blackboard.write_request(accepted)
         return accepted.request_id or ""
 
 
@@ -272,14 +272,14 @@ class Rig:
     session: AutonomousSession
     sandbox: LocalSandbox
     toolbox: Toolbox
-    toolbox_notebook: LocalNotebook
+    toolbox_blackboard: LocalBlackboard
     repo: object
-    notebook: LocalNotebook
+    blackboard: LocalBlackboard
     blobs: LocalBlobStore
     restart: object
 
     async def notices(self) -> list[str]:
-        return [record.entry.content for record in await self.notebook.branch_log(BRANCH)]
+        return [record.entry.content for record in await self.blackboard.branch_log(BRANCH)]
 
     def patch(self, request: TestRequest) -> str:
         [change] = request.delta.components
@@ -302,9 +302,9 @@ async def _rig(
 
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     start_commit = rig.root if start is None else await rig.repo.commit(BRANCH, rig.root, start, "champion")
-    toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox_blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
-    sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_notebook)
+    sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_blackboard)
 
     async def onboard(checkout: Path, prompt: str) -> str:
         sandbox.prompts.append(prompt)
@@ -336,14 +336,14 @@ async def _rig(
         stall_seconds=stall,
         clock=clock,
     )
-    place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
+    place = BranchPlace(worktree, rig.blackboard, tmp_path / BRANCH / "session")
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path)), deadline=deadline))
 
     def restart() -> AutonomousSession:
         return AutonomousSession(start, setup, place)
 
     blobs = LocalBlobStore(tmp_path / "blobs")
-    return Rig(restart(), sandbox, toolbox, toolbox_notebook, rig.repo, rig.notebook, blobs, restart)
+    return Rig(restart(), sandbox, toolbox, toolbox_blackboard, rig.repo, rig.blackboard, blobs, restart)
 
 
 @pytest.mark.parametrize("commits", [False, True], ids=["edits", "commits"])
@@ -357,9 +357,9 @@ async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_he
     await _until(lambda: rig.toolbox.requests, "the first import")
     await asyncio.sleep(1.0)
     assert len(rig.toolbox.requests) == 1
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
-    await rig.toolbox_notebook.write_result(result("r2"))
+    await rig.toolbox_blackboard.write_result(result("r2"))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
 
@@ -383,9 +383,9 @@ async def test_a_keep_after_one_the_branch_committed_imports_only_its_own_change
     first = rig.toolbox.requests[0]
     recipe = await rig.repo.read_recipe(first.parent_commit)
     committed = await rig.repo.commit(BRANCH, first.parent_commit, apply(recipe, first.delta), "keep 1")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
-    await rig.toolbox_notebook.write_result(result("r2"))
+    await rig.toolbox_blackboard.write_result(result("r2"))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
 
@@ -405,7 +405,7 @@ async def test_an_import_waits_while_the_last_one_is_measured_or_judged(tmp_path
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the first import")
     await asyncio.sleep(0.6)
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await asyncio.sleep(0.2)
     assert len(rig.toolbox.requests) == 1
     later[0] = 1.0
@@ -479,7 +479,7 @@ async def test_a_keep_waiting_at_a_crash_is_imported_by_the_resumed_run_with_the
     assert len(rig.toolbox.requests) == 1
     resumed = rig.restart()
     running = asyncio.create_task(resumed.run())
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the waiting keep")
 
     assert rig.sandbox.started[-1] == "sleep 30"
@@ -528,7 +528,7 @@ async def test_a_keep_made_just_before_the_agent_exits_is_imported(tmp_path: Pat
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the last keep", seconds=5.0)
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
 
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
@@ -625,14 +625,14 @@ async def test_an_agent_with_no_keep_signal_has_its_workspace_collected_once_bef
     assert any("EXPLORE ends" in note for note in await rig.notices())
 
 
-async def test_a_passed_preflight_records_the_agent_s_manifest_in_the_notebook(tmp_path: Path) -> None:
+async def test_a_passed_preflight_records_the_agent_s_manifest_in_the_blackboard(tmp_path: Path) -> None:
     rig = await _rig(tmp_path)
 
     await rig.session.preflight()
     await rig.session.release()
 
     stored = json.loads((tmp_path / BRANCH / "session" / MANIFEST_FILE).read_text(encoding="utf-8"))
-    recorded = (await rig.notebook.snapshot()).agent_manifests[BRANCH].manifest
+    recorded = (await rig.blackboard.snapshot()).agent_manifests[BRANCH].manifest
     assert recorded["source"] == stored["source"] and recorded["commit"] == stored["commit"]
 
 
@@ -657,7 +657,7 @@ async def test_a_keep_the_toolbox_refuses_is_noted_and_one_it_has_no_room_for_wa
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
 
@@ -683,7 +683,7 @@ async def test_a_keep_after_an_agent_restarted_its_count_is_a_new_keep(tmp_path:
     resumed = rig.restart()
     running = asyncio.create_task(resumed.run())
     await asyncio.sleep(1.0)
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the keep after the restart")
 
     assert any(note.startswith(f"{NOTICE} keep 2 imported") for note in await rig.notices())
@@ -712,7 +712,7 @@ async def test_a_refused_variable_is_left_out_of_later_keeps_while_their_other_l
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the first keep")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep")
 
     configs = [request.delta.config for request in rig.toolbox.requests]
@@ -735,7 +735,7 @@ async def test_a_keep_whose_launch_the_toolbox_refuses_is_imported_without_it_an
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the first keep without its launch")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep")
 
     assert all(not request.delta.config.envs for request in rig.toolbox.requests)
@@ -761,7 +761,7 @@ async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_th
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the import")
     Path(table).write_text("rewritten after the keep\n", encoding="utf-8")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
 
@@ -793,22 +793,22 @@ async def test_the_agent_s_ledger_facts_and_dead_ends_become_the_branch_s_learni
     await rig.session.preflight()
     running = asyncio.create_task(rig.session.run())
     await _until(lambda: rig.toolbox.requests, "the first import")
-    learnt = await rig.notebook.learnings(branch=BRANCH)
+    learnt = await rig.blackboard.learnings(branch=BRANCH)
     assert [(record.learning.kind.value, record.learning.content) for record in learnt] == [
         ("insight", f"FACT gemm-untuned: {first[0]['claim']}"),
         ("pitfall", f"DEAD_END triton-slower: {first[1]['claim']}"),
     ]
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
-    await rig.toolbox_notebook.write_result(result("r2"))
+    await rig.toolbox_blackboard.write_result(result("r2"))
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
 
-    revised, long = (await rig.notebook.learnings(branch=BRANCH))[2:]
+    revised, long = (await rig.blackboard.learnings(branch=BRANCH))[2:]
     assert revised.learning.content == f"FACT gemm-untuned: {second[0]['claim']}"
     assert revised.learning.supersedes == learnt[0].entry_id
     assert long.learning.content.startswith("FACT long: xxx") and len(long.learning.content) == LEARNING_MAX_CHARS
-    assert len(await rig.notebook.learnings(branch=BRANCH)) == 4
+    assert len(await rig.blackboard.learnings(branch=BRANCH)) == 4
 
 
 KEPT = "the decode GEMMs miss the tuned CSV"
@@ -830,7 +830,7 @@ async def test_ledger_findings_written_after_the_last_keep_are_learnt_when_the_b
     await asyncio.gather(running, return_exceptions=True)
     await rig.session.stop()
 
-    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    learnt = [record.learning.content for record in await rig.blackboard.learnings(branch=BRANCH)]
     assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
 
 
@@ -857,13 +857,13 @@ async def test_a_finding_learnt_as_the_agent_finished_is_not_learnt_again_when_t
     ledger = tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "run" / "ledger.jsonl"
     with ledger.open("a", encoding="utf-8") as lines:
         lines.write(json.dumps(_entry("b", "DEAD_END", AFTER)) + "\n")
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
 
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
     await rig.session.stop()
 
-    learnt = [record.learning.content for record in await rig.notebook.learnings(branch=BRANCH)]
+    learnt = [record.learning.content for record in await rig.blackboard.learnings(branch=BRANCH)]
     assert learnt == [f"FACT a: {KEPT}", f"DEAD_END b: {AFTER}"]
 
 
@@ -887,7 +887,7 @@ async def test_the_agent_runs_until_its_imports_can_still_be_judged_against_the_
 ) -> None:
     now = time.time()
     rig = await _rig(tmp_path, Agent(keeps=(), tail=30.0), clock=lambda: now, deadline=now + 3600.0)
-    gate = LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate"))
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
     rates = {"output_throughput": 0.2}
     root = await rig.repo.head(INTEGRATION_BRANCH)
     await gate.write_baseline(BaselineRecord(root, {"output_throughput": 6290.7}, rates, rates, ("b1",)))

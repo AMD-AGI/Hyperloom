@@ -18,11 +18,11 @@ from pathlib import Path
 import pytest
 
 import hyperloom
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LeaseEnd, LeaseStart, LineageEvent, Withdrawal
-from hyperloom_multibranch.contracts.notebook.vocab import LeaseEndReason, LeaseKind, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, intent, request, result
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LeaseEnd, LeaseStart, LineageEvent, Withdrawal
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import START, FakeClock, intent, request, result
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_CLOSE_GRACE_FRACTION,
@@ -147,8 +147,8 @@ def test_a_gpu_hour_budget_ends_explore_where_only_finals_share_is_left() -> Non
 async def test_the_gpu_seconds_spent_count_every_result_and_no_withdrawn_test(tmp_path: Path) -> None:
     clock = FakeClock()
 
-    def handle(role: Role) -> LocalNotebook:
-        return LocalNotebook(tmp_path, Writer(role, role.value), clock=clock)
+    def handle(role: Role) -> LocalBlackboard:
+        return LocalBlackboard(tmp_path, Writer(role, role.value), clock=clock)
 
     scheduler, toolbox = handle(Role.SCHEDULER), handle(Role.TOOLBOX)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
@@ -166,8 +166,8 @@ async def test_the_gpu_seconds_spent_count_every_result_and_no_withdrawn_test(tm
 async def test_a_closed_lease_s_card_seconds_count_once_beside_the_tests_gpu_seconds(tmp_path: Path) -> None:
     clock = FakeClock()
 
-    def handle(role: Role) -> LocalNotebook:
-        return LocalNotebook(tmp_path, Writer(role, role.value), clock=clock)
+    def handle(role: Role) -> LocalBlackboard:
+        return LocalBlackboard(tmp_path, Writer(role, role.value), clock=clock)
 
     scheduler, toolbox = handle(Role.SCHEDULER), handle(Role.TOOLBOX)
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))

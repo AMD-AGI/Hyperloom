@@ -24,9 +24,9 @@ import pytest
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, CancelOutcome, RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
 from hyperloom_multibranch.toolbox.tests.helpers import (
     IMAGE,
@@ -86,7 +86,7 @@ async def test_a_second_profile_of_the_same_commit_is_refused_with_the_first_one
 
     assert rejection.existing_request_id == first and first in rejection.reason
     assert [entry.request_id for entry in rig.toolbox._log.entries()] == [first], "the repeat is not even logged"
-    assert list(rig.notebook._state().requests) == [first], "and it writes nothing to the notebook"
+    assert list(rig.blackboard._state().requests) == [first], "and it writes nothing to the blackboard"
     state = await rig.toolbox.queue_state()
     assert (state.queued, state.running) == (0, 1)
     assert len(rig.planner.calls) == 1, "nothing was compiled for the refused one"
@@ -334,11 +334,11 @@ async def stack(tmp_path: Path) -> AsyncIterator[Stack]:
     await rig.toolbox.start()
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w62")
 
-    def notebooks(branch: str) -> LocalNotebook:
-        return LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+    def blackboards(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     options = SpecialistToolOptions(toolbox_loop=asyncio.get_running_loop(), wait_poll_seconds=0.05)
-    register_specialist_tools(server, toolbox=rig.toolbox, notebooks=notebooks, options=options)
+    register_specialist_tools(server, toolbox=rig.toolbox, blackboards=blackboards, options=options)
     server.start()
     try:
         yield Stack(rig, server, executor)
@@ -359,7 +359,7 @@ async def test_submit_test_refuses_a_second_profile_and_returns_the_existing_id(
 
     assert is_error and text.startswith("rejected (profile_exists):")
     assert first_id in text and "wait_test" in text and "op shares" in text
-    assert list(stack.rig.notebook._state().requests) == [first_id]
+    assert list(stack.rig.blackboard._state().requests) == [first_id]
 
 
 async def test_the_refused_branch_can_wait_for_the_existing_profile_but_not_cancel_it(stack: Stack) -> None:

@@ -4,8 +4,8 @@
 """The CLOSE exports: the Recipe KB write-back of the final choice, the session's knowledge, the session breakdown
 and the dashboard.
 
-They read a notebook that no longer changes. The write-back goes first, reading the patch and kernel files of the
-chosen commit's recipe from the session's blob store, then the notebook's knowledge steps (the search tree to the
+They read a blackboard that no longer changes. The write-back goes first, reading the patch and kernel files of the
+chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the search tree to the
 archive, marking the replays of the champions PRELUDE prepared from another image; the Experiences and the specialists'
 learnings go nowhere while MB1 runs on no Experience KB, see
 :func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
@@ -34,24 +34,24 @@ from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteRecipeValidationError, RemoteWriteResult
-from hyperloom_multibranch.contracts.notebook.interfaces import Notebook
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import QueueState
-from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.dashboard import DashboardFiles
-from hyperloom_multibranch.notebook.knowledge.breakdown import (
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.dashboard import DashboardFiles
+from hyperloom_multibranch.blackboard.knowledge.breakdown import (
     CloseOutcome,
     SessionPlace,
     build_breakdown,
     write_breakdown,
 )
-from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
-from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
-from hyperloom_multibranch.notebook.rsi.authoring import author_playbook
-from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
-from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
+from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
+from hyperloom_multibranch.blackboard.knowledge.warm_start import WarmLead
+from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
+from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
+from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import (
@@ -184,12 +184,12 @@ class CloseAuthoring:
 
 @dataclass(frozen=True)
 class ExportSources:
-    """What CLOSE exports from: the scheduler's notebook handle, the repository and the blob store that hold the
+    """What CLOSE exports from: the scheduler's blackboard handle, the repository and the blob store that hold the
     chosen commit's recipe and its files, the session's dashboard, the image check it ran before its first phase,
     ``None`` for a FINAL and CLOSE over a session that ended before FINAL, which run none, and PRELUDE's warm-start
     leads, none for a session that stopped before them."""
 
-    notebook: Notebook
+    blackboard: Blackboard
     repo: ExperimentRepo
     blobs: BlobStore
     dashboard: SessionDashboard
@@ -227,7 +227,7 @@ class SessionExports:
         self._author = services.author
         self._curator = services.curator
         self._kb_client = services.kb_client
-        self._notebook = sources.notebook
+        self._blackboard = sources.blackboard
         self._repo = sources.repo
         self._blobs = sources.blobs
         self._dashboard = sources.dashboard
@@ -241,7 +241,7 @@ class SessionExports:
 
         if self._image_check is not None:
             await asyncio.to_thread(self._image_check.write, self._layout.reports / IMAGE_CHECK_FILE)
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
         knowledge = await asyncio.to_thread(
@@ -280,7 +280,7 @@ class SessionExports:
     async def _ask_author(self, system: str, user: str) -> str:
         return (await self._author.completion(system, user)).text
 
-    async def _curate(self, snapshot: NotebookSnapshot) -> CloseStep:
+    async def _curate(self, snapshot: BlackboardSnapshot) -> CloseStep:
         """The lesson pool curated by the session's curator, after the knowledge steps published to it."""
 
         async def ask(system: str, user: str) -> str:
@@ -298,7 +298,7 @@ class SessionExports:
         recipe = await self._repo.read_recipe(chosen.commit)
         return FinalRecipe(chosen.commit, recipe, self._layout.final, self._metric, self._blobs)
 
-    async def _publish(self, snapshot: NotebookSnapshot, final_recipe: FinalRecipe | None) -> RemoteWriteResult:
+    async def _publish(self, snapshot: BlackboardSnapshot, final_recipe: FinalRecipe | None) -> RemoteWriteResult:
         if self._kb_client is None:
             return RemoteWriteResult(KB_DISABLED, "no Recipe KB client is configured")
         if final_recipe is None:

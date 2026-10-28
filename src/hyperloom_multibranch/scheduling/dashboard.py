@@ -3,7 +3,7 @@
 
 """The session dashboard in ``MB-dashboard/``: rebuilt every judge interval during EXPLORE and once more at CLOSE.
 
-Each build reads the notebook, the frontier-scored progress and the toolbox's queue at that moment.
+Each build reads the blackboard, the frontier-scored progress and the toolbox's queue at that moment.
 """
 
 from __future__ import annotations
@@ -11,18 +11,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery, SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.interfaces import ProgressQuery, SnapshotQuery
 from hyperloom_multibranch.contracts.toolbox import QueueState, Toolbox
-from hyperloom_multibranch.notebook.dashboard import DashboardFiles, build_dashboard, write_dashboard
+from hyperloom_multibranch.blackboard.dashboard import DashboardFiles, build_dashboard, write_dashboard
 
 
 class SessionDashboard:
-    """Writes the dashboard of ``notebook`` into ``directory``; ``metric`` names the gains it shows."""
+    """Writes the dashboard of ``blackboard`` into ``directory``; ``metric`` names the gains it shows."""
 
     def __init__(
-        self, notebook: SnapshotQuery, progress: ProgressQuery, toolbox: Toolbox, metric: str, directory: Path
+        self, blackboard: SnapshotQuery, progress: ProgressQuery, toolbox: Toolbox, metric: str, directory: Path
     ) -> None:
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._progress = progress
         self._toolbox = toolbox
         self._metric = metric
@@ -36,7 +36,7 @@ class SessionDashboard:
     async def write(self, queue: QueueState | None) -> DashboardFiles:
         """Rebuild the dashboard with ``queue``, ``None`` when the toolbox reported none."""
 
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         dashboard = build_dashboard(snapshot, await self._progress.progress(), metric=self._metric, queue=queue)
         return await asyncio.to_thread(write_dashboard, self._directory, dashboard)
 

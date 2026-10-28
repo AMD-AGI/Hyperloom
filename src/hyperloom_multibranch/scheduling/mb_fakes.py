@@ -13,8 +13,8 @@ from collections.abc import Collection
 from dataclasses import replace
 
 from hyperloom_kb import NoOpExperienceKB
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.notebook.rsi.session import (
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.blackboard.rsi.session import (
     DISABLED,
     CloseStep,
     CloseTargets,
@@ -29,7 +29,7 @@ MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
 
 
 def mb_fake_close_knowledge(
-    snapshot: NotebookSnapshot,
+    snapshot: BlackboardSnapshot,
     metric: str,
     *,
     budget_seconds: float,

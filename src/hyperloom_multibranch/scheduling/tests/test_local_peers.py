@@ -38,15 +38,15 @@ from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.pins import ActiveImage, pinned_tool_commits
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LearningKind, LineageKind
-from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
-from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
-from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
-from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
-from hyperloom_multibranch.notebook.tests.factories import START, delta, intent, judgement, profile, request, result
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LineageKind
+from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
+from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
+from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
+from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.critic import NoCritic
@@ -175,10 +175,10 @@ def test_an_agentx_workload_reaches_the_renderer_and_the_prelude_child_as_agentx
 
 
 def test_the_rule_follows_the_workload(tmp_path: Path) -> None:
-    notebook = LocalNotebook(tmp_path, Writer(Role.GATE, "rule-gate"))
+    blackboard = LocalBlackboard(tmp_path, Writer(Role.GATE, "rule-gate"))
 
-    assert workload_rule(WORKLOAD, notebook) == InferenceXRule(notebook, WORKLOAD.conc)
-    assert isinstance(workload_rule(AGENTX, notebook), AgentXRule)
+    assert workload_rule(WORKLOAD, blackboard) == InferenceXRule(blackboard, WORKLOAD.conc)
+    assert isinstance(workload_rule(AGENTX, blackboard), AgentXRule)
 
 
 def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -> None:
@@ -634,7 +634,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     assert (state.queued, state.running) == (0, 0)
     assert isinstance(peers.reserved, RuleGate) and not await peers.reserved.land_split("b09")
     assert isinstance(peers.regression, RegressionSet)
-    scheduler = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "test-scheduler"))
+    scheduler = LocalBlackboard(layout.blackboard, Writer(Role.SCHEDULER, "test-scheduler"))
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
     assert await peers.regression.check(root, RecipeDelta(), sources=()) == RegressionOutcome(True)
     state = await peers.toolbox.queue_state()
@@ -649,7 +649,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
         "worktree_sync",
         "worktree_check",
         "worktree_patch",
-        "notebook_brief",
+        "blackboard_brief",
         "request_repair",
         "decline_repair",
         "fix_case",
@@ -663,11 +663,11 @@ async def test_a_plain_explore_runs_no_accuracy_eval_while_confirm_and_integrati
 ) -> None:
     peers = built.peers
     root = await peers.repo.init_root(Recipe(IMAGE.digest))
-    notebook = LocalNotebook(built.layout.notebook, Writer(Role.SCHEDULER, "test-scheduler"))
+    blackboard = LocalBlackboard(built.layout.blackboard, Writer(Role.SCHEDULER, "test-scheduler"))
 
     async def submitted(purpose: Purpose, retest_of: str | None = None) -> TestRequest:
         test = TestRequest(TestKind.TEST, purpose, "b01", root, delta(), retest_of=retest_of)
-        return (await notebook.record(await peers.toolbox.submit_test(test))).request
+        return (await blackboard.record(await peers.toolbox.submit_test(test))).request
 
     explore = await submitted(Purpose.EXPLORE)
     confirm = await submitted(Purpose.CONFIRM, explore.request_id)
@@ -841,7 +841,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
             repo=None,
             briefs=SimpleNamespace(text=None),
             toolbox=None,
-            notebooks=None,
+            blackboards=None,
             dev_leases=held,
             native={},
         )
@@ -913,7 +913,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         repo=None,
         briefs=SimpleNamespace(text=None),
         toolbox=None,
-        notebooks=None,
+        blackboards=None,
         dev_leases=None,
         native={},
     )
@@ -944,21 +944,21 @@ async def test_a_fix_case_a_specialist_declares_is_stored_in_the_session_blob_st
 async def test_a_branchs_specialist_handle_is_one_writer_for_the_whole_session(built: _Built) -> None:
     """Every MCP call used to build a handle, hence a writer; an inbox cursor holds a sequence number for each writer, and
     the 1,258 of a 12 h session made one first ``poll_inbox`` answer 94,039 characters for three items."""
-    notebooks = built.wiring.notebooks
-    assert notebooks("b01") is notebooks("b01") and notebooks("b01") is not notebooks("b02")
+    blackboards = built.wiring.blackboards
+    assert blackboards("b01") is blackboards("b01") and blackboards("b01") is not blackboards("b02")
 
 
-async def test_the_specialist_notebook_handle_briefs_a_branch_after_stall_tests_judged_tests_without_a_commit(
+async def test_the_specialist_blackboard_handle_briefs_a_branch_after_stall_tests_judged_tests_without_a_commit(
     built: _Built,
 ) -> None:
-    root = built.layout.notebook
-    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "test-scheduler"))
+    root = built.layout.blackboard
+    scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "test-scheduler"))
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
-    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "test-toolbox"))
-    gate = LocalNotebook(root, Writer(Role.GATE, "test-gate"))
-    handle = built.wiring.notebooks("b01")
-    assert isinstance(handle, LocalNotebook)
+    toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "test-toolbox"))
+    gate = LocalBlackboard(root, Writer(Role.GATE, "test-gate"))
+    handle = built.wiring.blackboards("b01")
+    assert isinstance(handle, LocalBlackboard)
 
     async def judged(count: int) -> list[str]:
         for n in range(count):
@@ -1023,7 +1023,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
             repo=None,
             briefs=SimpleNamespace(text=None),
             toolbox=None,
-            notebooks=None,
+            blackboards=None,
             dev_leases=None,
             native=native,
         )

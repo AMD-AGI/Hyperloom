@@ -18,12 +18,12 @@ from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestR
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import NotRecorded
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import PRELUDE_SOURCE_CAVEAT, GateService, Polling
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
@@ -72,17 +72,17 @@ class _Session:
                 accuracy_score=accuracy_score,
                 accuracy_scores={WRONG.fingerprint(): 0.80},
             ),
-            notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")),
+            blackboard=LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")),
             autorun=False,
         )
-        self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
-        self.notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
+        self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
+        self.blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
         self.verifier = RecordingVerifier()
         self.gate = self.new_gate()
 
     def new_gate(self) -> GateService:
-        rule = AgentXRule() if self.agentx else InferenceXRule(self.notebook, CONC)
-        return GateService(self.notebook, self.toolbox, rule, self.verifier, polling=Polling(0.001))
+        rule = AgentXRule() if self.agentx else InferenceXRule(self.blackboard, CONC)
+        return GateService(self.blackboard, self.toolbox, rule, self.verifier, polling=Polling(0.001))
 
     async def record_root(self) -> None:
         event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())
@@ -103,38 +103,38 @@ class _Session:
 
 @pytest.fixture
 async def session(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.gate.establish_baseline(ROOT, await session.root_tests())
     yield session
     await session.toolbox.close()
 
 
 async def test_prelude_sets_the_bar_from_the_root_tests_that_measured(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     ids = await session.root_tests(failing=1)
 
     record = await session.gate.establish_baseline(ROOT, ids)
 
     assert record.request_ids == tuple(ids[1:])
-    assert await session.notebook.baseline() == record
+    assert await session.blackboard.baseline() == record
     assert session.verifier.asked == ids[1:]
     await session.toolbox.close()
 
 
 async def test_prelude_with_a_root_test_that_does_not_re_verify_sets_no_bar(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     ids = await session.root_tests()
     session.verifier.rejects = frozenset(ids[1:2])
 
     with pytest.raises(ResultUnverified, match=f"{ids[1]} did not re-verify"):
         await session.gate.establish_baseline(ROOT, ids)
     with pytest.raises(NotRecorded):
-        await session.notebook.baseline()
+        await session.blackboard.baseline()
     await session.toolbox.close()
 
 
 async def test_prelude_on_root_tests_scoring_below_the_floor_sets_no_bar(tmp_path):
-    session = _Session(tmp_path / "notebook", accuracy_score=0.3)
+    session = _Session(tmp_path / "blackboard", accuracy_score=0.3)
     ids = await session.root_tests()
 
     with pytest.raises(NotMeasured, match="below the floor"):
@@ -143,7 +143,7 @@ async def test_prelude_on_root_tests_scoring_below_the_floor_sets_no_bar(tmp_pat
 
 
 async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     ids = await session.root_tests(failing=2)
 
     with pytest.raises(NotMeasured, match="1 of 3 root tests measured"):
@@ -152,7 +152,7 @@ async def test_prelude_with_one_root_test_measured_sets_no_bar(tmp_path):
 
 
 async def test_an_agentx_prelude_asks_for_no_root_test(tmp_path):
-    session = _Session(tmp_path / "notebook", agentx=True)
+    session = _Session(tmp_path / "blackboard", agentx=True)
 
     assert await session.gate.baseline_test_count() == 0
     assert await session.root_tests() == []
@@ -176,7 +176,7 @@ def _child_run(tmp_path, metrics=AGENTX_RUN, validity=Validity.SUCCEEDED) -> Pre
 
 
 async def test_an_agentx_baseline_is_the_prelude_childs_run_of_the_root_and_names_it(tmp_path):
-    session = _Session(tmp_path / "notebook", agentx=True)
+    session = _Session(tmp_path / "blackboard", agentx=True)
     measured = _child_run(tmp_path)
 
     record = await session.gate.establish_prelude_baseline(ROOT, measured)
@@ -188,12 +188,12 @@ async def test_an_agentx_baseline_is_the_prelude_childs_run_of_the_root_and_name
         f"{PRELUDE_SOURCE_CAVEAT}"
     )
     assert session.verifier.asked == []
-    assert await session.notebook.baseline() == record
+    assert await session.blackboard.baseline() == record
     await session.toolbox.close()
 
 
 async def test_a_child_run_whose_copy_changed_since_it_was_read_anchors_nothing(tmp_path):
-    session = _Session(tmp_path / "notebook", agentx=True)
+    session = _Session(tmp_path / "blackboard", agentx=True)
     measured = _child_run(tmp_path)
     Path(measured.export).write_text("{}\n{}\n")
 
@@ -210,7 +210,7 @@ async def test_a_child_run_whose_copy_changed_since_it_was_read_anchors_nothing(
     ],
 )
 async def test_a_child_run_without_a_reading_anchors_nothing(tmp_path, metrics, validity, error):
-    session = _Session(tmp_path / "notebook", agentx=True)
+    session = _Session(tmp_path / "blackboard", agentx=True)
 
     with pytest.raises(NotMeasured, match=error):
         await session.gate.establish_prelude_baseline(ROOT, _child_run(tmp_path, metrics, validity))
@@ -229,7 +229,7 @@ async def test_a_merge_gain_counts_once_another_node_repeats_it(session):
 
     (retest,) = session.retests()
     assert (judgement.verdict, judgement.request_ids) == (Verdict.IMPROVED, (merge, retest.request_id))
-    assert retest.avoid_nodes == ((await session.notebook.record(merge)).result.sandbox.node_name,)
+    assert retest.avoid_nodes == ((await session.blackboard.record(merge)).result.sandbox.node_name,)
     assert session.verifier.asked[-2:] == [merge, retest.request_id]
 
 
@@ -280,7 +280,7 @@ async def test_a_flat_first_is_judged_without_the_confirm_asked_ahead_of_it(sess
 
 
 async def test_a_withdrawn_test_is_not_measured(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.record_root()
     merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST))
     await session.toolbox.cancel(merge)

@@ -3,8 +3,8 @@
 
 """The toolbox's submit log: what survives a restart (design 3.7, 4.17).
 
-An append-only JSON-lines file, flushed and fsynced per entry. A request is logged before the notebook hears of it,
-its outcome is logged before the notebook is written, and the entry is settled once the notebook holds it, so after a
+An append-only JSON-lines file, flushed and fsynced per entry. A request is logged before the blackboard hears of it,
+its outcome is logged before the blackboard is written, and the entry is settled once the blackboard holds it, so after a
 crash every accepted request is in exactly one of three states: waiting to run, measured and waiting to be written, or
 settled. Ids are UUID v5 of the campaign id and ``branch/sequence``; the sequence is per branch and is never reused
 (a submit that failed after it was logged still used its number), so a restart hands out the numbers it would have.

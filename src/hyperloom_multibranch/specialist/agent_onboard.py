@@ -23,9 +23,9 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, Onboard, tail
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand

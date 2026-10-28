@@ -20,7 +20,7 @@ error or otherwise ends within ``min_session_seconds`` raises, and the runtime d
 streams partial messages into its log, so a long reasoning step shows as log growth and is not taken for a lost
 session. The session's process registry adopts every process the socket starts, so the session stop kills it even
 when this stop cannot. The spend of each turn, its logged tokens at the gateway's rates, is written to the branch's
-notebook when the turn ends and when the launch is collected, however it ended. The CLI streams of earlier launches
+blackboard when the turn ends and when the launch is collected, however it ended. The CLI streams of earlier launches
 stay in the workspace, numbered in launch order beside ``process.log``, which holds the current launch's only.
 
 A Claude session runs under a conversation id it is given at launch, written with what a resume needs to
@@ -37,8 +37,8 @@ conversation record that cannot be read means a fresh session and a warning.
 
 A launch, and the message that wakes a CLI once the integration head moved, say what the integration head holds and
 what of it the branch head lacks (:mod:`~hyperloom_multibranch.specialist.following`). A branch whose specialist asked
-to follow the integration head is moved onto the one the notebook recorded between turns, once no candidate test of
-the branch is in flight or waits for its judge, and the notebook records the move; the next message says what the move
+to follow the integration head is moved onto the one the blackboard recorded between turns, once no candidate test of
+the branch is in flight or waits for its judge, and the blackboard records the move; the next message says what the move
 carried.
 """
 
@@ -72,7 +72,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
 )
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.interfaces import (
+from hyperloom_multibranch.contracts.blackboard.interfaces import (
     AgentRecords,
     BranchLogStore,
     Inbox,
@@ -80,14 +80,14 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     LineageSink,
     UsageSink,
 )
-from hyperloom_multibranch.contracts.notebook.records import (
+from hyperloom_multibranch.contracts.blackboard.records import (
     BranchLogRecord,
     InboxItem,
     LlmUsage,
-    NotebookSnapshot,
+    BlackboardSnapshot,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.exhausted import exhausted_refusal
@@ -271,12 +271,12 @@ class AgentSetup:
     dev_leases: DevLeaseHolder | None = None
 
 
-class SessionNotebook(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
+class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
     """A branch's runtime handle as its sessions use it: the branch log, the spend of each turn, the inbox that wakes
     a CLI whose turn ended, the learnings an autonomous agent's findings become, its agent's manifest, the re-root of
     its branch, and the snapshot that says whether the branch has a test in flight."""
 
-    async def snapshot(self) -> NotebookSnapshot: ...
+    async def snapshot(self) -> BlackboardSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -284,7 +284,7 @@ class BranchPlace:
     """Where one branch's sessions work: its worktree, its log and spend, and the directory a session's files go in."""
 
     worktree: BranchWorktree
-    notebook: SessionNotebook
+    blackboard: SessionBlackboard
     workspace: Path
 
 
@@ -355,7 +355,7 @@ class AgentSession:
         branch, worktree = self._start.branch, self._place.worktree
         followed = await self._follow()
         head = await sync_to_head(self._setup.repo, branch, worktree)
-        recent = await self._place.notebook.branch_log(branch)
+        recent = await self._place.blackboard.branch_log(branch)
         start = await self._briefed(head)
         integration = await self._setup.repo.head(INTEGRATION_BRANCH)
         holdings = _joined(followed.detail if followed else "", await self._holdings(head))
@@ -363,7 +363,7 @@ class AgentSession:
             launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end),
             integration_section(holdings),
         )
-        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent), integration=integration)
+        seen = _Seen((await self._place.blackboard.poll(branch)).cursor, len(recent), integration=integration)
         if not self._setup.command.interactive:
             return _Launch(prompt, seen)
         cli = _CliState(
@@ -498,7 +498,7 @@ class AgentSession:
             "the CLI of %s could not resume conversation %s (%s); a fresh session starts", branch, session_id, why
         )
         content = f"{NOTICE} resuming the specialist's conversation failed ({why}); a fresh session starts"
-        await self._place.notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, content))
+        await self._place.blackboard.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, content))
 
     def _read_cli(self) -> _CliState | None:
         """The conversation the workspace's last launch ran; ``None``, with a warning, when its record is missing
@@ -616,14 +616,14 @@ class AgentSession:
         """The inbox items and the runtime's notices past ``seen``, which moves past them, among them the refusal of
         each exhausted record past ``seen`` that :func:`exhausted_refusal` refuses; a notice of a session's restart is
         left out, as the resumed or fresh session's first message says why it starts."""
-        notebook, branch = self._place.notebook, self._start.branch
-        page = await notebook.poll(branch, seen.cursor)
-        log = await notebook.branch_log(branch)
+        blackboard, branch = self._place.blackboard, self._start.branch
+        page = await blackboard.poll(branch, seen.cursor)
+        log = await blackboard.branch_log(branch)
         refusals = [why for record in log[seen.logged :] if (why := exhausted_refusal(record.entry.content))]
         for why in refusals:
-            await notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{NOTICE} {why}"))
+            await blackboard.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{NOTICE} {why}"))
         if refusals:
-            log = await notebook.branch_log(branch)
+            log = await blackboard.branch_log(branch)
         notices = [
             record
             for record in log[seen.logged :]
@@ -635,7 +635,7 @@ class AgentSession:
     async def _branch_requests(self) -> frozenset[str]:
         """The branch's candidate tests: a profile measures no candidate, so it does not reset an idle count."""
         branch = self._start.branch
-        records = (await self._place.notebook.snapshot()).records
+        records = (await self._place.blackboard.snapshot()).records
         return frozenset(
             record.request_id
             for record in records
@@ -644,36 +644,36 @@ class AgentSession:
 
     async def _tests_in_flight(self) -> bool:
         branch = self._start.branch
-        records = (await self._place.notebook.snapshot()).records
+        records = (await self._place.blackboard.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
 
     async def _follow(self) -> Followed | None:
         """Move the branch onto the integration head when its specialist asked to since the runtime last answered,
         once no candidate of the branch is unsettled: one measured on the old head could no longer land. Writes the
-        answer to the branch log; ``None`` while there is nothing to do yet or the notebook cannot record the move yet."""
-        notebook, branch = self._place.notebook, self._start.branch
-        log = [record.entry for record in await notebook.branch_log(branch)]
+        answer to the branch log; ``None`` while there is nothing to do yet or the blackboard cannot record the move yet."""
+        blackboard, branch = self._place.blackboard, self._start.branch
+        log = [record.entry for record in await blackboard.branch_log(branch)]
         asked = max((index for index, entry in enumerate(log) if reroot_requested(entry.content)), default=-1)
         answered = max((index for index, entry in enumerate(log) if entry.content.startswith(_ANSWER)), default=-1)
         if asked <= answered or await self._candidates_unsettled():
             return None
         notes = self._place.workspace / REROOTED_DIR
-        followed = await follow(self._setup.repo, notebook, await notebook.snapshot(), log[asked], notes)
+        followed = await follow(self._setup.repo, blackboard, await blackboard.snapshot(), log[asked], notes)
         if followed is None:
             return None
         logger.info("%s asked to follow the integration head: %s", branch, followed.notice)
-        await notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{_ANSWER} {followed.notice}"))
+        await blackboard.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, f"{_ANSWER} {followed.notice}"))
         return followed
 
     async def _holdings(self, head: str) -> str:
-        return await integration_holdings(self._setup.repo, await self._place.notebook.snapshot(), head)
+        return await integration_holdings(self._setup.repo, await self._place.blackboard.snapshot(), head)
 
     async def _candidates_unsettled(self) -> bool:
         """Whether a candidate test of the branch is in flight, or measured and neither judged nor closed by a notice
         of its judge's that no judgement follows: until then the judge may still retest or commit it on the head it
         was measured against."""
         branch = self._start.branch
-        snapshot = await self._place.notebook.snapshot()
+        snapshot = await self._place.blackboard.snapshot()
         answered = {
             request_id
             for record in snapshot.branch_logs.get(branch, ())
@@ -698,7 +698,7 @@ class AgentSession:
         profile_exists waits on one of them, and its result reaches only that branch's inbox."""
         branch = self._start.branch
         head = await self._setup.repo.head(branch)
-        records = (await self._place.notebook.snapshot()).records
+        records = (await self._place.blackboard.snapshot()).records
         return [
             record
             for record in records
@@ -811,7 +811,7 @@ class AgentSession:
             total,
             used.session_id,
         )
-        await self._place.notebook.record_llm_usage(usage)
+        await self._place.blackboard.record_llm_usage(usage)
 
 
 @dataclass
@@ -979,5 +979,5 @@ __all__ = [
     "BranchPlace",
     "DevLeaseHolder",
     "Processes",
-    "SessionNotebook",
+    "SessionBlackboard",
 ]

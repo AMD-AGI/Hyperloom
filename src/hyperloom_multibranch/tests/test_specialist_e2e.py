@@ -21,10 +21,10 @@ from hyperloom.orchestrator.specialists.agent_runner import LocalAgentRunner
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -89,7 +89,7 @@ def call(name, **arguments):
 
 
 head = re.search(r"Its head: ([0-9a-f]+)\.", prompt).group(1)
-claimed = call("notebook_claim", parent_commit=head, target="@TARGET@", mechanism="@MECHANISM@", layer="source")
+claimed = call("blackboard_claim", parent_commit=head, target="@TARGET@", mechanism="@MECHANISM@", layer="source")
 found = re.search(r"\b[0-9a-f]{64}\b", claimed)
 call("worktree_sync")
 pathlib.Path("vllm/config.py").write_text("max_num_seqs = 256\n")
@@ -108,7 +108,7 @@ for _ in range(600):
     if json.loads(call("test_result", request_id=request_id))["state"] == "measured":
         break
     time.sleep(0.1)
-call("notebook_append_branch_log", kind="result", content=f"max_num_seqs 256 on {head}: measured", request_ids=[request_id])
+call("blackboard_append_branch_log", kind="result", content=f"max_num_seqs 256 on {head}: measured", request_ids=[request_id])
 """
 
 
@@ -121,14 +121,14 @@ class _Planner:
         return None
 
 
-def _toolbox(root, notebook, repo) -> RealToolbox:
+def _toolbox(root, blackboard, repo) -> RealToolbox:
     """The real toolbox over the fake measurer, accepting each request against the session's experiment repository."""
     config = FakeToolboxConfig(
         noise=QUIET, accuracy_metric=ACCURACY_METRICS[0], effect_fn=lambda r: 0.10 if r.delta.components else 0.0
     )
     executor = FakeExecutor(config)
     log = SubmissionLog(root / "submissions.jsonl", str(config.campaign_id))
-    stores = ToolboxStores(log, notebook, notebook, claims=notebook, records=notebook)
+    stores = ToolboxStores(log, blackboard, blackboard, claims=blackboard, records=blackboard)
     acceptance = AcceptanceSetup(repo, _Planner(), None)
     return RealToolbox(stores, executor, acceptance, tuning=ToolboxTuning(clock=lambda: executor.now))
 
@@ -153,10 +153,10 @@ def _read(path) -> str:
     return path.read_text() if path.exists() else f"{path.name} was not written"
 
 
-async def _prelude(repo, toolbox, notebook_root, gate_notebook) -> str:
+async def _prelude(repo, toolbox, blackboard_root, gate_blackboard) -> str:
     """PRELUDE as the scheduler and the gate leave it: the root committed, s1 open at it, the bar set."""
     root = await repo.init_root(ROOT)
-    scheduler = LocalNotebook(notebook_root, Writer(Role.SCHEDULER, "scheduler"))
+    scheduler = LocalBlackboard(blackboard_root, Writer(Role.SCHEDULER, "scheduler"))
     root_event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=ROOT.digest())
     await scheduler.record_lineage(root_event)
     await repo.create_branch(BRANCH, root)
@@ -164,7 +164,7 @@ async def _prelude(repo, toolbox, notebook_root, gate_notebook) -> str:
     baseline = TestRequest(TestKind.TEST, Purpose.BASELINE, INTEGRATION_BRANCH, root, RecipeDelta(), accuracy=True)
     ids = [await toolbox.submit_test(baseline) for _ in range(3)]
     await toolbox.drain()
-    await write_inferencex_baseline(gate_notebook, root, [await gate_notebook.record(i) for i in ids], CONC)
+    await write_inferencex_baseline(gate_blackboard, root, [await gate_blackboard.record(i) for i in ids], CONC)
     return root
 
 
@@ -174,14 +174,14 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     (package / "__init__.py").write_bytes(b"")
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
-    notebook_root, blobs = tmp_path / "notebook", LocalBlobStore(tmp_path / "blobs")
+    blackboard_root, blobs = tmp_path / "blackboard", LocalBlobStore(tmp_path / "blobs")
     repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
-    toolbox = _toolbox(tmp_path, LocalNotebook(notebook_root, Writer(Role.TOOLBOX, "toolbox")), repo)
-    gate_notebook = LocalNotebook(notebook_root, Writer(Role.GATE, "gate"))
-    reader = LocalNotebook(notebook_root, Writer(Role.OBSERVER, "observer"))
+    toolbox = _toolbox(tmp_path, LocalBlackboard(blackboard_root, Writer(Role.TOOLBOX, "toolbox")), repo)
+    gate_blackboard = LocalBlackboard(blackboard_root, Writer(Role.GATE, "gate"))
+    reader = LocalBlackboard(blackboard_root, Writer(Role.OBSERVER, "observer"))
 
-    def notebook_for(branch: str) -> LocalNotebook:
-        return LocalNotebook(notebook_root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+    def blackboard_for(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(blackboard_root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="e2e")
     cli = tmp_path / "stand-in-claude"
@@ -205,18 +205,18 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
         base=SourceBase(tmp_path / "MB-source", locator=lambda _layout: installed),
         components=("vllm",),
         branch_dir=lambda branch: tmp_path / "MB-branches" / branch,
-        notebook_for=notebook_for,
+        blackboard_for=blackboard_for,
     )
-    register_specialist_tools(server, toolbox=toolbox, notebooks=notebook_for)
+    register_specialist_tools(server, toolbox=toolbox, blackboards=blackboard_for)
     register_worktree_tools(server, repo=repo, worktrees=sessions.worktrees, locator=lambda _layout: installed)
-    gate = RuleGate(gate_notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
+    gate = RuleGate(gate_blackboard, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
     judging = Judging(gate, toolbox, InferenceXRule(reader, CONC))
-    runtime = SpecialistRuntime(notebook_for, judging, sessions.factory, pacing=RuntimePacing(poll_seconds=0.05))
+    runtime = SpecialistRuntime(blackboard_for, judging, sessions.factory, pacing=RuntimePacing(poll_seconds=0.05))
     workspace = tmp_path / "MB-branches" / BRANCH / SESSION_DIR
     started = False
     try:
         await toolbox.start()
-        root = await _prelude(repo, toolbox, notebook_root, gate_notebook)
+        root = await _prelude(repo, toolbox, blackboard_root, gate_blackboard)
 
         async def landed() -> bool:
             return await repo.head(BRANCH) != root

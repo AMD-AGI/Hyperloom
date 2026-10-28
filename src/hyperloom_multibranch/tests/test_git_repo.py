@@ -20,7 +20,7 @@ from hyperloom.contracts.recipe import (
     with_unexpressed,
 )
 from hyperloom.measure.compile import BlobError, LocalBlobStore
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 

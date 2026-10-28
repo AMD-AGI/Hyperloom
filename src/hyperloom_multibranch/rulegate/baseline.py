@@ -22,8 +22,8 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom.contracts.measurement import Purpose, TestResult
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate.accuracy import baseline_accuracy
 from hyperloom_multibranch.rulegate.inferencex import DispersionThreshold, InferenceXBaseline
 from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading

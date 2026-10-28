@@ -36,8 +36,8 @@ from hyperloom.measure.compile import COMPONENT_LAYOUTS
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
+from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, BranchLease, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
@@ -165,12 +165,12 @@ class DevLeases:
         self,
         toolbox: LeaseSource,
         sandboxes: SandboxFor,
-        notebooks: Callable[[str], BranchLogAppender],
+        blackboards: Callable[[str], BranchLogAppender],
         *,
         limits: DevLimits = DevLimits(),
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._toolbox, self._sandboxes, self._notebooks = toolbox, sandboxes, notebooks
+        self._toolbox, self._sandboxes, self._blackboards = toolbox, sandboxes, blackboards
         self._limits, self._clock = limits, clock
         self._slots: dict[str, int] = {}
         self._held: dict[str, _Lease] = {}
@@ -332,8 +332,8 @@ class DevLeases:
     async def _note(self, branch: str, content: str) -> None:
         entry = BranchLogEntry(branch, BranchLogType.RESULT, f"{NOTICE} {content}")
         try:
-            await self._notebooks(branch).append_branch_log(entry)
-        except NotebookError:
+            await self._blackboards(branch).append_branch_log(entry)
+        except BlackboardError:
             logger.warning("the branch log of %s did not take: %s", branch, content, exc_info=True)
 
     def _ports(self, slot: int) -> tuple[int, int]:

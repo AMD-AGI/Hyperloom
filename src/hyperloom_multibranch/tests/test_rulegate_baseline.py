@@ -16,11 +16,11 @@ from hyperloom.common.perf_metric import (
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
-from hyperloom_multibranch.notebook import LocalNotebook, codec
-from hyperloom_multibranch.notebook.tests.factories import delta, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
+from hyperloom_multibranch.blackboard import LocalBlackboard, codec
+from hyperloom_multibranch.blackboard.tests.factories import delta, result
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.baseline import (
     read_inferencex_baseline,
@@ -40,8 +40,8 @@ class _Session:
     """The toolbox writes the measured baselines; the gate reads them and writes the baseline record."""
 
     def __init__(self, root):
-        self.toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
-        self.gate = LocalNotebook(root, Writer(Role.GATE, "gate"))
+        self.toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"))
+        self.gate = LocalBlackboard(root, Writer(Role.GATE, "gate"))
 
     async def measured(
         self, request_id, *, metrics, score=None, change=None, parent=ROOT, purpose=Purpose.BASELINE, check=None
@@ -69,7 +69,7 @@ class _Session:
 
 @pytest.fixture
 def session(tmp_path):
-    return _Session(tmp_path / "notebook")
+    return _Session(tmp_path / "blackboard")
 
 
 async def _prelude(session, throughputs=(1000.0, 1010.0, 990.0), scores=(0.90, 0.91, 0.89), checks=None):

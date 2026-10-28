@@ -64,8 +64,8 @@ def test_the_toolbox_protocol_is_the_three_calls_of_the_design() -> None:
     assert {o.value for o in CancelOutcome} == {"withdrawn", "finished"}
 
 
-def test_the_notebook_writer_protocols_are_re_exported() -> None:
-    from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, TestRecordSink
+def test_the_blackboard_writer_protocols_are_re_exported() -> None:
+    from hyperloom_multibranch.contracts.blackboard.interfaces import NodeHealth, TestRecordSink
 
     assert toolbox.TestRecordSink is TestRecordSink
     assert toolbox.NodeHealth is NodeHealth

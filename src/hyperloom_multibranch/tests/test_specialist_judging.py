@@ -22,11 +22,11 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, AccuracyVerdict, Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, intent, judgement, request
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, intent, judgement, request
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_NOT_CONFIRMED
@@ -87,15 +87,17 @@ class _Session:
                 accuracy_scores={WRONG.fingerprint(): 0.80},
                 **config,
             ),
-            notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")),
+            blackboard=LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")),
             autorun=False,
         )
-        self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
-        self.gate_notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
-        self.runtime = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+        self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
+        self.gate_blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
+        self.runtime = LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
         self.repo = InMemoryRepo(RECIPE)
         self.verifier = RecordingVerifier()
-        self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED), self.verifier)
+        self.gate = RuleGate(
+            self.gate_blackboard, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED), self.verifier
+        )
         self.fixes: FixChecking | None = None
         self.judge = self.new_judge()
 
@@ -112,7 +114,7 @@ class _Session:
             return REPRODUCED if unchanged and parent_reproduces else NOT_REPRODUCED
 
         blobs = LocalBlobStore(root / "blobs")
-        repro = ReproToolbox(LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "repro")), answer)
+        repro = ReproToolbox(LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "repro")), answer)
         runner = ReproRunner(repro, self.runtime, RecordingVerifier(), polling=Polling(0.001))
         self.fixes = FixChecking(runner, critic, blobs, "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64")
         self.judge = self.new_judge()
@@ -129,8 +131,8 @@ class _Session:
         await self.scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=ROOT))
         ids = [await self.toolbox.submit_test(_request(INTEGRATION_BRANCH, Purpose.BASELINE)) for _ in range(3)]
         await self.toolbox.drain()
-        baselines = [await self.gate_notebook.record(request_id) for request_id in ids]
-        await write_inferencex_baseline(self.gate_notebook, ROOT, baselines, CONC)
+        baselines = [await self.gate_blackboard.record(request_id) for request_id in ids]
+        await write_inferencex_baseline(self.gate_blackboard, ROOT, baselines, CONC)
 
     async def explore(self, change: RecipeDelta) -> str:
         return await self.toolbox.submit_test(_request(BRANCH, Purpose.EXPLORE, change))
@@ -149,7 +151,7 @@ class _Session:
 
 @pytest.fixture
 async def session(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.prelude()
     return session
 
@@ -235,7 +237,7 @@ async def test_a_gain_whose_retest_failed_to_measure_is_left_unjudged(session):
 
 
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
-    session = _Session(tmp_path / "notebook", effect_fn=lambda r: 0.05 if r.purpose is Purpose.EXPLORE else 0.0)
+    session = _Session(tmp_path / "blackboard", effect_fn=lambda r: 0.05 if r.purpose is Purpose.EXPLORE else 0.0)
     await session.prelude()
     first = await session.explore(FAST)
     await session.step()
@@ -263,7 +265,7 @@ async def test_a_gain_the_accuracy_gate_holds_back_twice_is_held_for_the_special
 
 
 async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_specialist(tmp_path):
-    session = _Session(tmp_path / "notebook", error_rates={FAST.fingerprint(): 1.0})
+    session = _Session(tmp_path / "blackboard", error_rates={FAST.fingerprint(): 1.0})
     await session.prelude()
     first = await session.explore(FAST)
     await session.step()
@@ -392,7 +394,7 @@ async def test_of_two_gains_on_one_parent_the_second_does_not_land(session):
     )
 
 
-async def test_a_candidate_on_a_commit_the_notebook_does_not_know_does_not_stop_the_branch(session):
+async def test_a_candidate_on_a_commit_the_blackboard_does_not_know_does_not_stop_the_branch(session):
     stray = await session.toolbox.submit_test(_request(BRANCH, Purpose.EXPLORE, FLAT, parent=BRANCH))
     await session.explore(FAST)
     await session.step()
@@ -470,7 +472,7 @@ def test_a_fix_is_declared_only_on_a_judgement_whose_eval_passed(accuracy, decla
 async def skipping(tmp_path, monkeypatch):
     """A session whose toolbox leaves the eval out of a plain explore."""
     monkeypatch.setattr(fake_toolbox, "AcceptanceSetup", functools.partial(AcceptanceSetup, explore_accuracy=False))
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.prelude()
     return session
 

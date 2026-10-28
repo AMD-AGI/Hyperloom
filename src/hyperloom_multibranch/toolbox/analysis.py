@@ -7,12 +7,12 @@ toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
-notebook holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
+blackboard holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
 and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
 the trace splitter's workload hints are that profile test's own: the caller names neither. The scheduler's own request,
 for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
 child's point config by the same rule. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
-directory its output landed in, resolved inside the session, from the notebook's record of it, never from the caller.
+directory its output landed in, resolved inside the session, from the blackboard's record of it, never from the caller.
 An ``upstream_pr_search`` request is about no commit and no test: it names a repository (one the rule pack lists) and what to
 look for, and the service the search asks is the host's, never the caller's.
 """
@@ -24,9 +24,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch, UnknownRequest
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.interfaces import RecordSearch, UnknownRequest
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
@@ -91,7 +91,7 @@ async def _verified_profile(
 
     What a profile describes is a commit, so any branch's profile of ``commit`` qualifies (``records.profiles`` is the
     same commit identity ``profile_exists`` keys on); the branch that ran it does not matter. A profile of another
-    commit, or an id the notebook holds no profile for, is refused.
+    commit, or an id the blackboard holds no profile for, is refused.
     """
     if not request_id:
         return None
@@ -240,7 +240,7 @@ def _pr_search_request(ask: AnalysisAsk) -> ToolRequest:
 async def _tune_request(records: RecordSearch | None, ask: AnalysisAsk, root: Path | None) -> ToolRequest:
     """The ``kernel_tune`` request: the caller's parameters and the directory the named test's output landed in.
 
-    The test must be one the notebook holds a result for with an output directory inside the session ``root``; its server
+    The test must be one the blackboard holds a result for with an output directory inside the session ``root``; its server
     logs are read by the tool when it runs, with no card held, and a test that landed none is a failure of that job.
     """
     try:
@@ -257,7 +257,7 @@ async def _tune_request(records: RecordSearch | None, ask: AnalysisAsk, root: Pa
     try:
         record = await records.record(test_id)
     except UnknownRequest:
-        raise RequestRejected(f"the notebook holds no test {test_id!r}", CODE_TEST_UNKNOWN) from None
+        raise RequestRejected(f"the blackboard holds no test {test_id!r}", CODE_TEST_UNKNOWN) from None
     landed = _in_session(record.result.output_dir, root) if record.result and record.result.output_dir else None
     if landed is None or not landed.is_dir():
         raise RequestRejected(f"test {test_id!r} has no landed output to read", CODE_TEST_WITHOUT_OUTPUT)

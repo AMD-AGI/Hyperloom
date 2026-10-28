@@ -25,9 +25,9 @@ from typing import Any
 import pytest
 
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, _runner_template
 from hyperloom_multibranch.toolbox.mcp_tools import (
     McpSpecialistTokens,
@@ -113,22 +113,22 @@ def _host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 async def _serve(tmp_path: Path, **options: Any) -> AsyncIterator[Local]:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     repo = FakeRepo()
     repo.heads["b1"] = PARENT
-    toolbox = _toolbox(tmp_path, notebook, repo, **options)
+    toolbox = _toolbox(tmp_path, blackboard, repo, **options)
     await toolbox.start()
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w168")
     register_specialist_tools(
         server,
         toolbox=toolbox,
-        notebooks=lambda b: LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, b, b)),
+        blackboards=lambda b: LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, b, b)),
         options=SpecialistToolOptions(analysis=toolbox, toolbox_loop=asyncio.get_running_loop()),
     )
     server.start()
     try:
         stack = Stack(None, toolbox._tools, None, {}, server, McpSpecialistTokens(server))  # type: ignore[arg-type]
-        yield Local(stack, toolbox, notebook, tmp_path / "session", _Analysis("tracelens"))
+        yield Local(stack, toolbox, blackboard, tmp_path / "session", _Analysis("tracelens"))
     finally:
         server.stop()
         await toolbox.close()

@@ -7,7 +7,7 @@ Faked: the specialists' decisions only (a script instead of a model). The runner
 SGLang serves the model, the patch is applied to the SGLang installed here and the accuracy rounds are real evals, so
 the numbers are measured and the verdicts are whatever the rule gate makes of them. Because a comment-only patch and a
 changed request cap rarely gain more than the bar, this variant cannot promise a commit; it checks that whatever the
-rule gate decided is what the repository and the notebook say, and that the round's mechanics (fresh sandboxes, verified
+rule gate decided is what the repository and the blackboard say, and that the round's mechanics (fresh sandboxes, verified
 bundles, the retest beside a full branch, the withdrawals) hold with real measurements.
 
 Needs SGLang, a model directory and an InferenceX git checkout: ``HL_W15_MODEL``, ``HL_W15_INFERENCEX`` and

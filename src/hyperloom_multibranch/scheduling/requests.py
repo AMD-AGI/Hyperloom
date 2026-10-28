@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.scheduling.clock import Clock
 

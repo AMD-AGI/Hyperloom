@@ -4,7 +4,7 @@
 """A hosted test says where its wall time went: the executor is the real one over the hosted backend and the local
 sandbox provider, and the stand-in runner signs the phases of the sheet's ``fake_phases`` in its manifest.
 
-What is read is what the notebook stored: the phases of the host and of the runner in order, the card time each held, and
+What is read is what the blackboard stored: the phases of the host and of the runner in order, the card time each held, and
 the seconds that none of them covers, so the parts add up to the wall time of the attempt.
 """
 
@@ -77,10 +77,10 @@ async def test_every_phase_holds_the_cards_the_test_holds_so_the_card_time_adds_
     assert held == pytest.approx(result.gpu_seconds, abs=1e-6)
 
 
-async def test_the_notebook_keeps_the_phases_and_test_result_shows_them(tmp_path: Path, rig) -> None:
+async def test_the_blackboard_keeps_the_phases_and_test_result_shows_them(tmp_path: Path, rig) -> None:
     tb, request_id, result = await _attempt(tmp_path, rig, fake_phases=json.dumps(RUNNER_PHASES), fake_delay=1.3)
 
-    record = await tb.notebook.record(request_id)
+    record = await tb.blackboard.record(request_id)
     assert record.result is not None and record.result.phases == result.phases
     shown = _result_document(request_id, record)["result"]
     assert [p["name"] for p in shown["phases"]] == _names(result)

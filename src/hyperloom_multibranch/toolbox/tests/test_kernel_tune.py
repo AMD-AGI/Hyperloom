@@ -3,7 +3,7 @@
 
 """``kernel_tune`` on the real local toolbox: its card is a lease from the pool of the measurements and the branches'
 sandboxes, counted in ``leased_cards`` and given back on every way the job can end, and its rows are the rows-only CSV that
-``put_kernel_artifact`` takes. The pool, the leases, the tool jobs, the notebook and the MCP service are the real ones;
+``put_kernel_artifact`` takes. The pool, the leases, the tool jobs, the blackboard and the MCP service are the real ones;
 Forge is a stand-in that answers as the tuner does (``kernel_tune_rig``), except where a test says it runs a real child.
 """
 
@@ -66,9 +66,9 @@ async def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
 
 
 async def ready(rig: Rig, **kw: Any) -> Rig:
-    """The rig with a test landed (a server log of untuned shapes, two points) and recorded in its notebook."""
+    """The rig with a test landed (a server log of untuned shapes, two points) and recorded in its blackboard."""
     rig.landed(**kw)
-    await record_test(rig.notebook)
+    await record_test(rig.blackboard)
     return rig
 
 

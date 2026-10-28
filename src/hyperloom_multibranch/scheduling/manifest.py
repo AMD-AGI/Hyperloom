@@ -20,7 +20,7 @@ from pathlib import Path
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.provenance import detect_code_revision
-from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.blackboard.codec import decode, encode
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 
 #: The distribution this package ships in (pyproject.toml ``[project] name``).

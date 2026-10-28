@@ -4,7 +4,7 @@
 """The test request a multi-branch module hands to the toolbox, and the test result it gets back.
 
 Like the recipe contract, every type is a frozen dataclass that validates on construction and round-trips through
-``to_document()`` and ``from_document()``; the notebook stores the document form. A request is what the multi-branch
+``to_document()`` and ``from_document()``; the blackboard stores the document form. A request is what the multi-branch
 modules see: the toolbox turns it into a hosted or local test call. ``request_id`` is the toolbox's: it is generated
 when the request is accepted, so a request a module builds has none and the accepted copy carries it.
 
@@ -132,7 +132,7 @@ class Purpose(str, Enum):
 
 
 class Validity(str, Enum):
-    """Whether a test measured the candidate; ``SUCCESS`` and ``CANDIDATE_FAILURE`` are the notebook's older names."""
+    """Whether a test measured the candidate; ``SUCCESS`` and ``CANDIDATE_FAILURE`` are the blackboard's older names."""
 
     SUCCEEDED = "succeeded"
     CANDIDATE_FAILED = "candidate_failed"
@@ -189,7 +189,7 @@ class TestRequest:
 
     ``request_id`` is empty until the toolbox accepts the request; :meth:`accepted` returns the accepted copy.
     ``priority`` of ``None`` lets the toolbox pick the default of ``purpose``. ``concurrency`` empty means the active
-    main operating point. ``diff_ref`` points at the stored diff the notebook shows for the request.
+    main operating point. ``diff_ref`` points at the stored diff the blackboard shows for the request.
     """
 
     __test__ = False
@@ -274,13 +274,13 @@ class TestRequest:
 
     @property
     def branch(self) -> str:
-        """The notebook's name for ``branch_id``."""
+        """The blackboard's name for ``branch_id``."""
 
         return self.branch_id
 
     @property
     def accuracy_rounds(self) -> bool:
-        """The notebook's name for ``accuracy``."""
+        """The blackboard's name for ``accuracy``."""
 
         return self.accuracy
 
@@ -397,13 +397,13 @@ class SandboxFacts:
 
     @property
     def node(self) -> str | None:
-        """The notebook's name for ``node_name``."""
+        """The blackboard's name for ``node_name``."""
 
         return self.node_name
 
     @property
     def power_cap_watts(self) -> float | None:
-        """The notebook's name for ``power_cap_w``."""
+        """The blackboard's name for ``power_cap_w``."""
 
         return self.power_cap_w
 
@@ -548,7 +548,7 @@ class Attempt:
 
     @property
     def failure(self) -> FailureClass | None:
-        """The notebook's name for ``failure_class``."""
+        """The blackboard's name for ``failure_class``."""
 
         return self.failure_class
 
@@ -804,7 +804,7 @@ class BuildPayment(str, Enum):
 
 @dataclass(frozen=True)
 class BuildCharge:
-    """One native build a test needed, as the notebook sums build time: by its ``key`` and ``component``.
+    """One native build a test needed, as the blackboard sums build time: by its ``key`` and ``component``.
 
     ``build_seconds`` is the build's CPU seconds on :attr:`BuildPayment.PAID` (the request that started it) and ``0.0``
     on :attr:`BuildPayment.REUSED`, so summing over every result counts each build once.
@@ -857,7 +857,7 @@ class TestResult:
     """The final outcome of one request; ``failure_class`` is the last attempt's class and empty on success.
 
     ``output_dir`` is relative to the session directory. The four fingerprints come from the signed result manifest.
-    The timing, cost and profile fields are what the notebook asks of the toolbox beyond the measurement itself.
+    The timing, cost and profile fields are what the blackboard asks of the toolbox beyond the measurement itself.
     ``cold_start_seconds`` is how long the test's server took from its spawn to be ready, measured by the sandbox that
     ran it; ``None`` when the test booted none or nothing recorded it.
     ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
@@ -977,7 +977,7 @@ class TestResult:
 
     @property
     def failure(self) -> FailureClass | None:
-        """The notebook's name for ``failure_class``."""
+        """The blackboard's name for ``failure_class``."""
 
         return self.failure_class
 

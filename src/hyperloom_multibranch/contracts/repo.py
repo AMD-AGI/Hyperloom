@@ -137,10 +137,10 @@ class ExperimentRepo(Protocol):
     ``commit`` lands only while ``branch`` is still at ``parent``, the commit the candidate was measured against, and
     raises ``BranchMoved`` otherwise: a gain judged against one parent must not land on another. ``rewind`` takes
     ``branch`` from ``commit`` back to ``parent`` while it is still at ``commit``, for a commit whose judgement could
-    not be recorded or a re-root the notebook refused. ``reroot`` moves ``branch`` from ``head`` onto ``onto`` while it
+    not be recorded or a re-root the blackboard refused. ``reroot`` moves ``branch`` from ``head`` onto ``onto`` while it
     is still at ``head``, keeping ``head`` reachable for the commits merges still name, and raises ``ValueError`` when
     ``head`` holds ``onto`` already. Unknown branches and commits raise ``KeyError``, an existing branch
-    ``ValueError``. A commit's recorded value lives with its judgement in the notebook, and two commits are compared
+    ``ValueError``. A commit's recorded value lives with its judgement in the blackboard, and two commits are compared
     with ``hyperloom.contracts.recipe.diff`` on the recipes read here.
     """
 

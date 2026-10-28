@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.contracts.recipe import Recipe
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.specialist.agent_session import SessionNotebook
+from hyperloom_multibranch.specialist.agent_session import SessionBlackboard
 
 NOTES_FILE = "mb-integration.md"
 #: Where the head's patch and kernel files are written, beside the notes, at the paths its recipe names.
@@ -41,7 +41,7 @@ class MergedChange:
     intent: str
 
 
-def merged_changes(snapshot: NotebookSnapshot, head: str) -> tuple[MergedChange, ...]:
+def merged_changes(snapshot: BlackboardSnapshot, head: str) -> tuple[MergedChange, ...]:
     """The branch commits merged into ``head`` or a commit it builds on."""
 
     held = set(snapshot.lineage.ancestry(head))
@@ -102,10 +102,10 @@ def render_notes(head: str, recipe: Recipe, merged: Iterable[MergedChange], file
 
 
 class IntegrationNotes:
-    """The notes at ``path`` of the integration head of ``repo``, with what ``notebook`` says was merged into it."""
+    """The notes at ``path`` of the integration head of ``repo``, with what ``blackboard`` says was merged into it."""
 
-    def __init__(self, repo: ExperimentRepo, notebook: SessionNotebook, path: Path) -> None:
-        self._repo, self._notebook, self._path = repo, notebook, path
+    def __init__(self, repo: ExperimentRepo, blackboard: SessionBlackboard, path: Path) -> None:
+        self._repo, self._blackboard, self._path = repo, blackboard, path
         self._written = ""
 
     @property
@@ -122,7 +122,7 @@ class IntegrationNotes:
         await asyncio.to_thread(shutil.rmtree, files, ignore_errors=True)
         files.mkdir(parents=True)
         await self._repo.checkout(head, files)
-        merged = merged_changes(await self._notebook.snapshot(), head)
+        merged = merged_changes(await self._blackboard.snapshot(), head)
         text = render_notes(head, await self._repo.read_recipe(head), merged, files)
         self._path.write_text(text, encoding=ENCODING)
         self._written = head

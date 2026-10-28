@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """What the ``kernel_tune`` tests stand on: a landed test with a server log, a stand-in for the Forge command, and the
-real local toolbox (pool, leases, tool jobs, notebook) built over them.
+real local toolbox (pool, leases, tool jobs, blackboard) built over them.
 
 The server log lines are copied from the log of a real Qwen3-14B-FP8 test on gfx950 (SGLang, aiter): the ones that say
 a dense blockscale GEMM missed its tuned table, a per-token one that Forge's reader does not take, and the lines between
@@ -31,9 +31,9 @@ from hyperloom.measure.tests.hosted_fixtures import runner_template, spec_contex
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors import RoundWatch
 from hyperloom.sandbox.card_occupancy import CardGuard, CardReading, read_holders
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -168,11 +168,13 @@ def landed_test(session: Path, model: Path, *, log: str | None = SERVER_LOG, con
 
 
 async def record_test(
-    notebook: LocalNotebook, branch: str = "b1", output_dir: str = f"tests/{TEST_ID}/attempt-1"
+    blackboard: LocalBlackboard, branch: str = "b1", output_dir: str = f"tests/{TEST_ID}/attempt-1"
 ) -> str:
-    """The notebook's record of a test of ``branch`` whose output landed in ``output_dir`` of the session."""
-    await notebook.write_request(replace(req(branch, purpose=Purpose.EXPLORE, kind=TestKind.TEST), request_id=TEST_ID))
-    await notebook.write_result(TestResult(request_id=TEST_ID, validity=Validity.SUCCEEDED, output_dir=output_dir))
+    """The blackboard's record of a test of ``branch`` whose output landed in ``output_dir`` of the session."""
+    await blackboard.write_request(
+        replace(req(branch, purpose=Purpose.EXPLORE, kind=TestKind.TEST), request_id=TEST_ID)
+    )
+    await blackboard.write_result(TestResult(request_id=TEST_ID, validity=Validity.SUCCEEDED, output_dir=output_dir))
     return TEST_ID
 
 
@@ -243,7 +245,7 @@ class FakeForge:
 @dataclass
 class Rig:
     box: LocalHostedToolbox
-    notebook: LocalNotebook
+    blackboard: LocalBlackboard
     session: Path
     model: Path
     configs: Path
@@ -291,10 +293,10 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         session = tmp_path / f"session-{len(made)}"
         session.mkdir()
         configs = install(tmp_path / f"image-{len(made)}")
-        notebook = LocalNotebook(session / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+        blackboard = LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
         box = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
-            notebook,
+            blackboard,
             AcceptanceSetup(FakeRepo(), _PointPerBranch(dict(points or {})), IMAGE, WorkloadKind.AGENTX),
             spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
@@ -306,7 +308,7 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         )
         made.append(box)
         await box.start()
-        return Rig(box, notebook, session, tmp_path / "model", configs, forge)
+        return Rig(box, blackboard, session, tmp_path / "model", configs, forge)
 
     return make
 

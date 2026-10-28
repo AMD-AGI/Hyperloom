@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""How a session's workload is judged, read from the notebook's records.
+"""How a session's workload is judged, read from the blackboard's records.
 
 The specialist runtime judges a branch's candidates with it, and the scheduler's gate the PRELUDE baseline, a merge and
 a final candidate, so every test is held to the same bar, the same accuracy gate and the same confirming retest.
@@ -17,8 +17,8 @@ from hyperloom.common.perf_metric import GRADED_ERROR_RATE
 from hyperloom.contracts.long_context import refuses
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom_multibranch.contracts.judgement import Judgement
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate import agentx, inferencex
 from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
 from hyperloom_multibranch.rulegate.baseline import (
@@ -71,7 +71,7 @@ class InferenceXRule(Rule):
     without one is unreadable.
     """
 
-    notebook: CommitQuery
+    blackboard: CommitQuery
     concurrency: int
     accuracy_round = True
     baseline_tests = inferencex.BASELINE_TESTS
@@ -86,15 +86,15 @@ class InferenceXRule(Rule):
         raise ValueError(f"an InferenceX baseline is measured by {self.baseline_tests} root tests, not the child's run")
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        baseline = await read_inferencex_baseline(self.notebook)
+        baseline = await read_inferencex_baseline(self.blackboard)
         return inferencex.compare(self._candidate(record, baseline), baseline, parent, record.request_id)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        baseline = await read_inferencex_baseline(self.notebook)
+        baseline = await read_inferencex_baseline(self.blackboard)
         return inferencex.confirm(first, self._candidate(record, baseline), baseline, parent, record.request_id)
 
     async def accuracy_passes(self, record: TestRecord) -> bool:
-        baseline = await read_inferencex_baseline(self.notebook)
+        baseline = await read_inferencex_baseline(self.blackboard)
         return inferencex_accuracy_ok(baseline.accuracy, eval_score(_result(record)))
 
     def _candidate(self, record: TestRecord, baseline: inferencex.InferenceXBaseline) -> inferencex.InferenceXReading:

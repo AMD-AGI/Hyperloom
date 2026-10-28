@@ -50,8 +50,8 @@ from hyperloom_multibranch.contracts.fork import (
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
@@ -61,8 +61,8 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import inferencex_reading
 from hyperloom_multibranch.rulegate.rules import InferenceXRule, Rule
-from hyperloom_multibranch.rulegate.service import GateNotebook, GateService, Polling
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.rulegate.service import GateBlackboard, GateService, Polling
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.contracts.llm import CompletionReply
@@ -254,18 +254,18 @@ VIRTUAL_POLL_SECONDS = 5.0
 
 
 def session_gate(
-    notebook: GateNotebook,
+    blackboard: GateBlackboard,
     toolbox: FakeToolbox,
     rule: Rule | None = None,
     *,
     polling: Polling = Polling(GATE_POLL_SECONDS),
 ) -> GateService:
     """The rule gate's session service on ``rule``, by default the InferenceX rule at the conc ``toolbox`` measures a
-    test at when its request names none, the workload's; ``notebook`` writes as the gate."""
+    test at when its request names none, the workload's; ``blackboard`` writes as the gate."""
 
     (conc,) = toolbox.config.main_concurrency
-    judged_on = InferenceXRule(notebook, conc) if rule is None else rule
-    return GateService(notebook, toolbox, judged_on, toolbox, polling=polling)
+    judged_on = InferenceXRule(blackboard, conc) if rule is None else rule
+    return GateService(blackboard, toolbox, judged_on, toolbox, polling=polling)
 
 
 def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -338,7 +338,7 @@ class MbFakeHeldRegistry(MbFakeChildRegistry):
             self._time.release()
 
 
-#: Real seconds the specialist runtime of the tests and its scripted sessions wait between two reads of the notebook.
+#: Real seconds the specialist runtime of the tests and its scripted sessions wait between two reads of the blackboard.
 SPECIALIST_POLL_SECONDS = 0.01
 
 
@@ -392,7 +392,7 @@ class RecordedSessions:
         self,
         toolbox: RecordingToolbox,
         repo: BranchHeads,
-        notebook: SnapshotQuery,
+        blackboard: SnapshotQuery,
         *,
         scripts: Mapping[str, Sequence[RecipeDelta]] | None = None,
         steps: Mapping[str, SessionStep] | None = None,
@@ -404,7 +404,7 @@ class RecordedSessions:
         self._sleep = sleep
         self._poll_seconds = poll_seconds
         self._repo = repo
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._scripts = dict(scripts or {})
         self._steps = dict(steps or {})
         self.hanging = hanging
@@ -435,7 +435,7 @@ class RecordedSessions:
         self.k[branch] = start.k
         self.running.add(branch)
         script = tuple(self._scripts.get(branch, ()))
-        setup = ScriptedSetup(script, self._toolbox, self._repo, self._notebook, self._poll_seconds, self._sleep)
+        setup = ScriptedSetup(script, self._toolbox, self._repo, self._blackboard, self._poll_seconds, self._sleep)
         return RecordedSession(self, branch, ScriptedSession(start, setup), self._steps.get(branch))
 
 
@@ -478,7 +478,7 @@ class RecordedReservations:
 
 
 def specialist_runtime(
-    notebook: Path,
+    blackboard: Path,
     toolbox: RecordingToolbox,
     repo: ExperimentRepo,
     sessions: SessionFactory,
@@ -490,20 +490,20 @@ def specialist_runtime(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     poll_seconds: float = SPECIALIST_POLL_SECONDS,
 ) -> RefusingRuntime:
-    """The specialist runtime of the notebook at ``notebook`` on the tests' toolbox, judging on ``rule``, by default
+    """The specialist runtime of the blackboard at ``blackboard`` on the tests' toolbox, judging on ``rule``, by default
     the InferenceX rule at the conc ``toolbox`` measures at, as the session's peers build it; ``desk`` answers its
     branch requests. Its judges poll every ``poll_seconds`` and its claims renew on ``sleep`` and ``now``."""
 
-    gate_notebook = LocalNotebook(notebook, Writer(Role.GATE, GATE_WRITER), clock=now)
+    gate_blackboard = LocalBlackboard(blackboard, Writer(Role.GATE, GATE_WRITER), clock=now)
     (conc,) = toolbox.config.main_concurrency
 
-    def notebook_for(branch: str) -> LocalNotebook:
-        return LocalNotebook(notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
+    def blackboard_for(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(blackboard, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
 
-    gate = RuleGate(gate_notebook, repo, desk or NoForks(), toolbox)
-    judging = Judging(gate, toolbox, InferenceXRule(gate_notebook, conc) if rule is None else rule)
+    gate = RuleGate(gate_blackboard, repo, desk or NoForks(), toolbox)
+    judging = Judging(gate, toolbox, InferenceXRule(gate_blackboard, conc) if rule is None else rule)
     pacing = RuntimePacing(poll_seconds=poll_seconds, clock=now, sleep=sleep)
-    return runtime(notebook_for, judging, sessions, pacing=pacing)
+    return runtime(blackboard_for, judging, sessions, pacing=pacing)
 
 
 #: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main
@@ -577,7 +577,7 @@ class RecordingToolbox(FakeToolbox):
 
     def __init__(
         self,
-        notebook: LocalNotebook,
+        blackboard: LocalBlackboard,
         effect: Callable[[TestRequest], float] | None = None,
         accuracy: Mapping[str, float] | None = None,
         conc: int = FakeToolboxConfig.main_concurrency[0],
@@ -593,7 +593,7 @@ class RecordingToolbox(FakeToolbox):
             main_concurrency=(conc,),
             image_digest=BASE_IMAGE_DIGEST,
         )
-        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook, log_path=log, repo=repo))
+        super().__init__(config, blackboard=blackboard, wiring=FakeWiring(records=blackboard, log_path=log, repo=repo))
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []

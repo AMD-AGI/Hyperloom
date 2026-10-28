@@ -38,7 +38,7 @@ from hyperloom_multibranch.scheduling.settings import Workload
 if TYPE_CHECKING:
     from hyperloom.hosted.host_info import HostInfo
     from hyperloom.measure.hosted_spec import SpecContext
-    from hyperloom_multibranch.notebook import LocalNotebook
+    from hyperloom_multibranch.blackboard import LocalBlackboard
     from hyperloom_multibranch.toolbox.hosted_toolbox import HostedToolboxInputs
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox
 
@@ -63,13 +63,13 @@ class HostedSandboxes:
     inputs: ToolboxInputsFor
 
     def toolbox(
-        self, setup: PeerSetup, notebook: LocalNotebook, acceptance: AcceptanceSetup, spec: SpecContext
+        self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
         from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions, build_hosted_toolbox
 
         inputs = self.inputs(setup.layout, setup.workload.tp)
         options = HostedOptions(timeout_sec=attempt_timeout_sec(setup.workload))
-        return build_hosted_toolbox(inputs, notebook, acceptance, spec, options=options)
+        return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
 
 
 def load_hosted_peers(workload: Workload, inputs: ToolboxInputsFor) -> PeerFactory:

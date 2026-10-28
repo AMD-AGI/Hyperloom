@@ -30,9 +30,9 @@ from hyperloom.contracts.recipe import KernelKind
 from hyperloom.measure.framework.base import DEFAULT_CONFIGS
 from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import spec_context
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo
 from hyperloom_multibranch.toolbox.tests.kernel_tune_rig import (
@@ -73,10 +73,10 @@ def real_log() -> str:
 async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_the_rows_are_checked() -> None:
     session = Path(OUT) / "session"
     session.mkdir()
-    notebook = LocalNotebook(session / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     box = build_local_toolbox(
         LocalSession(session, "w117", [CARD, CARD + 1000], tp=1),
-        notebook,
+        blackboard,
         AcceptanceSetup(FakeRepo(), _PointPerBranch({}), IMAGE, WorkloadKind.AGENTX),
         spec_context(session, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(),
@@ -85,7 +85,7 @@ async def test_the_real_tuner_tunes_two_untuned_shapes_on_the_leased_card_and_th
     try:
         assert "kernel_tune" in box.analysis_tools
         landed_test(session, Path(MODEL), log=real_log(), concs=(1,))
-        await record_test(notebook)
+        await record_test(blackboard)
         job = await box.submit_analysis("b1", "kernel_tune", {"test_request_id": TEST_ID, "timeout_sec": TIMEOUT_SEC})
         await asyncio.sleep(5)
         during = await box.measurement_capacity()

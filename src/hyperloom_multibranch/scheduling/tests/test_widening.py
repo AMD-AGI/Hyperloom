@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.records import OpShares
+from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps

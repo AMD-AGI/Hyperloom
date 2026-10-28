@@ -28,7 +28,7 @@ async def _rejected(rig, request, code: str) -> None:
     assert refused.value.code == code
     state = await rig.toolbox.queue_state()
     assert state.queued == 0 and state.running == 0
-    assert rig.notebook._state().requests == {}, "a refused request must write nothing to the notebook"
+    assert rig.blackboard._state().requests == {}, "a refused request must write nothing to the blackboard"
     assert rig.toolbox._log.entries() == []
 
 
@@ -51,7 +51,7 @@ async def test_a_surface_mismatch_is_refused(tmp_path: Path) -> None:
     with pytest.raises(RequestRejected, match="isl 2048") as refused:
         await rig.toolbox.submit_test(req())
     assert refused.value.code == "surface_mismatch"
-    assert rig.notebook._state().requests == {}
+    assert rig.blackboard._state().requests == {}
 
 
 async def test_an_unknown_parent_is_refused(tmp_path: Path) -> None:
@@ -73,7 +73,7 @@ async def test_a_runtime_snapshot_is_not_compared_with_the_active_image(tmp_path
     compared, as the compile's ``check_base_image`` does."""
     rig = build(tmp_path, repo=FakeRepo(Recipe(base_image_digest=IMAGE, runtime_snapshot=OTHER_IMAGE)))
     request_id = await rig.toolbox.submit_test(req())
-    assert request_id in rig.notebook._state().requests
+    assert request_id in rig.blackboard._state().requests
 
 
 async def test_a_retest_of_an_unknown_request_is_refused(tmp_path: Path) -> None:
@@ -86,12 +86,12 @@ async def test_a_request_that_already_has_an_id_is_refused(tmp_path: Path) -> No
     await _rejected(rig, req().accepted("mine"), "invalid_request")
 
 
-async def test_a_valid_request_is_accepted_and_written_to_the_notebook(tmp_path: Path) -> None:
+async def test_a_valid_request_is_accepted_and_written_to_the_blackboard(tmp_path: Path) -> None:
     rig = build(tmp_path)
     request_id = await rig.toolbox.submit_test(
         req(purpose=Purpose.CONFIRM, retest_of=await rig.toolbox.submit_test(req()))
     )
-    row = rig.notebook._state().requests[request_id]
+    row = rig.blackboard._state().requests[request_id]
     assert (row.request_id, row.branch, row.purpose, row.priority) == (request_id, "b1", "confirm", 0)
     assert row.retest_of is not None
 
@@ -219,7 +219,7 @@ async def test_a_delta_that_moves_the_upstream_of_a_component_the_parent_has_is_
     assert refused.value.code == "upstream_label_unsupported" and "sglang" in refused.value.reason
     state = await rig.toolbox.queue_state()
     assert state.queued == 0 and state.running == 0
-    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+    assert rig.blackboard._state().requests == {} and rig.toolbox._log.entries() == []
     assert rig.planner.calls == []
 
 
@@ -230,7 +230,7 @@ async def test_a_delta_that_restates_the_parents_upstream_is_accepted_unchanged(
     rig = build(tmp_path, repo=_with_sglang())
     change = RecipeDelta(components=(ComponentChange("sglang", SGLANG_REF, SGLANG_REPO, add_patches=(PATCH,)),))
     request_id = await rig.toolbox.submit_test(req(purpose=purpose, change=change))
-    assert rig.notebook._state().requests[request_id].purpose == purpose.value
+    assert rig.blackboard._state().requests[request_id].purpose == purpose.value
     assert rig.planner.calls == [change], "the delta runs as submitted, so its fingerprint matches the claim's"
 
 

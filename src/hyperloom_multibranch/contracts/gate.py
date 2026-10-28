@@ -20,7 +20,7 @@ from typing import Protocol
 from hyperloom.contracts.measurement import TestResult
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 
 
 class NotMeasured(Exception):
@@ -30,7 +30,7 @@ class NotMeasured(Exception):
 
 
 class ResultUnverified(NotMeasured):
-    """The notebook's result of ``request_id`` is not backed by its archived signed bundle, or the bundle cannot be
+    """The blackboard's result of ``request_id`` is not backed by its archived signed bundle, or the bundle cannot be
     read; ``reason`` says which. Final: the gate does not ask again."""
 
     def __init__(self, request_id: str, reason: str) -> None:
@@ -43,7 +43,7 @@ class ResultVerifier(Protocol):
     """What the gate asks before a decision rests on a result (hosting design L26); the toolbox implements it."""
 
     async def reverify(self, request_id: str) -> None:
-        """Check the notebook's result of ``request_id`` against its archived signed bundle, its values included;
+        """Check the blackboard's result of ``request_id`` against its archived signed bundle, its values included;
         raises :class:`ResultUnverified` when it does not match or cannot be checked."""
 
 

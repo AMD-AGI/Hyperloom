@@ -23,9 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING
 from hyperloom_multibranch.specialist.llm_usage import launch_cost
 

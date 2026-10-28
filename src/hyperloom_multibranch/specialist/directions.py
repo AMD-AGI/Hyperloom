@@ -105,7 +105,7 @@ DIRECTIONS = (
     "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test. "
     "Search with WebSearch, once per hot operator at least (the architecture, ROCm or gfx950 and the operator, on "
     "site:github.com/sgl-project/sglang or site:github.com/ROCm/aiter), read a PR's diff with WebFetch, tell from the "
-    "installed version's commit whether the image has it, and record each PR's verdict with notebook_learn (in the "
+    "installed version's commit whether the image has it, and record each PR's verdict with blackboard_learn (in the "
     "image, missing, or not for this model) so no branch searches it again. A PR that needs a newer aiter or Triton "
     "than the image is vendored, not ruled out: copy its kernel into the patch with the helpers it imports (a "
     "Triton or gluon file, a ctypes launch of a .co), drop the version check that gates it and let the accuracy "

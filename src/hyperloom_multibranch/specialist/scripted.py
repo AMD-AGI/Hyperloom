@@ -4,7 +4,7 @@
 """A specialist that proposes from a script, for running the session's skeleton without a model.
 
 It submits each change of its script as an explore test on its branch's head, with at most K of them running at once,
-then idles until it is stopped. What it submitted is read back from the notebook, so a restarted run goes on where
+then idles until it is stopped. What it submitted is read back from the blackboard, so a restarted run goes on where
 the last one stopped instead of measuring a change twice.
 """
 
@@ -17,8 +17,8 @@ from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.specialist.runtime import SessionStart
 
@@ -35,7 +35,7 @@ class ScriptedSetup:
     script: tuple[RecipeDelta, ...]
     toolbox: Toolbox
     repo: BranchHeads
-    notebook: SnapshotQuery
+    blackboard: SnapshotQuery
     poll_seconds: float = 5.0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
@@ -76,7 +76,7 @@ class ScriptedSession:
         self._stopped.set()
 
     async def _explored(self) -> list[TestRecord]:
-        snapshot = await self._setup.notebook.snapshot()
+        snapshot = await self._setup.blackboard.snapshot()
         return [
             record
             for record in snapshot.records

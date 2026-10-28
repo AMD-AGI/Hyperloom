@@ -30,8 +30,8 @@ from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom.sandbox.local import LocalSandboxProvider
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
@@ -140,11 +140,11 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
 
 
 def _toolbox_of(
-    notebook: LocalNotebook, tmp_path: Path, session: Path, commit: str, **extra: Any
+    blackboard: LocalBlackboard, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
     return build_local_toolbox(
         LocalSession(session, "run-1", range(8)),
-        notebook,
+        blackboard,
         AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
         spec_context(
             tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
@@ -162,9 +162,9 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
     session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     envs = {"INFERENCEX_REPO": str(repo) + "-missing"}
-    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
+    toolbox = _toolbox_of(blackboard, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
     try:
         await toolbox.start()
         request_id = await toolbox.submit_test(req())
@@ -192,8 +192,8 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
     commit = _git_repo(repo)
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
     session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)})
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)})
     try:
         assert toolbox._queue.policy.global_concurrency == 8, "the policy is held to 8 / TP"
         await toolbox.start()
@@ -205,7 +205,7 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
         # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
         # the server log names, quoted (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
-        # notebook.
+        # blackboard.
         assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
         assert result.failure_reason is not None and result.failure_reason.startswith("import_error: ")
         assert "No module named 'sglang'" in result.failure_reason, (
@@ -214,7 +214,7 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
         assert len(sandboxes) == 1
-        record = await notebook.record(request_id)
+        record = await blackboard.record(request_id)
         assert record.result is not None and record.result.manifest_sha256 == result.manifest_sha256
         assert toolbox.backend.journal.latest(request_id).extra["verified"] is True  # type: ignore[union-attr]
     finally:
@@ -229,9 +229,9 @@ async def test_every_test_of_the_session_reads_private_copies_of_the_tables_the_
     _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
     configs = make_framework(tmp_path)
     session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _toolbox_of(
-        notebook,
+        blackboard,
         tmp_path,
         session,
         commit,
@@ -259,11 +259,11 @@ async def test_every_test_of_the_session_reads_private_copies_of_the_tables_the_
 async def test_a_session_that_names_a_rule_pack_gives_its_sandboxes_a_staged_copy_and_one_that_does_not_gives_none(
     tmp_path: Path, reading_pack
 ) -> None:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     named = other_pack(tmp_path)
     for pack, session in ((named, tmp_path / "named"), (None, tmp_path / "reference")):
         reading_pack(pack)
-        toolbox = _toolbox_of(notebook, tmp_path, session, "a" * 40)
+        toolbox = _toolbox_of(blackboard, tmp_path, session, "a" * 40)
         try:
             env = (await toolbox.lease_branch_sandbox(f"branch-{session.name}", 1)).env
         finally:
@@ -287,9 +287,9 @@ async def test_every_test_of_a_session_runs_with_the_rule_pack_the_session_names
     named = other_pack(tmp_path)
     reading_pack(named)
     session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _toolbox_of(
-        notebook, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)}, max_infra_retries=0
+        blackboard, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)}, max_infra_retries=0
     )
     try:
         await toolbox.start()
@@ -318,9 +318,9 @@ async def test_a_result_of_a_runner_that_read_another_pack_than_the_session_is_n
     other = other_pack(tmp_path)
     reading_pack(None)
     session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     envs = {"INFERENCEX_REPO": str(repo), PACK_ENV: str(other)}
-    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
+    toolbox = _toolbox_of(blackboard, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
     try:
         await toolbox.start()
         request_id = await toolbox.submit_test(req())

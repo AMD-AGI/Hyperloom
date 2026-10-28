@@ -6,7 +6,7 @@
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
 gain on another node, checks a declared correctness fix (``fix_check``) and lands it or asks for its fork, and tells the
 specialist in its branch log what landed and what the gate could not land. A retest that fails as a candidate settles
-the candidate as regressed; one whose measurement failed leaves it unjudged. Every step is read back from the notebook,
+the candidate as regressed; one whose measurement failed leaves it unjudged. Every step is read back from the blackboard,
 so a restarted runtime takes each step once; a fix check interrupted by a restart runs its repro tests again.
 """
 
@@ -22,15 +22,15 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import (
+from hyperloom_multibranch.contracts.blackboard.interfaces import (
     BranchLogStore,
     CommitQuery,
     Inbox,
     NotRecorded,
     SnapshotQuery,
 )
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -47,7 +47,7 @@ _CANNOT_BE_JUDGED = "cannot be judged:"
 _NOT_COMMITTED = "was not committed:"
 
 
-class JudgeNotebook(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol):
+class JudgeBlackboard(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol):
     """What judging a branch reads, and the branch log it writes as the branch's runtime."""
 
 
@@ -66,9 +66,9 @@ class Judging:
 class BranchJudge:
     """Judges one branch's measured candidates; one task per branch, so its steps never race each other."""
 
-    def __init__(self, branch: str, notebook: JudgeNotebook, judging: Judging) -> None:
+    def __init__(self, branch: str, blackboard: JudgeBlackboard, judging: Judging) -> None:
         self._branch = branch
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
         self._fixes = judging.fixes
         self._finishing = False
@@ -78,11 +78,11 @@ class BranchJudge:
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled or, once :meth:`finish`
         was called, until no test of the branch is left in flight; ``sleep`` waits between two polls."""
-        cursor = (await self._notebook.poll(self._branch)).cursor
+        cursor = (await self._blackboard.poll(self._branch)).cursor
         await self.reconcile()
         while not self._finished:
             await sleep(poll_seconds)
-            page = await self._notebook.poll(self._branch, cursor)
+            page = await self._blackboard.poll(self._branch, cursor)
             cursor = page.cursor
             if self._finishing or any(item.kind is InboxKind.RESULT for item in page.items):
                 await self.reconcile()
@@ -95,7 +95,7 @@ class BranchJudge:
         """Take the runtime's next step for every candidate of the branch still waiting for one."""
         # Only a snapshot read after finish() can show that nothing of the branch is left to arrive.
         finishing, self._submitted = self._finishing, False
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
         retests: dict[str, list[TestRecord]] = {}
@@ -111,7 +111,7 @@ class BranchJudge:
     async def _judge(self, first: TestRecord, retests: Sequence[TestRecord], logged: set[BranchLogEntry]) -> None:
         retests = [retest for retest in retests if repeats(retest, first, self._rule)]
         try:
-            parent = (await self._notebook.recorded_value(first.request.parent_commit)).values
+            parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
             judgement = await self._rule.first(first, parent)
             if judgement.verdict is Verdict.NEEDS_CONFIRM and retests:
                 measured = [retest for retest in retests if _succeeded(retest)]
@@ -179,7 +179,7 @@ class BranchJudge:
         if self._fixes is None:
             checked = FixCheck(judgement, None, "this session does not check correctness fixes")
         else:
-            checked = await check_fix(self._fixes, self._notebook, first.request, judgement)
+            checked = await check_fix(self._fixes, self._blackboard, first.request, judgement)
         if checked.alone:
             content = f"{first.request_id} is judged on its performance alone: {checked.alone}"
             await self._notice(logged, content, first.request_id)
@@ -188,7 +188,7 @@ class BranchJudge:
     async def _notice(self, logged: set[BranchLogEntry], content: str, *request_ids: str) -> None:
         entry = BranchLogEntry(self._branch, BranchLogType.RESULT, f"{NOTICE} {content}", request_ids)
         if entry not in logged:
-            await self._notebook.append_branch_log(entry)
+            await self._blackboard.append_branch_log(entry)
             logged.add(entry)
 
 
@@ -239,4 +239,4 @@ def _ended(record: TestRecord) -> str:
     return f"ended {record.result.validity.value} ({record.result.failure_reason or 'no reason given'})"
 
 
-__all__ = ["NOTICE", "BranchJudge", "JudgeNotebook", "Judging", "left_unjudged"]
+__all__ = ["NOTICE", "BranchJudge", "JudgeBlackboard", "Judging", "left_unjudged"]

@@ -3,7 +3,7 @@
 
 """Results and bundles written while the greedy decode pass existed still load and verify again.
 
-The pass is gone, but a notebook keeps the results it recorded (``decode_outputs``, ``decode_identity``), the archive
+The pass is gone, but a blackboard keeps the results it recorded (``decode_outputs``, ``decode_identity``), the archive
 keeps the bundles (they list ``decode/outputs.jsonl``) and the journal keeps the sheets (``procedure.decode_pass``).
 """
 
@@ -46,7 +46,7 @@ async def _run(tmp_path: Path, rig: Rig, **fake: object):  # type: ignore[no-unt
 
 
 def _as_recorded_then(result: TestResult) -> TestResult:
-    """The result as the notebook of that time persisted it: the document carried both decode keys."""
+    """The result as the blackboard of that time persisted it: the document carried both decode keys."""
     document = {**result.to_document(), "decode_outputs": LEGACY_DECODE_PATH, "decode_identity": LEGACY_DECODE_IDENTITY}
     return TestResult.from_document(json.loads(json.dumps(document)))
 

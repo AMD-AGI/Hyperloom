@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Opening, re-sizing and stopping branches: the roster, the repository, the specialists, the toolbox quota and the
-notebook in step.
+blackboard in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
 specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
@@ -19,13 +19,13 @@ repairs of it that are queued, or admitted but not started yet, as the fork desk
 Its queued and running tests run to their end under the K it had, and their results are recorded, unless the session's
 end stopped it, which withdraws them too; the end of EXPLORE withdraws every test a stopped branch still has. Every
 fork and repair voided that way, stopped before it started, or whose start failed is handed to the rule gate, which
-records its candidate as only recorded unless it already landed the fork; the notebook gets the ``STOP`` lineage of a
+records its candidate as only recorded unless it already landed the fork; the blackboard gets the ``STOP`` lineage of a
 branch that started, the integration branch included, which only the end of the session stops. A specialist counts
 as possibly running from the moment its start is asked for until the runtime confirms its stop; only a start the
 runtime itself failed leaves nothing to stop. A call to a specialist gets
 :data:`SPECIALIST_CALL_SECONDS`; a stop or a new K that overruns them, or fails, is recorded as a failed step, the rest
 of the stop still runs, and the session stop asks once more for every stop that was not confirmed. The commits a
-specialist already made stay in the notebook, so the integrator may still merge them. The roster entry is stopped
+specialist already made stay in the blackboard, so the integrator may still merge them. The roster entry is stopped
 first, so an admitted branch whose parent is being stopped is never started. The toolbox gets a branch's K
 before its specialist starts, so the first tests it submits already queue by it, together with the time its
 exploration ends, past which the toolbox refuses a test whose native builds would not leave it time to run. A peer
@@ -44,9 +44,9 @@ from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLifecycle
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
@@ -61,7 +61,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 
 if TYPE_CHECKING:
-    from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+    from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ class BranchControl:
         briefs: SessionBriefs,
     ) -> None:
         self._roster = context.roster
-        self._notebook = context.notebook
+        self._blackboard = context.blackboard
         self._lifecycle = lifecycle
         self._toolbox = toolbox
         self._repo = repo
@@ -297,10 +297,10 @@ class BranchControl:
             steps.append(await self._stop_specialist(branch))
         withdrawn = await settled(self._withdraw(branch, stop))
         steps.append(await settled(self._processes.kill_branch(branch)))
-        released = await settled(self._notebook.release_branch(branch))
+        released = await settled(self._blackboard.release_branch(branch))
         if entry.start_commit:
             event = LineageEvent(LineageKind.STOP, branch, reason=stop.summary)
-            steps.append(await settled(self._notebook.record_lineage(event)))
+            steps.append(await settled(self._blackboard.record_lineage(event)))
         raised = [outcome for outcome in (*steps, withdrawn, released) if isinstance(outcome, BaseException)]
         detail = {
             "withdrawn": 0 if isinstance(withdrawn, BaseException) else withdrawn,
@@ -383,7 +383,7 @@ class BranchControl:
                 repairs=repairs,
                 driver=entry.origin.driver,
             )
-            await self._notebook.record_lineage(opened)
+            await self._blackboard.record_lineage(opened)
             await self._repo.create_branch(entry.branch, start_commit)
         self._deadlines[entry.branch] = deadline
         await self.push_quota()

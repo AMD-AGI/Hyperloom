@@ -3,7 +3,7 @@
 
 """The MB1 integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
 
-Candidates are the notebook's committed specialist commits, in the order it gives them (foundation fixes first, then
+Candidates are the blackboard's committed specialist commits, in the order it gives them (foundation fixes first, then
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
 is merged or found already on the head, except that one the rule gate measured as not stackable waits until a later
 merge changes something its own change names: see :mod:`hyperloom_multibranch.scheduling.candidates`. A round
@@ -34,7 +34,7 @@ whatever its gain: a fix the other branches build on is worth merging even when 
 merges without a gain only when it carries nothing but itself; one that brings parents never merged is judged as any
 candidate is, so a fix cut from a regressed commit does not take that commit onto the integration branch unjudged.
 
-A round also adopts a stranded lead (:mod:`hyperloom_multibranch.notebook.rsi.stranded`), a branch whose head leads
+A round also adopts a stranded lead (:mod:`hyperloom_multibranch.blackboard.rsi.stranded`), a branch whose head leads
 the integration head by more than the bar while a commit of its own failed to merge, the largest lead first: it
 offers that branch's head as a candidate in the round's first slot, and the merge carries everything the branch holds
 that the integration head lacks, the branch's values winning where both set one. The adoption is tested, judged and
@@ -61,9 +61,9 @@ from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeErro
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeAttempt, WarmReplay
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.repo import (
     ExperimentRepo,
     PatchConflict,
@@ -74,8 +74,8 @@ from hyperloom_multibranch.contracts.repo import (
     UnitedTable,
 )
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
-from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
+from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
+from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.candidates import Candidates
@@ -390,9 +390,9 @@ _Tested = MergeReport | _TestedMerge
 
 @dataclass(frozen=True)
 class MergeRecords:
-    """Where the integrator records its rounds: its notebook handle, which writes as the integrator, and the merge log."""
+    """Where the integrator records its rounds: its blackboard handle, which writes as the integrator, and the merge log."""
 
-    notebook: Notebook
+    blackboard: Blackboard
     merges: DecisionLog
 
 
@@ -400,7 +400,7 @@ class Integrator:
     """Merges committed specialist commits onto the integration branch; the caller runs one round at a time.
 
     A cancelled round takes its merge tests back; a caller that cancels one then awaits :meth:`abandon`, which takes
-    back the retests the gate asked for too and leaves the repository and the notebook agreeing on the integration
+    back the retests the gate asked for too and leaves the repository and the blackboard agreeing on the integration
     head.
     """
 
@@ -413,9 +413,9 @@ class Integrator:
         clock: Clock,
     ) -> None:
         self._clock = clock
-        self._notebook = records.notebook
+        self._blackboard = records.blackboard
         self._repo = repo
-        self._candidates = Candidates(records.notebook, repo)
+        self._candidates = Candidates(records.blackboard, repo)
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
@@ -436,7 +436,7 @@ class Integrator:
         no more: the head has moved under the rest, which are offered again on the head it moved to.
 
         A test that ends waits for the tests the round started before it, so which commit a round merges follows the
-        order the notebook offers them in rather than how long each one took to measure.
+        order the blackboard offers them in rather than how long each one took to measure.
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
@@ -472,7 +472,7 @@ class Integrator:
 
         tried = {
             commit.commit_id
-            for commit in await self._notebook.committed()
+            for commit in await self._blackboard.committed()
             if commit.last_merge is not None and commit.last_merge.integration_head == head
         }
         lead = next(
@@ -496,7 +496,7 @@ class Integrator:
     async def _to_test(self, head: str, free: int, started: Set[str]) -> tuple[CommittedCommit, ...]:
         """The commits to start now on ``head``: those it offers, less the ones this round has already started.
 
-        A test records its merge attempt once the toolbox has taken it, which is what stops the notebook offering it
+        A test records its merge attempt once the toolbox has taken it, which is what stops the blackboard offering it
         again; until then it still reads as offered, so the round remembers what it started rather than racing that
         record.
         """
@@ -530,17 +530,17 @@ class Integrator:
             return await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
 
     async def _foundation_fixes(self) -> frozenset[str]:
-        """The foundation fixes merged onto the integration branch, as the notebook records them: no later merge may
+        """The foundation fixes merged onto the integration branch, as the blackboard records them: no later merge may
         replace a patch they brought, which other branches build on."""
 
-        committed = await self._notebook.committed()
+        committed = await self._blackboard.committed()
         return frozenset(
             commit.commit_id for commit in committed if commit.foundation_fix and commit.merged_into is not None
         )
 
     async def _judge(self, merge: RepoMerge, pending: MergeReport, request_id: str) -> _Tested:
         attempt = MergeAttempt(merge.carried, merge.onto, request_id, resolved_patches=merge.resolved_patches)
-        await self._notebook.record_merge_attempt(attempt)
+        await self._blackboard.record_merge_attempt(attempt)
         tested = replace(
             _found(pending, merge),
             request_id=request_id,
@@ -574,13 +574,13 @@ class Integrator:
         """A skipped candidate's report. ``merge`` is what the repository carried before the skip, if it got that far.
         What it found is recorded even where nothing was tested: a candidate whose every tuned row the head already had
         reads as already on the head, which is true of the slot and says nothing about the rows it cost, and a merge
-        lost to a conflicting patch still names the patches the rebase settled. The notebook's record of a skipped lead
+        lost to a conflicting patch still names the patches the rebase settled. The blackboard's record of a skipped lead
         adoption says it is one."""
 
         report = replace(pending, outcome=outcome, reason=reason)
         skipped = _naming_adoption(report).reason
         attempt = MergeAttempt((pending.candidate,), pending.onto, skipped_reason=skipped, skipped_outcome=outcome)
-        await self._notebook.record_merge_attempt(attempt)
+        await self._blackboard.record_merge_attempt(attempt)
         return report if merge is None else _found(report, merge)
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
@@ -591,7 +591,7 @@ class Integrator:
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if reason:
-            await self._notebook.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
+            await self._blackboard.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
             return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
         if superseded:
             return replace(report, reason=SUPERSEDED)
@@ -619,7 +619,7 @@ class Integrator:
     async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:
         """Commit the merge and record it; runs shielded, so a cancelled merge never moves only one of the two.
 
-        A commit whose judgement could not be written is rewound: the notebook would not know the commit the
+        A commit whose judgement could not be written is rewound: the blackboard would not know the commit the
         integration head is at.
         """
 
@@ -627,7 +627,7 @@ class Integrator:
         written = False
         try:
             digest = (await self._repo.read_recipe(merged)).digest()
-            await self._notebook.write_judgement(str(tested.request_id), judgement, Conclusion.MERGED, merged, digest)
+            await self._blackboard.write_judgement(str(tested.request_id), judgement, Conclusion.MERGED, merged, digest)
             written = True
         finally:
             if not written:
@@ -663,11 +663,11 @@ class Integrator:
             return self._record_champion(root, name, f"the replay did not measure: {exc}", request_id=request_id)
         reason = not_stackable_reason(judgement, foundation_fix=False)
         if reason:
-            await self._notebook.write_judgement(request_id, judgement, Conclusion.NOT_STACKABLE)
+            await self._blackboard.write_judgement(request_id, judgement, Conclusion.NOT_STACKABLE)
             return self._record_champion(root, name, reason, request_id=request_id)
         recipe = apply(await self._repo.read_recipe(root), replay.delta)
         landed = await self._repo.commit(INTEGRATION_BRANCH, root, recipe, f"replay the Recipe KB champion {name}")
-        await self._notebook.write_judgement(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
+        await self._blackboard.write_judgement(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
         return self._record_champion(root, name, _verdict_on_head(judgement), request_id=request_id, landed=landed)
 
     def _record_champion(

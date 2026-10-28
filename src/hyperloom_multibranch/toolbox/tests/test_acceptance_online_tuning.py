@@ -52,7 +52,7 @@ async def _code_of(tmp_path: Path, repo: FakeRepo, change: RecipeDelta, **fields
         await rig.toolbox.submit_test(req(change=change, **fields))
     except RequestRejected as refused:
         assert rig.planner.calls == [], "a refused request must not reach the compiler"
-        assert rig.notebook._state().requests == {}, "a refused request must write nothing to the notebook"
+        assert rig.blackboard._state().requests == {}, "a refused request must write nothing to the blackboard"
         return refused.code
     return None
 

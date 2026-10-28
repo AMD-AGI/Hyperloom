@@ -29,11 +29,11 @@ from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import BranchProgress
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
-from hyperloom_multibranch.notebook.changes import same_recipe
+from hyperloom_multibranch.blackboard.changes import same_recipe
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
@@ -109,7 +109,7 @@ async def choose_candidates(
     repo: ExperimentRepo,
 ) -> FinalCandidates:
     """The integration head and the specialist head with the highest recorded ``metric`` over every branch the
-    notebook knows.
+    blackboard knows.
 
     A branch with no commit offers no single-branch candidate, and neither does one whose head carries the recipe the
     integration head already carries: a merge writes the branch's work as a new commit, so the two differ by commit

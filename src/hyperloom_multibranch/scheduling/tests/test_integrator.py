@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The integrator against the local notebook, the git experiment repository, the toolbox's fake and the rule gate.
+"""The integrator against the local blackboard, the git experiment repository, the toolbox's fake and the rule gate.
 
 The root runs ``--max-num-seqs 64``; branch ``s1`` commits ``c1`` (+4%, ``vllm`` pinned with a patch and
 ``--max-num-seqs 256``) and then ``c2`` (+2%, ``--max-num-seqs 128``), so ``c1`` is tried first. What a merge test
@@ -44,15 +44,15 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
-from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
-from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, request, result
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay
+from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
+from hyperloom_multibranch.blackboard.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.candidates import MERGE_INFRA_RETRIES
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -200,8 +200,8 @@ class Bench:
     decisions: Path
     regression: FakeRegressionCheck
 
-    def handle(self, role: Role) -> LocalNotebook:
-        return LocalNotebook(self.root_dir, Writer(role, role.value), clock=self.clock)
+    def handle(self, role: Role) -> LocalBlackboard:
+        return LocalBlackboard(self.root_dir, Writer(role, role.value), clock=self.clock)
 
     async def outcome(self, tag: str) -> MergeOutcome | None:
         committed = await self.handle(Role.OBSERVER).committed()
@@ -281,18 +281,18 @@ async def _bench(
     completion_type: type[ScriptedCompletion] = ScriptedCompletion,
 ) -> Bench:
     clock = FakeClock()
-    notebook = tmp_path / "notebook"
+    blackboard = tmp_path / "blackboard"
     package = _package(tmp_path / "site")
     repo = repo_type(tmp_path / "repo", LocalBlobStore(tmp_path / "blobs"), lambda layout: package)
     root = await repo.init_root(ROOT_RECIPE)
-    await LocalNotebook(notebook, Writer(Role.SCHEDULER, "scheduler"), clock=clock).record_lineage(
+    await LocalBlackboard(blackboard, Writer(Role.SCHEDULER, "scheduler"), clock=clock).record_lineage(
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root)
     )
-    toolbox_notebook = LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
-    toolbox = toolbox_type(toolbox_notebook, recipe_effect(tmp_path / "repo", curves), accuracy, repo=repo)
-    merger = LocalNotebook(notebook, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
+    toolbox_blackboard = LocalBlackboard(blackboard, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    toolbox = toolbox_type(toolbox_blackboard, recipe_effect(tmp_path / "repo", curves), accuracy, repo=repo)
+    merger = LocalBlackboard(blackboard, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
     tests = SessionTests(toolbox, Clock(now=clock, sleep=_instant))
-    gate = session_gate(LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=clock), toolbox)
+    gate = session_gate(LocalBlackboard(blackboard, Writer(Role.GATE, "gate"), clock=clock), toolbox)
     baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
     await gate.establish_baseline(root, [await tests.submit(baseline) for _ in range(BASELINE_TESTS)])
     completion = completion_type()
@@ -304,7 +304,7 @@ async def _bench(
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
-    made = Bench(notebook, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions, regression)
+    made = Bench(blackboard, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions, regression)
     await _commit_specialist_work(made, invalid, foundation, tags)
     return made
 

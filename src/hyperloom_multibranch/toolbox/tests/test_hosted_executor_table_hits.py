@@ -5,7 +5,7 @@
 
 The executor is the real one over the hosted backend and the local sandbox provider; the compiled environment is a real
 one that loads a table of the rows of run ``cc2bf0ef``, and the server log the sandbox's rounds leave in the landed output
-holds aiter's hit lines. What is read from the result is what the notebook stored.
+holds aiter's hit lines. What is read from the result is what the blackboard stored.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ async def _run(tmp_path: Path, r, mode: str, *, with_table: bool, log: str | Non
     await tb.toolbox.start()
     request_id = await tb.toolbox.submit_test(req())
     await asyncio.wait_for(tb.toolbox.drain(), 60)
-    record = await tb.notebook.record(request_id)
+    record = await tb.blackboard.record(request_id)
     assert record.result is not None
     entry = tb.toolbox._log.get(request_id)
     assert entry is not None and entry.outcome is not None

@@ -20,10 +20,10 @@ from hyperloom.hosted.mcp_server import CallContext, McpServer, ToolError, ToolF
 from hyperloom_multibranch.contracts.fork import ForkAdmission
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch, SnapshotQuery
-from hyperloom_multibranch.contracts.notebook.peers import TestRequest
-from hyperloom_multibranch.contracts.notebook.records import ClaimKey, NotebookSnapshot, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+from hyperloom_multibranch.contracts.blackboard.interfaces import RecordSearch, SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.peers import TestRequest
+from hyperloom_multibranch.contracts.blackboard.records import ClaimKey, BlackboardSnapshot, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.rulegate.gate import RuleGate
 
@@ -33,7 +33,7 @@ _ID = "request_id"
 _CANDIDATE = "The request id of the blocked candidate's first test."
 
 
-class BlockedNotebook(SnapshotQuery, RecordSearch, Protocol):
+class BlockedBlackboard(SnapshotQuery, RecordSearch, Protocol):
     """What concluding a blocked candidate reads; its writes go through the rule gate."""
 
 
@@ -47,9 +47,9 @@ class NotYours(Refused):
 
 @dataclass(frozen=True)
 class _Waiting:
-    """A blocked candidate waiting for its diagnosis, and the notebook it was read from."""
+    """A blocked candidate waiting for its diagnosis, and the blackboard it was read from."""
 
-    snapshot: NotebookSnapshot
+    snapshot: BlackboardSnapshot
     request: TestRequest
     judgement: Judgement
 
@@ -58,8 +58,8 @@ class BlockedCandidates:
     """Concludes the blocked candidates of every specialist branch, one conclusion at a time, so two calls never
     conclude one candidate twice; run it on one loop."""
 
-    def __init__(self, notebook: BlockedNotebook, gate: RuleGate) -> None:
-        self._notebook = notebook
+    def __init__(self, blackboard: BlockedBlackboard, gate: RuleGate) -> None:
+        self._blackboard = blackboard
         self._gate = gate
         self._lock = asyncio.Lock()
 
@@ -87,7 +87,7 @@ class BlockedCandidates:
                     f"decline {request_id}"
                 )
             admission = await self._gate.repair(request, waiting.judgement, intent, diagnosis)
-            return await self._notebook.record(request_id), admission
+            return await self._blackboard.record(request_id), admission
 
     async def decline(self, branch: str, request_id: str) -> TestRecord:
         """Record the candidate as an inherent trade-off, once a learning of ``branch`` cites it."""
@@ -98,13 +98,13 @@ class BlockedCandidates:
                 for found in waiting.snapshot.learnings
             ):
                 raise Refused(
-                    f"write what {request_id} taught with notebook_learn, citing it in request_ids, then decline it"
+                    f"write what {request_id} taught with blackboard_learn, citing it in request_ids, then decline it"
                 )
             return await self._gate.decline(waiting.request, waiting.judgement)
 
     async def _waiting(self, branch: str, request_id: str) -> _Waiting:
         """The candidate ``request_id`` of ``branch`` while it waits for its diagnosis."""
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         record = next((found for found in snapshot.records if found.request_id == request_id), None)
         if record is None:
             raise Refused(f"no test {request_id}")
@@ -120,7 +120,7 @@ class BlockedCandidates:
         return _Waiting(snapshot, record.request, judgement)
 
 
-def _claimed_intent(snapshot: NotebookSnapshot, request: TestRequest) -> Intent:
+def _claimed_intent(snapshot: BlackboardSnapshot, request: TestRequest) -> Intent:
     """The intent the candidate's claim names; the scheduler cuts the repair at its parent, for its branch."""
     fingerprint = request.intent_fingerprint
     if fingerprint is None:
@@ -128,7 +128,7 @@ def _claimed_intent(snapshot: NotebookSnapshot, request: TestRequest) -> Intent:
     key = ClaimKey(request.parent_commit, fingerprint)
     claim = next((found for found in snapshot.claims if found.key == key), None)
     if claim is None:
-        raise Refused(f"the notebook holds no claim of the intent {request.request_id} tested; decline it")
+        raise Refused(f"the blackboard holds no claim of the intent {request.request_id} tested; decline it")
     # The key's latest claim may be another branch's, of the same intent on the same commit.
     return replace(claim.intent, branch=request.branch)
 
@@ -155,7 +155,7 @@ def register_blocked_tools(
     server.register(
         "decline_repair",
         description=(
-            "Record a blocked candidate of yours as an inherent trade-off; write its lesson with notebook_learn, "
+            "Record a blocked candidate of yours as an inherent trade-off; write its lesson with blackboard_learn, "
             "citing the candidate, first."
         ),
         schema=_schema(request_id=_CANDIDATE),
@@ -218,4 +218,4 @@ async def _at_home(home: asyncio.AbstractEventLoop | None, call: Coroutine[Any, 
         raise ToolError(str(error)) from error
 
 
-__all__ = ["BlockedCandidates", "BlockedNotebook", "NotYours", "Refused", "register_blocked_tools"]
+__all__ = ["BlockedCandidates", "BlockedBlackboard", "NotYours", "Refused", "register_blocked_tools"]

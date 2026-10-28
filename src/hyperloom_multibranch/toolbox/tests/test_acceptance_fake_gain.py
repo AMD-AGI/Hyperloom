@@ -27,7 +27,7 @@ async def _refused_with(tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, serv
         await rig.toolbox.submit_test(req(server_args=server_args))
     except RequestRejected as refused:
         assert rig.planner.calls == [], "a refused request must not reach the compiler"
-        assert rig.notebook._state().requests == {}
+        assert rig.blackboard._state().requests == {}
         return refused.code
     return None
 

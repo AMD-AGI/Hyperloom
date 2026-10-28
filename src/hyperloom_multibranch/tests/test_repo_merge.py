@@ -37,7 +37,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ReplacedPatch, RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table

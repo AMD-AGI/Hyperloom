@@ -22,7 +22,7 @@ from hyperloom_multibranch.contracts.fork import ForkAdmissionService, ReservedB
 from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry

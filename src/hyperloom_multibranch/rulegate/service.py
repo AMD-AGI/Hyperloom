@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The rule gate the scheduler calls, over the notebook and the toolbox.
+"""The rule gate the scheduler calls, over the blackboard and the toolbox.
 
-Every test it judges is read back from the notebook, so a scheduler that asks again after a restart finds the retest
+Every test it judges is read back from the blackboard, so a scheduler that asks again after a restart finds the retest
 it asked for before instead of paying for another.
 """
 
@@ -20,8 +20,8 @@ from typing import Protocol
 from hyperloom.contracts.measurement import Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, ResultVerifier
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.inferencex import BASELINE_TESTS
@@ -33,7 +33,7 @@ PRELUDE_SOURCE_CAVEAT = "not card-guarded, not re-verified"
 _HASH_CHUNK = 1 << 20
 
 
-class GateNotebook(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
+class GateBlackboard(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protocol):
     """The gate's handle: it writes the baseline and reads every test and recorded value."""
 
 
@@ -55,14 +55,14 @@ class GateService:
 
     def __init__(
         self,
-        notebook: GateNotebook,
+        blackboard: GateBlackboard,
         toolbox: Toolbox,
         rule: Rule,
         verifier: ResultVerifier,
         *,
         polling: Polling = Polling(),
     ) -> None:
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._toolbox = toolbox
         self._rule = rule
         self._verifier = verifier
@@ -80,7 +80,7 @@ class GateService:
         for record in measured:
             await self._verifier.reverify(record.request_id)
         with _judgeable():
-            return await self._rule.baseline(self._notebook, root_commit, measured)
+            return await self._rule.baseline(self._blackboard, root_commit, measured)
 
     async def establish_prelude_baseline(self, root_commit: str, measured: PreludeMeasurement) -> BaselineRecord:
         await asyncio.to_thread(_check_copies, measured)
@@ -92,12 +92,12 @@ class GateService:
         )
         with _judgeable():
             return await self._rule.prelude_baseline(
-                self._notebook, root_commit, measured.result, source=source, wall_seconds=measured.wall_seconds
+                self._blackboard, root_commit, measured.result, source=source, wall_seconds=measured.wall_seconds
             )
 
     async def compare(self, request_id: str) -> Judgement:
         first = await self._measured(request_id)
-        parent = (await self._notebook.recorded_value(first.request.parent_commit)).values
+        parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
         with _judgeable():
             judgement = await self._rule.first(first, parent)
         if judgement.verdict is not Verdict.NEEDS_CONFIRM:
@@ -107,7 +107,7 @@ class GateService:
             return await self._rule.retest(judgement, retest, parent)
 
     async def request_confirm(self, request_id: str) -> str:
-        record = await self._notebook.record(request_id)
+        record = await self._blackboard.record(request_id)
         return await self._toolbox.submit_test(retest_request(record, self._rule))
 
     async def accuracy_passes(self, request_id: str) -> bool:
@@ -116,7 +116,7 @@ class GateService:
             return await self._rule.accuracy_passes(record)
 
     async def _retest_of(self, first: TestRecord) -> str:
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         asked = [
             record
             for record in snapshot.records
@@ -137,7 +137,7 @@ class GateService:
         return record
 
     async def _ended(self, request_id: str) -> TestRecord:
-        while (record := await self._notebook.record(request_id)).in_flight:
+        while (record := await self._blackboard.record(request_id)).in_flight:
             await self._polling.sleep(self._polling.seconds)
         return record
 
@@ -175,4 +175,4 @@ def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
 
 
-__all__ = ["BASELINE_TESTS", "PRELUDE_SOURCE_CAVEAT", "GateNotebook", "GateService", "Polling"]
+__all__ = ["BASELINE_TESTS", "PRELUDE_SOURCE_CAVEAT", "GateBlackboard", "GateService", "Polling"]

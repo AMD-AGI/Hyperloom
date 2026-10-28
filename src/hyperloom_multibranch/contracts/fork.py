@@ -37,7 +37,7 @@ class RepairRequest:
     ``intent.branch`` is the requesting branch and ``intent.parent_commit`` the candidate's parent, where the repair
     branch is cut; ``judgement.request_ids`` starts with the candidate's first test. The new specialist starts from
     ``candidate_delta`` and the ``diagnosis`` (root cause and repair plan) the requesting specialist wrote; nothing lands
-    until a repaired candidate passes the gate. The scheduler and the notebook open one repair per blocked intent.
+    until a repaired candidate passes the gate. The scheduler and the blackboard open one repair per blocked intent.
     """
 
     intent: Intent

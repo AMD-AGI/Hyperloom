@@ -55,9 +55,9 @@ from hyperloom.measure.points import PointError
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock

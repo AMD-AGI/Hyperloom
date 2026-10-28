@@ -18,13 +18,13 @@ from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHan
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, UsageSource
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.specialist.agent_session import (
     CLI_SESSION_FILE,
     IDLE_TURNS,
@@ -150,8 +150,8 @@ class _Processes:
 @pytest.fixture
 async def rig(tmp_path):
     built = await branch_rig(tmp_path, ROOT, BRANCH)
-    base, repo, root, notebook = built.base, built.repo, built.root, built.notebook
-    await notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "try fp8 KV cache next"))
+    base, repo, root, blackboard = built.base, built.repo, built.root, built.blackboard
+    await blackboard.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "try fp8 KV cache next"))
     clock = _Clock()
     rig = SimpleNamespace(
         root=root,
@@ -162,8 +162,8 @@ async def rig(tmp_path):
         processes=_Processes(),
         worktree=base.worktree(BRANCH, tmp_path / "s1" / "worktree"),
         workspace=tmp_path / "s1" / "session",
-        notebook=notebook,
-        toolbox_notebook=LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox")),
+        blackboard=blackboard,
+        toolbox_blackboard=LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox")),
     )
 
     def session(command=AgentCommand("claude", "claude"), runner=None, **overrides) -> AgentSession:
@@ -179,7 +179,7 @@ async def rig(tmp_path):
             clock=lambda: clock.now,
             **overrides,
         )
-        place = BranchPlace(rig.worktree, notebook, rig.workspace)
+        place = BranchPlace(rig.worktree, blackboard, rig.workspace)
         return AgentSession(SessionStart(BRANCH, root, 2, BranchTask("leads: fp8 KV cache")), setup, place)
 
     rig.session = session
@@ -233,7 +233,7 @@ def _end_turn(rig, *rows) -> None:
 
 
 async def test_a_claude_cli_lives_on_after_its_turn_and_what_arrives_for_its_branch_wakes_it(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
@@ -245,7 +245,7 @@ async def test_a_claude_cli_lives_on_after_its_turn_and_what_arrives_for_its_bra
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats, "an idle session to keep its heartbeat")
     assert rig.runner.sent == []
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
     await session.stop()
     await asyncio.wait_for(running, 1)
@@ -255,14 +255,14 @@ async def test_a_claude_cli_lives_on_after_its_turn_and_what_arrives_for_its_bra
 
 
 async def test_a_cli_that_exits_as_it_is_woken_ends_its_launch_as_any_exit(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
     rig.runner.exits_before_send[1] = (EXITED_WELL, 3600.0)
 
     _end_turn(rig)
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.runner.specs) == 2, "a fresh launch after the CLI ended")
     await session.stop()
     await asyncio.wait_for(running, 1)
@@ -274,7 +274,7 @@ async def test_a_profile_of_its_head_that_another_branch_runs_keeps_the_cli_wait
     shared = request(
         "p1", intent(INTEGRATION_BRANCH, rig.root), RecipeDelta(), kind=TestKind.PROFILE, purpose=Purpose.PROFILE
     )
-    await rig.toolbox_notebook.write_request(shared)
+    await rig.toolbox_blackboard.write_request(shared)
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
@@ -283,7 +283,7 @@ async def test_a_profile_of_its_head_that_another_branch_runs_keeps_the_cli_wait
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
     assert rig.runner.sent == []
-    await rig.toolbox_notebook.write_result(result("p1"))
+    await rig.toolbox_blackboard.write_result(result("p1"))
     await _until(lambda: len(rig.runner.sent) == 1, "the shared profile's result to wake the CLI")
     await session.stop()
     await asyncio.wait_for(running, 1)
@@ -292,13 +292,13 @@ async def test_a_profile_of_its_head_that_another_branch_runs_keeps_the_cli_wait
 
 
 async def test_a_runtime_notice_written_while_the_turn_is_over_reaches_the_cli(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
     _end_turn(rig)
-    await rig.notebook.append_branch_log(
+    await rig.blackboard.append_branch_log(
         BranchLogEntry(BRANCH, BranchLogType.RESULT, f"{NOTICE} you may now have 3 tests running at once")
     )
     await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
@@ -314,12 +314,12 @@ def _exhausted(why: str, detail: str) -> BranchLogEntry:
 
 
 async def test_an_exhausted_record_its_turn_wrote_with_no_tried_path_is_refused_back_to_the_cli(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
-    await rig.notebook.append_branch_log(_exhausted("blocked_by_tool", "Memset needs an aiter C++ change."))
+    await rig.blackboard.append_branch_log(_exhausted("blocked_by_tool", "Memset needs an aiter C++ change."))
     _end_turn(rig)
     await _until(lambda: len(rig.runner.sent) == 1, "the refusal to wake the CLI")
     await session.stop()
@@ -327,18 +327,18 @@ async def test_an_exhausted_record_its_turn_wrote_with_no_tried_path_is_refused_
 
     assert "EXHAUSTED record of 'Fusion' was refused" in rig.runner.sent[0]
     assert "names no file or call you tried and no error it gave" in rig.runner.sent[0]
-    logged = [record.entry.content for record in await rig.notebook.branch_log(BRANCH)]
+    logged = [record.entry.content for record in await rig.blackboard.branch_log(BRANCH)]
     assert sum(content.startswith(NOTICE) and "was refused" in content for content in logged) == 1
 
 
 async def test_an_exhausted_record_that_names_its_tried_path_is_not_sent_back(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
     detail = "aiter.jit.module_gemm_a8w8_bpreshuffle fails to import: ModuleNotFoundError"
-    await rig.notebook.append_branch_log(_exhausted("blocked_by_tool", detail))
+    await rig.blackboard.append_branch_log(_exhausted("blocked_by_tool", detail))
     _end_turn(rig)
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
@@ -349,8 +349,8 @@ async def test_an_exhausted_record_that_names_its_tried_path_is_not_sent_back(ri
 
 
 async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_with_a_nudge_between(rig):
-    await rig.toolbox_notebook.write_request(request("r0", intent(BRANCH, rig.root)))
-    await rig.toolbox_notebook.write_result(result("r0"))
+    await rig.toolbox_blackboard.write_request(request("r0", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_result(result("r0"))
     rig.clock.now = time.time()
     session = rig.session(nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
@@ -368,7 +368,7 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
 
-_WORKED = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "notebook_brief", "input": {}}]}}
+_WORKED = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "blackboard_brief", "input": {}}]}}
 
 
 async def test_a_turn_that_called_tools_but_tested_nothing_counts_half_an_idle_turn(rig):
@@ -391,8 +391,8 @@ async def test_an_idle_session_says_whether_it_submitted_a_test(rig):
     session = rig.session(nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_result(result("r1"))
 
     for sent in range(1, IDLE_TURNS + 1):
         _end_turn(rig)
@@ -408,10 +408,10 @@ async def test_a_profile_is_no_tested_candidate_for_an_idle_session(rig):
     session = rig.session(nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
-    await rig.toolbox_notebook.write_request(
+    await rig.toolbox_blackboard.write_request(
         request("p1", intent(BRANCH, rig.root), kind=TestKind.PROFILE, purpose=Purpose.PROFILE)
     )
-    await rig.toolbox_notebook.write_result(result("p1"))
+    await rig.toolbox_blackboard.write_result(result("p1"))
 
     for sent in range(1, IDLE_TURNS + 1):
         _end_turn(rig)
@@ -432,7 +432,7 @@ async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nud
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats + 2, "the patience to be waited, beating")
     assert rig.runner.sent == []
-    await rig.notebook.append_branch_log(
+    await rig.blackboard.append_branch_log(
         BranchLogEntry(BRANCH, BranchLogType.RESULT, f"{NOTICE} you may now have 3 tests running at once")
     )
     await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
@@ -443,11 +443,11 @@ async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nud
 
 
 def _building(rig) -> tuple[FakeToolbox, FakeBuildDriver]:
-    """A fake toolbox writing to the rig's notebook whose every test needs a held sgl_kernel build."""
+    """A fake toolbox writing to the rig's blackboard whose every test needs a held sgl_kernel build."""
     driver = FakeBuildDriver()
     driver.need(lambda request: True, "sgl_kernel")
     driver.gate.clear()
-    box = FakeToolbox(notebook=rig.toolbox_notebook, autorun=False, wiring=FakeWiring(builds=driver))
+    box = FakeToolbox(blackboard=rig.toolbox_blackboard, autorun=False, wiring=FakeWiring(builds=driver))
     return box, driver
 
 
@@ -498,16 +498,16 @@ async def test_a_build_the_machine_failed_wakes_the_cli_with_its_detail(rig):
 async def test_a_build_item_reaches_the_next_tool_reply_unless_that_reply_carries_its_test(rig):
     box, driver = _building(rig)
     request_id = await box.submit_test(_native_test(rig))
-    annotate = reply_inbox(lambda branch: rig.notebook)
+    annotate = reply_inbox(lambda branch: rig.blackboard)
     principal = McpPrincipal("specialist", BRANCH, BRANCH)
 
     def call(tool: str, **arguments) -> ReplyCall:
         return ReplyCall(principal, tool, arguments, is_error=False)
 
-    start = (await annotate(call("notebook_brief"), None)).cursor
+    start = (await annotate(call("blackboard_brief"), None)).cursor
     driver.gate.set()
     await box.drain()
-    shown = await annotate(call("notebook_brief"), start)
+    shown = await annotate(call("blackboard_brief"), start)
     hidden = await annotate(call("wait_test", request_id=request_id), start)
     await box.close()
 
@@ -517,7 +517,7 @@ async def test_a_build_item_reaches_the_next_tool_reply_unless_that_reply_carrie
 
 
 async def test_each_turn_records_the_tokens_it_added(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"), nudge_waits_s=NO_WAITS)
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
@@ -528,12 +528,12 @@ async def test_each_turn_records_the_tokens_it_added(rig):
         return {"type": "assistant", "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": usage}}
 
     async def recorded() -> list:
-        return [record.usage.tokens for record in (await rig.notebook.snapshot()).llm_usage]
+        return [record.usage.tokens for record in (await rig.blackboard.snapshot()).llm_usage]
 
     _end_turn(rig, init, call(1, 1_000))
     await _until(lambda: rig.runner.beats > 0, "the first turn to end")
     first = await recorded()
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
     _end_turn(rig, call(2, 500))
     await _until(lambda: len(rig.runner.sent) == 2, "the second turn to end")
@@ -545,7 +545,7 @@ async def test_each_turn_records_the_tokens_it_added(rig):
 
 
 async def test_a_launch_ended_early_to_wait_for_its_test_is_no_crash_and_the_next_waits_for_the_result(rig):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     session = rig.session()
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
@@ -553,7 +553,7 @@ async def test_a_launch_ended_early_to_wait_for_its_test_is_no_crash_and_the_nex
     rig.runner.end(1, EXITED_WELL, 30.0)
     await asyncio.sleep(0.2)
     assert len(rig.runner.specs) == 1 and not running.done()
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     await _until(lambda: len(rig.runner.specs) == 2, "a launch once the test has its result")
     await session.stop()
     await asyncio.wait_for(running, 1)
@@ -575,7 +575,7 @@ async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_
     await session.stop()
     await asyncio.wait_for(running, 1)
 
-    first, killed = (record.usage for record in (await rig.notebook.snapshot()).llm_usage)
+    first, killed = (record.usage for record in (await rig.blackboard.snapshot()).llm_usage)
     assert first == LlmUsage(BRANCH, UsageSource.SPECIALIST, first.cost_usd, TokenCounts(1_000, 100), "sess-1")
     assert first.cost_usd == pytest.approx((1_000 * 4 + 100 * 20) / 1e6)
     assert (killed.cost_usd, killed.tokens) == (None, TokenCounts(input=1_000_000))
@@ -606,7 +606,7 @@ async def test_each_launch_keeps_the_stream_of_the_one_before_while_its_readers_
     current = (rig.workspace / "process.log").read_text()
     assert '"m2"' in current and '"m1"' not in current
     assert sorted(path.name for path in rig.workspace.glob("process*.log")) == ["process-1.log", "process.log"]
-    tokens = [record.usage.tokens for record in (await rig.notebook.snapshot()).llm_usage]
+    tokens = [record.usage.tokens for record in (await rig.blackboard.snapshot()).llm_usage]
     assert tokens == [TokenCounts(1_000, 10), TokenCounts(500, 10)]
 
 
@@ -806,9 +806,9 @@ async def test_a_link_the_cli_left_in_the_workspace_is_not_written_through(rig, 
 
 @pytest.mark.parametrize("status", [CRASHED, LOST], ids=["error-exit", "lost"])
 async def test_a_crashed_cli_is_resumed_by_the_next_run_with_what_arrived_while_it_was_down(rig, status):
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     crashed = await _crash_after_a_turn(rig, rig.session(), 1, status)
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     (rig.worktree.path / "half-done.txt").write_text("an edit the CLI made before it crashed")
 
     session, running = await _next_launch(rig, 2)
@@ -868,8 +868,8 @@ async def _move_integration(rig) -> str:
 
 async def test_an_idle_end_under_the_context_cap_is_resumed_with_what_changed_since(rig):
     idle = await _idle_after_turns(rig, _call(50_000), _SUCCESS)
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
-    await rig.toolbox_notebook.write_result(result("r1"))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_result(result("r1"))
     moved = await _move_integration(rig)
 
     session, running = await _next_launch(rig, 2)
@@ -994,7 +994,7 @@ async def test_a_resume_the_cli_refuses_at_once_falls_back_to_a_fresh_session_in
     first, resumed, fresh = (spec.argv for spec in rig.runner.specs)
     assert _flag(resumed, "--resume") == _flag(first, "--session-id") != _flag(fresh, "--session-id")
     assert "--resume" not in fresh and rig.runner.prompts[2].startswith("Startup brief")
-    notices = [record.entry.content for record in await rig.notebook.branch_log(BRANCH)]
+    notices = [record.entry.content for record in await rig.blackboard.branch_log(BRANCH)]
     assert any(notice.startswith(NOTICE) and "a fresh session starts" in notice for notice in notices)
 
 
@@ -1065,7 +1065,7 @@ _MORE_ROOM = f"{NOTICE} you may now have 3 tests running at once"
 
 async def _log(rig, *contents: str) -> None:
     for content in contents:
-        await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, content))
+        await rig.blackboard.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, content))
 
 
 async def test_an_idle_resume_leaves_the_runtime_s_notice_of_the_restart_out_of_what_arrived(rig):
@@ -1097,7 +1097,7 @@ async def test_a_crash_resume_shows_the_notices_that_arrived_but_not_the_one_of_
 @pytest.mark.parametrize("arrival", ["result", "notice", "integration"])
 async def test_an_idle_resume_waits_until_something_arrives_for_its_branch(rig, arrival):
     await _idle_after_turns(rig, _call(50_000), _SUCCESS)
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_request(request("r1", intent(BRANCH, rig.root)))
     await _log(rig, _IDLE_RESTART)
     session = rig.session(idle_resume_wait_s=60.0)
     running = asyncio.create_task(session.run())
@@ -1105,7 +1105,7 @@ async def test_an_idle_resume_waits_until_something_arrives_for_its_branch(rig, 
     await asyncio.sleep(0.3)
     assert len(rig.runner.specs) == 1
     if arrival == "result":
-        await rig.toolbox_notebook.write_result(result("r1"))
+        await rig.toolbox_blackboard.write_result(result("r1"))
         said = "result r1"
     elif arrival == "notice":
         await _log(rig, _MORE_ROOM)
@@ -1146,7 +1146,7 @@ async def test_a_branch_stopped_while_its_idle_resume_waits_launches_nothing(rig
 
 
 async def test_a_fresh_launch_shows_what_the_integration_head_holds_and_what_the_head_lacks(rig, tmp_path):
-    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
+    branched = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
 
     session, running = await _next_launch(rig, 1)
     await session.stop()
@@ -1194,22 +1194,24 @@ async def test_a_resume_after_the_integration_head_moved_mid_turn_shows_what_it_
 
 
 async def test_a_reroot_asked_for_waits_for_the_branch_s_test_then_moves_it_and_says_what_it_carried(rig, tmp_path):
-    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
-    await rig.toolbox_notebook.write_request(request("r9", intent(BRANCH, branched.own)))
+    branched = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    await rig.toolbox_blackboard.write_request(request("r9", intent(BRANCH, branched.own)))
     session, running = await _next_launch(rig, 1)
 
-    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill"))
+    await rig.blackboard.append_branch_log(
+        BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill")
+    )
     _end_turn(rig)
     beats = rig.runner.beats
     await _until(lambda: rig.runner.beats > beats + 2, "the turn's end to be waited out")
     assert await rig.repo.head(BRANCH) == branched.own and rig.runner.sent == []
-    await rig.toolbox_notebook.write_result(result("r9"))
+    await rig.toolbox_blackboard.write_result(result("r9"))
     await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
     _end_turn(rig)
     await _until(lambda: rig.runner.beats > beats + 6, "the judgement to be waited for")
     assert await rig.repo.head(BRANCH) == branched.own and len(rig.runner.sent) == 1
     flat = judgement(0.2, ("r9",), verdict=Verdict.FLAT)
-    await LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate")).write_judgement(
+    await LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate")).write_judgement(
         "r9", flat, Conclusion.RECORDED_ONLY
     )
     await _until(lambda: len(rig.runner.sent) == 2, "the judgement to wake the CLI")
@@ -1220,28 +1222,30 @@ async def test_a_reroot_asked_for_waits_for_the_branch_s_test_then_moves_it_and_
     await asyncio.wait_for(running, 1)
 
     assert await rig.repo.head(BRANCH) == branched.onto
-    rows = (await rig.notebook.snapshot()).progress
+    rows = (await rig.blackboard.snapshot()).progress
     assert next(row.head_commit for row in rows if row.branch == BRANCH) == branched.onto
     woken = rig.runner.sent[-1]
     assert f"re-rooted from {branched.own} onto the integration head {branched.onto}" in woken
     assert (
         '"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}' in woken and f"Your head {branched.onto} holds all of it" in woken
     )
-    answers = [r.entry.content for r in await rig.notebook.branch_log(BRANCH) if r.entry.content.startswith(NOTICE)]
+    answers = [r.entry.content for r in await rig.blackboard.branch_log(BRANCH) if r.entry.content.startswith(NOTICE)]
     assert sum("re-rooted" in content for content in answers) == 1
 
 
 async def test_a_reroot_waits_out_a_judge_notice_that_precedes_its_judgement(rig, tmp_path):
     """A fix judged on its performance alone is noticed before the gate commits it: moving the branch then would turn
     its retested gain into a record-only one."""
-    branched = await diverged(rig.repo, tmp_path / "notebook", rig.root, ROOT, BRANCH)
-    await rig.toolbox_notebook.write_request(request("r9", intent(BRANCH, branched.own)))
-    await rig.toolbox_notebook.write_result(result("r9"))
+    branched = await diverged(rig.repo, tmp_path / "blackboard", rig.root, ROOT, BRANCH)
+    await rig.toolbox_blackboard.write_request(request("r9", intent(BRANCH, branched.own)))
+    await rig.toolbox_blackboard.write_result(result("r9"))
     session, running = await _next_launch(rig, 1)
 
-    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill"))
+    await rig.blackboard.append_branch_log(
+        BranchLogEntry(BRANCH, BranchLogType.PLAN, "REROOT: it holds chunked prefill")
+    )
     alone = f"{NOTICE} r9 is judged on its performance alone: the case is not available"
-    await rig.notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, alone, ("r9",)))
+    await rig.blackboard.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.RESULT, alone, ("r9",)))
     _end_turn(rig)
     await _until(lambda: len(rig.runner.sent) == 1, "the notice to wake the CLI")
     _end_turn(rig)
@@ -1249,7 +1253,7 @@ async def test_a_reroot_waits_out_a_judge_notice_that_precedes_its_judgement(rig
     await _until(lambda: rig.runner.beats > beats + 2, "the notice to be waited past")
     assert await rig.repo.head(BRANCH) == branched.own
 
-    gate = LocalNotebook(tmp_path / "notebook", Writer(Role.GATE, "gate"))
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
     await gate.write_judgement("r9", judgement(0.2, ("r9",), verdict=Verdict.FLAT), Conclusion.RECORDED_ONLY)
     await _until(lambda: any("re-rooted" in sent for sent in rig.runner.sent), "the re-root once judged")
     await session.stop()

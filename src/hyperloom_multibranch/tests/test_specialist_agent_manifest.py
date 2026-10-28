@@ -13,7 +13,7 @@ from hyperloom_multibranch.specialist.agent_manifest import (
     LedgerSource,
     ManifestError,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 
 LEDGER = {
     "path": "sessions/b01/ledger.jsonl",

@@ -262,24 +262,24 @@ def test_test_classes_are_not_collected_by_pytest() -> None:
     assert TestKind.__test__ is False
 
 
-# --- compatibility with the notebook's names ---------------------------------------------------------------------
+# --- compatibility with the blackboard's names ---------------------------------------------------------------------
 
 
-def test_request_answers_to_the_notebooks_names() -> None:
+def test_request_answers_to_the_blackboards_names() -> None:
     request = _request(accuracy=True)
     assert request.branch == "b1"
     assert request.accuracy_rounds is True
     assert request.action_fingerprint == DELTA.fingerprint()
 
 
-def test_enums_keep_the_notebooks_member_names() -> None:
+def test_enums_keep_the_blackboards_member_names() -> None:
     assert Validity.SUCCESS is Validity.SUCCEEDED
     assert Validity.CANDIDATE_FAILURE is Validity.CANDIDATE_FAILED
     assert TestKind.SWEEP.value == "sweep"
     assert Purpose.EXPLORE == "explore"
 
 
-def test_result_answers_to_the_notebooks_names() -> None:
+def test_result_answers_to_the_blackboards_names() -> None:
     result = _result(validity=Validity.CANDIDATE_FAILED, failure_class=FailureClass.CANDIDATE)
     assert result.failure is FailureClass.CANDIDATE
     assert result.sandbox.node == "n1"

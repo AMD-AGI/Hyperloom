@@ -14,28 +14,28 @@ import pytest
 
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.contracts.notebook.records import (
+from hyperloom_multibranch.contracts.blackboard.records import (
     BranchProgress,
     FrontierScore,
     PendingCandidate,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, MergeOutcome
+from hyperloom_multibranch.contracts.blackboard.vocab import FrontierBasis, MergeOutcome
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
 from hyperloom_multibranch.contracts.judgement import Verdict
-from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
-from hyperloom_multibranch.notebook.rsi.frontier import (
+from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
+from hyperloom_multibranch.blackboard.rsi.frontier import (
     NEAR_BAR_COMPONENT,
     PROBATION_COMPONENT,
     SETTLED_TESTS,
     STRANDED_COMPONENT,
 )
-from hyperloom_multibranch.notebook.rsi.playbook import H0, Playbook, PlaybookChoice, PlaybookPlay, replaced
-from hyperloom_multibranch.notebook.rsi.stranded import StrandedCommit, StrandedLead
-from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
+from hyperloom_multibranch.blackboard.rsi.playbook import H0, Playbook, PlaybookChoice, PlaybookPlay, replaced
+from hyperloom_multibranch.blackboard.rsi.stranded import StrandedCommit, StrandedLead
+from hyperloom_multibranch.blackboard.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -1033,12 +1033,12 @@ async def test_a_branch_waiting_on_a_native_build_shows_it_once_with_its_compone
     driver.gate.clear()
     driver.need(lambda test: test.branch_id == "b01", "aiter", "fused-moe")
     toolbox = FakeToolbox(
-        notebook=LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox")), wiring=FakeWiring(builds=driver)
+        blackboard=LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox")), wiring=FakeWiring(builds=driver)
     )
     for branch, args in (("b01", "--a"), ("b01", "--b"), ("b02", "--c")):
         change = RecipeDelta(config=ConfigDelta(server_args=args))
         await toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, "c-root", delta=change))
-    snapshot = await LocalNotebook(tmp_path / "nb", Writer(Role.OBSERVER, "judge")).snapshot()
+    snapshot = await LocalBlackboard(tmp_path / "nb", Writer(Role.OBSERVER, "judge")).snapshot()
 
     building = await waiting_builds(toolbox, snapshot.records)
 

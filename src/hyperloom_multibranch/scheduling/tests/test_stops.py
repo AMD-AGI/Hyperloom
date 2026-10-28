@@ -21,12 +21,12 @@ from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerCo
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
@@ -104,36 +104,38 @@ class Stage:
         self.processes = ProcessRegistry(tmp_path / "MB-pids.jsonl", clock)
         self.decisions_file = tmp_path / "MB-decisions.jsonl"
         decisions = DecisionLog(self.decisions_file, clock)
-        self.notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
+        self.blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
         self.repo_path = tmp_path / "repo"
         self.root = ""
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
         self.toolbox = toolbox_type(
-            LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
+            LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
         )
-        self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, hanging=hanging)
-        self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
+        self.sessions = RecordedSessions(self.toolbox, self.repo, self.blackboard, hanging=hanging)
+        self.runtime = specialist_runtime(
+            tmp_path / "blackboard", self.toolbox, self.repo, self.sessions, now=clock.now
+        )
         self.runtime.refusing = refusing
         self.desk = ForkDesk(self.roster, decisions, clock)
         self.reserved = RecordedReservations()
         context = SchedulerContext(
             SessionLayout(tmp_path),
             self.roster,
-            self.notebook,
+            self.blackboard,
             decisions,
             self.processes,
             clock,
             self.desk,
             self.reserved,
         )
-        self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.notebook))
+        self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.blackboard))
         self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
         self.stopper = SessionStopper(context, self.branches, self.toolbox, self.mcp)
 
     async def opened(self) -> Stage:
         baseline = Recipe(BASE_IMAGE_DIGEST)
         self.root = await self.repo.init_root(baseline)
-        await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
+        await self.blackboard.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
         await self.branches.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, self.root, HARD_STOP))
         await asyncio.sleep(SPECIALIST_POLL_SECONDS)

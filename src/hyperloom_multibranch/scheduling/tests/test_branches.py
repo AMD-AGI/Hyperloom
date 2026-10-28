@@ -19,11 +19,11 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
@@ -117,17 +117,17 @@ class Bench:
         steps: Mapping[str, SessionStep] | None = None,
     ) -> None:
         self.clock = clock
-        self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
-        self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=clock.now)
+        self.blackboard = LocalBlackboard(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
+        self.gate_blackboard = LocalBlackboard(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=clock.now)
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", clock)
         self.desk = ForkDesk(self.roster, DecisionLog(tmp_path / "MB-decisions.jsonl", clock), clock)
         self.reserved = RecordedReservations()
         self.repo_path = tmp_path / "repo"
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
         self.toolbox = RecordingToolbox(
-            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
+            LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
         )
-        self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, steps=steps)
+        self.sessions = RecordedSessions(self.toolbox, self.repo, self.blackboard, steps=steps)
         self.runtime = specialist_runtime(
             tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=clock.now, runtime=runtime
         )
@@ -140,7 +140,7 @@ class Bench:
         return SchedulerContext(
             SessionLayout(tmp_path),
             self.roster,
-            self.notebook,
+            self.blackboard,
             decisions,
             ProcessRegistry(tmp_path / "MB-pids.jsonl", self.clock),
             self.clock,
@@ -149,11 +149,11 @@ class Bench:
         )
 
     def controlling(self, toolbox: RecordingToolbox, tmp_path: Path) -> BranchControl:
-        return BranchControl(self.context(tmp_path), self.runtime, toolbox, self.repo, SessionBriefs(self.notebook))
+        return BranchControl(self.context(tmp_path), self.runtime, toolbox, self.repo, SessionBriefs(self.blackboard))
 
     async def rooted(self) -> Bench:
         self.root = await self.repo.init_root(BASELINE)
-        await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
+        await self.blackboard.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
         return self
 
@@ -179,7 +179,7 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
     assert bench.sessions.started == {"b01": bench.root, "b02": bench.root}
     assert bench.sessions.k == {"b01": 2, "b02": 2}
     assert [await bench.repo.head(branch) for branch in ("b01", "b02")] == [bench.root, bench.root]
-    view = await bench.notebook.lineage()
+    view = await bench.blackboard.lineage()
     assert {branch.branch: branch.start_commit for branch in view.branches}["b02"] == bench.root
     assert dict(bench.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1, "b01": 2, "b02": 2}
     assert bench.sessions.quota_at_start == {"b01": 2, "b02": 2}
@@ -206,7 +206,7 @@ async def test_a_batch_stops_at_the_first_slot_an_admission_took_and_spends_no_b
 
 async def test_a_batch_keeps_each_branch_focus_unrendered_and_names_it_in_its_open_decision(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
-    briefs = SessionBriefs(bench.notebook)
+    briefs = SessionBriefs(bench.blackboard)
     bench.control = BranchControl(bench.context(tmp_path), bench.runtime, bench.toolbox, bench.repo, briefs)
 
     start = BatchStart(BranchOrigin.REFILL, await bench.control.integration_head(), OPEN_BY)
@@ -260,7 +260,7 @@ async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_
     assert ("b02", "agent branch started") in [(row["branch"], row["reason"]) for row in rows if row["kind"] == "open"]
 
 
-async def test_the_notebook_records_an_agent_branch_as_autonomous_and_a_user_branch_as_specialist(
+async def test_the_blackboard_records_an_agent_branch_as_autonomous_and_a_user_branch_as_specialist(
     tmp_path: Path,
 ) -> None:
     bench = await Bench(tmp_path).rooted()
@@ -269,7 +269,7 @@ async def test_the_notebook_records_an_agent_branch_as_autonomous_and_a_user_bra
     await bench.control.open_agent_branches(("https://github.com/acme/agent@v1",), bench.root, OPEN_BY)
     await _runs_started()
 
-    drivers = {node.branch: node.driver for node in (await bench.notebook.lineage()).branches}
+    drivers = {node.branch: node.driver for node in (await bench.blackboard.lineage()).branches}
     assert (drivers["b01"], drivers["b02"]) == (BranchDriver.SPECIALIST, BranchDriver.AUTONOMOUS)
 
 
@@ -328,7 +328,7 @@ async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_its_
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
     assert bench.sessions.repairs == {"b02": repair}
     assert bench.sessions.quota_at_start["b02"] == 2
-    view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
+    view = {branch.branch: branch for branch in (await bench.blackboard.lineage()).branches}
     assert (view["b02"].start_commit, view["b02"].origin, view["b02"].repairs) == (fix, LineageKind.OPEN, "r1")
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
@@ -368,7 +368,7 @@ async def test_a_repair_branch_is_stopped_for_its_time_limit_two_hours_after_its
     assert bench.roster.entry("b02").stop == expected
     assert bench.roster.entry("b01").stop is None
     assert bench.sessions.stopped == ["b02"] and bench.toolbox.tool_cancels == ["b02"]
-    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.blackboard.lineage()).branches}
     assert stops["b02"] == "repair_time_limit: a repair branch runs at most 2 hours"
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"], logged["reason"]) == ("stop", "b02", expected.summary)
@@ -381,13 +381,13 @@ async def test_a_fork_the_gate_landed_opens_at_its_fix(tmp_path: Path) -> None:
     await bench.repo.create_branch("b02", bench.root)
     fix = await bench.repo.commit("b02", bench.root, BASELINE, "the fix")
     split = LineageEvent(LineageKind.SPLIT, "b02", commit_id=fix, from_commit=bench.root, from_branch="b01")
-    await bench.gate_notebook.record_lineage(split)
+    await bench.gate_blackboard.record_lineage(split)
 
     await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
     await _runs_started()
 
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
-    view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
+    view = {branch.branch: branch for branch in (await bench.blackboard.lineage()).branches}
     assert (view["b02"].origin, view["b02"].from_branch) == (LineageKind.SPLIT, "b01")
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
@@ -453,7 +453,7 @@ async def test_a_repair_whose_specialist_does_not_start_is_handed_back_to_the_ga
     await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     toolbox = DownToolbox(
-        LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
+        LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
     )
     toolbox.down = True
     bench.control = bench.controlling(toolbox, tmp_path)
@@ -476,7 +476,7 @@ async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_rec
 
     assert bench.toolbox.tool_cancels == ["b01"]
     assert "b01" not in bench.toolbox.policies[-1].branch_k
-    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.blackboard.lineage()).branches}
     assert stops["b01"] == "judge: flat"
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert logged["detail"]["failures"] == ["RuntimeError: the runtime refused to stop b01"]
@@ -498,8 +498,8 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
     await _runs_started()
     assert "b02" not in bench.sessions.started
-    assert "b02" not in {branch.branch for branch in (await bench.notebook.lineage()).branches}
-    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    assert "b02" not in {branch.branch for branch in (await bench.blackboard.lineage()).branches}
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.blackboard.lineage()).branches}
     assert stops["b01"] == "judge: flat"
     assert "b01" not in bench.toolbox.policies[-1].branch_k
 
@@ -535,7 +535,7 @@ async def test_a_judge_stop_leaves_the_branchs_tests_to_finish_under_its_k_and_r
     assert bench.toolbox.policies[-1].k_for("b01") == 2
     assert (await bench.toolbox.queue_state()).running_by_branch == {"b01": 2}
     await bench.toolbox.drain()
-    assert all([(await bench.notebook.record(test)).result is not None for test in tests])
+    assert all([(await bench.blackboard.record(test)).result is not None for test in tests])
     await bench.control.push_quota()
     assert "b01" not in bench.toolbox.policies[-1].branch_k
 
@@ -593,7 +593,7 @@ async def test_a_specialist_that_does_not_start_is_withdrawn_without_a_stop_and_
         "RuntimeError: no GPU left for b01",
     )
     assert bench.roster.entry("b02").stop is None and bench.roster.entry("b02").k == 2
-    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.blackboard.lineage()).branches}
     assert stops["b01"] == "start_failed: RuntimeError: no GPU left for b01" and stops["b02"] is None
     logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert [row["detail"]["failure"] for row in logged if row["kind"] == "set_k"] == [
@@ -619,7 +619,7 @@ async def test_a_start_that_does_not_finish_in_time_is_withdrawn_and_the_others_
 async def test_a_toolbox_failing_while_a_branch_opens_fails_that_branch_alone(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     toolbox = DownToolbox(
-        LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
+        LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
     )
     toolbox.down = True
     bench.control = bench.controlling(toolbox, tmp_path)

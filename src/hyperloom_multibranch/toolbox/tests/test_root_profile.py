@@ -14,10 +14,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.tests.helpers import Rig, build
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import ANALYSIS_JSON, DEGRADED_NOTICE, OPS_SUMMARY, with_op_shares
@@ -64,14 +64,14 @@ class _Report:
 
 
 class _Inbox:
-    """The inbox push: keeps every pointer, then writes it to the notebook as the toolbox does."""
+    """The inbox push: keeps every pointer, then writes it to the blackboard as the toolbox does."""
 
-    def __init__(self, notebook: LocalNotebook) -> None:
-        self.notebook, self.pointers = notebook, []
+    def __init__(self, blackboard: LocalBlackboard) -> None:
+        self.blackboard, self.pointers = blackboard, []
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         self.pointers.append(pointer)
-        await self.notebook.notify_tool_result(pointer)
+        await self.blackboard.notify_tool_result(pointer)
 
 
 @dataclass
@@ -104,8 +104,8 @@ class Stack:
 async def stack(tmp_path: Path) -> Stack:
     report, made = _Report(), []
 
-    def tools(notebook: LocalNotebook) -> ToolJobs:
-        made.append(_Inbox(notebook))
+    def tools(blackboard: LocalBlackboard) -> ToolJobs:
+        made.append(_Inbox(blackboard))
         return ToolJobs([report], made[0], tmp_path / "session" / "tool-results")
 
     rig = build(tmp_path, tools=tools)
@@ -138,7 +138,7 @@ async def test_the_report_is_a_job_of_the_integration_branch_and_its_pointer_car
     assert (request.tool, request.branch) == ("tracelens", INTEGRATION_BRANCH)
     assert request.params["analysis_route"] == "report"
     assert request.params["trace_input"] == str(stack.trace_dir.resolve())
-    held = await stack.rig.notebook.op_shares(COMMIT)
+    held = await stack.rig.blackboard.op_shares(COMMIT)
     assert held is not None and (held.job_id, held.profile_request_id) == (job, "")
     assert ":" not in Path(pointer.location).parent.name  # shared storage rejects ":" in a name
 
@@ -227,7 +227,7 @@ async def test_a_degraded_report_ends_the_job_with_a_summary_and_no_op_shares(st
     pointer = await stack.finished(await stack.analyze())
     assert not pointer.op_shares and not pointer.commit_id
     assert DEGRADED_NOTICE in pointer.summary
-    assert await stack.rig.notebook.op_shares(COMMIT) is None
+    assert await stack.rig.blackboard.op_shares(COMMIT) is None
 
 
 async def test_a_failed_report_ends_the_job_with_its_reason_and_raises_nothing(stack: Stack) -> None:

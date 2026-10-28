@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from hyperloom.contracts.measurement import AttachmentRef, TestRequest
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery
 from hyperloom_multibranch.rulegate.critic import FixReview, FixReviewer, ReproVerdicts
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, CaseError, case_of, read_case
 from hyperloom_multibranch.rulegate.regression import FixNotProven, FixProof, ReproRunner, prove_fix
@@ -57,7 +57,7 @@ def declares_fix(request: TestRequest, judgement: Judgement) -> bool:
 
 
 async def check_fix(
-    checking: FixChecking, notebook: CommitQuery, request: TestRequest, judgement: Judgement
+    checking: FixChecking, blackboard: CommitQuery, request: TestRequest, judgement: Judgement
 ) -> FixCheck:
     """Prove the fix ``request`` declares and, unless it gained, have the critic review it."""
     try:
@@ -67,7 +67,7 @@ async def check_fix(
     if case is None:
         raise ValueError(f"{request.request_id} declares no fix")
     try:
-        proof = await prove_fix(checking.runner, notebook, request, (case,))
+        proof = await prove_fix(checking.runner, blackboard, request, (case,))
     except FixNotProven as error:
         return FixCheck(judgement, None, f"its fix is not proven: {error.reason}")
     if judgement.verdict is Verdict.IMPROVED:

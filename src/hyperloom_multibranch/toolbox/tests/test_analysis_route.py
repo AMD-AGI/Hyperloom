@@ -18,11 +18,11 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.mcp_tools import (
     McpSpecialistTokens,
     SpecialistToolOptions,
@@ -52,14 +52,14 @@ class _Analysis:
 
 
 class _Capture:
-    """The inbox push: remembers every pointer, then writes it to the notebook as the toolbox does."""
+    """The inbox push: remembers every pointer, then writes it to the blackboard as the toolbox does."""
 
-    def __init__(self, notebook: LocalNotebook) -> None:
-        self.notebook, self.pointers = notebook, []
+    def __init__(self, blackboard: LocalBlackboard) -> None:
+        self.blackboard, self.pointers = blackboard, []
 
     async def notify_tool_result(self, pointer: ToolResultPointer) -> None:
         self.pointers.append(pointer)
-        await self.notebook.notify_tool_result(pointer)
+        await self.blackboard.notify_tool_result(pointer)
 
 
 @dataclass
@@ -111,8 +111,8 @@ async def _stack(
     tools = {name: _Analysis(name) for name in names}
     holder: list[_Capture] = []
 
-    def make(notebook: LocalNotebook) -> ToolJobs:
-        holder.append(_Capture(notebook))
+    def make(blackboard: LocalBlackboard) -> ToolJobs:
+        holder.append(_Capture(blackboard))
         return ToolJobs(list(tools.values()), holder[0], tmp_path / "tool-results")
 
     rig = build(tmp_path, tools=make if with_tools else None)
@@ -123,11 +123,11 @@ async def _stack(
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w32")
     root = tmp_path
 
-    def notebooks(branch: str) -> LocalNotebook:
-        return LocalNotebook(root / "notebook", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+    def blackboards(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(root / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     options = SpecialistToolOptions(analysis=rig.toolbox, toolbox_loop=asyncio.get_running_loop())
-    register_specialist_tools(server, toolbox=rig.toolbox, notebooks=notebooks, options=options)
+    register_specialist_tools(server, toolbox=rig.toolbox, blackboards=blackboards, options=options)
     server.start()
     try:
         jobs = rig.toolbox._tools
@@ -161,7 +161,7 @@ def _text(reply: dict[str, Any]) -> str:
 
 
 async def _profile_test(stack: Stack, branch: str = "b1", commit: str = PARENT, **result: Any) -> str:
-    """A measured PROFILE test of ``branch`` on ``commit``, as the notebook holds it."""
+    """A measured PROFILE test of ``branch`` on ``commit``, as the blackboard holds it."""
     rig = stack.rig
     rig.executor.script = [lambda job: ok(job, profile_location="traces/p1", **result)]
     request = replace(
@@ -324,7 +324,7 @@ async def test_without_an_analysis_starter_the_route_refuses_by_name(tmp_path: P
     register_specialist_tools(
         server,
         toolbox=rig.toolbox,
-        notebooks=lambda b: LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, b, b)),
+        blackboards=lambda b: LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, b, b)),
         options=SpecialistToolOptions(toolbox_loop=asyncio.get_running_loop()),
     )
     server.start()

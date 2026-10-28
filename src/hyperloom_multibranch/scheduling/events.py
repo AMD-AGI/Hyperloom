@@ -6,7 +6,7 @@
 The integration head moving by a large gain or by a foundation fix (``integration_moved``) leaves the branches started
 before it behind it, its bottleneck moving (``bottleneck_moved``) leaves the branches attacking the old one with less to
 gain, and a measurement node quarantined or a node's measurement environment moving between two of its results
-(``environment_changed``: its image, GPU model, power cap or partition mode, as the notebook reads them off the
+(``environment_changed``: its image, GPU model, power cap or partition mode, as the blackboard reads them off the
 results' sandbox facts) may make results on either side of it compare less well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
 what to stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes
 the toolbox avoids, and on a single node the toolbox still measures there. What does stop it is the toolbox having
@@ -39,15 +39,15 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch, SnapshotQuery
-from hyperloom_multibranch.contracts.notebook.records import (
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.interfaces import RecordSearch, SnapshotQuery
+from hyperloom_multibranch.contracts.blackboard.records import (
     BranchProgress,
     EnvironmentChange,
     OpShares,
     QuarantineEvent,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -338,7 +338,7 @@ class IntegrationProfiler:
         job = await self._toolbox.submit_analysis(INTEGRATION_BRANCH, TRACELENS_TOOL, {}, request_id)
         while self._toolbox.tool_status(job) is JobStatus.RUNNING:
             await self._clock.sleep(ANALYSIS_POLL_SECONDS)
-        # A job's status turns final just before its result is pushed to the notebook, so the shares are read a poll
+        # A job's status turns final just before its result is pushed to the blackboard, so the shares are read a poll
         # later, and only when they are this job's.
         await self._clock.sleep(ANALYSIS_POLL_SECONDS)
         found = await self._records.op_shares(head)
@@ -359,7 +359,7 @@ class SessionEvents:
     """Detects the events of one EXPLORE and holds them until the judge's next call.
 
     The integrator's task hands over each round's merge reports with :meth:`note_merges`; :meth:`detect` turns them,
-    the quarantines put in force and the environment changes the ``notebook`` shows since the last tick and the
+    the quarantines put in force and the environment changes the ``blackboard`` shows since the last tick and the
     profile ``profiler`` finished, into events. The head a large merge moved to is profiled at once when the
     ``workload`` profiles a moved head on its merge, else by :meth:`branches_opened_on` it. A quarantine lifted and put
     in force again is a new event; an environment change is one event, however many ticks see it.
@@ -369,13 +369,13 @@ class SessionEvents:
 
     def __init__(
         self,
-        notebook: SnapshotQuery,
+        blackboard: SnapshotQuery,
         decisions: DecisionLog,
         profiler: IntegrationProfiler,
         toolbox: Toolbox,
         workload: Workload,
     ) -> None:
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._decisions = decisions
         self._profiler = profiler
         self._toolbox = toolbox
@@ -469,7 +469,7 @@ class SessionEvents:
     async def _environment(self) -> list[SessionEvent]:
         """The quarantines put in force and the environment changes recorded since the last look, from one read."""
 
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         current = snapshot.quarantined
         new = [quarantine for quarantine in current if _slot(quarantine) not in self._quarantined]
         self._quarantined = frozenset(map(_slot, current))

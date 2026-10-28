@@ -135,8 +135,8 @@ async def test_a_verified_measurement_is_a_succeeded_result_with_its_audit_data(
     (measured,) = result.rounds
     assert measured.phase == "measure" and measured.metrics["output_throughput"] == 5000.0
     assert len(result.attempts) == 1 and scripted.calls == 1
-    notebook_record = await tb.notebook.record(request_id)
-    assert notebook_record.result is not None and notebook_record.result.manifest_sha256 == result.manifest_sha256
+    blackboard_record = await tb.blackboard.record(request_id)
+    assert blackboard_record.result is not None and blackboard_record.result.manifest_sha256 == result.manifest_sha256
 
 
 #: The ready stamps of a real graded test: its warmup round booted the server, its measured round found it ready.
@@ -292,8 +292,8 @@ async def test_infrastructure_failures_end_as_measurement_failed_after_the_retri
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert scripted.calls == 4 and len(result.attempts) == 4 and "node_fault" in (result.failure_reason or "")
     assert len(set(_journal_attempts(r, request_id).values())) == 4
-    notebook_record = await tb.notebook.record(request_id)
-    assert notebook_record.withdrawn_at is None and notebook_record.result == result
+    blackboard_record = await tb.blackboard.record(request_id)
+    assert blackboard_record.withdrawn_at is None and blackboard_record.result == result
 
 
 async def test_an_unclear_failure_is_rerun_once_and_the_rerun_decides(tmp_path: Path, rig) -> None:

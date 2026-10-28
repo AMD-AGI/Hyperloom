@@ -54,9 +54,9 @@ from hyperloom.sandbox.tests.e2b_standin import (
     interpreter_binds,
     unavailable_reason,
 )
-from hyperloom_multibranch.contracts.notebook import Role as NotebookRole, Writer
+from hyperloom_multibranch.contracts.blackboard import Role as BlackboardRole, Writer
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, GrantLimits, LeaseTuning
 from hyperloom_multibranch.toolbox.hosted_toolbox import (
@@ -245,7 +245,7 @@ def _toolbox(
     )
     return build_hosted_toolbox(
         _inputs(service, tmp_path, **changed),
-        LocalNotebook(tmp_path / "notebook", Writer(NotebookRole.TOOLBOX, "toolbox")),
+        LocalBlackboard(tmp_path / "blackboard", Writer(BlackboardRole.TOOLBOX, "toolbox")),
         AcceptanceSetup(FakeRepo(), PointPlanner(point), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path),
         options=options,

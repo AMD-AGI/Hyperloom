@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 
 EXHAUSTED_PREFIX = "EXHAUSTED "

@@ -3,7 +3,7 @@
 
 """The branch roster: which branches the session has, where each started, its K, and why it stopped.
 
-The roster says what is running now; the history of the branch tree is the notebook's lineage, which the roster does
+The roster says what is running now; the history of the branch tree is the blackboard's lineage, which the roster does
 not copy. The branch cap counts specialist branches that are admitted or running, never the integration branch.
 ``MB-roster.json`` is written after every change and read back when a roster is built over a session directory that
 already has one, so the emergency ``final-only`` run carries the dead session's branches instead of writing them away.
@@ -19,8 +19,8 @@ from typing import Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json_strict
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 

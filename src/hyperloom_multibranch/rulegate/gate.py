@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """The rule gate as the one writer of specialist branches: it lands what a judgement decides in the experiment
-repository and the notebook, takes fork and repair requests to the scheduler, and lands or records the forks and
+repository and the blackboard, takes fork and repair requests to the scheduler, and lands or records the forks and
 repairs the scheduler reserved a branch for."""
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ from hyperloom_multibranch.contracts.fork import (
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink, LineageSink
-from hyperloom_multibranch.contracts.notebook.peers import TestRequest
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
+from hyperloom_multibranch.contracts.blackboard.interfaces import JudgementSink, LineageSink
+from hyperloom_multibranch.contracts.blackboard.peers import TestRequest
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, TestRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.regression import CaseRegistry, FixProof, register_case
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 class GateWriter(JudgementSink, LineageSink, CaseRegistry, Protocol):
-    """The gate's handle on the notebook: it writes judgements, the ``SPLIT`` of each fork it lands, and the cases of
+    """The gate's handle on the blackboard: it writes judgements, the ``SPLIT`` of each fork it lands, and the cases of
     the fixes it commits."""
 
 
@@ -80,9 +80,9 @@ class RuleGate:
     """
 
     def __init__(
-        self, notebook: GateWriter, repo: ExperimentRepo, scheduler: ForkAdmissionService, verifier: ResultVerifier
+        self, blackboard: GateWriter, repo: ExperimentRepo, scheduler: ForkAdmissionService, verifier: ResultVerifier
     ) -> None:
-        self._notebook = notebook
+        self._blackboard = blackboard
         self._repo = repo
         self._scheduler = scheduler
         self._verifier = verifier
@@ -106,7 +106,7 @@ class RuleGate:
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)
         elif action is Action.DIAGNOSE:
-            await self._notebook.write_judgement(request.request_id, judgement, Conclusion.DIAGNOSIS_PENDING)
+            await self._blackboard.write_judgement(request.request_id, judgement, Conclusion.DIAGNOSIS_PENDING)
         return action
 
     async def decline(self, request: TestRequest, judgement: Judgement) -> TestRecord:
@@ -132,7 +132,7 @@ class RuleGate:
             else:
                 conclusion = Conclusion.SPLIT_REQUESTED
             self._reserve(admission, _Reserved(request, judgement, reason, fix))
-            await self._notebook.write_judgement(request.request_id, judgement, conclusion)
+            await self._blackboard.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
     async def repair(self, request: TestRequest, judgement: Judgement, intent: Intent, diagnosis: str) -> ForkAdmission:
@@ -142,7 +142,7 @@ class RuleGate:
             rejected = admission.status is AdmissionStatus.REJECTED
             conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
             self._reserve(admission, _Reserved(request, judgement, ""))
-            await self._notebook.write_judgement(request.request_id, judgement, conclusion)
+            await self._blackboard.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
     async def land_split(self, branch: str) -> bool:
@@ -170,14 +170,14 @@ class RuleGate:
             message = f"{request.request_id}: split from {request.branch}: {split.reason}"
             commit = await self._repo.commit(branch, parent, recipe, message)
             try:
-                await register_case(self._notebook, commit, split.fix.candidate.request_id)
-                await self._notebook.write_judgement(
+                await register_case(self._blackboard, commit, split.fix.candidate.request_id)
+                await self._blackboard.write_judgement(
                     request.request_id, split.judgement, Conclusion.SPLIT_COMMITTED, commit, recipe.digest()
                 )
             except Exception:
                 await self._repo.rewind(branch, commit, parent)
                 raise
-            await self._notebook.record_lineage(
+            await self._blackboard.record_lineage(
                 LineageEvent(
                     LineageKind.SPLIT,
                     branch,
@@ -211,8 +211,8 @@ class RuleGate:
         conclusion = Conclusion.COMMITTED_WITH_REPRO if judgement.fixes_correctness else Conclusion.COMMITTED
         try:
             if fix is not None:
-                await register_case(self._notebook, commit, fix.candidate.request_id)
-            await self._notebook.write_judgement(request.request_id, judgement, conclusion, commit, recipe.digest())
+                await register_case(self._blackboard, commit, fix.candidate.request_id)
+            await self._blackboard.write_judgement(request.request_id, judgement, conclusion, commit, recipe.digest())
         except Exception:
             # Whatever kept the judgement out, a commit no judgement names would block the branch for good.
             await self._repo.rewind(request.branch, commit, request.parent_commit)
@@ -224,11 +224,11 @@ class RuleGate:
             for request_id in judgement.request_ids:
                 await self._verifier.reverify(request_id)
         except ResultUnverified:
-            await self._notebook.write_judgement(request.request_id, judgement, Conclusion.UNVERIFIED)
+            await self._blackboard.write_judgement(request.request_id, judgement, Conclusion.UNVERIFIED)
             raise
 
     async def _record(self, request: TestRequest, judgement: Judgement) -> TestRecord:
-        return await self._notebook.write_judgement(request.request_id, judgement, _recorded_as(judgement))
+        return await self._blackboard.write_judgement(request.request_id, judgement, _recorded_as(judgement))
 
 
 __all__ = ["GateWriter", "RuleGate"]

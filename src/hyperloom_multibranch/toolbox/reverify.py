@@ -4,7 +4,7 @@
 """What a recorded result must still say once it is derived again from its verified bundle (design 4.4, L26).
 
 Verifying a bundle proves the recorded hashes name an authentic bundle; it does not prove that the recorded numbers are
-the bundle's. A notebook entry whose throughput was edited and whose hashes were left alone verifies perfectly. So the
+the bundle's. A blackboard entry whose throughput was edited and whose hashes were left alone verifies perfectly. So the
 rounds and the accuracy are derived from the bundle's own files again and every field is compared with the record:
 :func:`first_value_difference` and :func:`first_hash_difference` name the first field that differs, or return ``None``.
 """

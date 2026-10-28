@@ -20,8 +20,8 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
-from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
+from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent, Withdrawal
+from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import (
     Backpressure,
     CancelOutcome,
@@ -30,10 +30,10 @@ from hyperloom_multibranch.contracts.toolbox import (
     Toolbox,
     UnknownTestRequest,
 )
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, intent
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
 
@@ -41,7 +41,7 @@ DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
 
 
-class Notebook:
+class Blackboard:
     """Records what the toolbox writes, in order."""
 
     def __init__(self) -> None:
@@ -77,8 +77,8 @@ def _request(branch: str = "b1", **overrides: object) -> TestRequest:
     return TestRequest(**{**fields, **overrides})
 
 
-def _toolbox(*, notebook: Notebook | None = None, autorun: bool = False, **config: object) -> FakeToolbox:
-    return FakeToolbox(FakeToolboxConfig(**config), notebook=notebook, autorun=autorun)
+def _toolbox(*, blackboard: Blackboard | None = None, autorun: bool = False, **config: object) -> FakeToolbox:
+    return FakeToolbox(FakeToolboxConfig(**config), blackboard=blackboard, autorun=autorun)
 
 
 async def _run_one(box: FakeToolbox, request: TestRequest | None = None) -> TestResult:
@@ -96,8 +96,8 @@ def test_the_fake_is_a_toolbox() -> None:
 
 
 async def test_submit_returns_a_stable_uuid_and_writes_the_request_before_returning() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     first = await box.submit_test(_request())
     assert book.of("request")[0].request_id == first
     assert box.requests[first].request_id == first
@@ -109,8 +109,8 @@ async def test_submit_returns_a_stable_uuid_and_writes_the_request_before_return
 
 
 async def test_a_rejection_raises_with_its_reason_and_writes_nothing() -> None:
-    book = Notebook()
-    box = FakeToolbox(notebook=book, autorun=False, wiring=FakeWiring(parent_exists=lambda commit: commit == "c0"))
+    book = Blackboard()
+    box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(parent_exists=lambda commit: commit == "c0"))
     with pytest.raises(RequestRejected) as raised:
         await box.submit_test(_request(parent_commit="c9"))
     assert raised.value.code == "unknown_parent"
@@ -193,8 +193,8 @@ def _attach():
 
 async def test_more_urgent_tests_run_first() -> None:
     order: list[str] = []
-    book = Notebook()
-    box = FakeToolbox(FakeToolboxConfig(default_k=9, max_parallel_tests=1), notebook=book, autorun=False)
+    book = Blackboard()
+    box = FakeToolbox(FakeToolboxConfig(default_k=9, max_parallel_tests=1), blackboard=book, autorun=False)
     blocker = await box.submit_test(_request(priority=1))  # starts at once: a running test is not preempted
     slow = await box.submit_test(_request(priority=4))
     urgent = await box.submit_test(_request(priority=0))
@@ -250,9 +250,9 @@ async def test_the_global_limit_holds_across_branches() -> None:
 # --- results and attempts ----------------------------------------------------------------------------------------
 
 
-async def test_a_quiet_success_is_complete_and_written_to_the_notebook() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book, noise=QUIET, default_effect=0.02)
+async def test_a_quiet_success_is_complete_and_written_to_the_blackboard() -> None:
+    book = Blackboard()
+    box = _toolbox(blackboard=book, noise=QUIET, default_effect=0.02)
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.failure_class is None
     assert book.of("result") == [result]
@@ -272,8 +272,8 @@ async def test_a_profile_test_reports_where_the_profile_is() -> None:
 
 
 async def test_infra_failure_retries_on_another_node_and_the_submitter_gets_one_result() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     box.script(lambda r: True, [Fate.INFRA, Fate.INFRA, Fate.OK])
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED
@@ -298,8 +298,8 @@ async def test_infra_retries_run_out_as_measurement_failed_never_a_candidate_fai
 
 
 async def test_unclear_failure_reruns_once_and_the_rerun_wins() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     box.script(lambda r: True, [Fate.UNCLEAR, Fate.OK])
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.failure_class is None
@@ -320,8 +320,8 @@ async def _reran_clear(box: FakeToolbox, request: TestRequest | None = None) -> 
 
 
 async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quarantines_it() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book, nodes=("a", "b"))
+    book = Blackboard()
+    box = _toolbox(blackboard=book, nodes=("a", "b"))
     node = await _reran_clear(box)
     assert box.quarantined == set()
     other = ({"a", "b"} - {node}).pop()
@@ -334,8 +334,8 @@ async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quara
 async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_not_quarantine_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book, nodes=("a",))
+    book = Blackboard()
+    box = _toolbox(blackboard=book, nodes=("a",))
     assert box.single_node
     with caplog.at_level("INFO", logger="hyperloom_multibranch.toolbox.toolbox"):
         assert await _reran_clear(box) == "a"
@@ -348,8 +348,8 @@ async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_
 
 
 async def test_an_infra_failure_on_the_only_node_is_counted_and_does_not_quarantine_it() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book, nodes=("a",))
+    book = Blackboard()
+    box = _toolbox(blackboard=book, nodes=("a",))
     box.script(lambda r: True, [Fate.INFRA, Fate.OK])
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.attempts[0].failure_class is FailureClass.INFRA
@@ -370,8 +370,8 @@ async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quaran
 
 
 async def test_an_infra_failure_quarantines_its_node_at_once() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     box.script(lambda r: True, [Fate.INFRA, Fate.OK])
     result = await _run_one(box)
     assert box.quarantined == {result.attempts[0].sandbox.node_name}
@@ -477,8 +477,8 @@ async def test_results_do_not_depend_on_run_order() -> None:
 
 
 async def test_cancel_of_a_queued_test_withdraws_it_and_it_never_runs() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     keep = await box.submit_test(_request())
     drop = await box.submit_test(_request())
     assert await box.cancel(drop) is CancelOutcome.WITHDRAWN
@@ -491,8 +491,8 @@ async def test_cancel_of_a_queued_test_withdraws_it_and_it_never_runs() -> None:
 
 
 async def test_cancel_of_a_running_test_withdraws_it_and_writes_no_result() -> None:
-    book = Notebook()
-    box = FakeToolbox(FakeToolboxConfig(run_delay_s=0.05), notebook=book, autorun=True)
+    book = Blackboard()
+    box = FakeToolbox(FakeToolboxConfig(run_delay_s=0.05), blackboard=book, autorun=True)
     request_id = await box.submit_test(_request())
     assert (await box.queue_state()).running == 1
     assert await box.cancel(request_id) is CancelOutcome.WITHDRAWN
@@ -502,8 +502,8 @@ async def test_cancel_of_a_running_test_withdraws_it_and_writes_no_result() -> N
 
 
 async def test_cancel_of_a_finished_test_changes_nothing_and_unknown_ids_raise() -> None:
-    book = Notebook()
-    box = _toolbox(notebook=book)
+    book = Blackboard()
+    box = _toolbox(blackboard=book)
     result = await _run_one(box)
     assert await box.cancel(result.request_id) is CancelOutcome.FINISHED
     assert book.of("withdrawal") == []
@@ -521,24 +521,24 @@ async def test_autorun_finishes_in_the_background() -> None:
     assert request_id in box.results and (await box.queue_state()).running == 0
 
 
-# --- the real notebook -------------------------------------------------------------------------------------------
+# --- the real blackboard -------------------------------------------------------------------------------------------
 
 
-async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_a_local_notebook(
+async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_a_local_blackboard(
     tmp_path: Path,
 ) -> None:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     box = FakeToolbox(
         FakeToolboxConfig(noise=QUIET),
-        notebook=notebook,
-        wiring=FakeWiring(claims=notebook, records=notebook),
+        blackboard=blackboard,
+        wiring=FakeWiring(claims=blackboard, records=blackboard),
         autorun=False,
     )
     box.script(lambda r: r.branch_id == "flaky", [Fate.INFRA, Fate.OK])
     box.script(lambda r: r.branch_id == "broken", [Fate.CANDIDATE])
     target, action = intent("b1", "c0"), DELTA
-    specialist = LocalNotebook(
-        tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, "specialist", "b1"), clock=FakeClock()
+    specialist = LocalBlackboard(
+        tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, "specialist", "b1"), clock=FakeClock()
     )
     claim = await specialist.acquire(target, action.fingerprint(), ttl_seconds=TTL)
     measured = await box.submit_test(_request(intent_fingerprint=target.fingerprint))
@@ -548,7 +548,7 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     assert await box.cancel(dropped) is CancelOutcome.WITHDRAWN
     await box.drain()
 
-    record = await notebook.record(measured)
+    record = await blackboard.record(measured)
     assert record.result is not None and record.result.validity.value == "succeeded"
     assert record.result.sandbox.node in box.config.nodes
     assert record.result.rounds == box.results[measured].rounds
@@ -557,12 +557,12 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     }
     held = (await specialist.lookup(claim.key, action.fingerprint())).claim
     assert held is None or held.status is ClaimStatus.COMPLETED or held.request_id == measured
-    retried = (await notebook.record(flaky)).result
+    retried = (await blackboard.record(flaky)).result
     assert retried is not None and [a.failure.value if a.failure else None for a in retried.attempts] == ["infra", None]
-    failed = (await notebook.record(broken)).result
+    failed = (await blackboard.record(broken)).result
     assert failed is not None and failed.validity.value == "candidate_failed"
-    assert (await notebook.record(dropped)).withdrawn_at is not None
-    assert {event.node for event in await notebook.quarantined()} == box.quarantined != set()
+    assert (await blackboard.record(dropped)).withdrawn_at is not None
+    assert {event.node for event in await blackboard.quarantined()} == box.quarantined != set()
 
 
 # --- re-verifying a result the fake produced ---------------------------------------------------------------------

@@ -10,9 +10,9 @@ import asyncio
 from pathlib import Path
 
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchNode, CommitNode, LineageView
-from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import BranchNode, CommitNode, LineageView
+from hyperloom_multibranch.contracts.blackboard.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.similarity import (
@@ -48,7 +48,7 @@ class _Repo:
 
 
 class _Session:
-    """The roster, the repository's recipes, and the notebook's lineage of the commits and branch heads."""
+    """The roster, the repository's recipes, and the blackboard's lineage of the commits and branch heads."""
 
     def __init__(self, tmp_path: Path) -> None:
         caps = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)

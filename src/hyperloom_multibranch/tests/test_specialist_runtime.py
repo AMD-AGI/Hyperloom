@@ -15,12 +15,12 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, ClaimStatus, Conclusion, LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, intent
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
@@ -101,7 +101,7 @@ class _Run:
         self._runs.released.append(self.start.branch)
 
 
-class _JudgeFails(LocalNotebook):
+class _JudgeFails(LocalBlackboard):
     async def poll(self, branch: str, cursor: str = ""):
         raise RuntimeError("the inbox is corrupt")
 
@@ -112,19 +112,19 @@ class _Session:
     def __init__(self, root) -> None:
         self.root = root
         self.toolbox = FakeToolbox(
-            FakeToolboxConfig(), notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")), autorun=False
+            FakeToolboxConfig(), blackboard=LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), autorun=False
         )
         self.repo = InMemoryRepo(RECIPE)
-        self.reader = LocalNotebook(root, Writer(Role.OBSERVER, "observer"))
+        self.reader = LocalBlackboard(root, Writer(Role.OBSERVER, "observer"))
         self.gate = RuleGate(
-            LocalNotebook(root, Writer(Role.GATE, "gate")),
+            LocalBlackboard(root, Writer(Role.GATE, "gate")),
             self.repo,
             RecordingScheduler(AdmissionStatus.ACCEPTED),
             RecordingVerifier(),
         )
 
     async def open(self) -> str:
-        scheduler = LocalNotebook(self.root, Writer(Role.SCHEDULER, "scheduler"))
+        scheduler = LocalBlackboard(self.root, Writer(Role.SCHEDULER, "scheduler"))
         start = await self.repo.head(INTEGRATION_BRANCH)
         await scheduler.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=start, recipe_digest=RECIPE.digest())
@@ -133,13 +133,13 @@ class _Session:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=start))
         return start
 
-    def runtime(self, runs, *, notebook=LocalNotebook, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
-        def notebook_for(branch: str) -> LocalNotebook:
-            return notebook(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+    def runtime(self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
+        def blackboard_for(branch: str) -> LocalBlackboard:
+            return blackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
         judging = Judging(self.gate, self.toolbox, InferenceXRule(self.reader, 64))
         pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
-        return SpecialistRuntime(notebook_for, judging, runs, pacing=pacing)
+        return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing)
 
     async def claim(self, key) -> ClaimStatus:
         (found,) = [claim for claim in (await self.reader.snapshot()).claims if claim.key == key]
@@ -170,7 +170,7 @@ async def _until(condition, what: str) -> None:
 
 @pytest.fixture
 async def session(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.open()
     yield session
     await session.toolbox.close()
@@ -506,7 +506,7 @@ async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_clos
     record = {"direction": DIRECTIONS[0], "head": moved, "tried": ["r1"], "why": "blocked_by_tool"}
     record |= {"detail": "start_analysis refused the head's profile", "reopen_if": "the analysis is allowed"}
     entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
-    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
 
     await runtime.start(BRANCH, head)
     await _until(lambda: _any_notice(session, "not restarted"), "the specialist to give up")
@@ -530,7 +530,7 @@ async def test_a_direction_a_running_or_stopped_branch_recorded_exhausted_on_a_h
 
     await runtime.start(BRANCH, head)
     entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
-    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
     await runtime.start("b1", head)
     await runtime.start("next", head)
     await _until(lambda: _true(len(runs.started) == 3), "the first specialists to start")
@@ -555,7 +555,7 @@ async def test_an_exhausted_record_naming_no_session_direction_closes_nothing_an
 
     await runtime.start(BRANCH, head)
     entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
-    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
     await runtime.start("b1", head)
     await runtime.start("next", head)
     await _until(lambda: _true(len(runs.started) == 3), "the specialists to start")
@@ -619,7 +619,7 @@ async def test_crashes_further_apart_than_the_window_do_not_add_up(session):
 
 async def test_a_failed_judge_stops_the_specialist_and_is_not_restarted(session):
     runs = _Runs()
-    runtime = session.runtime(runs, notebook=_JudgeFails)
+    runtime = session.runtime(runs, blackboard=_JudgeFails)
 
     await runtime.start(BRANCH, await session.repo.head(BRANCH))
     await _until(lambda: _any_notice(session, "judging this branch failed"), "the judge to fail")
@@ -647,7 +647,7 @@ async def test_the_claims_a_specialist_holds_are_renewed_until_its_branch_stops(
     runtime = session.runtime(_Runs(), claim_ttl=0.3)
     start = await session.repo.head(BRANCH)
     await runtime.start(BRANCH, start)
-    holder = LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    holder = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
     claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=0.3)
 
     await asyncio.sleep(0.9)
@@ -753,7 +753,9 @@ class _Judged(_Session):
         super().__init__(root)
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(noise=quiet, accuracy_metric=ACCURACY_METRICS[0], effects={FAST.fingerprint(): 0.05})
-        self.toolbox = FakeToolbox(config, notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")), autorun=False)
+        self.toolbox = FakeToolbox(
+            config, blackboard=LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), autorun=False
+        )
 
     async def open(self) -> str:
         start = await super().open()
@@ -762,7 +764,7 @@ class _Judged(_Session):
         )
         ids = [await self.toolbox.submit_test(baseline) for _ in range(3)]
         await self.toolbox.drain()
-        gate = LocalNotebook(self.root, Writer(Role.GATE, "gate"))
+        gate = LocalBlackboard(self.root, Writer(Role.GATE, "gate"))
         await write_inferencex_baseline(gate, start, [await gate.record(request_id) for request_id in ids], 64)
         return start
 
@@ -779,7 +781,7 @@ class _Judged(_Session):
 
 @pytest.fixture
 async def judged(tmp_path):
-    session = _Judged(tmp_path / "notebook")
+    session = _Judged(tmp_path / "blackboard")
     await session.open()
     yield session
     await session.toolbox.close()

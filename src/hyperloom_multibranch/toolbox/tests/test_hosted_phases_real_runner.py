@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Where the time of a hosted test goes, from the shipped runner to the result the notebook stores.
+"""Where the time of a hosted test goes, from the shipped runner to the result the blackboard stores.
 
 The hosted executor runs the real hosted backend over the local sandbox provider, whose runner is the shipped one with the
 real local backend; only ``run_grid`` is a stand-in (``phased_runner_entry``), which spends a scaled-down share of the

@@ -30,8 +30,8 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.llm import CompletionReply
-from hyperloom_multibranch.contracts.notebook import Role
-from hyperloom_multibranch.notebook.rsi.archive import (
+from hyperloom_multibranch.contracts.blackboard import Role
+from hyperloom_multibranch.blackboard.rsi.archive import (
     ARCHIVE_ENV,
     ARCHIVED,
     NO_ARCHIVE,
@@ -39,7 +39,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     WRITE_ONLY_ENV,
     TreeArchive,
 )
-from hyperloom_multibranch.notebook.rsi.frontier import (
+from hyperloom_multibranch.blackboard.rsi.frontier import (
     CANDIDATE_COMPONENT,
     EVIDENCE_COMPONENTS,
     NEAR_BAR_COMPONENT,
@@ -48,8 +48,8 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     STALL_BAR_COMPONENT,
     STALLED_COMPONENT,
 )
-from hyperloom_multibranch.notebook.rsi.ladder import trials
-from hyperloom_multibranch.notebook.rsi.playbook import (
+from hyperloom_multibranch.blackboard.rsi.ladder import trials
+from hyperloom_multibranch.blackboard.rsi.playbook import (
     FALLBACK_KEY,
     H0,
     PLAYBOOK_KEY,
@@ -58,8 +58,8 @@ from hyperloom_multibranch.notebook.rsi.playbook import (
     PlaybookPool,
     replaced,
 )
-from hyperloom_multibranch.notebook.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
-from hyperloom_multibranch.notebook.tools import MENU_TITLE
+from hyperloom_multibranch.blackboard.rsi.session import NO_PLAYBOOK_PLAYED, STOP_AUDIT_REPORT, WRITTEN
+from hyperloom_multibranch.blackboard.tools import MENU_TITLE
 from hyperloom_multibranch.scheduling.explore import PLAYBOOK_FALLBACK_REASON, PLAYBOOK_OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import (

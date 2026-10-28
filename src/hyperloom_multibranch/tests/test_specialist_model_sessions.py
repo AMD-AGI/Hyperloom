@@ -37,7 +37,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
             base=SourceBase(tmp_path / "MB-source", locator=lambda _layout: installed),
             components=("vllm",),
             branch_dir=lambda branch: tmp_path / "MB-branches" / branch,
-            notebook_for=lambda branch: object(),
+            blackboard_for=lambda branch: object(),
         )
 
     sessions = built()
@@ -66,11 +66,13 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_s
     def branch_dir(branch: str) -> Path:
         return tmp_path / "MB-branches" / branch
 
-    def notebook_for(branch: str) -> object:
+    def blackboard_for(branch: str) -> object:
         return object()
 
-    sessions = model_sessions(setup, base=base, components=("vllm",), branch_dir=branch_dir, notebook_for=notebook_for)
-    built = with_agents(sessions, _agent_sessions(), branch_dir=branch_dir, notebook_for=notebook_for)
+    sessions = model_sessions(
+        setup, base=base, components=("vllm",), branch_dir=branch_dir, blackboard_for=blackboard_for
+    )
+    built = with_agents(sessions, _agent_sessions(), branch_dir=branch_dir, blackboard_for=blackboard_for)
     first, second, third = (
         built.factory(SessionStart(branch, "c0", 1, BranchTask(agent="https://example.com/agent.git")))
         for branch in ("a1", "a2", "a3")

@@ -23,9 +23,9 @@ import pytest_asyncio
 from hyperloom.measure.tests.hosted_fixtures import point_yaml, runner_template, spec_context
 from hyperloom.sandbox.card_occupancy import CardGuard, Holder, read_holders
 from hyperloom.sandbox.socket import SandboxUnavailable
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected, WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox import branch_leases, local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
@@ -75,7 +75,7 @@ async def local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         }
         toolbox = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
-            LocalNotebook(session / "notebook", Writer(Role.TOOLBOX, "toolbox")),
+            LocalBlackboard(session / "blackboard", Writer(Role.TOOLBOX, "toolbox")),
             AcceptanceSetup(FakeRepo(), _PointPerBranch(points), IMAGE, WorkloadKind.AGENTX),
             spec_context(session, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(

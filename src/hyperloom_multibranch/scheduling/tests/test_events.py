@@ -17,15 +17,15 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import (
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard.records import (
     BranchProgress,
     EnvironmentChange,
     OpShares,
     QuarantineEvent,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome, QuarantineAction
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome, QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
@@ -119,14 +119,14 @@ def test_each_running_specialist_branch_is_shown_how_far_it_lies_behind_the_inte
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """The two views of a notebook snapshot the events read."""
+    """The two views of a blackboard snapshot the events read."""
 
     quarantined: tuple[QuarantineEvent, ...]
     environment_changes: tuple[EnvironmentChange, ...]
 
 
 class _Health:
-    """The notebook's snapshot as the events read it: the quarantines in force and the environment changes."""
+    """The blackboard's snapshot as the events read it: the quarantines in force and the environment changes."""
 
     def __init__(self) -> None:
         self.events: list[QuarantineEvent] = []
@@ -158,7 +158,7 @@ CLOCK = Clock(now=lambda: 7.0, sleep=_no_wait)
 
 
 class _Shares:
-    """The notebook's op shares by commit, as the TraceLens results put them there, and the records of the tests the
+    """The blackboard's op shares by commit, as the TraceLens results put them there, and the records of the tests the
     toolbox ``requests`` holds."""
 
     def __init__(self, shares: Mapping[str, OpShares] | None = None) -> None:
@@ -337,7 +337,7 @@ class _HeadRecipes:
 
 class _AnalysingToolbox(FakeToolbox):
     """The toolbox module's fake with an analysis route: a TraceLens job that runs until ``finish`` puts its op shares
-    in the notebook; not a placeholder, the fake has no tool jobs of its own."""
+    in the blackboard; not a placeholder, the fake has no tool jobs of its own."""
 
     def __init__(self, shares: _Shares, repo: _HeadRecipes | None = None, **options: Any) -> None:
         super().__init__(wiring=FakeWiring(repo=repo or _HeadRecipes()), **options)  # type: ignore[arg-type]

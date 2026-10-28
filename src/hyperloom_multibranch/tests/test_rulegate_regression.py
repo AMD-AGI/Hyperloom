@@ -18,11 +18,11 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.judgement import Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, LineageEvent, RegressionCase
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, judgement, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, LineageEvent, RegressionCase
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, judgement, result
 from hyperloom_multibranch.rulegate.regression import (
     RESUBMIT_SECONDS,
     FixNotProven,
@@ -61,14 +61,14 @@ def _fixed_by_bounds(*, root: ReproAnswer = REPRODUCED):
 
 
 class _Rig:
-    """A toolbox that runs repro tests, writing to a local notebook, and a runner reading it as the gate."""
+    """A toolbox that runs repro tests, writing to a local blackboard, and a runner reading it as the gate."""
 
     def __init__(self, root, answer=lambda request: NOT_REPRODUCED, verifier=None):
-        self.toolbox = ReproToolbox(LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")), answer)
-        self.notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
+        self.toolbox = ReproToolbox(LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox")), answer)
+        self.blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
         self.verifier = verifier or RecordingVerifier()
         self.sleeps: list[float] = []
-        self.runner = ReproRunner(self.toolbox, self.notebook, self.verifier, polling=Polling(0.5, self._sleep))
+        self.runner = ReproRunner(self.toolbox, self.blackboard, self.verifier, polling=Polling(0.5, self._sleep))
 
     async def _sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
@@ -158,7 +158,7 @@ async def test_a_cancelled_run_takes_its_test_back(tmp_path):
         await running
 
     assert rig.toolbox.cancelled == ["p1"]
-    assert (await rig.notebook.record("p1")).withdrawal_reason == "cancelled by its caller"
+    assert (await rig.blackboard.record("p1")).withdrawal_reason == "cancelled by its caller"
 
 
 class _Session(_Rig):
@@ -168,13 +168,13 @@ class _Session(_Rig):
     def __init__(self, root):
         self.answers = {}
         super().__init__(root, self._answer)
-        self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
+        self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
         self.repo = InMemoryRepo(BASELINE)
-        self.regression = RegressionSet(self.notebook, self.runner, self.repo)
+        self.regression = RegressionSet(self.blackboard, self.runner, self.repo)
 
     async def start(self) -> None:
         await self.scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT))
-        await self.notebook.write_baseline(BaselineRecord(ROOT, {"output_tps": 1000.0}, {}, {}, ("b1", "b2")))
+        await self.blackboard.write_baseline(BaselineRecord(ROOT, {"output_tps": 1000.0}, {}, {}, ("b1", "b2")))
         await self._fix("s1", FIX, OVERFLOW)
         await self._fix("s2", GUARD, NAN)
 
@@ -182,14 +182,14 @@ class _Session(_Rig):
         await self.scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=ROOT, reason="opened"))
         await self.repo.create_branch(branch, ROOT)
         measured = TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, ROOT, change, request_id=f"r-{branch}")
-        await self.toolbox.notebook.write_request(measured)
-        await self.toolbox.notebook.write_result(result(measured.request_id))
+        await self.toolbox.blackboard.write_request(measured)
+        await self.toolbox.blackboard.write_result(result(measured.request_id))
         commit = await self.repo.commit(branch, ROOT, apply(BASELINE, change), "a correctness fix")
         flat = judgement(0.1, (measured.request_id,), verdict=Verdict.FLAT, fixes_correctness=True)
-        await self.notebook.write_judgement(measured.request_id, flat, Conclusion.COMMITTED_WITH_REPRO, commit)
+        await self.blackboard.write_judgement(measured.request_id, flat, Conclusion.COMMITTED_WITH_REPRO, commit)
         repro = TestRequest(TestKind.REPRO, Purpose.REPRO, branch, ROOT, change, attachments=case)
         case_request = await self.toolbox.submit_test(repro)
-        await self.notebook.add_regression_case(RegressionCase(case[0].id, commit, case_request))
+        await self.blackboard.add_regression_case(RegressionCase(case[0].id, commit, case_request))
 
     def _answer(self, request):
         """A case's answer, or what a callable answer makes of the request."""
@@ -203,12 +203,12 @@ class _Session(_Rig):
         return self.toolbox.submitted[2:]
 
     async def prove(self, candidate: TestRequest):
-        return await prove_fix(self.runner, self.notebook, candidate, OOB)
+        return await prove_fix(self.runner, self.blackboard, candidate, OOB)
 
 
 @pytest.fixture
 async def session(tmp_path):
-    session = _Session(tmp_path / "notebook")
+    session = _Session(tmp_path / "blackboard")
     await session.start()
     return session
 
@@ -390,10 +390,10 @@ async def test_a_fix_its_case_does_not_tell_from_its_parent_is_not_proven(sessio
 async def test_a_fix_s_clean_run_is_registered_as_the_case_of_its_commit(session):
     run = await session.runner.run("c1", BOUNDS, OOB, branch="s1")
 
-    case = await register_case(session.notebook, "c2", run.request_id)
+    case = await register_case(session.blackboard, "c2", run.request_id)
 
     assert case == RegressionCase("oob_8k", "c2", run.request_id)
-    assert case in await session.notebook.regression_cases_for("c2")
+    assert case in await session.blackboard.regression_cases_for("c2")
 
 
 @pytest.mark.parametrize("answer", [REPRODUCED, None, ""])
@@ -402,11 +402,11 @@ async def test_only_a_repro_test_whose_case_ran_clean_is_registered(session, ans
     run = await session.runner.run("c1", BOUNDS, OOB, branch="s1")
 
     with pytest.raises(ValueError, match="not a repro test whose case ran clean"):
-        await register_case(session.notebook, "c2", run.request_id)
+        await register_case(session.blackboard, "c2", run.request_id)
 
-    assert [case.case_ref for case in await session.notebook.regression_cases_for("c2")] == ["nan_logits"]
+    assert [case.case_ref for case in await session.blackboard.regression_cases_for("c2")] == ["nan_logits"]
 
 
 async def test_a_performance_test_is_no_case(session):
     with pytest.raises(ValueError, match="r-s1 is not a repro test"):
-        await register_case(session.notebook, "c1", "r-s1")
+        await register_case(session.blackboard, "c1", "r-s1")

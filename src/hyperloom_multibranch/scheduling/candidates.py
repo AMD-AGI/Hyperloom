@@ -37,9 +37,9 @@ from typing import Protocol
 from hyperloom.common.unified_diff import touched_paths
 from hyperloom.contracts.measurement import FailureClass, Validity
 from hyperloom.contracts.recipe import PatchRef, Recipe, diff
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeState
-from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, RecordSearch
+from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, MergeState
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 
 #: How many times a candidate is offered again after a merge test that ended as an infrastructure failure.
@@ -107,8 +107,8 @@ def _merge_base(commit: CommittedCommit, unmerged: Mapping[str, CommittedCommit]
     """The commit a merge of ``commit`` carries its change from: its nearest ancestor that is merged or no specialist
     commit, of ``unmerged`` the specialist commits not merged.
 
-    The notebook answers for the repository's merge base because the integrator records every commit a landed merge
-    carries as merged: one the notebook does not record as merged is on no integration head, and one it does is on
+    The blackboard answers for the repository's merge base because the integrator records every commit a landed merge
+    carries as merged: one the blackboard does not record as merged is on no integration head, and one it does is on
     every head since its merge.
     """
 
@@ -118,7 +118,7 @@ def _merge_base(commit: CommittedCommit, unmerged: Mapping[str, CommittedCommit]
     return base
 
 
-class CandidateNotebook(CommitQuery, RecordSearch, Protocol):
+class CandidateBlackboard(CommitQuery, RecordSearch, Protocol):
     """What :class:`Candidates` reads: the committed commits, and how a candidate's last merge test ended."""
 
 
@@ -127,21 +127,21 @@ class Candidates:
 
     A commit's recipe never changes and a patch's text is fixed by its sha256, so each is read from ``repo`` once:
     the idle merge loop asks on every tick, and both sides of the overlap are changes between commits already read.
-    The notebook keeps only a candidate's latest merge, so the merge tests that ended as infrastructure failures are
+    The blackboard keeps only a candidate's latest merge, so the merge tests that ended as infrastructure failures are
     tallied here as the integrator records each that measured nothing.
     """
 
-    def __init__(self, notebook: CandidateNotebook, repo: ExperimentRepo) -> None:
-        self._notebook = notebook
+    def __init__(self, blackboard: CandidateBlackboard, repo: ExperimentRepo) -> None:
+        self._blackboard = blackboard
         self._repo = repo
         self._recipes: dict[str, Recipe] = {}
         self._patched: dict[str, frozenset[str]] = {}
         self._infra_ended: dict[str, set[str]] = {}
 
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
-        """The committed commits to test on ``head``, in the order the notebook gives them."""
+        """The committed commits to test on ``head``, in the order the blackboard gives them."""
 
-        committed = await self._notebook.committed()
+        committed = await self._blackboard.committed()
         unmerged = {commit.commit_id: commit for commit in committed if commit.merged_into is None}
         offered = []
         for commit in committed:
@@ -177,7 +177,7 @@ class Candidates:
         if last.outcome is not MergeOutcome.PENDING:
             return False
         request_id = str(last.request_id)
-        result = (await self._notebook.record(request_id)).result
+        result = (await self._blackboard.record(request_id)).result
         if result is None:
             return False
         if result.failure_class is FailureClass.INFRA:
@@ -188,7 +188,7 @@ class Candidates:
         """Tally ``request_id``, a merge test that measured nothing, against each commit it ``carried`` if the
         infrastructure ended it."""
 
-        result = (await self._notebook.record(request_id)).result
+        result = (await self._blackboard.record(request_id)).result
         if result is not None and result.failure_class is FailureClass.INFRA:
             for commit in carried:
                 self._infra_ended.setdefault(commit, set()).add(request_id)
@@ -216,4 +216,4 @@ class Candidates:
         return self._recipes[commit]
 
 
-__all__ = ["MERGE_INFRA_RETRIES", "CandidateNotebook", "Candidates", "touched"]
+__all__ = ["MERGE_INFRA_RETRIES", "CandidateBlackboard", "Candidates", "touched"]

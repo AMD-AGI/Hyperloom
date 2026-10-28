@@ -21,7 +21,7 @@ from hyperloom.measure.archive import DirResultArchive, ResultArchive
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.sandbox.socket import SandboxProvider
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.pending_builds import BuildDriver
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup
@@ -160,22 +160,22 @@ def session_archive(archive: ResultArchive | None, directory: Path) -> ResultArc
 
 
 def session_stores(
-    notebook: LocalNotebook, directory: Path, run_id: str, builds: BuildDriver | None = None
+    blackboard: LocalBlackboard, directory: Path, run_id: str, builds: BuildDriver | None = None
 ) -> ToolboxStores:
-    """The submit log and the short-prompt pool below the session directory and the notebook as every port the toolbox
+    """The submit log and the short-prompt pool below the session directory and the blackboard as every port the toolbox
     writes to; ``builds`` drives the native build store when the host configured one (without it no test waits for a
     build)."""
     return ToolboxStores(
         log=SubmissionLog(directory / _SUBMISSIONS, run_id),
         short_prompt_pool=ShortPromptPool(directory / POOL_FILE),
-        sink=notebook,  # type: ignore[arg-type]
-        health=notebook,  # type: ignore[arg-type]
-        claims=notebook,  # type: ignore[arg-type]
-        records=notebook,  # type: ignore[arg-type]
+        sink=blackboard,  # type: ignore[arg-type]
+        health=blackboard,  # type: ignore[arg-type]
+        claims=blackboard,  # type: ignore[arg-type]
+        records=blackboard,  # type: ignore[arg-type]
         builds=builds,
     )
 
 
-def session_tools(tools: Sequence[AsyncTool], notebook: LocalNotebook, directory: Path) -> ToolJobs:
+def session_tools(tools: Sequence[AsyncTool], blackboard: LocalBlackboard, directory: Path) -> ToolJobs:
     """``tools`` as the jobs ``start_analysis`` starts, their results landing below the session's ``tool-results/``."""
-    return ToolJobs(tools, notebook, directory / _TOOL_RESULTS)  # type: ignore[arg-type]
+    return ToolJobs(tools, blackboard, directory / _TOOL_RESULTS)  # type: ignore[arg-type]

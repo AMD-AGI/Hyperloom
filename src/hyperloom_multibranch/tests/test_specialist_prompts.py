@@ -13,8 +13,8 @@ from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
-from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
+from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, InboxItem
+from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
@@ -31,16 +31,16 @@ from hyperloom_multibranch.specialist.prompts import (
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
-from hyperloom_multibranch.contracts.notebook.records import WarmReplay
-from hyperloom_multibranch.notebook.knowledge.warm_start import PATCH_REFERENCE, ReplayReference
-from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
-from hyperloom_multibranch.notebook.tools import FOCUS_LINE, MENU_TITLE, UNFINISHED_TITLE, render_replay
+from hyperloom_multibranch.contracts.blackboard.records import WarmReplay
+from hyperloom_multibranch.blackboard.knowledge.warm_start import PATCH_REFERENCE, ReplayReference
+from hyperloom_multibranch.blackboard.rsi.briefing import ON_HEAD
+from hyperloom_multibranch.blackboard.tools import FOCUS_LINE, MENU_TITLE, UNFINISHED_TITLE, render_replay
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
 TOOLS = (
-    "notebook_branch_log",
-    "notebook_claim",
+    "blackboard_branch_log",
+    "blackboard_claim",
     "start_analysis",
     "worktree_sync",
     "worktree_check",
@@ -49,8 +49,8 @@ TOOLS = (
     "wait_test",
     "poll_inbox",
     "test_result",
-    "notebook_append_branch_log",
-    "notebook_learn",
+    "blackboard_append_branch_log",
+    "blackboard_learn",
     "request_repair",
     "decline_repair",
     "fix_case",
@@ -76,7 +76,7 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert "target_share_pct" in prompt and "w/(1-w)" in prompt
     assert BASH_KILL_SAFETY_PREAMBLE in prompt
     assert "A fixable defect" in prompt and "An inherent trade-off" in prompt
-    assert prompt.index("notebook_learn, citing the candidate") < prompt.index("then call decline_repair")
+    assert prompt.index("blackboard_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
         role_prompt(" \n")
 
@@ -270,7 +270,7 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "this arrived for your branch" in woken and "- judgement r7: r7 measured +2.1%: committed" in woken
     nudge = prompts.nudge_message()
     assert "nothing new for your branch" in nudge
-    assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
+    assert "Nothing arrives on its own" in nudge and "blackboard_brief" in nudge
     assert "decides when your branch stops" not in nudge
 
 
@@ -305,9 +305,9 @@ def test_the_role_says_a_cross_image_lead_is_measured_here_and_its_left_out_file
     prompt = role_prompt(WORKLOAD)
 
     assert "its gain was measured on image sha256:old" in shown and "left out: patch fused.patch" in shown
-    assert "whose gain the brief or notebook_replay says was measured on another image" in prompt
+    assert "whose gain the brief or blackboard_replay says was measured on another image" in prompt
     assert 'Each "left out: patch" entry' in prompt
-    assert "read its text with notebook_replay and reference set to that path" in prompt
+    assert "read its text with blackboard_replay and reference set to that path" in prompt
     assert "then check your synced worktree" in prompt and "port its intent to your head" in prompt
     assert "never replay it as is" in prompt
 
@@ -368,7 +368,7 @@ def test_the_existing_prs_direction_says_how_to_search_check_and_record_a_pr():
     (direction,) = [text for text in DIRECTIONS if text.startswith("Existing PRs and patches:")]
 
     assert "WebSearch" in direction and "WebFetch" in direction
-    assert "record each PR's verdict with notebook_learn" in direction
+    assert "record each PR's verdict with blackboard_learn" in direction
 
 
 def test_a_branch_with_no_candidate_buys_the_missing_number_before_it_stops():
@@ -414,13 +414,13 @@ def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_cla
     prompt = role_prompt(WORKLOAD)
 
     assert 'A "brief" item' in prompt
-    assert prompt.index("call notebook_brief with the head it names") < prompt.index("before your next claim")
+    assert prompt.index("call blackboard_brief with the head it names") < prompt.index("before your next claim")
 
 
 def test_the_role_tests_a_replayable_champion_on_the_head_before_other_directions():
     prompt = role_prompt(WORKLOAD)
 
-    assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+    assert "get its delta with blackboard_replay and test it on your head before other directions" in prompt
     assert f'A champion the brief lists as "{ON_HEAD}" is in your head already: build on it' in prompt
 
 

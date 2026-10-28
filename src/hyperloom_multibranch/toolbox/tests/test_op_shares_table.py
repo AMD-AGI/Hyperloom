@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.records import MAX_OP_SHARES
+from hyperloom_multibranch.contracts.blackboard.records import MAX_OP_SHARES
 from hyperloom_multibranch.toolbox.tools import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import _copy_back
 from hyperloom_multibranch.toolbox.tools.op_shares import (

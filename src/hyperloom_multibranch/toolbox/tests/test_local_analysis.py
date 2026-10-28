@@ -20,9 +20,9 @@ from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _point
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.acceptance import check_kind
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.local_hosted import (
@@ -55,24 +55,24 @@ def _attachments_of(kind: TestKind) -> tuple[AttachmentRef, ...]:
 class Local:
     stack: Stack
     toolbox: LocalHostedToolbox
-    notebook: LocalNotebook
+    blackboard: LocalBlackboard
     session: Path
     tracelens: _Analysis
 
     async def profile_test(self, location: str = LOCATION, branch: str = "b1") -> str:
-        """A PROFILE test of ``branch`` on its head commit that left ``location``, as the notebook holds it."""
+        """A PROFILE test of ``branch`` on its head commit that left ``location``, as the blackboard holds it."""
         request = replace(req(branch, purpose=Purpose.PROFILE, kind=TestKind.PROFILE), request_id="p1")
-        await self.notebook.write_request(request)
+        await self.blackboard.write_request(request)
         done = TestResult(request_id="p1", validity=Validity.SUCCEEDED, profile_location=location)
-        await self.notebook.write_result(done)
+        await self.blackboard.write_result(done)
         return "p1"
 
 
-def _toolbox(tmp_path: Path, notebook: LocalNotebook, repo: FakeRepo, **options: Any) -> LocalHostedToolbox:
+def _toolbox(tmp_path: Path, blackboard: LocalBlackboard, repo: FakeRepo, **options: Any) -> LocalHostedToolbox:
     session = tmp_path / "session"
     return build_local_toolbox(
         LocalSession(session, "run-1", range(2)),
-        notebook,
+        blackboard,
         AcceptanceSetup(repo, PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
         spec_context(tmp_path, blob_root=str(session / "hosted" / "blobs")),
         options=LocalOptions(**options),
@@ -86,23 +86,23 @@ def _shares(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 async def local(tmp_path: Path) -> AsyncIterator[Local]:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     repo = FakeRepo()
     repo.heads["b1"] = PARENT
     tracelens = _Analysis("tracelens")
-    toolbox = _toolbox(tmp_path, notebook, repo, tools=[tracelens])
+    toolbox = _toolbox(tmp_path, blackboard, repo, tools=[tracelens])
     await toolbox.start()
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w38")
     register_specialist_tools(
         server,
         toolbox=toolbox,
-        notebooks=lambda b: LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, b, b)),
+        blackboards=lambda b: LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, b, b)),
         options=SpecialistToolOptions(analysis=toolbox, toolbox_loop=asyncio.get_running_loop()),
     )
     server.start()
     try:
         stack = Stack(None, toolbox._tools, None, {}, server, McpSpecialistTokens(server))  # type: ignore[arg-type]
-        yield Local(stack, toolbox, notebook, tmp_path / "session", tracelens)
+        yield Local(stack, toolbox, blackboard, tmp_path / "session", tracelens)
     finally:
         server.stop()
         await toolbox.close()
@@ -116,7 +116,7 @@ async def test_a_specialist_analyses_the_trace_of_its_profile_test_on_the_real_l
     await local.toolbox._tools.wait(job)  # type: ignore[union-attr]
     (request,) = local.tracelens.requests
     assert request.params["trace_input"] == str((local.session / LOCATION).resolve())
-    page = await LocalNotebook(local.notebook.root, Writer(Role.SPECIALIST_RUNTIME, "b1", "b1")).poll("b1")
+    page = await LocalBlackboard(local.blackboard.root, Writer(Role.SPECIALIST_RUNTIME, "b1", "b1")).poll("b1")
     assert [(item.kind.value, item.pointer) for item in page.items if item.pointer == job] == [("tool_result", job)]
 
 
@@ -173,7 +173,7 @@ async def test_a_trace_location_that_leaves_the_session_is_refused(local: Local)
 async def test_a_profile_test_without_a_trace_location_is_refused_by_name(local: Local) -> None:
     profile = await local.profile_test()
     bare = tuple(
-        replace(r, result=replace(r.result, profile_location="")) for r in await local.notebook.profiles(PARENT)
+        replace(r, result=replace(r.result, profile_location="")) for r in await local.blackboard.profiles(PARENT)
     )
 
     async def profiles(commit: str) -> Any:
@@ -185,8 +185,8 @@ async def test_a_profile_test_without_a_trace_location_is_refused_by_name(local:
 
 
 async def test_the_default_options_serve_every_analysis_tool(tmp_path: Path) -> None:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, notebook, FakeRepo())
+    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox(tmp_path, blackboard, FakeRepo())
     try:
         assert toolbox._tools is not None
         assert toolbox._tools.tool_names == ("kernel_tune", "roofline", "tracelens", "upstream_pr_search")

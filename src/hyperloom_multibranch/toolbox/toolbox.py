@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real toolbox: acceptance, queue, attempts, quarantine and results into the notebook (design 4.5, 4.17).
+"""The real toolbox: acceptance, queue, attempts, quarantine and results into the blackboard (design 4.5, 4.17).
 
-``submit_test`` accepts synchronously: when it returns the request is in the submit log, in the notebook (its request
+``submit_test`` accepts synchronously: when it returns the request is in the submit log, in the blackboard (its request
 row, with the claim handed over) and in the queue. Execution is behind the :class:`~.attempts.Executor` seam, so the
 fake executor and the hosted one run the same queue and retry code. The outcome of a test is logged before it is
-written to the notebook and settled after, so a crash loses neither a request nor a result and renumbers nothing.
+written to the blackboard and settled after, so a crash loses neither a request nor a result and renumbers nothing.
 """
 
 from __future__ import annotations
@@ -28,14 +28,14 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
-from hyperloom_multibranch.contracts.notebook.interfaces import (
+from hyperloom_multibranch.contracts.blackboard.interfaces import (
     ClaimLost,
     ClaimService,
     ConflictingWrite,
     RecordSearch,
     UnknownRequest,
 )
-from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ClaimKey, Withdrawal
+from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ClaimKey, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import (
     BranchLease,
     CancelOutcome,
@@ -97,7 +97,7 @@ def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
 
 @dataclass(frozen=True)
 class ToolboxStores:
-    """Where the toolbox keeps what it must not lose: the submit log and the notebook's ports.
+    """Where the toolbox keeps what it must not lose: the submit log and the blackboard's ports.
 
     ``sink`` takes the requests, results and withdrawals, ``health`` holds the quarantine list, ``claims`` hands the
     claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
@@ -325,7 +325,7 @@ class RealToolbox:
         """Run acceptance on ``request`` as :meth:`submit_test` does, and accept nothing.
 
         Raises :class:`RequestRejected` for the check that refuses it; nothing is queued, logged or written to the
-        notebook either way. The queue's own checks (branch listed, backpressure) are left out: they say when a test
+        blackboard either way. The queue's own checks (branch listed, backpressure) are left out: they say when a test
         may start, not whether it may run.
         """
 
@@ -357,18 +357,18 @@ class RealToolbox:
         raise TestWithdrawn(request_id, str(entry.outcome["withdrawal"]))
 
     async def reverify(self, request_id: str) -> None:
-        """Check the notebook's result of ``request_id`` against the evidence of the attempt that made it (L26).
+        """Check the blackboard's result of ``request_id`` against the evidence of the attempt that made it (L26).
 
         Fails closed: raises :class:`ResultUnverified` when there is no record, no result or no manifest hash to check
         it by; otherwise what the executor raises.
         """
 
         if self._records is None:
-            raise ResultUnverified(request_id, "the toolbox reads no notebook records")
+            raise ResultUnverified(request_id, "the toolbox reads no blackboard records")
         try:
             record = await self._records.record(request_id)
         except UnknownRequest:
-            raise ResultUnverified(request_id, "the notebook holds no record of this request") from None
+            raise ResultUnverified(request_id, "the blackboard holds no record of this request") from None
         result = record.result
         if result is None:
             raise ResultUnverified(request_id, "the record holds no result")
@@ -415,7 +415,7 @@ class RealToolbox:
         """Start an asynchronous tool (profile, roofline, build, ...) for a branch; returns its job id at once.
 
         Tool jobs are not tests: they take no slot of K and write no test record. Their result reaches the branch's
-        inbox through the notebook, and a stopped branch's running jobs are cancelled with :meth:`cancel_branch`.
+        inbox through the blackboard, and a stopped branch's running jobs are cancelled with :meth:`cancel_branch`.
         """
 
         if self._tools is None:
@@ -448,7 +448,7 @@ class RealToolbox:
 
         The commit of ``tracelens`` and ``roofline`` is the head of the branch in the experiment repository, read here at
         submission; it is never taken from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit,
-        whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the notebook's record
+        whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the blackboard's record
         of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
         cannot be spared.
         """
@@ -514,7 +514,7 @@ class RealToolbox:
         self._pump()
 
     async def tick(self) -> None:
-        """One round of housekeeping: renew the claims of live tests and retry outcomes the notebook refused."""
+        """One round of housekeeping: renew the claims of live tests and retry outcomes the blackboard refused."""
 
         await self.renew_claims()
         await self._housekeeping()
@@ -555,7 +555,7 @@ class RealToolbox:
         The recipe, not the commit, is the key: a merge commit whose recipe is its source's has the same profile. An
         entry logged before the log recorded digests is matched by its commit and delta, as then. Read from the log,
         never from a set of its own, so a restarted toolbox answers as the one before it did. A profile that failed, was
-        withdrawn or was aborted covers nothing, and so does one the log knows only as settled in the notebook with no
+        withdrawn or was aborted covers nothing, and so does one the log knows only as settled in the blackboard with no
         outcome of its own. :meth:`submit_test` calls this under the lock that also logs the accepted request, so two
         submits of one profile cannot both pass.
         """
@@ -606,7 +606,7 @@ class RealToolbox:
             return False
         try:
             record = await self._records.record(entry.request_id)
-        except UnknownRequest:  # logged but the notebook never heard of it: the crash came between the two writes
+        except UnknownRequest:  # logged but the blackboard never heard of it: the crash came between the two writes
             return False
         return record.result is not None or record.withdrawn_at is not None
 
@@ -716,7 +716,7 @@ class RealToolbox:
         await self._write_outcome(entry)
 
     async def _write_outcome(self, entry: LogEntry) -> None:
-        """Write the logged outcome to the notebook and settle it; an outcome the notebook refuses stays unsettled and
+        """Write the logged outcome to the blackboard and settle it; an outcome the blackboard refuses stays unsettled and
         is retried by :meth:`tick` and the next start."""
 
         outcome = entry.outcome or {}
@@ -727,10 +727,10 @@ class RealToolbox:
                 else:
                     await self._sink.write_result(TestResult.from_document(outcome["result"]))
             except ConflictingWrite:
-                break  # the notebook already holds another final state for this request; there is nothing to write
+                break  # the blackboard already holds another final state for this request; there is nothing to write
             except Exception:
                 logger.warning(
-                    "the notebook refused the outcome of %s (try %d)", entry.request_id, attempt + 1, exc_info=True
+                    "the blackboard refused the outcome of %s (try %d)", entry.request_id, attempt + 1, exc_info=True
                 )
                 await asyncio.sleep(0)
                 continue

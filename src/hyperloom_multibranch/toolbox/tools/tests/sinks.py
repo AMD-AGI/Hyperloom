@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook.records import BuildNotice, ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 
 

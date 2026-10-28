@@ -10,10 +10,10 @@ import pytest
 
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
-from hyperloom_multibranch.contracts.notebook import Role
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
+from hyperloom_multibranch.contracts.blackboard import Role
+from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus, DedupStatus
 from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, RequestRejected, UnknownTestRequest
-from hyperloom_multibranch.notebook.tests.factories import TTL, intent
+from hyperloom_multibranch.blackboard.tests.factories import TTL, intent
 from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -40,13 +40,13 @@ def _gated() -> ScriptedExecutor:
 
 
 async def _record(rig, request_id: str):
-    return await rig.notebook.record(request_id)
+    return await rig.blackboard.record(request_id)
 
 
-# --- results and the notebook -----------------------------------------------------------------------------------
+# --- results and the blackboard -----------------------------------------------------------------------------------
 
 
-async def test_a_measured_test_is_written_to_the_notebook_as_a_result(tmp_path: Path) -> None:
+async def test_a_measured_test_is_written_to_the_blackboard_as_a_result(tmp_path: Path) -> None:
     rig = build(tmp_path)
     request_id = await rig.toolbox.submit_test(req())
     await rig.toolbox.drain()
@@ -60,7 +60,7 @@ async def test_a_measured_test_is_written_to_the_notebook_as_a_result(tmp_path: 
 
 async def test_the_claim_is_carried_by_the_request_renewed_and_completed_by_the_result(tmp_path: Path) -> None:
     rig = build(tmp_path, executor=_gated())
-    specialist = rig.open_notebook(Role.SPECIALIST_RUNTIME, "b1")
+    specialist = rig.open_blackboard(Role.SPECIALIST_RUNTIME, "b1")
     target, action = intent("b1", PARENT), delta()
     claim = await specialist.acquire(target, action.fingerprint(), ttl_seconds=TTL)
     request_id = await rig.toolbox.submit_test(req(intent=target.fingerprint, change=action))
@@ -83,7 +83,7 @@ async def test_a_request_whose_claim_is_not_held_is_refused_and_withdrawn_and_it
     rig = build(tmp_path)
     with pytest.raises(RequestRejected, match="claim"):
         await rig.toolbox.submit_test(req(intent="nobody-claimed-this"))
-    state = rig.notebook._state()
+    state = rig.blackboard._state()
     (lost,) = state.withdrawals
     assert lost == rig.toolbox._log.request_id("b1", 1)
     assert await rig.toolbox.submit_test(req()) == rig.toolbox._log.request_id("b1", 2)
@@ -136,11 +136,11 @@ async def test_backpressure_refuses_the_submit_and_writes_nothing(tmp_path: Path
     await settle()
     await rig.toolbox.submit_test(req(server_args="--b"))
     await rig.toolbox.submit_test(req(server_args="--c"))
-    written = len(rig.notebook._state().requests)
+    written = len(rig.blackboard._state().requests)
     with pytest.raises(Backpressure) as refused:
         await rig.toolbox.submit_test(req(server_args="--d"))
     assert (refused.value.queued, refused.value.limit) == (2, 2)
-    assert len(rig.notebook._state().requests) == written
+    assert len(rig.blackboard._state().requests) == written
     await rig.toolbox.submit_test(req("b2", server_args="--e"))  # another branch is unaffected
     executor.gate.set()  # type: ignore[union-attr]
     await rig.toolbox.drain()
@@ -174,7 +174,7 @@ async def test_an_unclear_failure_is_rerun_on_another_node_and_one_that_did_not_
     assert record.result is not None and record.result.validity.value == "succeeded"
     assert [(a.node, a.failure and a.failure.value) for a in record.result.attempts] == [("n1", "infra"), ("n2", None)]
     assert executor.jobs[1].avoid_nodes == ("n1",) and executor.jobs[1].attempt == 2
-    assert await rig.notebook.quarantined() == ()
+    assert await rig.blackboard.quarantined() == ()
     assert rig.toolbox.quarantined == frozenset()
 
 
@@ -185,7 +185,7 @@ async def test_a_second_unclear_failure_that_did_not_reproduce_quarantines_its_n
     for flag in ("--a", "--b"):
         await rig.toolbox.submit_test(req(server_args=flag))
         await rig.toolbox.drain()
-    assert [event.node for event in await rig.notebook.quarantined()] == ["n1"]
+    assert [event.node for event in await rig.blackboard.quarantined()] == ["n1"]
     assert rig.toolbox.quarantined == {"n1"}
 
 
@@ -199,7 +199,7 @@ async def test_unclear_failures_that_did_not_reproduce_on_different_nodes_quaran
         await rig.toolbox.submit_test(req(branch))
         await rig.toolbox.drain()
     assert [job.attempt for job in executor.jobs] == [1, 2, 1, 2]
-    assert await rig.notebook.quarantined() == ()
+    assert await rig.blackboard.quarantined() == ()
 
 
 async def test_an_infrastructure_failure_quarantines_its_node_at_once(tmp_path: Path) -> None:
@@ -207,7 +207,7 @@ async def test_an_infrastructure_failure_quarantines_its_node_at_once(tmp_path: 
     rig = build(tmp_path, executor=executor)
     await rig.toolbox.submit_test(req())
     await rig.toolbox.drain()
-    assert [event.node for event in await rig.notebook.quarantined()] == ["n1"]
+    assert [event.node for event in await rig.blackboard.quarantined()] == ["n1"]
 
 
 async def test_an_unclear_failure_that_repeats_is_the_candidates_failure(tmp_path: Path) -> None:
@@ -221,7 +221,7 @@ async def test_an_unclear_failure_that_repeats_is_the_candidates_failure(tmp_pat
     assert len(executor.jobs) == 2, "an unclear failure is rerun once, not more"
     assert record.result is not None
     assert (record.result.validity.value, record.result.failure.value) == ("candidate_failed", "unclear")  # type: ignore[union-attr]
-    assert await rig.notebook.quarantined() == ()
+    assert await rig.blackboard.quarantined() == ()
 
 
 async def test_a_candidate_failure_is_final_without_a_rerun(tmp_path: Path) -> None:
@@ -245,9 +245,9 @@ async def test_infra_failures_retry_up_to_the_limit_then_measurement_failed_is_s
     assert len(executor.jobs) == 4, "one try and three retries"
     record = await _record(rig, request_id)
     assert record.result is not None and record.result.validity is Validity.MEASUREMENT_FAILED
-    assert record.withdrawn_at is None and request_id not in rig.notebook._state().withdrawals
+    assert record.withdrawn_at is None and request_id not in rig.blackboard._state().withdrawals
     assert rig.toolbox._log.get(request_id).settled  # type: ignore[union-attr]
-    assert {event.node for event in await rig.notebook.quarantined()} == {"n1", "n2", "n3", "n4"}
+    assert {event.node for event in await rig.blackboard.quarantined()} == {"n1", "n2", "n3", "n4"}
 
 
 async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not_call_it_tested(
@@ -255,7 +255,7 @@ async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not
 ) -> None:
     executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, "n1", "pull failed")])
     rig = build(tmp_path, executor=executor)
-    specialist = rig.open_notebook(Role.SPECIALIST_RUNTIME, "b1")
+    specialist = rig.open_blackboard(Role.SPECIALIST_RUNTIME, "b1")
     target, action = intent("b1", PARENT), delta()
     claim = await specialist.acquire(target, action.fingerprint(), ttl_seconds=TTL)
     request_id = await rig.toolbox.submit_test(req(intent=target.fingerprint, change=action))
@@ -266,7 +266,7 @@ async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not
     assert answer.claim is None, "the claim was released, not held or completed"
     assert answer.status is not DedupStatus.TESTED and answer.status is not DedupStatus.IN_PROGRESS
     await rig.toolbox.tick()
-    assert len(rig.notebook._state().results) == 1, "written once, never again"
+    assert len(rig.blackboard._state().results) == 1, "written once, never again"
 
 
 async def test_an_infra_failure_then_success_is_the_result(tmp_path: Path) -> None:
@@ -397,8 +397,8 @@ async def test_cancelling_a_branchs_tool_jobs_leaves_its_tests_queued_and_runnin
     tool.block = asyncio.Event()
     executor, jobs = _gated(), []
 
-    def tools(notebook):
-        jobs.append(ToolJobs([tool], notebook, tmp_path / "results"))
+    def tools(blackboard):
+        jobs.append(ToolJobs([tool], blackboard, tmp_path / "results"))
         return jobs[0]
 
     rig = build(tmp_path, executor=executor, policy=K1, tools=tools)
@@ -455,12 +455,12 @@ async def test_what_the_executor_names_comes_back_as_the_reason(tmp_path: Path) 
     assert _unverified(raised) == "rounds[0].metrics.output_tps: recorded 1, the bundle has 2"
 
 
-async def test_a_request_the_notebook_never_heard_of_is_unverified(tmp_path: Path) -> None:
+async def test_a_request_the_blackboard_never_heard_of_is_unverified(tmp_path: Path) -> None:
     executor = ScriptedExecutor()
     rig = build(tmp_path, executor=executor)
     with pytest.raises(ResultUnverified) as raised:
         await rig.toolbox.reverify("nope")
-    assert _unverified(raised) == "the notebook holds no record of this request"
+    assert _unverified(raised) == "the blackboard holds no record of this request"
     assert executor.verified == []
 
 
@@ -487,9 +487,9 @@ async def test_a_result_without_a_manifest_hash_is_unverified(tmp_path: Path) ->
     assert executor.verified == []
 
 
-async def test_a_toolbox_without_a_notebook_to_read_is_unverified(tmp_path: Path) -> None:
+async def test_a_toolbox_without_a_blackboard_to_read_is_unverified(tmp_path: Path) -> None:
     rig = build(tmp_path)
     rig.toolbox._records = None
     with pytest.raises(ResultUnverified) as raised:
         await rig.toolbox.reverify("any")
-    assert _unverified(raised) == "the toolbox reads no notebook records"
+    assert _unverified(raised) == "the toolbox reads no blackboard records"

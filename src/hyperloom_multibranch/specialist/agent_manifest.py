@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
-from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 
 #: The field that names a file in the agent's checkout, in every part of the manifest that reads one.
 _PATH_FIELD = "path"

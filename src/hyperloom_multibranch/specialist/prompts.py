@@ -31,7 +31,7 @@ from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
+from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.contracts.sources import NativeTree
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
@@ -39,7 +39,7 @@ from hyperloom_multibranch.specialist.following import REROOT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
 
-#: Branch-log entries a launch prompt shows; the specialist reads further back with notebook_branch_log.
+#: Branch-log entries a launch prompt shows; the specialist reads further back with blackboard_branch_log.
 RECENT_ENTRIES = 20
 #: Characters of one shown entry; a longer one is cut, its id says where to read it whole.
 ENTRY_CHARS = 400
@@ -77,12 +77,12 @@ _ENTRY = "- [{entry_id}] {kind}{tests}: {content}"
 _WAKE = """\
 Since your last turn ended, this arrived for your branch:
 {items}
-Read what bears on your work (test_result, notebook_brief) and carry on from where you stopped."""
+Read what bears on your work (test_result, blackboard_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _MOVED = "Since your last turn ended, the integration head moved."
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
-comes only when the integration head moves, and no one hands your branch a new direction, so read notebook_brief for \
+comes only when the integration head moves, and no one hands your branch a new direction, so read blackboard_brief for \
 your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
 direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
 direction is done on this head, take another of the session's directions. If no candidate clears the bar, buy the \
@@ -106,9 +106,9 @@ Your last session ended idle ({reason}); your branch goes on in this same conver
 {worktree}
 {integration}
 {arrived}
-Act on what changed. If nothing did, read notebook_brief for your head and test the next source change in your \
+Act on what changed. If nothing did, read blackboard_brief for your head and test the next source change in your \
 direction, or take another of the session's directions: sessions that end with nothing to test stop your branch."""
-_INTEGRATION_MOVED = "The integration head moved from {seen} to {now}; read notebook_brief for what it took in."
+_INTEGRATION_MOVED = "The integration head moved from {seen} to {now}; read blackboard_brief for what it took in."
 _INTEGRATION_STILL = "The integration head is still {now}."
 _IDLE_ARRIVED = "Since your last turn ended, this arrived for your branch:\n{items}"
 _IDLE_NOTHING = "Nothing arrived for your branch since your last turn ended."
@@ -157,9 +157,9 @@ branch log current all the same: a new conversation starts from it if this one i
 
 Up to K of your tests may be running at once. K is a ceiling, not a target: submit only candidates that the profile \
 and your analysis say can clear the session's bar, never a test just to fill a slot.
-1. Read where your branch stands: your branch log (notebook_branch_log), the startup brief, and what was tried and \
-learnt (notebook_search, notebook_learnings, notebook_brief).
-2. Choose a direction from your branch head's own state, starting from where its GPU time goes: notebook_brief lists \
+1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
+learnt (blackboard_search, blackboard_learnings, blackboard_brief).
+2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
 a commit's ceilings once its operator shares are known. A profile is heavy, a full test and an analysis, and one per \
 commit serves every branch. Profile the session's root only while no brief lists ceilings for it. Profile a later \
 head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
@@ -182,7 +182,7 @@ choose as you would without it. A granted claim's reply says what your direction
 Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer: \
 config for server arguments, environment variables and other settings, kernel when the change adds or replaces a GPU \
 kernel (a Triton, HIP or CK kernel, a fused kernel) or a kernel's tuned table, and source for any other code change. \
-For a source or kernel intent on a commit with operator shares, also give notebook_claim \
+For a source or kernel intent on a commit with operator shares, also give blackboard_claim \
 the target's share of GPU time on that commit (target_share_pct), the summed share of the operators it speeds up: \
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, its ceiling is below the session's bar, or another branch is testing it \
@@ -197,10 +197,10 @@ to test. When your change adds a code path, put a one-time log line on the path 
 flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
 measured nothing. Submit the delta worktree_patch returns as it is: for a component new on your head it names the \
 upstream commit already, and you set them only when its reply carries a note saying so; never set upstream_ref or \
-upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief that the integration head does not hold: get its delta with notebook_replay and test it on your head before other \
-directions. A lead whose gain the brief or notebook_replay says was measured on another image is \
+upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief that the integration head does not hold: get its delta with blackboard_replay and test it on your head before other \
+directions. A lead whose gain the brief or blackboard_replay says was measured on another image is \
 trusted only once your own test on your head measures it. Each "left out: patch" entry is a patch that did not come \
-with it: read its text with notebook_replay and reference set to that path, then check your synced worktree, built \
+with it: read its text with blackboard_replay and reference set to that path, then check your synced worktree, built \
 from this image's upstream, for its change already; if missing, port its intent to your head with worktree_patch and test it. Any other "left out:" entry is a kernel artifact built for \
 another image: never replay it as is, tune your own on your head. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
@@ -226,14 +226,14 @@ says such a build is ready and the test queues for cards, or that it failed on t
 asks anything of you. A test whose build your change broke ends candidate_failed with a compile_error and the compiler's \
 excerpt: fix the change. A submission refused as build_after_deadline would end past your branch's deadline: do not \
 resubmit it; test a change that needs no new build instead. A tool reply can end with a block headed "New for your branch since your last call:": \
-it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
+it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call blackboard_brief with the head it names and \
 reconsider your direction before your next claim.
 6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \
 never from figures other branches quote: a test result holds raw rounds, and your parent may not be the root. After \
-every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
+every result, write to your branch log (blackboard_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
-to notebook_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
+to blackboard_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
 (lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
 longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
 
@@ -389,7 +389,7 @@ where the model needs them per head or per channel, a kernel path with a numeric
 fail at a limit. Call request_repair with the root cause and the repair. A new branch, cut at the candidate's parent, \
 starts from its change and your diagnosis; you go on on your branch. An intent is repaired once per commit.
 - An inherent trade-off is one where the gain comes from the defect itself: a lower precision that costs accuracy \
-whatever the scales, a P50 gain bought with P90. Write the lesson with notebook_learn, citing the candidate in \
+whatever the scales, a P50 gain bought with P90. Write the lesson with blackboard_learn, citing the candidate in \
 request_ids, then call decline_repair; it is refused until such a learning exists.
 
 A correctness fix removes a defect your branch head shows (wrong or failed outputs, a crash, a hang). It counts only \

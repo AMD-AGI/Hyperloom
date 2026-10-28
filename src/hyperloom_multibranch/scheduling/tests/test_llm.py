@@ -3,7 +3,7 @@
 
 """The production completion: it returns the reply text with its tokens, cached ones apart, and their cost from the
 price sheet, refuses a model the sheet cannot price, and turns every transport failure into one error; a recorded
-completion writes what each reply cost to the notebook as the scheduler's own spend.
+completion writes what each reply cost to the blackboard as the scheduler's own spend.
 
 ``aanthropic_completion`` is the network boundary, so these tests replace it in place.
 """
@@ -17,8 +17,8 @@ from claude_agent_sdk import ClaudeSDKError
 from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage, LlmUsageRecord
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.scheduling import llm
 
 MODEL = "claude-sonnet-5-5"

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The wiring of the toolbox integration test: the real toolbox, notebook, repository, rule gate and MCP service.
+"""The wiring of the toolbox integration test: the real toolbox, blackboard, repository, rule gate and MCP service.
 
 Nothing here is faked. :class:`Variant` names the only two things that differ between the CPU and the GPU variant: the
 planner (the real ``HostedPlanner``, in the CPU variant wrapped so that the fake runner is told what to report) and the
@@ -27,10 +27,10 @@ from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, Packa
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.points import CanonicalMeasurement
 from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkRequest, RepairRequest
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.toolbox.local_hosted import (
@@ -92,12 +92,12 @@ class Stack:
     server: McpServer
     tokens: McpSpecialistTokens
     gate: RuleGate
-    gate_notebook: LocalNotebook
+    gate_blackboard: LocalBlackboard
     blobs: LocalBlobStore
     baseline_commit: str
 
-    def specialist_notebook(self, branch: str) -> LocalNotebook:
-        return LocalNotebook(self.root / "notebook", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+    def specialist_blackboard(self, branch: str) -> LocalBlackboard:
+        return LocalBlackboard(self.root / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
 
 class Specialist:
@@ -141,12 +141,12 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
     session = root / "session"
     repo = GitExperimentRepo(root / "experiments.git", variant.spec.blobs)
     await repo.init_root(baseline)
-    notebook = LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    blackboard = LocalBlackboard(root / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
     compiler = EnvironmentCompiler(variant.spec.blobs, variant.image_digest, variant.locator)
     planner = variant.wrap_planner(HostedPlanner(compiler, variant.canonical, root / "points"))
     toolbox = build_local_toolbox(
         LocalSession(session, "w15", variant.cards),
-        notebook,
+        blackboard,
         AcceptanceSetup(repo, planner, variant.image_digest),
         variant.spec,
         options=LocalOptions(
@@ -161,18 +161,20 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
     register_specialist_tools(
         server,
         toolbox=toolbox,
-        notebooks=lambda branch: LocalNotebook(root / "notebook", Writer(Role.SPECIALIST_RUNTIME, branch, branch)),
+        blackboards=lambda branch: LocalBlackboard(
+            root / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch)
+        ),
         options=SpecialistToolOptions(analysis=toolbox),
     )
-    gate_notebook = LocalNotebook(root / "notebook", Writer(Role.GATE, "gate"))
+    gate_blackboard = LocalBlackboard(root / "blackboard", Writer(Role.GATE, "gate"))
     stack = Stack(
         root,
         toolbox,
         repo,
         server,
         McpSpecialistTokens(server),
-        RuleGate(gate_notebook, repo, NoScheduler(), toolbox),
-        gate_notebook,
+        RuleGate(gate_blackboard, repo, NoScheduler(), toolbox),
+        gate_blackboard,
         variant.spec.blobs,  # type: ignore[arg-type]
         await repo.head(INTEGRATION_BRANCH),
     )

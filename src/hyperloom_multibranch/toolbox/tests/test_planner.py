@@ -79,7 +79,7 @@ async def test_a_request_is_accepted_with_its_compiled_environment_and_points(tm
     await rig.toolbox.drain()
     accepted = rig.executor.jobs[0].environment
     assert isinstance(accepted, AcceptedMeasurement) and len(accepted.points) == 2
-    assert (await rig.notebook.record(request_id)).result is not None
+    assert (await rig.blackboard.record(request_id)).result is not None
 
 
 async def test_a_launch_variable_that_changes_the_workload_is_a_surface_refusal(tmp_path: Path) -> None:
@@ -88,7 +88,7 @@ async def test_a_launch_variable_that_changes_the_workload_is_a_surface_refusal(
     with pytest.raises(RequestRejected) as refused:
         await rig.toolbox.submit_test(req(change=change))
     assert refused.value.code == "surface_mismatch"
-    assert rig.notebook._state().requests == {}
+    assert rig.blackboard._state().requests == {}
 
 
 async def test_a_component_that_cannot_be_applied_is_refused_by_acceptance(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ async def test_an_accuracy_test_whose_launch_serves_less_context_than_its_evalua
         await rig.toolbox.submit_test(req(server_args="--context-length 2304"))  # an InferenceX explore: accuracy on
     assert refused.value.code == "context_below_eval"
     assert "Serve at least 8192 tokens" in refused.value.reason and "--context-length 2304" in refused.value.reason
-    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+    assert rig.blackboard._state().requests == {} and rig.toolbox._log.entries() == []
 
 
 async def test_a_check_refuses_what_acceptance_refuses_and_accepts_nothing_either_way(tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ async def test_a_check_refuses_what_acceptance_refuses_and_accepts_nothing_eithe
     await rig.toolbox.check_test(req(server_args="--max-running-requests 77"))
 
     assert refused.value.code == "context_below_eval"
-    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+    assert rig.blackboard._state().requests == {} and rig.toolbox._log.entries() == []
     assert rig.executor.jobs == [] and not (await rig.toolbox.queue_state()).queued_by_branch
 
 
@@ -264,7 +264,7 @@ async def test_a_recipe_that_launches_with_another_value_is_refused_and_the_reas
         await rig.toolbox.submit_test(req(change=change))
     assert refused.value.code == "delta_not_applicable"
     assert f"{ENV}=0" in refused.value.reason and "every measured point runs with" in refused.value.reason
-    assert rig.notebook._state().requests == {} and rig.executor.jobs == []
+    assert rig.blackboard._state().requests == {} and rig.executor.jobs == []
 
 
 async def test_a_table_no_hit_names_is_not_exercised_under_the_planner_and_not_observable_without_it(

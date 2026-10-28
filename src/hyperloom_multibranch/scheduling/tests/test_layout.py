@@ -20,7 +20,7 @@ _CLOCK = Clock(now=lambda: _NOW)
 _DIRS = (
     "MB-scheduling",
     "MB-prelude",
-    "MB-notebook",
+    "MB-blackboard",
     "MB-reference",
     "MB-blobs",
     "MB-branches",
@@ -79,7 +79,7 @@ def test_layout_paths() -> None:
         layout.report: "MB-reports/MB-report.json",
         layout.report_markdown: "MB-reports/MB-report.md",
         layout.scheduler_log: "MB-logs/MB-scheduler.log",
-        layout.notebook: "MB-notebook",
+        layout.blackboard: "MB-blackboard",
         layout.repo: "MB-repo",
         layout.blobs: "MB-blobs",
         layout.toolbox: "MB-toolbox",

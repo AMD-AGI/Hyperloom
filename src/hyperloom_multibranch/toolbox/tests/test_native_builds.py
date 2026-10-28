@@ -308,7 +308,7 @@ async def test_a_test_waiting_for_its_build_when_the_service_restarts_is_planned
     await after.toolbox.start()
     await asyncio.wait_for(after.toolbox.drain(), 120)
 
-    result = (await after.notebook.record(request_id)).result
+    result = (await after.blackboard.record(request_id)).result
     assert result is not None and result.validity is Validity.SUCCEEDED, result
     assert after.executor.started == [request_id]
     assert [charge.payment for charge in result.builds] == [BuildPayment.PAID], "built once, by this process"

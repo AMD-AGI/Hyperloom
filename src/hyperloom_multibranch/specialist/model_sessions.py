@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_multibranch.specialist.agent_session import AgentSession, AgentSetup, BranchPlace, SessionNotebook
+from hyperloom_multibranch.specialist.agent_session import AgentSession, AgentSetup, BranchPlace, SessionBlackboard
 from hyperloom_multibranch.specialist.runtime import SessionFactory, SessionStart
 from hyperloom_multibranch.specialist.tools import WorktreeFor
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase
@@ -37,7 +37,7 @@ def model_sessions(
     base: SourceBase,
     components: Sequence[str],
     branch_dir: Callable[[str], Path],
-    notebook_for: Callable[[str], SessionNotebook],
+    blackboard_for: Callable[[str], SessionBlackboard],
 ) -> ModelSessions:
     """The sessions of one session's specialists; ``setup.role`` is the
     :func:`~hyperloom_multibranch.specialist.prompts.role_prompt` of the session's workload."""
@@ -51,14 +51,14 @@ def model_sessions(
         if start.task.agent:
             raise ValueError(f"branch {start.branch} runs the agent {start.task.agent}, which no specialist stands for")
         branch = start.branch
-        return AgentSession(start, setup, branch_place(worktrees(branch), notebook_for(branch), branch_dir(branch)))
+        return AgentSession(start, setup, branch_place(worktrees(branch), blackboard_for(branch), branch_dir(branch)))
 
     return ModelSessions(factory, worktrees)
 
 
-def branch_place(worktree: BranchWorktree, notebook: SessionNotebook, branch_dir: Path) -> BranchPlace:
-    """Where a branch's runs work: its worktree, its notebook handle and the workspace in its directory."""
-    return BranchPlace(worktree, notebook, branch_dir / SESSION_DIR)
+def branch_place(worktree: BranchWorktree, blackboard: SessionBlackboard, branch_dir: Path) -> BranchPlace:
+    """Where a branch's runs work: its worktree, its blackboard handle and the workspace in its directory."""
+    return BranchPlace(worktree, blackboard, branch_dir / SESSION_DIR)
 
 
 __all__ = ["SESSION_DIR", "WORKTREE_DIR", "ModelSessions", "branch_place", "model_sessions"]

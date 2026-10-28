@@ -28,7 +28,7 @@ SESSION_SUFFIX_BYTES = 4
 MANIFEST_FILE = "MB-manifest.json"
 SCHEDULING_DIR = "MB-scheduling"
 PRELUDE_DIR = "MB-prelude"
-NOTEBOOK_DIR = "MB-notebook"
+BLACKBOARD_DIR = "MB-blackboard"
 REFERENCE_DIR = "MB-reference"
 REPO_DIR = "MB-repo"
 BLOBS_DIR = "MB-blobs"
@@ -62,7 +62,7 @@ SCHEDULER_LOG_FILE = "MB-scheduler.log"
 SESSION_SUBDIRS: tuple[str, ...] = (
     SCHEDULING_DIR,
     PRELUDE_DIR,
-    NOTEBOOK_DIR,
+    BLACKBOARD_DIR,
     REFERENCE_DIR,
     BLOBS_DIR,
     BRANCHES_DIR,
@@ -98,8 +98,8 @@ class SessionLayout:
         return self.root / PRELUDE_DIR
 
     @property
-    def notebook(self) -> Path:
-        return self.root / NOTEBOOK_DIR
+    def blackboard(self) -> Path:
+        return self.root / BLACKBOARD_DIR
 
     @property
     def reference(self) -> Path:
@@ -148,7 +148,7 @@ class SessionLayout:
 
     @property
     def reports(self) -> Path:
-        """Holds ``MB-report.json`` and the notebook's ``session_breakdown.json``."""
+        """Holds ``MB-report.json`` and the blackboard's ``session_breakdown.json``."""
         return self.root / REPORTS_DIR
 
     @property

@@ -11,11 +11,11 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.hosted.mcp_server import ToolError, ToolForbidden
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Learning
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LearningKind
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta, intent, request, result
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import ClaimKey, Learning
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH, Conclusion, LearningKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import delta, intent, request, result
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.specialist.blocked import BlockedCandidates, register_blocked_tools
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
@@ -56,13 +56,13 @@ class _Server:
 class _Rig:
     def __init__(self, root, status: AdmissionStatus, home: asyncio.AbstractEventLoop | None = None) -> None:
         self.root = root
-        self.toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
-        self.runtime = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
-        self.gate_notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
-        self.reader = LocalNotebook(root, Writer(Role.OBSERVER, "observer"))
+        self.toolbox = LocalBlackboard(root, Writer(Role.TOOLBOX, "toolbox"))
+        self.runtime = LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+        self.gate_blackboard = LocalBlackboard(root, Writer(Role.GATE, "gate"))
+        self.reader = LocalBlackboard(root, Writer(Role.OBSERVER, "observer"))
         self.repo = InMemoryRepo(Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 1")))
         self.scheduler = _Scheduler(status)
-        self.gate = RuleGate(self.gate_notebook, self.repo, self.scheduler, RecordingVerifier())
+        self.gate = RuleGate(self.gate_blackboard, self.repo, self.scheduler, RecordingVerifier())
         self.server = _Server()
         register_blocked_tools(self.server, blocked=BlockedCandidates(self.reader, self.gate), home=home)
 
@@ -83,13 +83,13 @@ class _Rig:
         await self.gate.settle(candidate, _blocked(request_id, f"{request_id}b", **judged))
 
     async def learn(self, *request_ids: str, branch: str = BRANCH) -> None:
-        learner = LocalNotebook(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+        learner = LocalBlackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
         await learner.append_learning(Learning(branch, LearningKind.PITFALL, LESSON, request_ids=request_ids))
 
 
 @pytest.fixture
 async def rig(tmp_path):
-    rig = _Rig(tmp_path / "notebook", AdmissionStatus.ACCEPTED)
+    rig = _Rig(tmp_path / "blackboard", AdmissionStatus.ACCEPTED)
     await rig.setup()
     await rig.block("r1")
     return rig
@@ -106,7 +106,7 @@ async def rig(tmp_path):
 async def test_a_repair_goes_to_the_scheduler_with_the_claimed_intent_and_the_diagnosis(
     tmp_path, status, branch, conclusion
 ):
-    rig = _Rig(tmp_path / "notebook", status)
+    rig = _Rig(tmp_path / "blackboard", status)
     await rig.setup()
     await rig.block("r1")
 
@@ -150,7 +150,7 @@ async def test_a_concluded_candidate_is_not_concluded_again(rig):
 async def test_a_decline_waits_for_a_learning_of_its_branch_that_cites_the_candidate(rig):
     await rig.learn()
     await rig.learn("r1", branch="s2")
-    with pytest.raises(ToolError, match="notebook_learn"):
+    with pytest.raises(ToolError, match="blackboard_learn"):
         await rig.server.call("decline_repair", request_id="r1")
 
     await rig.learn("r1")
@@ -204,7 +204,7 @@ async def test_a_candidate_without_an_intent_is_declined_not_repaired(rig):
 
 async def test_a_call_answered_on_another_loop_is_admitted_on_the_runtime_s_loop(tmp_path):
     home = asyncio.get_running_loop()
-    rig = _Rig(tmp_path / "notebook", AdmissionStatus.ACCEPTED, home=home)
+    rig = _Rig(tmp_path / "blackboard", AdmissionStatus.ACCEPTED, home=home)
     await rig.setup()
     await rig.block("r1")
 

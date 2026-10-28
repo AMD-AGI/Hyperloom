@@ -464,7 +464,7 @@ async def session_rig(tmp_path):
         repo=built.repo,
         dev_leases=held,
     )
-    place = BranchPlace(built.base.worktree(B1, tmp_path / "wt"), built.notebook, tmp_path / "session")
+    place = BranchPlace(built.base.worktree(B1, tmp_path / "wt"), built.blackboard, tmp_path / "session")
     session = AgentSession(SessionStart(B1, built.root, 1, BranchTask("")), setup, place)
     return SimpleNamespace(session=session, held=held)
 

@@ -47,13 +47,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, ConflictingWrite
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, NotebookSnapshot, priced_usd
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
+from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring, probation_event
-from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay
-from hyperloom_multibranch.notebook.rsi.session import judge_history, judge_open_areas
-from hyperloom_multibranch.notebook.rsi.stranded import stranded_leads
+from hyperloom_multibranch.blackboard.rsi.frontier import FrontierScoring, probation_event
+from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
+from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_open_areas
+from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
@@ -175,7 +175,7 @@ def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | No
 
 
 class Explorer:
-    """Runs EXPLORE once; the scheduler's notebook handle gives the snapshot the judge's digest of the archived
+    """Runs EXPLORE once; the scheduler's blackboard handle gives the snapshot the judge's digest of the archived
     sessions compares with them, and its rule gate lands each fork the fork desk admits."""
 
     def __init__(
@@ -193,7 +193,7 @@ class Explorer:
         self._integrator = integrator
         self._progress = steering.progress
         self._metric = steering.progress.policy.metric
-        self._notebook = context.notebook
+        self._blackboard = context.blackboard
         self._dashboard = steering.dashboard
         self._decisions = context.decisions
         self._interval = steering.interval_seconds
@@ -276,19 +276,19 @@ class Explorer:
     async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:
         """The budget the session used up, if any: the GPU seconds EXPLORE has, tests' and leases' alike, then the
         session's LLM dollars.
-        Reads the notebook's own progress: a frontier-scored read appends a round to the frontier log."""
+        Reads the blackboard's own progress: a frontier-scored read appends a round to the frontier log."""
 
         gpu_limited = window.explore_gpu_seconds != math.inf
-        if gpu_limited and spent_gpu_seconds(await self._notebook.progress()) >= window.explore_gpu_seconds:
+        if gpu_limited and spent_gpu_seconds(await self._blackboard.progress()) >= window.explore_gpu_seconds:
             return SessionStopReason.GPU_HOURS_EXHAUSTED
-        if window.max_llm_usd != math.inf and (await self._notebook.snapshot()).llm_usd >= window.max_llm_usd:
+        if window.max_llm_usd != math.inf and (await self._blackboard.snapshot()).llm_usd >= window.max_llm_usd:
             return SessionStopReason.LLM_BUDGET_EXHAUSTED
         return None
 
     async def _merge_forever(self) -> None:
         while True:
             width = self._roster.entry(INTEGRATION_BRANCH).k
-            leads = stranded_leads(await self._notebook.snapshot(), self._metric)
+            leads = stranded_leads(await self._blackboard.snapshot(), self._metric)
             reports = await self._integrator.integrate_next(width, EXPLORE_TICK_SECONDS, leads)
             self._events.note_merges(reports)
             if not reports:
@@ -333,8 +333,8 @@ class Explorer:
         progress = self._scored = await self._progress.progress()
         integration = integration_row(progress)
         integration_value = dict(integration.head_value) if integration is not None else {}
-        root = await self._notebook.recorded_value(window.root_commit)
-        snapshot = await self._notebook.snapshot()
+        root = await self._blackboard.recorded_value(window.root_commit)
+        snapshot = await self._blackboard.snapshot()
         specialists = await self._specialist_states()
         await self._record_probations(snapshot, progress)
         view = JudgeView(
@@ -378,7 +378,7 @@ class Explorer:
             self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
         return decision
 
-    def _with_playbook(self, view: JudgeView, snapshot: NotebookSnapshot) -> JudgeView:
+    def _with_playbook(self, view: JudgeView, snapshot: BlackboardSnapshot) -> JudgeView:
         """``view`` with the playbook the session plays and where a new branch could open under it in what is left of
         EXPLORE, kept for the round's opens; as it is for a session that plays none."""
 
@@ -409,14 +409,14 @@ class Explorer:
         round, where a hold of their own does not come first. A session that plays no playbook has the grace it always
         had, and no envelope, as its rows carry no stall evidence."""
 
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._blackboard.snapshot()
         rules = HoldRules(self._clock.now(), session_grace(self._play))
         held = held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists, rules)
         return {**envelope_holds(scored, specialists), **held}
 
-    async def _record_probations(self, snapshot: NotebookSnapshot, scored: Iterable[BranchProgress]) -> None:
+    async def _record_probations(self, snapshot: BlackboardSnapshot, scored: Iterable[BranchProgress]) -> None:
         """Record each branch the round's stall evidence holds on probation under the stop rule the scoring read, the
-        notebook keeping one a stall; nothing in a session that plays no playbook, whose rows carry no stall
+        blackboard keeping one a stall; nothing in a session that plays no playbook, whose rows carry no stall
         evidence."""
 
         if self._progress.stop_rule is None:
@@ -426,7 +426,7 @@ class Explorer:
             event = probation_event(snapshot, row, rule)
             if event is not None:
                 with contextlib.suppress(ConflictingWrite):
-                    await self._notebook.record_lineage(event)
+                    await self._blackboard.record_lineage(event)
 
     async def _stop_given_up(self) -> bool:
         """Stop every live branch whose specialist gave up and has no candidate waiting for its confirm: nothing of
@@ -513,11 +513,11 @@ class Explorer:
         detail = {"breach": play.breach, "playing": play.playbook.label}
         self._decisions.record(Decision(DecisionKind.EVENT, PLAYBOOK_FALLBACK_REASON, detail=detail))
         played = {**play.versions(), GRACE_KEY: str(session_grace(play))}
-        fingerprints = (await self._notebook.snapshot()).fingerprints
+        fingerprints = (await self._blackboard.snapshot()).fingerprints
         if fingerprints:
             latest = fingerprints[-1]
             versions = {**latest.policy_versions, **played}
-            await self._notebook.write_manifest_fingerprint(replace(latest, policy_versions=versions))
+            await self._blackboard.write_manifest_fingerprint(replace(latest, policy_versions=versions))
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:

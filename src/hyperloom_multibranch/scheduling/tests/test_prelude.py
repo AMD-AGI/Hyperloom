@@ -26,11 +26,11 @@ from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.warm_start import (
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     LAUNCH_ONLY_REASON,
     PreparedReplay,
     RecipeDownloader,
@@ -120,7 +120,7 @@ class StubbornRegistry(ProcessRegistry):
 
 @dataclass
 class PreludePeers:
-    """The repository, toolbox and rule gate PRELUDE works with, on the session's notebook; ``tests`` waits for the
+    """The repository, toolbox and rule gate PRELUDE works with, on the session's blackboard; ``tests`` waits for the
     toolbox's outcomes without real sleeps."""
 
     repo: GitExperimentRepo
@@ -138,12 +138,12 @@ def _peers(layout: SessionLayout, accuracy: float | None = None, rule: Rule | No
     gate's, InferenceX's when ``None``."""
 
     scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
-    toolbox_notebook = LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
+    toolbox_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
     repo = GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs))
-    toolbox = RecordingToolbox(toolbox_notebook, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
+    toolbox = RecordingToolbox(toolbox_blackboard, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
     tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
-    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now)
-    gate = session_gate(gate_notebook, toolbox, rule)
+    gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"), clock=_clock().now)
+    gate = session_gate(gate_blackboard, toolbox, rule)
     return PreludePeers(repo, toolbox, tests, gate)
 
 
@@ -156,8 +156,8 @@ def _layout(tmp_path: Path) -> SessionLayout:
     return create_session(tmp_path / "workspace", WORKLOAD.model_basename, _clock())
 
 
-def _notebook(layout: SessionLayout) -> LocalNotebook:
-    return LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "scheduler"), clock=_clock().now)
+def _blackboard(layout: SessionLayout) -> LocalBlackboard:
+    return LocalBlackboard(layout.blackboard, Writer(Role.SCHEDULER, "scheduler"), clock=_clock().now)
 
 
 def _prelude(
@@ -172,7 +172,7 @@ def _prelude(
     decisions = DecisionLog(layout.decisions, clock)
     desk = ForkDesk(roster, decisions, clock)
     context = SchedulerContext(
-        layout, roster, _notebook(layout), decisions, processes, clock, desk, RecordedReservations()
+        layout, roster, _blackboard(layout), decisions, processes, clock, desk, RecordedReservations()
     )
     warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
     services = PreludeServices(peers.repo, peers.gate, peers.tests, peers.toolbox)
@@ -247,7 +247,7 @@ async def test_an_agentx_session_profile_has_no_sequence_lengths_and_no_throughp
     budget = SessionBudget.from_hours(2.0, NOW)
     result = await _prelude(layout, processes, peers).root(AGENTX, budget, HardStop(budget, _clock()), IMAGE)
 
-    profile = await _notebook(layout).session_profile()
+    profile = await _blackboard(layout).session_profile()
     assert profile == result.profile
     assert (profile.isl, profile.osl, dict(profile.roofline_ceiling)) == (None, None, {})
     assert not {"--isl", "--osl"} & set(processes.argv)
@@ -270,10 +270,10 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert json.loads(layout.root_recipe.read_text()) == recipe.to_document()
     assert json.loads(layout.prelude_child.read_text())["session_dir"] == str(child)
     assert await processes.leftovers() == ()
-    root = (await _notebook(layout).lineage()).commit(result.root_commit)
+    root = (await _blackboard(layout).lineage()).commit(result.root_commit)
     assert root is not None
     assert (root.branch, root.recipe_digest) == (INTEGRATION_BRANCH, recipe.digest())
-    profile = await _notebook(layout).session_profile()
+    profile = await _blackboard(layout).session_profile()
     assert profile == result.profile
     assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
     assert dict(profile.roofline_ceiling) == {GRADED_OUTPUT: ROOFLINE_PEAK}
@@ -319,7 +319,7 @@ async def test_a_refused_root_profile_is_recorded_and_prelude_goes_on(tmp_path: 
 
     result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
 
-    assert (await _notebook(layout).baseline()).root_commit == result.root_commit
+    assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
     [refused] = [entry for entry in _logged(layout) if entry["reason"] == "root profile not started"]
     assert (refused["detail"]["code"], refused["detail"]["reason"]) == (
         "profile_without_trace",
@@ -540,7 +540,7 @@ async def test_the_profile_names_the_model_type_and_architectures_of_the_models_
     result = await prelude.root(workload, budget, HardStop(budget, _clock()), IMAGE)
 
     assert (result.profile.model_type, result.profile.architectures) == ("qwen3", ("Qwen3ForCausalLM",))
-    assert await _notebook(layout).session_profile() == result.profile
+    assert await _blackboard(layout).session_profile() == result.profile
 
 
 async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
@@ -552,7 +552,7 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
 
     requests = peers.toolbox.requests
     assert len(requests) == BASELINE_TESTS
-    baseline = await _notebook(layout).baseline()
+    baseline = await _blackboard(layout).baseline()
     assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
     assert baseline.values[GRADED_OUTPUT] == pytest.approx(1000.0)
@@ -795,7 +795,7 @@ async def test_an_agentx_baseline_is_the_childs_own_run_and_no_root_test_is_subm
     assert peers.toolbox.prelude_baselines == [copy]
     report = copy / AGENTX_BENCHMARK / "benchmark_report.json"
     assert report.read_bytes() == (run / AGENTX_BENCHMARK / "benchmark_report.json").read_bytes()
-    baseline = await _notebook(layout).baseline()
+    baseline = await _blackboard(layout).baseline()
     assert (baseline.root_commit, baseline.request_ids, baseline.wall_seconds) == (result.root_commit, (), reserve)
     assert {key: baseline.values[key] for key in AGENTX_RUN_PERF} == pytest.approx(AGENTX_RUN_PERF)
     assert baseline.source.startswith(f"prelude-child:{run} sha256:")
@@ -850,4 +850,4 @@ async def test_a_reused_prelude_anchors_an_agentx_baseline_on_the_earlier_childs
     assert await prelude.measure_baseline(result.root_commit) == AGENTX_RUN_SECONDS
 
     assert peers.toolbox.requests == {}
-    assert (await _notebook(layout).baseline()).source.startswith(f"prelude-child:{run} ")
+    assert (await _blackboard(layout).baseline()).source.startswith(f"prelude-child:{run} ")

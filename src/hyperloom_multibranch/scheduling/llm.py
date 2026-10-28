@@ -5,7 +5,7 @@
 
 The judge and the integrator's patch resolver take a ``Completion`` through their constructors, so tests hand them a
 deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``, priced from the
-price sheet when it lists the model. :func:`recorded` writes what each reply cost to the notebook as the scheduler's
+price sheet when it lists the model. :func:`recorded` writes what each reply cost to the blackboard as the scheduler's
 own LLM usage.
 """
 
@@ -26,9 +26,9 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 
 
 logger = logging.getLogger(__name__)
@@ -67,14 +67,14 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
     return (RuntimeError, OSError, TimeoutError, asyncio.TimeoutError, httpx.HTTPError, ClaudeSDKError)
 
 
-def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -> Completion:
-    """``completion``, recording what each reply cost in ``notebook`` as the scheduler's ``source``; a failed call
+def recorded(completion: Completion, blackboard: UsageSink, source: UsageSource) -> Completion:
+    """``completion``, recording what each reply cost in ``blackboard`` as the scheduler's ``source``; a failed call
     records nothing."""
 
     async def complete(system: str, user: str) -> CompletionReply:
         reply = await completion(system, user)
         usage = LlmUsage("", source, reply.cost_usd, reply.tokens)
-        await notebook.record_llm_usage(usage)
+        await blackboard.record_llm_usage(usage)
         return reply
 
     return complete

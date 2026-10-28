@@ -63,7 +63,7 @@ from hyperloom.sandbox.gated_pool import GatedPool
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
@@ -138,7 +138,7 @@ class LocalHostedToolbox(LeasedToolbox):
         self.leases.release(lease_id)
 
     async def start(self) -> None:
-        """Start, after taking back the leaks an earlier run of this host recorded in the notebook."""
+        """Start, after taking back the leaks an earlier run of this host recorded in the blackboard."""
 
         await self._restore_leaked_cards()
         await super().start()
@@ -146,7 +146,7 @@ class LocalHostedToolbox(LeasedToolbox):
     async def _restore_leaked_cards(self) -> None:
         """A card an earlier process lost for good stays lost: its old holder may still run.
 
-        The notebook holds those cards as events of this node with ``gpu_ids``. The provider is fresh and owns every
+        The blackboard holds those cards as events of this node with ``gpu_ids``. The provider is fresh and owns every
         card, so they are leased once here (the pool has no call to take out one card) and never released, exactly as
         a leak in this process; the others go straight back.
         """
@@ -166,10 +166,10 @@ class LocalHostedToolbox(LeasedToolbox):
         return frozenset(self.provider.quarantined)
 
     async def _housekeeping(self) -> None:
-        """Tell the notebook about cards the provider lost since last time: one event for all the new ones.
+        """Tell the blackboard about cards the provider lost since last time: one event for all the new ones.
 
         The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
-        layer knows nothing of the notebook. A refused write is retried at the next poll.
+        layer knows nothing of the blackboard. A refused write is retried at the next poll.
         """
 
         new = self._leaked() - self._reported_cards
@@ -178,7 +178,7 @@ class LocalHostedToolbox(LeasedToolbox):
         try:
             await self._quarantine.add_cards(self.provider.hostname, new, LEAKED_CARDS_REASON)
         except Exception:
-            logger.warning("could not record leaked cards in the notebook", exc_info=True)
+            logger.warning("could not record leaked cards in the blackboard", exc_info=True)
             return
         self._reported_cards |= new
 
@@ -232,7 +232,7 @@ class LocalSession:
 
 @dataclass(frozen=True)
 class LocalOptions:
-    """What :func:`build_local_toolbox` may be told besides the session, the notebook, acceptance and the spec.
+    """What :func:`build_local_toolbox` may be told besides the session, the blackboard, acceptance and the spec.
 
     ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
     ``runner_envs`` add to the image's variables the runner template carries (for example ``INFERENCEX_REPO``).
@@ -392,7 +392,7 @@ def _acceptance_with_prompts(
 
 def build_local_toolbox(
     session: LocalSession,
-    notebook: LocalNotebook,
+    blackboard: LocalBlackboard,
     acceptance: AcceptanceSetup,
     spec: SpecContext,
     *,
@@ -402,7 +402,7 @@ def build_local_toolbox(
 
     Args:
         session: Where and on what the toolbox runs, see :class:`LocalSession`.
-        notebook: The notebook; it takes the requests and results, holds the quarantine list and the claims, and is
+        blackboard: The blackboard; it takes the requests and results, holds the quarantine list and the claims, and is
             searched when a restart recovers unfinished tests.
         acceptance: The repository the parent recipes are read from, the planner (its ``plan`` must return a
             ``hyperloom.measure.points.AcceptedMeasurement``; ``HostedPlanner`` does), the active framework image
@@ -449,10 +449,10 @@ def build_local_toolbox(
         workload_kind=acceptance.workload_kind,
     )
     toolbox = LocalHostedToolbox(
-        session_stores(notebook, directory, session.run_id, native.driver if native else None),
+        session_stores(blackboard, directory, session.run_id, native.driver if native else None),
         executor,
         _accepting_local_kinds(acceptance),
-        tools=session_tools(_local_tools(leases, options), notebook, directory),
+        tools=session_tools(_local_tools(leases, options), blackboard, directory),
         tuning=ToolboxTuning(
             policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
         ),

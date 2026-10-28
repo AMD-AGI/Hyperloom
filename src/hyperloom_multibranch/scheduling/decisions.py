@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
-from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
 
 

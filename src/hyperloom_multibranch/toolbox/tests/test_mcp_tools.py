@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The specialist tools on a running MCP service: real HTTP requests, the local notebook behind them."""
+"""The specialist tools on a running MCP service: real HTTP requests, the local blackboard behind them."""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ import pytest
 
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.hosted.mcp_server import HOST_KIND, McpServer, McpServerConfig
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
-from hyperloom_multibranch.contracts.notebook.records import InboxItem, InboxPage, StartupBrief
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
+from hyperloom_multibranch.contracts.blackboard.records import InboxItem, InboxPage, StartupBrief
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     Backpressure,
@@ -32,9 +32,9 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
     TestProgress,
 )
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, request, result
-from hyperloom_multibranch.notebook.tests.sessions import Writers, scripted_session
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, request, result
+from hyperloom_multibranch.blackboard.tests.sessions import Writers, scripted_session
 from hyperloom_multibranch.toolbox import mcp_tools
 from hyperloom_multibranch.toolbox.mcp_tools import (
     REPLY_INBOX_HEADER,
@@ -110,14 +110,14 @@ class Rig:
         assert status == 200 and reply["result"]["isError"] is True, reply
         return reply["result"]["content"][0]["text"]
 
-    def observer(self) -> LocalNotebook:
-        return LocalNotebook(self.root, Writer(Role.OBSERVER, "observer"), clock=self.clock)
+    def observer(self) -> LocalBlackboard:
+        return LocalBlackboard(self.root, Writer(Role.OBSERVER, "observer"), clock=self.clock)
 
 
 @pytest.fixture
 async def seeded(tmp_path: Path) -> tuple[Path, FakeClock]:
     clock = FakeClock()
-    root = tmp_path / "notebook"
+    root = tmp_path / "blackboard"
     await scripted_session(root, clock)
     return root, clock
 
@@ -127,10 +127,10 @@ def _running(seeded: tuple[Path, FakeClock], options: SpecialistToolOptions) -> 
     toolbox = FakeToolbox()
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
 
-    def notebooks(branch: str) -> LocalNotebook:
-        return LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
+    def blackboards(branch: str) -> LocalBlackboard:
+        return LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
 
-    register_specialist_tools(server, toolbox=toolbox, notebooks=notebooks, options=options)
+    register_specialist_tools(server, toolbox=toolbox, blackboards=blackboards, options=options)
     server.start()
     yield Rig(server, toolbox, root, clock)
     server.stop()
@@ -159,19 +159,19 @@ def briefed_rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
 
 def test_the_brief_is_the_providers_for_the_branch_of_the_token(briefed_rig: Rig) -> None:
     for branch in ("s1", "s2"):
-        text = briefed_rig.ok(briefed_rig.token(branch), "notebook_brief", start_commit="c1")
+        text = briefed_rig.ok(briefed_rig.token(branch), "blackboard_brief", start_commit="c1")
         assert f"- lesson for {branch}" in text
         assert text.count("lesson for") == 1
 
 
 def test_a_branch_named_in_the_arguments_is_refused_not_used(briefed_rig: Rig) -> None:
-    status, reply = briefed_rig.call(briefed_rig.token("s1"), "notebook_brief", start_commit="c1", branch="s2")
+    status, reply = briefed_rig.call(briefed_rig.token("s1"), "blackboard_brief", start_commit="c1", branch="s2")
     assert status == 200 and "lesson for" not in json.dumps(reply)
     assert reply.get("error") is not None or reply["result"]["isError"] is True
 
 
-def test_without_briefing_for_the_brief_is_the_notebooks_own(rig: Rig) -> None:
-    text = rig.ok(rig.token("s1"), "notebook_brief", start_commit="c1")
+def test_without_briefing_for_the_brief_is_the_blackboards_own(rig: Rig) -> None:
+    text = rig.ok(rig.token("s1"), "blackboard_brief", start_commit="c1")
     assert text.startswith("Startup brief from c1") and "lesson for" not in text
 
 
@@ -182,13 +182,19 @@ def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
     assert names == sorted(
         ["submit_test", "test_result", "wait_test", "cancel_test", "queue_state", "poll_inbox", "start_analysis"]
         + ["put_kernel_artifact"]
-        + [f"notebook_{name}" for name in ("lookup", "claim", "release", "search", "record", "branch_log")]
-        + ["notebook_append_branch_log", "notebook_learn", "notebook_learnings", "notebook_brief", "notebook_replay"]
+        + [f"blackboard_{name}" for name in ("lookup", "claim", "release", "search", "record", "branch_log")]
+        + [
+            "blackboard_append_branch_log",
+            "blackboard_learn",
+            "blackboard_learnings",
+            "blackboard_brief",
+            "blackboard_replay",
+        ]
     )
 
 
 def test_the_host_token_cannot_call_any_specialist_tool(rig: Rig) -> None:
-    for tool in ("queue_state", "notebook_search", "test_result"):
+    for tool in ("queue_state", "blackboard_search", "test_result"):
         status, reply = rig.call(HOST_TOKEN, tool)
         assert (status, reply["error"]["code"]) == (200, -32001)
 
@@ -387,38 +393,38 @@ def test_poll_inbox_reads_the_callers_branch(rig: Rig) -> None:
 
 
 def test_claims_are_made_for_the_branch_of_the_token(rig: Rig) -> None:
-    rig.ok(rig.token("s1"), "notebook_claim", **CLAIM)
+    rig.ok(rig.token("s1"), "blackboard_claim", **CLAIM)
     key = {"parent_commit": "c1", "target": "attention", "mechanism": "flash decode", "layer": "source"}
-    other = rig.failed(rig.token("s2"), "notebook_claim", **key)
+    other = rig.failed(rig.token("s2"), "blackboard_claim", **key)
     assert other.startswith("refused") and "claimed by s1" in other
-    seen = rig.ok(rig.token("s2"), "notebook_lookup", **CLAIM)
+    seen = rig.ok(rig.token("s2"), "blackboard_lookup", **CLAIM)
     assert "claimed by s1" in seen
 
 
 def test_a_claim_cannot_name_a_holder(rig: Rig) -> None:
-    _, reply = rig.call(rig.token("s1"), "notebook_claim", branch="s2", **CLAIM)
+    _, reply = rig.call(rig.token("s1"), "blackboard_claim", branch="s2", **CLAIM)
     assert reply["error"]["code"] == -32602
 
 
 def test_branch_log_is_appended_to_and_read_from_the_callers_branch(rig: Rig) -> None:
     token = rig.token("s1")
-    rig.ok(token, "notebook_append_branch_log", kind="plan", content="try flash decode next")
-    assert "try flash decode next" in rig.ok(token, "notebook_branch_log")
-    assert "try flash decode next" not in rig.ok(rig.token("s2"), "notebook_branch_log")
-    _, reply = rig.call(token, "notebook_branch_log", branch="s2")
+    rig.ok(token, "blackboard_append_branch_log", kind="plan", content="try flash decode next")
+    assert "try flash decode next" in rig.ok(token, "blackboard_branch_log")
+    assert "try flash decode next" not in rig.ok(rig.token("s2"), "blackboard_branch_log")
+    _, reply = rig.call(token, "blackboard_branch_log", branch="s2")
     assert reply["error"]["code"] == -32602
-    _, reply = rig.call(token, "notebook_append_branch_log", kind="plan", content="x", branch="s2")
+    _, reply = rig.call(token, "blackboard_append_branch_log", kind="plan", content="x", branch="s2")
     assert reply["error"]["code"] == -32602
 
 
-def test_notebook_search_and_record_work_through_http(rig: Rig) -> None:
+def test_blackboard_search_and_record_work_through_http(rig: Rig) -> None:
     token = rig.token("s1")
-    assert "r1" in rig.ok(token, "notebook_record", request_id="r1")
-    assert rig.ok(token, "notebook_search", query="gemm").strip()
+    assert "r1" in rig.ok(token, "blackboard_record", request_id="r1")
+    assert rig.ok(token, "blackboard_search", query="gemm").strip()
 
 
-def test_notebook_errors_are_error_results(rig: Rig) -> None:
-    assert "UnknownRequest" in rig.failed(rig.token("s1"), "notebook_record", request_id="nope")
+def test_blackboard_errors_are_error_results(rig: Rig) -> None:
+    assert "UnknownRequest" in rig.failed(rig.token("s1"), "blackboard_record", request_id="nope")
 
 
 def test_missing_wrong_and_revoked_tokens(rig: Rig) -> None:
@@ -536,11 +542,11 @@ async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
     toolbox = LoopRecordingToolbox()
 
-    class Notebooks:
+    class Blackboards:
         async def record(self, request_id: str) -> object:
             return SimpleNamespace(request=SimpleNamespace(branch="s1"))
 
-    register_specialist_tools(server, toolbox=toolbox, notebooks=lambda branch: Notebooks())  # type: ignore[arg-type,return-value]
+    register_specialist_tools(server, toolbox=toolbox, blackboards=lambda branch: Blackboards())  # type: ignore[arg-type,return-value]
     server.start()
     try:
         token = server.issue_token("specialist-s1", "s1")
@@ -828,7 +834,7 @@ async def test_a_cursor_in_the_middle_of_a_page_is_refused_when_it_is_not_one(wa
 
 
 class ScriptedInbox:
-    """A notebook whose inbox is a list the test edits between calls; every poll answers the whole list."""
+    """A blackboard whose inbox is a list the test edits between calls; every poll answers the whole list."""
 
     def __init__(self, count: int) -> None:
         self.items = [
@@ -841,14 +847,14 @@ class ScriptedInbox:
 
 def _scripted_rig(inbox: ScriptedInbox) -> Rig:
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
-    register_specialist_tools(server, toolbox=FakeToolbox(), notebooks=lambda branch: inbox)  # type: ignore[arg-type,return-value]
+    register_specialist_tools(server, toolbox=FakeToolbox(), blackboards=lambda branch: inbox)  # type: ignore[arg-type,return-value]
     server.start()
     return Rig(server, FakeToolbox(), Path(), FakeClock())
 
 
 @pytest.mark.parametrize("edit", ["vanishes", "appears"])
 def test_a_page_cursor_resumes_after_the_last_item_it_returned_when_the_feed_moved_under_it(edit: str) -> None:
-    """The notebook derives some items from the claims a branch holds now, so an item before the cursor can vanish."""
+    """The blackboard derives some items from the claims a branch holds now, so an item before the cursor can vanish."""
     inbox = ScriptedInbox(2 * POLL_INBOX_MAX_ITEMS + 5)
     rig = _scripted_rig(inbox)
     try:

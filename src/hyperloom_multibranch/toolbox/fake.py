@@ -5,7 +5,7 @@
 
 :class:`FakeToolbox` is a :class:`~hyperloom_multibranch.toolbox.toolbox.RealToolbox` whose executor is
 :class:`FakeExecutor`. Acceptance, the queue (priorities, per-branch K, global limit, backpressure), the retry rules of
-design 4.5, quarantine, the submit log and the notebook writes are the real toolbox's own code, so a test written
+design 4.5, quarantine, the submit log and the blackboard writes are the real toolbox's own code, so a test written
 against the fake exercises the semantics the hosted executor will have. Only one attempt is faked: the fate drawn for
 it, the node it lands on and the values it measures come from :mod:`hyperloom_multibranch.toolbox.fake_model`, seeded
 by ``FakeToolboxConfig.seed`` and by the request and attempt number, so a run does not depend on the order tests ran in.
@@ -27,8 +27,8 @@ from typing import Protocol
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import BuildNotice, QuarantineEvent, Withdrawal
+from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, RecordSearch
+from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
@@ -52,8 +52,8 @@ from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
 
-class ToolboxNotebook(Protocol):
-    """What the fake writes to: the notebook's ``TestRecordSink`` and ``NodeHealth`` (a ``LocalNotebook`` is one)."""
+class ToolboxBlackboard(Protocol):
+    """What the fake writes to: the blackboard's ``TestRecordSink`` and ``NodeHealth`` (a ``LocalBlackboard`` is one)."""
 
     async def write_request(self, request: object) -> object: ...
 
@@ -68,8 +68,8 @@ class ToolboxNotebook(Protocol):
     async def quarantined(self) -> Sequence[QuarantineEvent]: ...
 
 
-class MemoryNotebook:
-    """The notebook the fake writes to when it is given none: it keeps what it is told, in order."""
+class MemoryBlackboard:
+    """The blackboard the fake writes to when it is given none: it keeps what it is told, in order."""
 
     def __init__(self) -> None:
         self.log: list[tuple[str, object]] = []
@@ -232,12 +232,12 @@ class FakeExecutor:
 
 @dataclass(frozen=True)
 class FakeWiring:
-    """What a :class:`FakeToolbox` is connected to besides its notebook; every field is optional.
+    """What a :class:`FakeToolbox` is connected to besides its blackboard; every field is optional.
 
     ``repo`` is the experiment repository acceptance reads each parent's recipe from, as the real toolbox does; its
     recipes must sit on ``FakeToolboxConfig.image_digest``, the active image. Without one a parent's recipe is the
     empty one, so a delta must give a component's upstream repository and commit. ``parent_exists`` answers whether a
-    parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the notebook's claim and
+    parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the blackboard's claim and
     record ports and ``workload_kind`` is the campaign's workload. ``builds`` drives the native builds a test waits
     for (a :class:`~hyperloom_multibranch.toolbox.fake_builds.FakeBuildDriver`); without one no test needs any.
     """
@@ -255,7 +255,7 @@ class FakeToolbox(RealToolbox):
     """The real toolbox over a :class:`FakeExecutor`.
 
     ``autorun=False`` holds every attempt until :meth:`drain`; tests that want queued tests use it with a small
-    ``max_parallel_tests``. Without a ``notebook`` the writes go to a :class:`MemoryNotebook`; without
+    ``max_parallel_tests``. Without a ``blackboard`` the writes go to a :class:`MemoryBlackboard`; without
     ``wiring.log_path`` the submit log lives in a temporary directory that goes with the toolbox. The toolbox starts
     on first use.
     """
@@ -264,14 +264,14 @@ class FakeToolbox(RealToolbox):
         self,
         config: FakeToolboxConfig | None = None,
         *,
-        notebook: ToolboxNotebook | None = None,
+        blackboard: ToolboxBlackboard | None = None,
         autorun: bool = True,
         wiring: FakeWiring = FakeWiring(),
     ) -> None:
         log_path = wiring.log_path
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun, workload=wiring.workload_kind)
-        self.notebook = notebook if notebook is not None else MemoryNotebook()
+        self.blackboard = blackboard if blackboard is not None else MemoryBlackboard()
         self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-")
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []
@@ -280,8 +280,8 @@ class FakeToolbox(RealToolbox):
         self.blobs = LocalBlobStore(Path(self._blob_scratch.name))
         stores = ToolboxStores(
             log=SubmissionLog(path, str(self.config.campaign_id)),
-            sink=self.notebook,  # type: ignore[arg-type]
-            health=self.notebook,  # type: ignore[arg-type]
+            sink=self.blackboard,  # type: ignore[arg-type]
+            health=self.blackboard,  # type: ignore[arg-type]
             claims=wiring.claims,
             records=wiring.records,
             builds=wiring.builds,
@@ -321,7 +321,7 @@ class FakeToolbox(RealToolbox):
 
     @property
     def results(self) -> dict[str, TestResult]:
-        """Every finished test's result, a ``measurement_failed`` one included (the notebook gets that as a withdrawal)."""
+        """Every finished test's result, a ``measurement_failed`` one included (the blackboard gets that as a withdrawal)."""
 
         return {
             e.request_id: TestResult.from_document(e.outcome["result"])
@@ -405,4 +405,4 @@ class FakeToolbox(RealToolbox):
         self._rejections.append(check)
 
 
-__all__ = ["FakeExecutor", "FakeToolbox", "FakeWiring", "MemoryNotebook", "ToolboxNotebook"]
+__all__ = ["FakeExecutor", "FakeToolbox", "FakeWiring", "MemoryBlackboard", "ToolboxBlackboard"]

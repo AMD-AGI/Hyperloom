@@ -43,8 +43,8 @@ from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.native.trust import BuildRefused
 from hyperloom.measure.runner.native.builder import COMPILE_ERROR
 from hyperloom.measure.runner.native.service import Ensured
-from hyperloom_multibranch.contracts.notebook.records import BuildNotice
-from hyperloom_multibranch.contracts.notebook.vocab import BuildOutcome
+from hyperloom_multibranch.contracts.blackboard.records import BuildNotice
+from hyperloom_multibranch.contracts.blackboard.vocab import BuildOutcome
 from hyperloom_multibranch.contracts.toolbox import BuildState, BuildStatus, RequestRejected
 from hyperloom_multibranch.toolbox.submission_log import LogEntry
 
@@ -347,7 +347,7 @@ class PendingBuilds:
         notice = BuildNotice(request_id, build.inputs.key, build.inputs.component, outcome, detail)
         try:
             await self._hooks.notify(notice)
-        except Exception:  # any failure of the notebook's push: the waiting test goes on without its notice
+        except Exception:  # any failure of the blackboard's push: the waiting test goes on without its notice
             logger.warning(
                 "the build notice of %s for %s was not delivered", build.inputs.key, request_id, exc_info=True
             )

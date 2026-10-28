@@ -52,17 +52,17 @@ from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.llm_prices import price_of
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
-from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
-from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
-from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
-from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
-from hyperloom_multibranch.notebook.rsi.session import session_menus
+from hyperloom_multibranch.blackboard import BriefTriggers, LocalBlackboard
+from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, RetrievalLog
+from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool
+from hyperloom_multibranch.blackboard.rsi.session import session_menus
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
@@ -126,7 +126,7 @@ class SessionWiring:
     setup: PeerSetup
     repo: ExperimentRepo
     tokens: SpecialistTokens
-    notebooks: Callable[[str], BranchLogStore]
+    blackboards: Callable[[str], BranchLogStore]
     briefs: SessionBriefs
     toolbox: RealToolbox
     dev_leases: DevLeases | None
@@ -150,11 +150,11 @@ class InferenceXCheckout:
 
 
 class ToolboxBackend(Protocol):
-    """Where a session's tests run: it builds the session's toolbox on the notebook handle, the acceptance setup and
+    """Where a session's tests run: it builds the session's toolbox on the blackboard handle, the acceptance setup and
     the instruction sheet's context that every backend shares."""
 
     def toolbox(
-        self, setup: PeerSetup, notebook: LocalNotebook, acceptance: AcceptanceSetup, spec: SpecContext
+        self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox: ...
 
 
@@ -166,14 +166,14 @@ class LocalCards:
     cards: tuple[int, ...]
 
     def toolbox(
-        self, setup: PeerSetup, notebook: LocalNotebook, acceptance: AcceptanceSetup, spec: SpecContext
+        self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox:
         from hyperloom_multibranch.toolbox.local_hosted import LocalOptions, LocalSession, build_local_toolbox
 
         layout = setup.layout
         session = LocalSession(layout.toolbox, layout.session_id, self.cards, setup.workload.tp)
         options = LocalOptions(timeout_sec=attempt_timeout_sec(setup.workload))
-        return build_local_toolbox(session, notebook, acceptance, spec, options=options)
+        return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
 
 
 @dataclass(frozen=True)
@@ -251,13 +251,13 @@ def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> N
     os.environ[BENCHMARK_CONFIG_ENV] = str(path.resolve())
 
 
-def workload_rule(workload: Workload, notebook: CommitQuery) -> Rule:
+def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
-    PRELUDE bar ``notebook`` holds, or AgentX P50 interactivity with its guards."""
+    PRELUDE bar ``blackboard`` holds, or AgentX P50 interactivity with its guards."""
 
     if workload.inferencex is None:
         return AgentXRule()
-    return InferenceXRule(notebook, workload.conc)
+    return InferenceXRule(blackboard, workload.conc)
 
 
 def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> CanonicalMeasurement:
@@ -307,34 +307,36 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
     toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host))
-    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
-    rule = workload_rule(workload, gate_notebook)
+    gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, GATE_WRITER))
+    rule = workload_rule(workload, gate_blackboard)
 
     @cache
-    def runtime_notebook(branch: str) -> LocalNotebook:
+    def runtime_blackboard(branch: str) -> LocalBlackboard:
         """The branch's one handle for the session: a handle is a writer of its own, and every inbox cursor holds one
         sequence number per writer, so a handle per MCP call made ``poll_inbox`` answer 91,000 characters after 12 h."""
-        return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
+        return LocalBlackboard(
+            layout.blackboard, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers()
+        )
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     briefs = _specialist_briefs(setup, repo)
-    _serve_specialist_tools(mcp, toolbox, runtime_notebook, briefs)
-    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_notebook, lambda branch: built.worktrees(branch))
+    _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs)
+    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, lambda branch: built.worktrees(branch))
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
-    built = sessions(SessionWiring(setup, repo, tokens, runtime_notebook, briefs, toolbox, leases, rendered, native))
+    built = sessions(SessionWiring(setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
-    gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
-    register_blocked_tools(mcp, blocked=BlockedCandidates(gate_notebook, gate), home=asyncio.get_running_loop())
+    gate = RuleGate(gate_blackboard, repo, setup.desk, toolbox)
+    register_blocked_tools(mcp, blocked=BlockedCandidates(gate_blackboard, gate), home=asyncio.get_running_loop())
     register_fix_tools(mcp, attachments=toolbox)
-    runner = ReproRunner(toolbox, gate_notebook, toolbox)
+    runner = ReproRunner(toolbox, gate_blackboard, toolbox)
     judging = Judging(gate, toolbox, rule, FixChecking(runner, setup.critic, setup.blobs, _specialist_role(workload)))
     runtime = SpecialistRuntime(
-        runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
+        runtime_blackboard, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )
     mcp.start()
-    gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
-    regression = RegressionSet(gate_notebook, runner, repo)
+    gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
+    regression = RegressionSet(gate_blackboard, runner, repo)
     return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression)
 
 
@@ -364,19 +366,19 @@ def _toolbox(
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
     return host.backend.toolbox(
         setup,
-        LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
+        LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
         AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
         spec,
     )
 
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:
-    """The briefs the session's specialists are given, read as an observer of the notebook, with their learnings
+    """The briefs the session's specialists are given, read as an observer of the blackboard, with their learnings
     recall (:func:`specialist_recall`)."""
 
     learnings = specialist_recall(setup.layout.reports)
     return SessionBriefs(
-        LocalNotebook(setup.layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
+        LocalBlackboard(setup.layout.blackboard, Writer(Role.OBSERVER, BRIEFS_READER)),
         metric=setup.workload.metric,
         learnings=learnings,
         repo=repo,
@@ -386,9 +388,9 @@ def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBrie
 
 
 def _serve_specialist_tools(
-    mcp: McpServer, toolbox: RealToolbox, notebooks: Callable[[str], LocalNotebook], briefs: SessionBriefs
+    mcp: McpServer, toolbox: RealToolbox, blackboards: Callable[[str], LocalBlackboard], briefs: SessionBriefs
 ) -> None:
-    """Register the specialists' toolbox and notebook tools on ``mcp``, calling the toolbox on the session's loop and
+    """Register the specialists' toolbox and blackboard tools on ``mcp``, calling the toolbox on the session's loop and
     briefing each branch from ``briefs``."""
 
     from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
@@ -400,14 +402,14 @@ def _serve_specialist_tools(
         briefing_for=briefs.for_branch,
         analysis=toolbox,
     )
-    register_specialist_tools(mcp, toolbox=toolbox, notebooks=notebooks, options=options)
+    register_specialist_tools(mcp, toolbox=toolbox, blackboards=blackboards, options=options)
 
 
 def _lend_dev_sandboxes(
     mcp: McpServer,
     setup: PeerSetup,
     toolbox: RealToolbox,
-    notebooks: Callable[[str], LocalNotebook],
+    blackboards: Callable[[str], LocalBlackboard],
     worktrees: WorktreeFor,
 ) -> DevLeases | None:
     """The session's dev sandboxes on ``toolbox``'s cards, their tools registered on ``mcp`` for the session's loop;
@@ -424,7 +426,7 @@ def _lend_dev_sandboxes(
     )
 
     limits = DevLimits(cap=setup.dev_leases)
-    leases = DevLeases(toolbox, local_dev_sandboxes(worktrees, setup.processes, limits), notebooks, limits=limits)
+    leases = DevLeases(toolbox, local_dev_sandboxes(worktrees, setup.processes, limits), blackboards, limits=limits)
     register_dev_sandbox_tools(mcp, leases=leases, home=asyncio.get_running_loop())
     return leases
 
@@ -647,7 +649,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             agent,
             base=SourceBase(layout.source, native=wiring.native),
             branch_dir=layout.branch_dir,
-            notebook_for=wiring.notebooks,
+            blackboard_for=wiring.blackboards,
         )
         native = tuple(component for component in wiring.native if component != workload.framework)
         sessions = _sessions_over_source(open_sessions, layout.source, workload.framework, native)
@@ -660,7 +662,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             wiring.setup.processes,
             client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
         )
-        return with_agents(sessions, agents, branch_dir=layout.branch_dir, notebook_for=wiring.notebooks)
+        return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
 
     return build
 

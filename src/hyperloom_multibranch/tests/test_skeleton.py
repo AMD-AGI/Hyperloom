@@ -52,18 +52,18 @@ from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import (
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import (
     LeaseStart,
     LlmUsage,
-    NotebookSnapshot,
+    BlackboardSnapshot,
     PendingCandidate,
     QuarantineEvent,
     RegressionCase,
     ToolResultPointer,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import (
+from hyperloom_multibranch.contracts.blackboard.vocab import (
     ClaimStatus,
     Conclusion,
     LearningKind,
@@ -73,28 +73,28 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     UsageSource,
 )
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
-from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
-from hyperloom_multibranch.notebook.rsi.decisions import decision_calls
-from hyperloom_multibranch.notebook.rsi.playbook import (
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.learning_recall import LearningRecall
+from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
+from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, SKIPPED, TreeArchive
+from hyperloom_multibranch.blackboard.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.blackboard.rsi.decisions import decision_calls
+from hyperloom_multibranch.blackboard.rsi.playbook import (
     FALLBACK_KEY,
     H0,
     PLAYBOOK_KEY,
 )
-from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
-from hyperloom_multibranch.notebook.rsi.frontier import (
+from hyperloom_multibranch.blackboard.rsi.authoring import NO_ARCHIVE
+from hyperloom_multibranch.blackboard.rsi.frontier import (
     FRONTIER_V1_LABEL,
     SETTLED_TESTS,
     FrontierPolicy,
 )
-from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
-from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
-from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
-from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
-from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
+from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
+from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG
+from hyperloom_multibranch.blackboard.rsi.similarity import TaskConditions
+from hyperloom_multibranch.blackboard.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
     FixReview,
     FixReviewer,
@@ -385,8 +385,8 @@ class Stage:
     watchers: list[asyncio.Future[None]] = field(default_factory=list)
     signalled_at: float = 0.0
 
-    def handle(self, role: Role, branch: str = "") -> LocalNotebook:
-        return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
+    def handle(self, role: Role, branch: str = "") -> LocalBlackboard:
+        return LocalBlackboard(self.layout.blackboard, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
@@ -412,7 +412,7 @@ class Stage:
         )
         self.gate = RuleGate(self.handle(Role.GATE), repo, setup.desk, RecordingVerifier())
         runtime = specialist_runtime(
-            setup.layout.notebook,
+            setup.layout.blackboard,
             toolbox,
             repo,
             self.sessions,
@@ -440,7 +440,7 @@ class Stage:
         """Have the rule gate ask for a fork of ``branch`` at ``parent`` for the fix :data:`FIXES` names by
         ``reason``, as the runtime asks for one: on a retested candidate that regresses but fixes a correctness defect,
         with the proof that its case runs clean on it. The candidate is the retest ``fix-<n>`` of a first test the
-        notebook never holds, and its clean case run is ``fix-<n>-case``: the runtime judges neither."""
+        blackboard never holds, and its clean case run is ``fix-<n>-case``: the runtime judges neither."""
 
         fix = request(f"fix-{len(self.forks) + 1}", intent(branch, parent), FIXES[reason])
         candidate = replace(fix, purpose=Purpose.CONFIRM, retest_of=f"{fix.request_id}-first")
@@ -1428,7 +1428,7 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
 
     head, c2 = await stage.repo.head(INTEGRATION_BRANCH), await stage.repo.head("b02")
     assert outcome.final is not None and outcome.final.chosen is not None
-    # The branch set FINAL weighs comes from the notebook, which holds every branch the session explored.
+    # The branch set FINAL weighs comes from the blackboard, which holds every branch the session explored.
     assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
     assert (outcome.final.chosen.label, outcome.final.chosen.commit) == (INTEGRATION_LABEL, head)
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
@@ -1718,19 +1718,19 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
 
 
 def _candidate_waits_on_b02(monkeypatch: pytest.MonkeyPatch, waits: Callable[[], bool]) -> None:
-    """Every notebook snapshot shows a candidate of ``b02`` waiting for its confirm while ``waits()`` holds."""
+    """Every blackboard snapshot shows a candidate of ``b02`` waiting for its confirm while ``waits()`` holds."""
 
     candidate = PendingCandidate("b02-r1", "b02-r1-confirm", "c-b02", MAIN_POINT, 1060.0, 6.0)
-    taken = LocalNotebook.snapshot
+    taken = LocalBlackboard.snapshot
 
-    async def snapshot(self: LocalNotebook) -> NotebookSnapshot:
+    async def snapshot(self: LocalBlackboard) -> BlackboardSnapshot:
         state = await taken(self)
         if not waits():
             return state
         rows = tuple(replace(row, pending=(candidate,)) if row.branch == "b02" else row for row in state.progress)
         return replace(state, progress=rows)
 
-    monkeypatch.setattr(LocalNotebook, "snapshot", snapshot)
+    monkeypatch.setattr(LocalBlackboard, "snapshot", snapshot)
 
 
 async def test_the_judge_cannot_stop_a_branch_whose_candidate_waits_for_its_confirm_but_the_session_end_does(

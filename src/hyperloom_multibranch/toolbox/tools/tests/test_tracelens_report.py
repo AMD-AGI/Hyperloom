@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
+from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, roofline, tracelens_tool
 from hyperloom_multibranch.toolbox.tools import tracelens_report as report
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE

@@ -36,19 +36,19 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.intent import Intent
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, PendingCandidate, TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, PendingCandidate, TestRecord
 from hyperloom_multibranch.contracts.toolbox import BuildStatus
-from hyperloom_multibranch.notebook.rsi.frontier import (
+from hyperloom_multibranch.blackboard.rsi.frontier import (
     NEAR_BAR_HOLD,
     PROBATION_HOLD,
     SETTLED_TESTS,
     STRANDED_HOLD,
     envelope_hold,
 )
-from hyperloom_multibranch.notebook.rsi.playbook import PlaybookPlay
-from hyperloom_multibranch.notebook.rsi.stranded import StrandedLead
+from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPlay
+from hyperloom_multibranch.blackboard.rsi.stranded import StrandedLead
 from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import SessionEvent
@@ -83,7 +83,7 @@ class HoldReason(str, Enum):
     """Why the judge may neither stop a branch nor lower its K: a specialist branch in its grace, a repair branch in
     its protected period, a branch with a candidate waiting for its confirm, or a branch no judge steers, whose K the
     judge may not raise either. In a session that plays a playbook its safety envelope holds three more
-    (:func:`envelope_holds`), named as :func:`~hyperloom_multibranch.notebook.rsi.frontier.envelope_hold` names them: a
+    (:func:`envelope_holds`), named as :func:`~hyperloom_multibranch.blackboard.rsi.frontier.envelope_hold` names them: a
     probation draw, a near-bar lead and a stranded lead, whose stop the judge may not order but whose K it may lower
     (:data:`ENVELOPE_HOLDS`)."""
 
@@ -106,7 +106,7 @@ class JudgeView:
     one branch unless a specialist branch is open already.
 
     ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
-    repairs the fork desk queued for a slot, oldest first; ``history`` is the notebook's
+    repairs the fork desk queued for a slot, oldest first; ``history`` is the blackboard's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
@@ -165,7 +165,7 @@ class JudgeView:
 @dataclass(frozen=True)
 class QueuedIntent:
     """An explore test requested at ``requested_at`` and neither measured nor withdrawn yet; ``intent`` is the target and
-    mechanism it tests, ``""`` when the notebook holds no intent for it."""
+    mechanism it tests, ``""`` when the blackboard holds no intent for it."""
 
     request_id: str
     intent: str
@@ -173,7 +173,7 @@ class QueuedIntent:
 
 
 def queued_intents(records: Iterable[TestRecord], intents: Mapping[str, Intent]) -> dict[str, tuple[QueuedIntent, ...]]:
-    """Each branch's explore tests in flight, in the order they were requested, read off the notebook's ``records``
+    """Each branch's explore tests in flight, in the order they were requested, read off the blackboard's ``records``
     and its ``intents`` by fingerprint; a branch with none is left out."""
 
     queued: dict[str, list[QueuedIntent]] = {}
@@ -264,7 +264,7 @@ def held_branches(
 def envelope_holds(
     scored: Iterable[BranchProgress], specialists: Mapping[str, SpecialistStatus]
 ) -> dict[str, HoldReason]:
-    """The running branches the safety envelope holds, as the notebook's :func:`envelope_hold` reads the stall evidence
+    """The running branches the safety envelope holds, as the blackboard's :func:`envelope_hold` reads the stall evidence
     of the frontier ``scored`` rows: drawn for probation, or holding a near-bar or a stranded lead. A branch whose
     specialist gave up, or was stopped for a failed judging, has nobody to follow its lead and is held by none of
     them."""

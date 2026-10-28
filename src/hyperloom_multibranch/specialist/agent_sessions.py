@@ -7,7 +7,7 @@ Every agent's branch gets ports of its own: the branch first built takes the fir
 one, and a branch keeps its block for the session, a restart included. Its sandbox (:mod:`agent_sandbox`) runs on the
 cards and in the directory its preflight leases from the toolbox, with the lease's environment on top of the
 session's; its onboarding model is the specialists' CLI (:mod:`agent_onboard`) with its spend recorded in the branch's
-notebook, where the agent's own spend goes too, read from the transcripts of the Claude CLI's directory the session's
+blackboard, where the agent's own spend goes too, read from the transcripts of the Claude CLI's directory the session's
 environment names (:mod:`agent_spend`). Given the gate's benchmark client (:mod:`gate_client`), each agent's spec names
 it aimed at the branch's first port.
 """
@@ -26,7 +26,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
-from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionNotebook
+from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionBlackboard
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
 from hyperloom_multibranch.specialist.gate_client import GateClient
@@ -71,7 +71,7 @@ class AgentSessions:
         client = "" if self.client is None else self.client.command(port, place.workspace / AGENT_DIR / BENCH_DIR)
         spec = replace(self.spec, port=port, client=client)
         source = place.worktree.path / PurePosixPath(COMPONENT_LAYOUTS[component].upstream_prefix).parent
-        onboard = cli_onboard(self.command, self.env, branch, place.notebook)
+        onboard = cli_onboard(self.command, self.env, branch, place.blackboard)
 
         def sandbox(lease: BranchLease) -> AgentSandbox:
             base_env = {**os.environ, **lease.env}
@@ -82,7 +82,7 @@ class AgentSessions:
 
         def spend(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
             config = Path(os.environ.get(CLAUDE_CONFIG_ENV) or Path.home() / DEFAULT_CLAUDE_CONFIG)
-            return AgentSpend(config, roots, ledger, branch, self.command.model, place.notebook)
+            return AgentSpend(config, roots, ledger, branch, self.command.model, place.blackboard)
 
         setup = AutonomousSetup(onboarding, sandbox, spec, self.toolbox, self.repo, component, spend)
         return AutonomousSession(start, setup, place)
@@ -93,16 +93,16 @@ def with_agents(
     agents: AgentSessions,
     *,
     branch_dir: Callable[[str], Path],
-    notebook_for: Callable[[str], SessionNotebook],
+    blackboard_for: Callable[[str], SessionBlackboard],
 ) -> ModelSessions:
     """``sessions``, with a branch whose task names a third-party agent running that agent on ``agents``, in the
-    branch's place that ``branch_dir`` and ``notebook_for`` give, as ``sessions`` places its specialists."""
+    branch's place that ``branch_dir`` and ``blackboard_for`` give, as ``sessions`` places its specialists."""
 
     def factory(start: SessionStart) -> Session:
         if not start.task.agent:
             return sessions.factory(start)
         branch = start.branch
-        place = branch_place(sessions.worktrees(branch), notebook_for(branch), branch_dir(branch))
+        place = branch_place(sessions.worktrees(branch), blackboard_for(branch), branch_dir(branch))
         return agents.session(start, place)
 
     return ModelSessions(factory, sessions.worktrees)

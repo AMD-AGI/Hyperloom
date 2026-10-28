@@ -39,21 +39,21 @@ from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
-from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint, SessionProfile
-from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
+from hyperloom_multibranch.contracts.blackboard.records import ManifestFingerprint, SessionProfile
+from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.reference_leads import (
+from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.blackboard.codec import encode
+from hyperloom_multibranch.blackboard.knowledge.reference_leads import (
     INFERENCEX_REFERENCE,
     ReferenceLead,
     reference_leads,
 )
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.notebook.rsi.playbook import PlaybookChoice, PlaybookPlay, PlaybookPool, session_playbook
-from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, archived_history
+from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookChoice, PlaybookPlay, PlaybookPool, session_playbook
+from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
@@ -172,7 +172,7 @@ class SessionServices:
     """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
     configured), what builds the critic the rule gate asks whether a proven correctness fix matters under the
-    workload, on the scheduler's notebook handle its spend is recorded through, and the completion CLOSE asks to change
+    workload, on the scheduler's blackboard handle its spend is recorded through, and the completion CLOSE asks to change
     the scheduling playbook and to curate the RSI lesson pool, with ``author_model`` the model it runs on;
     ``resolver_model`` is the model the patch resolver runs on, which every patch it writes names."""
 
@@ -186,7 +186,7 @@ class SessionServices:
 
 
 class Session:
-    """Wires one session's scheduler, integrator and notebook handles onto the peers ``peer_factory`` builds."""
+    """Wires one session's scheduler, integrator and blackboard handles onto the peers ``peer_factory`` builds."""
 
     def __init__(
         self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
@@ -199,7 +199,7 @@ class Session:
         context = SchedulerContext(
             self._layout,
             self._roster,
-            self._notebook,
+            self._blackboard,
             self._decisions,
             self._processes,
             self._clock,
@@ -227,18 +227,18 @@ class Session:
         self._integrator = self._build_integrator(peers.repo, checks, services)
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
-        profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, self._clock)
-        self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload)
+        profiler = IntegrationProfiler(peers.toolbox, tests, self._blackboard, self._clock)
+        self._events = SessionEvents(self._blackboard, self._decisions, profiler, peers.toolbox, settings.workload)
         self._selector = FinalSelector(checks, settings.workload)
         self._signals = StopSignals()
         self._in_final = False
         self._image_check: ImageCheckReport | None = None
 
     def _open_records(self) -> None:
-        """The scheduler's notebook handle, the roster, the decision log and the blob store, on the session's layout."""
+        """The scheduler's blackboard handle, the roster, the decision log and the blob store, on the session's layout."""
 
         layout, clock = self._layout, self._clock
-        self._notebook = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, SCHEDULER_WRITER), clock=clock.now)
+        self._blackboard = LocalBlackboard(layout.blackboard, Writer(Role.SCHEDULER, SCHEDULER_WRITER), clock=clock.now)
         self._roster = Roster(self._settings.caps, layout.roster, clock)
         self._decisions = DecisionLog(layout.decisions, clock)
         self._blobs = LocalBlobStore(layout.blobs)
@@ -251,7 +251,7 @@ class Session:
             desk,
             self._processes,
             self._blobs,
-            services.critic(self._notebook),
+            services.critic(self._blackboard),
             self._reference_dirs(),
             settings.dev_leases,
             settings.agents,
@@ -268,24 +268,28 @@ class Session:
         self._history = tuple(tree for tree in archived_history() if tree.session_id != self._layout.session_id)
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
-        """The integrator, writing as itself to the notebook and the merge log, with the LLM patch resolver whose
+        """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose
         spend the scheduler records."""
 
-        merger = LocalNotebook(self._layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=self._clock.now)
+        merger = LocalBlackboard(
+            self._layout.blackboard, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=self._clock.now
+        )
         resolver = LlmPatchResolver(
-            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), repo, services.resolver_model
+            recorded(services.resolver_completion, self._blackboard, UsageSource.RESOLVER),
+            repo,
+            services.resolver_model,
         )
         records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
         return Integrator(records, repo, checks, resolver, self._clock)
 
     def _open_llm_roles(self, services: SessionServices) -> None:
-        """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the notebook."""
+        """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the blackboard."""
 
-        judge = recorded(services.judge_completion, self._notebook, UsageSource.JUDGE)
+        judge = recorded(services.judge_completion, self._blackboard, UsageSource.JUDGE)
         self._judge = Judge(judge, self._layout.judge, self._clock)
-        author = recorded(services.author_completion, self._notebook, UsageSource.AUTHOR)
+        author = recorded(services.author_completion, self._blackboard, UsageSource.AUTHOR)
         self._author = CloseAuthoring(author, services.author_model)
-        curator = recorded(services.author_completion, self._notebook, UsageSource.CURATOR)
+        curator = recorded(services.author_completion, self._blackboard, UsageSource.CURATOR)
         self._curator = CloseAuthoring(curator, services.author_model)
 
     async def run(self) -> SessionOutcome:
@@ -312,7 +316,7 @@ class Session:
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
-        report as that session would have; the manifest and the notebook that session wrote are this one's input, so
+        report as that session would have; the manifest and the blackboard that session wrote are this one's input, so
         this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
         ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
         make it so.
@@ -411,7 +415,7 @@ class Session:
         manifest = read_manifest(self._layout.manifest)
         replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
         sockets = await asyncio.to_thread(socket_versions)
-        await self._notebook.write_manifest_fingerprint(
+        await self._blackboard.write_manifest_fingerprint(
             ManifestFingerprint(
                 activity=self._layout.session_id,
                 sockets=sockets,
@@ -498,10 +502,10 @@ class Session:
     def _scoring(self) -> FrontierScoring:
         log = self._layout.reports / FRONTIER_LOG
         rule = self._play.stop_rule if self._play is not None else None
-        return FrontierScoring(self._notebook, self._policy, self._history, log, rule)
+        return FrontierScoring(self._blackboard, self._policy, self._history, log, rule)
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
-        return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
+        return SessionDashboard(self._blackboard, scoring, self._toolbox, self._metric, self._layout.dashboard)
 
     def _explorer(self) -> Explorer:
         scoring = self._scoring()
@@ -523,7 +527,7 @@ class Session:
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
         sources = ExportSources(
-            self._notebook, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
+            self._blackboard, self._repo, self._blobs, dashboard, self._image_check, self._briefs.warm
         )
         services = ExportServices(self._recipe_kb, self._author, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
@@ -558,10 +562,10 @@ class Session:
         return reference_leads(self._reference_dirs()[source.name], profile, source.revision)
 
     async def _final_candidates(self) -> FinalCandidates:
-        progress = await self._notebook.progress()
+        progress = await self._blackboard.progress()
         integration = integration_row(progress)
         if integration is None:
-            raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
+            raise RuntimeError("the blackboard has no integration branch after PRELUDE recorded its root")
         return await choose_candidates(
             progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
         )

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import (

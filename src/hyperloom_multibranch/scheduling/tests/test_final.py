@@ -25,10 +25,10 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
+from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS
@@ -197,7 +197,7 @@ class DroppingRequestsGate(GateService):
 
 
 class Bench:
-    """FINAL's toolbox fake, git repository and rule gate, on a virtual clock and an anchored notebook.
+    """FINAL's toolbox fake, git repository and rule gate, on a virtual clock and an anchored blackboard.
 
     ``i1`` (recorded at 1040) is committed on ``b01`` and ``c7`` (recorded at 1060) on ``b02``; what a test of either
     measures is its curve in ``curves``.
@@ -209,8 +209,8 @@ class Bench:
         self.commits: dict[str, str] = {}
         self.regression = FakeRegressionCheck()
 
-    def handle(self, role: Role) -> LocalNotebook:
-        return LocalNotebook(self.tmp_path / "notebook", Writer(role, role.value), clock=self.time.now)
+    def handle(self, role: Role) -> LocalBlackboard:
+        return LocalBlackboard(self.tmp_path / "blackboard", Writer(role, role.value), clock=self.time.now)
 
     async def build(self, curves: Curves) -> Bench:
         self.repo = GitExperimentRepo(self.tmp_path / "repo", LocalBlobStore(self.tmp_path / "blobs"))

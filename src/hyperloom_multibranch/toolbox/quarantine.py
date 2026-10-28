@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The node quarantine list, kept in the notebook's ``NodeHealth`` and read back when the toolbox starts (design 4.5).
+"""The node quarantine list, kept in the blackboard's ``NodeHealth`` and read back when the toolbox starts (design 4.5).
 
 A node enters the list when an attempt on it fails with an infrastructure failure the executor classified, or when a
 second unclear failure that did not reproduce on its rerun happens on it within the session (the toolbox's lifetime;
@@ -11,7 +11,7 @@ marked same-node (design 4.9.3), so a toolbox with one node counts the failures 
 never quarantines it.
 
 A failure that says nothing about its node (``attempts.NODE_BLAMELESS_INFRA_REASONS``) never quarantines it, and a node
-quarantine the notebook holds from such a failure (one recorded before that rule) is not read back: :meth:`load` leaves
+quarantine the blackboard holds from such a failure (one recorded before that rule) is not read back: :meth:`load` leaves
 it out, so the node is in service again without an operator.
 """
 
@@ -20,8 +20,8 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 
-from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent
-from hyperloom_multibranch.contracts.notebook.vocab import QuarantineAction
+from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent
+from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import NodeHealth
 from hyperloom_multibranch.toolbox.attempts import node_blameless
 
@@ -34,14 +34,14 @@ class Quarantine:
         self._failures: Counter[str] = Counter()
 
     async def load(self) -> None:
-        """Read the list the notebook holds, less the node quarantines a blameless failure recorded; called once when the
+        """Read the list the blackboard holds, less the node quarantines a blameless failure recorded; called once when the
         toolbox starts."""
 
         events = await self._health.quarantined()
         self._nodes = {event.node for event in events if not event.gpu_ids and not node_blameless(event.reason)}
 
     async def cards(self) -> tuple[QuarantineEvent, ...]:
-        """The card-level events the notebook holds (cards lost for good), not the whole-node ones."""
+        """The card-level events the blackboard holds (cards lost for good), not the whole-node ones."""
 
         return tuple(event for event in await self._health.quarantined() if event.gpu_ids)
 
@@ -97,7 +97,9 @@ class Quarantine:
             return False
         lost = [event for event in await self.cards() if event.node == node]
         await self._health.record_quarantine(QuarantineEvent(node=node, action=QuarantineAction.LIFT, reason=reason))
-        for event in lost:  # lifting a node returns its card sets in the notebook; cards lost for good are not returned
+        for (
+            event
+        ) in lost:  # lifting a node returns its card sets in the blackboard; cards lost for good are not returned
             await self._health.record_quarantine(event)
         self._nodes.discard(node)
         return True
