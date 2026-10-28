@@ -143,8 +143,7 @@ def _port_agent(
     spec: RewriteSpec, driver_path: str, config: Config, request: PortRequest, usage: UsageAccumulator | None
 ):
     """The implementer session every PORT attempt runs: only the FlyDSL kernel is editable, correctness is the gate."""
-    from kernelforge.loop.gate_settings import GateMeasurement
-    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
+    from kernelforge.loop.api import GateMeasurement, ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
 
     return make_agent_fn(
         config,
@@ -225,8 +224,8 @@ async def run_port_loop(
                 if integrity_error := restore_integrity(sink):
                     log.warning("port attempt %d restored protected inputs after timeout: %s", attempt, integrity_error)
                 raise _ReserveReached(attempt, _RESERVE_REACHED) from None
-            except Exception as e:  # noqa: BLE001 - a session crash is one failed attempt
-                log.warning("port attempt %d: agent session error: %s", attempt, e)
+            except Exception as e:  # isolation boundary: one PORT agent attempt
+                log.warning("port attempt %d: agent session error: %s", attempt, e, exc_info=True)
                 integrity_error = restore_integrity(sink)
                 history = f"Previous attempt crashed the session: {e}\n"
                 if integrity_error:

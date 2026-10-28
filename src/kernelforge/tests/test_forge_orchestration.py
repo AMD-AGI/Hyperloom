@@ -15,6 +15,8 @@ import pytest
 from kernelforge.tools.process_reaping import ReapReport
 
 from kernelforge.orchestrator import orchestration as orchestration_module
+from kernelforge.orchestrator import lane_prompts as lane_prompts_module
+from kernelforge.orchestrator.lane_prompts import lane_last_prompt
 from kernelforge.agent_backends import (
     AgentCapabilities,
     AgentProviderUnavailableError,
@@ -46,6 +48,7 @@ from kernelforge.orchestrator.specialists import (
     build_specialist_prompts,
 )
 from kernelforge.orchestrator.plan_critic import PlanCriticAgent
+from kernelforge.orchestrator.summary_line import PLAN_SUMMARY_RULE
 
 
 def _context() -> OrchestrationContext:
@@ -156,9 +159,9 @@ def test_factory_uses_same_runtime_for_independent_critic_backend(
         "create_registered_backend",
         create_backend,
     )
+    monkeypatch.setattr(orchestration_module, "agent_runtime", lambda _config: runtime)
     service = make_orchestration_service(
         config=SimpleNamespace(
-            agent_runtime=lambda: runtime,
             workspace="/workspace",
             max_turns=500,
             # The probe fields the factory now reads as attributes rather than through a ``getattr`` default that
@@ -2554,6 +2557,71 @@ async def test_a_fresh_revision_carries_the_whole_bundle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_single_plan_is_asked_to_open_with_its_summary_line() -> None:
+    """The export reads a plan's problem and goal from its first line, so synthesis must write one."""
+    backend = _PerCallBackend(["Summary: The scale stream is re-read. Stage it once.\n# Plan"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+
+    await agent.synthesize_lane_plan_results(
+        _context(),
+        SpecialistRound(dispatch, (await _outcome("memory", "The scale stream is re-read."),), _coverage(["memory"])),
+        lanes=2,
+    )
+
+    assert PLAN_SUMMARY_RULE in backend.specs[0].system_prompt
+
+
+@pytest.mark.asyncio
+async def test_every_lane_plan_opens_with_a_summary_line_and_the_partition_does_not() -> None:
+    """Only a step that writes a Markdown plan is asked for the line; the partition answers in JSON."""
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A\nRetime the MFMA.", "# Lane B\nStage."])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+
+    await agent.synthesize_lane_plan_results(_context(), await _compute_and_memory_round(), lanes=2)
+
+    partition, *lanes = backend.specs
+    assert PLAN_SUMMARY_RULE not in partition.system_prompt
+    assert len(lanes) == 2
+    assert all(PLAN_SUMMARY_RULE in lane.system_prompt for lane in lanes)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_is_not_asked_for_a_summary_line() -> None:
+    backend = _StaticBackend(_dispatch_payload())
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2, min_assignments=1)
+
+    await agent.plan_dispatch(_context(), _definitions())
+
+    assert PLAN_SUMMARY_RULE not in backend.specs[0].system_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumable", [True, False])
+async def test_a_revised_plan_writes_its_own_summary_line(resumable) -> None:
+    """A REPLACE changes the plan's goal, so the revision restates the line rather than keeping the draft's."""
+    backend = (_ResumableQueuedBackend if resumable else _QueuedBackend)(["# Revised plan"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+
+    await agent.revise_optimization_plan(
+        _context(),
+        SpecialistRound(dispatch, (await _outcome("memory", "The scale stream is re-read."),), _coverage(["memory"])),
+        draft=SynthesizedPlan(
+            text="Summary: The draft's goal.\n# Draft plan",
+            session_id="synthesis-session" if resumable else "",
+        ),
+        critic=PlanCriticOutcome(verdict="REPLACE", review="Compare the existing GEMM path."),
+    )
+
+    spec = backend.resumes[0][0] if resumable else backend.specs[0]
+    assert PLAN_SUMMARY_RULE in spec.system_prompt
+    assert "for the plan as revised, not for the draft" in spec.system_prompt
+    if not resumable:
+        assert PLAN_SUMMARY_RULE.strip() in json.loads(spec.user_prompt)["revision_instructions"]
+
+
+@pytest.mark.asyncio
 async def test_plan_revision_turn_cap_uses_non_executable_fallback(
     caplog,
 ) -> None:
@@ -2897,3 +2965,101 @@ async def test_diversify_partial_coverage_still_produces_plan() -> None:
     assert coverage["missing_cases"] == ["case-b"]
     assert result.optimization_plan_executable is True
     assert len(orchestration_backend.specs) == 2
+
+
+# ── lanes sharing the round's cached prefix ───────────────────────────────────
+
+
+class _PrefixCachingBackend:
+    """Reports each session's response start, and records when every session started and ended."""
+
+    capabilities = AgentCapabilities(shared_prompt_cache=True)
+
+    def __init__(self, replies: list[str], *, lead_answers: bool = True, lead_silence_sec: float = 0.0) -> None:
+        self.replies = list(replies)
+        self.lead_answers = lead_answers
+        self.lead_silence_sec = lead_silence_sec
+        self.specs: list = []
+        self.events: list[tuple[str, str]] = []
+
+    async def run(self, spec, usage=None) -> AgentRunResult:
+        self.specs.append(spec)
+        reply = self.replies[len(self.specs) - 1]
+        self.events.append(("start", spec.role))
+        await asyncio.sleep(0)
+        if spec.on_response_started is not None:
+            await asyncio.sleep(self.lead_silence_sec)
+            if not self.lead_answers:
+                raise RuntimeError("the lead lane ended before it answered")
+            self.events.append(("response", spec.role))
+            spec.on_response_started()
+        await asyncio.sleep(0.01)
+        self.events.append(("end", spec.role))
+        return AgentRunResult(text=reply, end_reason="agent_stopped")
+
+
+def test_the_lane_block_comes_last_and_everything_before_it_is_shared() -> None:
+    payload = {"task": "plan", "context": {"b": 1, "a": 2}, "lane": {"ground": "mine"}, "specialist_analyses": ["x"]}
+
+    prompt, shared = lane_last_prompt(payload)
+
+    assert list(json.loads(prompt)) == ["context", "specialist_analyses", "task", "lane"]
+    assert json.loads(prompt) == payload
+    assert prompt.startswith(shared)
+    assert "mine" not in shared and "specialist_analyses" in shared
+
+
+@pytest.mark.asyncio
+async def test_sibling_lanes_start_once_the_first_lane_is_answering() -> None:
+    """Started together, every lane writes the round's prefix; started after the first answers, they read it."""
+    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert [result.text for result in results] == ["# Lane A", "# Lane B"]
+    lead, sibling = "orchestration lane 1 synthesis", "orchestration lane 2 synthesis"
+    events = backend.events
+    assert events.index(("response", lead)) < events.index(("start", sibling)) < events.index(("end", lead))
+    lanes = backend.specs[1:]
+    assert lanes[0].shared_prompt_prefix == lanes[1].shared_prompt_prefix
+    assert all(spec.user_prompt.startswith(spec.shared_prompt_prefix) for spec in lanes)
+    assert lanes[1].on_response_started is None
+
+
+@pytest.mark.asyncio
+async def test_siblings_still_run_when_the_first_lane_never_answers() -> None:
+    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"], lead_answers=False)
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert [result.text for result in results] == ["# Lane B"]
+
+
+@pytest.mark.asyncio
+async def test_siblings_stop_waiting_for_a_first_lane_that_stays_silent(monkeypatch) -> None:
+    """A lead retrying or stuck before its first event must not hold the round for its whole timeout."""
+    monkeypatch.setattr(lane_prompts_module, "LEAD_RESPONSE_WAIT_SEC", 0.05)
+    backend = _PrefixCachingBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"], lead_silence_sec=0.5)
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    results = await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert [result.text for result in results] == ["# Lane A", "# Lane B"]
+    lead, sibling = "orchestration lane 1 synthesis", "orchestration lane 2 synthesis"
+    assert backend.events.index(("start", sibling)) < backend.events.index(("response", lead))
+
+
+@pytest.mark.asyncio
+async def test_a_backend_without_a_shared_prompt_cache_starts_every_lane_at_once() -> None:
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    specialists = await _compute_and_memory_round()
+
+    await agent.synthesize_lane_plan_results(_context(), specialists, lanes=2)
+
+    assert all(spec.on_response_started is None for spec in backend.specs)

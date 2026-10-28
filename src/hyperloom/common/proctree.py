@@ -31,7 +31,6 @@ __all__ = [
     "Tree",
     "collect_tree",
     "descendants",
-    "group_alive",
     "group_members",
     "kill_tree",
     "marked_pids",
@@ -144,29 +143,6 @@ def running(pid: int) -> bool:
         # No procfs reading to refine the signal with; the signal stands.
         return True
     return bool(fields) and fields[0] != "Z"
-
-
-def group_alive(pgid: int) -> bool:
-    """Whether a process group still has at least one member.
-
-    Args:
-        pgid: The process-group id to probe.
-
-    Returns:
-        bool: True while the group has a member or its liveness cannot be read
-        (a sandbox may refuse the probe), False once it is empty or on
-        non-POSIX.
-    """
-    if os.name != "posix":
-        return False
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # An indeterminate reading is not an empty group.
-        return True
-    return True
 
 
 def signal_group(pgid: int, sig: int, *, what: str = "process group") -> bool | None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import asyncio
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -204,6 +205,14 @@ class TestForgeGemmHelperCoverage:
         # Unreadable / missing config -> auto.
         assert untuned_gemm_csv._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
         assert untuned_gemm_csv._resolve_fp8_quant_type("") == "auto"
+
+    def test_resolve_fp8_quant_type_logs_malformed_config(self, tmp_path, caplog):
+        model_dir = tmp_path / "broken"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text("{not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert untuned_gemm_csv._resolve_fp8_quant_type(str(model_dir)) == "auto"
+        assert "model_config_invalid_json" in caplog.text
 
     def test_resolve_forge_precision_fp8_plain_model_routes_per_token(self, tmp_path):
         model = self._write_cfg(tmp_path / "plain", {"hidden_size": 2048})
@@ -1367,7 +1376,7 @@ class TestForgeGemmHelperCoverage:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.common import model_paths
 
         snapshot = tmp_path / "models--amd--DeepSeek-V4-Pro-MXFP4" / "snapshots" / "abc123"
         snapshot.mkdir(parents=True)
@@ -1386,7 +1395,7 @@ class TestForgeGemmHelperCoverage:
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            model_config_utils,
+            model_paths,
             "resolve_local_model_dir",
             lambda _model_path: snapshot,
         )
@@ -1514,7 +1523,7 @@ class TestForgeGemmHelperCoverage:
         tmp_path,
         monkeypatch,
     ):
-        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.common import model_paths
 
         SharedState(
             precision="mxfp4",
@@ -1524,7 +1533,7 @@ class TestForgeGemmHelperCoverage:
         ).save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(
-            model_config_utils,
+            model_paths,
             "resolve_local_model_dir",
             lambda _model_path: None,
         )
@@ -1991,7 +2000,7 @@ class TestForgeGemmHelperCoverage:
         )
         state.save(tmp_path)
         monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_shapes, "_profile_shapes_are_fresh", lambda _state: True)
+        monkeypatch.setattr(SharedState, "profile_trace_matches_workload", lambda _self: True)
 
         captured = {"ran": False}
 
@@ -4189,17 +4198,7 @@ class TestRunGemmTuningHandler:
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
 # _all_kernel_candidates — canonicalizes an aliased id against the full hot ∪ skipped set (no fallback).
 class TestTracelensRootResolution:
-    """TraceLens root is resolved/validated independently of inherited env."""
-
-    def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
-        assert ta._resolve_tracelens_root() == tmp_path / "tl"
-
-    def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
-        expected = tmp_path / "podlocal" / "TraceLens"
-        assert ta._resolve_tracelens_root() == expected
+    """The resolved TraceLens root is validated before trace analysis uses it."""
 
     def test_root_error_none_when_present(self, tmp_path):
         tl = tmp_path / "tl"
@@ -4504,7 +4503,7 @@ class TestBuildTraceAnalyzeCmd:
             ),
             session_dir=session_dir,
             state=state,
-            workload={"precision": "mxfp8"},
+            workload={},
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"

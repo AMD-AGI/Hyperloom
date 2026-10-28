@@ -16,11 +16,9 @@ import pytest
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
-from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
-    _parse_server_arg_value,
     resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
@@ -61,9 +59,7 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry; ``pin_num_prompts`` forwards that
-    regime's NUM_PROMPTS onto the point.
-    """
+    """No ``bench_protocol`` -> fall back to the first ``validated_regimes`` entry, whose NUM_PROMPTS reaches the point."""
     bench = _bench_script(tmp_path)
     monkeypatch.setenv("MODEL_PATH", "/models/x")
     monkeypatch.setenv("FRAMEWORK", "sglang")
@@ -99,9 +95,7 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
             ],
             "accepted_config": {"flags": "", "env": ""},
         },
-        spec=GeakSweepSpec(
-            conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1, pin_num_prompts=True
-        ),
+        spec=GeakSweepSpec(conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1),
         output_root=tmp_path / "sweep",
     )
 
@@ -524,22 +518,3 @@ def test_budget_limited_without_valid_pair_paths() -> None:
         )
         is True
     )
-
-
-def test_coerce_extra_envs_skips_malformed_tokens() -> None:
-    """The GEAK/sweep env coercion drops empty tokens and empty keys in both the shell-string and token-list shapes rather than emitting junk keys."""
-    # Shell-string shape: leading separator -> empty token; ``=v`` -> empty key.
-    assert coerce_extra_envs("; =v FOO=1") == {"FOO": "1"}
-    # Token-list shape: dict item with a None key, a token without ``=``, a non-string item, and an empty-key ``=v``
-    # are all skipped.
-    assert coerce_extra_envs([{None: "x", "A": "1"}, "noeq", 123, "=v", "B=2"]) == {"A": "1", "B": "2"}
-
-
-def test_parse_server_arg_value_falls_back_on_unbalanced_quotes() -> None:
-    """The GEAK handoff recovers a flag value even when the server-args string is not shlex-parseable (unbalanced quote -> plain ``str.split`` fallback)."""
-    got = _parse_server_arg_value('--max-model-len 4096 "unbalanced', "--max-model-len")
-    assert got == "4096"
-    # ``--flag=value`` form is also handled.
-    assert _parse_server_arg_value("--gpu-memory-utilization=0.9", "--gpu-memory-utilization") == "0.9"
-    # Absent flag -> None.
-    assert _parse_server_arg_value("--tp 8", "--max-model-len") is None

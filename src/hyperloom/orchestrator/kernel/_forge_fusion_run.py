@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.coerce import optional_positive_int
 
 from . import forge_fusion
 from ..actions.executors._kernel_agent_tool import HandlerResult
@@ -18,7 +19,6 @@ from ._forge_lane_budget import (
     _forge_fusion_timeout_sec,
     _fusion_session_serve_args,
     _lane_budget,
-    _positive_int,
     _unfunded_lane_skip,
 )
 from ._integrate_payload import _requested_framework, _requested_setting
@@ -54,8 +54,8 @@ def _resolve_fusion_decode_trace(state) -> str:
     ``last_profile_trace`` holds a single trace file for AgentX profiles and for any
     round that merged its ranks, and the capture directory otherwise --
     ``_preferred_main_trace_path`` in ``actions/executors/profile.py`` returns
-    ``trace_dir`` when ``require_single_rank`` is off and no ``merged-*`` file exists,
-    which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
+    ``trace_dir`` when no ``merged-*`` file exists, which is every non-AgentX
+    sglang/vLLM profile. A directory therefore resolves to the
     newest capture in it, which is this run's too: the directory is the round's own
     ``trace_dir``.
     """
@@ -265,7 +265,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     if fusion_lane is None:
         return {**_unfunded_lane_skip(LANE_FUSION), "engine": "forge_fusion"}
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
-    requested_recipes = _positive_int(payload.get("max_recipes"))
+    requested_recipes = optional_positive_int(payload.get("max_recipes"), 0)
     # An explicit payload value stays an operator/test escape hatch.
     fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 

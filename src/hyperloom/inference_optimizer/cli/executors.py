@@ -27,7 +27,7 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
-from hyperloom.orchestrator.actions.executors.roofline import make_roofline_executor
+from hyperloom.orchestrator.actions.executors.roofline import RooflineExecutor
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
@@ -219,10 +219,7 @@ def _register_executors(
 
     coordinator.sub.register_executor(
         "target_analysis",
-        TargetAnalysisExecutor(
-            compare_against_gpu=(compare_against_gpu or "").strip(),
-            session_dir=session_dir,
-        ),
+        TargetAnalysisExecutor(compare_against_gpu=(compare_against_gpu or "").strip()),
     )
 
     if specialist_executor is not None:
@@ -239,11 +236,11 @@ def _register_executors(
     # watermark crossing, so always registered.
     coordinator.sub.register_executor(
         "roofline",
-        make_roofline_executor(shared_state=coordinator.shared_state),
+        RooflineExecutor(shared_state=coordinator.shared_state),
     )
 
     # targeted_build: off-loop compiled-component builds.  Coordinator-internal
-    # only (in INTERNAL_ONLY_ACTION_NAMES); dispatched by the enablement phase,
+    # only (in COORDINATOR_INTERNAL_ACTIONS); dispatched by the enablement phase,
     # not proposed by LLM agents.  The executor runs via run_task_registered so
     # cancel_inflight_actions can stop it at shutdown or on a spent budget.
     coordinator.sub.register_executor(

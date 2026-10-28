@@ -21,8 +21,8 @@ from ._kernel_agent_tool import (
     _run_subprocess,
     _shape_tool_result,
 )
-from .._recorder_trace import trace_recording_skipped
 from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
@@ -60,20 +60,6 @@ _CANDIDATE_ENV_PREFIXES = (
 _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
-def _resolve_tracelens_root() -> Path:
-    """Resolve the TraceLens checkout, independent of inherited env.
-
-    Falls back to the install-script-derived pod-local path so trace analysis
-    works even when the coordinator process did not source kernel-agent.env.sh.
-
-    Returns:
-        Path: The resolved TraceLens root (may not exist yet; callers validate).
-    """
-    from hyperloom.inference_optimizer.session import paths
-
-    return paths.tracelens_root()
-
-
 def _tracelens_root_error(root: Path) -> str | None:
     """Validate that the resolved TraceLens root is a usable git checkout.
 
@@ -106,8 +92,6 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     ``TRACELENS_ROOT`` override must fail fast when missing. A heal that cannot
     load or fails is logged and the caller's validation reports the error.
     """
-    from hyperloom.inference_optimizer.session import paths
-
     # The installer-managed checkout is <deps_cache_root>/TraceLens or the
     # per-revision <deps_cache_root>/TraceLens@<sha>; both are healable. An
     # explicit override elsewhere must fail fast (never auto-clone).
@@ -227,7 +211,7 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
     # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
-    from ._grid_runner import server_args_env_name
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
@@ -450,7 +434,7 @@ def _build_trace_analyze_cmd(
         cmd += _bypass_flags(state, run.analysis_mode)
 
     model_path = first_text(payload.get("model_path"), getattr(state, "model_path", ""), os.environ.get("MODEL_PATH"))
-    precision = first_text(payload.get("precision"), getattr(state, "precision", ""), workload.get("precision"))
+    precision = first_text(payload.get("precision"), getattr(state, "precision", ""))
     cmd += _optional_flags(
         ("--model-name", run.model_name),
         ("--framework", run.framework),
@@ -460,7 +444,7 @@ def _build_trace_analyze_cmd(
     )
 
     if scriptable:
-        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps"))
         cmd += _optional_flags(("--num-denoise-steps", num_denoise))
     elif not is_bypass:
         cmd += _split_llm_flags(payload, workload)
@@ -586,11 +570,12 @@ def _record_tool_version(session_dir: Path, tool: str) -> None:
     # kernels is in scope. Nothing downstream can recover it, so it is recorded here even
     # though the rest of the discovery run is already on the roofline event.
     from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
+    from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
 
     try:
         tool_versions.record_tool_version(session_dir, tool=tool)
     except recorder_warnings.RECORDING_ERRORS as exc:
-        trace_recording_skipped("versions", reason="caller raised before the recorder", entity=tool, error=exc)
+        trace_skip(reason="caller raised before the recorder", section="versions", entity=tool, error=exc)
 
 
 def _framework_for_analysis(payload: dict, state: Any) -> tuple[str, list[dict[str, Any]]]:
@@ -735,7 +720,7 @@ async def trace_analyze_handler(
     is_bypass = analysis_route == "bypass"
     # Both routes need an importable checkout: bypass transitively imports
     # TraceLens for source-path mapping.
-    tracelens_root = _resolve_tracelens_root()
+    tracelens_root = paths.tracelens_root()
     # Self-heal when the checkout is missing or incomplete (no .git).
     if not (tracelens_root / ".git").exists():
         _maybe_selfheal_tracelens_root(tracelens_root, log=log)

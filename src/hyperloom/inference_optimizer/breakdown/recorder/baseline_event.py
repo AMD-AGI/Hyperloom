@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import (
     to_float as _float_or_none,
@@ -29,7 +29,7 @@ from .event_fields import (
 from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import BASELINE_EVENT_SECTIONS
 
@@ -58,8 +58,12 @@ ROW_ROUND = "round"
 
 # Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
 RUN_INITIAL = "initial"
-RUN_AFTER_EVAL_FAILURE = "retry_after_eval_failure"
 RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
+
+#: Quality-reference statuses whose figure the session went on to use. ``degraded`` is a baseline that stands on its
+#: cold warmup round because the budget would not hold the hot pass: knowingly depressed, but it is the number every
+#: later gain in the session was read against, so it is the number to publish.
+ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 # The executor's round labels, mirrored so a consumer selects the measured pass without matching on prose.
 ROUND_SINGLE = "single"
@@ -101,6 +105,7 @@ _EVAL_FAILURE_WARNINGS = frozenset(
 _MAX_ROUND_WARNINGS = 12
 
 __all__ = [
+    "ANCHORING_BASELINE_STATUSES",
     "ARGS_FROM_LAUNCH",
     "ARGS_FROM_OBSERVED",
     "ARGS_UNAVAILABLE",
@@ -112,7 +117,6 @@ __all__ = [
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",
-    "RUN_AFTER_EVAL_FAILURE",
     "RUN_AFTER_MOE_RUNNER_FAILURE",
     "RUN_INITIAL",
     "SECTION_ACTION",
@@ -123,14 +127,16 @@ __all__ = [
     "BaselineInvocation",
     "BaselineRequest",
     "BaselineRound",
-    "assemble_baseline_action",
+    "QualityRefAction",
     "assemble_baseline_actions",
     "assemble_baseline_ext",
+    "anchoring_baseline_action",
     "anchoring_eval_from_action",
     "anchoring_eval_from_actions",
     "anchoring_eval_from_timeline",
     "baseline_event_id",
     "make_baseline_recorder",
+    "quality_ref_actions",
 ]
 
 
@@ -160,9 +166,7 @@ def record_action_decision(
     """
     if not str(task_id or "") or not str(decision or ""):
         return
-    from .event_sink import make_sink
-
-    sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
+    sink = EventSink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
     if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
         log.debug(
             "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
@@ -179,23 +183,10 @@ def record_action_decision(
     _republish_closed_event(sink.event_id)
 
 
-def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> dict[str, Any]:
-    """The event-level fragment: its timeline sequence and its own start time.
-
-    An event holds every measurement of one phase and cycle, and the timeline
-    orders events by ``start_time``, so the event's start is the first action's
-    -- read from here -- and never the closing action's, which would file the
-    event at whichever measurement happened to finish last.
-    """
-    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    return rows[0] if rows else {}
-
-
 def _republish_closed_event(event: str) -> None:
     """Re-assemble a closed event so a fragment written after it is published."""
     from .assembler import event_parts
     from .construct import republish_closed_event
-    from .event_rows import rows_for_event
 
     def _end_time(parts: Mapping[str, list[dict[str, Any]]], header: dict[str, Any]) -> str:
         action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
@@ -396,25 +387,74 @@ def _action_failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] 
     return _failure(result, stage=stage)
 
 
-def _latest_quality_ref_action(actions: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
-    """Return the latest action dispatched as a session quality reference."""
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    for row in actions:
-        if not isinstance(row, Mapping):
-            continue
-        if not bool(_as_dict(row.get("request")).get("establishes_quality_ref")):
-            continue
-        stamp = str(row.get("end_time") or row.get("start_time") or "")
-        candidates.append((stamp, dict(row)))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[-1][1]
+class QualityRefAction(NamedTuple):
+    """One action dispatched as the session's quality reference, and the event that holds it."""
+
+    action: dict[str, Any]
+    event_id: str
+
+
+def _establishes_quality_ref(action: Mapping[str, Any]) -> bool:
+    return bool(_as_dict(action.get("request")).get("establishes_quality_ref"))
+
+
+def _settle_stamp(action: Mapping[str, Any]) -> str:
+    return str(action.get("end_time") or action.get("start_time") or "")
+
+
+def _quality_ref_rows(actions: Sequence[Any]) -> list[dict[str, Any]]:
+    """One event's quality-reference actions, in the order they settled.
+
+    Ordered on each action's own stamps because the actions array is keyed by
+    task id and carries no chronology of its own; equal stamps keep their
+    recorded order.
+    """
+    rows = [dict(row) for row in actions if isinstance(row, Mapping) and _establishes_quality_ref(row)]
+    rows.sort(key=_settle_stamp)
+    return rows
+
+
+def quality_ref_actions(timeline: Sequence[Mapping[str, Any]]) -> list[QualityRefAction]:
+    """Every action dispatched as the session's quality reference, in the order they settled.
+
+    Two dispatches land an action on a ``baseline`` event: the genuine baseline
+    and ``replay_warm_recipe``. The kernel lane's throughput-only probes --
+    integrate re-baseline, stack validation, shape capture -- go through the
+    same executor but record into the kernel event that asked for them. Only
+    the genuine baseline is a quality reference, so the selection reads the
+    action's own ``establishes_quality_ref``, the flag the executor set from
+    the dispatch kind and ``quality_ref_exempt``, rather than re-deciding from
+    the kind. Failed actions are included: they are the attempts history.
+    """
+    found = [
+        QualityRefAction(action, str(event.get("id") or ""))
+        for event in timeline
+        if isinstance(event, Mapping) and str(event.get("type") or "") == EVENT_TYPE
+        for action in _quality_ref_rows(_as_list(_as_dict(event.get("ext")).get("actions")))
+    ]
+    found.sort(key=lambda row: _settle_stamp(row.action))
+    return found
+
+
+def anchoring_baseline_action(timeline: Sequence[Mapping[str, Any]]) -> QualityRefAction | None:
+    """The quality-reference action the session's gains were read against, or ``None``.
+
+    The latest one that produced a usable figure: a baseline re-measured after
+    an enablement fix re-anchors the session. ``outcome.baseline`` and the
+    report's baseline section both read this one choice, so they cannot name
+    different measurements.
+    """
+    usable = [
+        row
+        for row in quality_ref_actions(timeline)
+        if str(row.action.get("status") or "").strip().lower() in ANCHORING_BASELINE_STATUSES
+    ]
+    return usable[-1] if usable else None
 
 
 def anchoring_eval_from_action(action: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one action's anchoring eval verdict for export-time lift."""
-    if not bool(_as_dict(action.get("request")).get("establishes_quality_ref")):
+    if not _establishes_quality_ref(action):
         return None
     measurement = _as_dict(action.get("measurement"))
     eval_failure = _as_dict(action.get("eval_failure"))
@@ -448,27 +488,14 @@ def anchoring_eval_from_action(action: Mapping[str, Any]) -> dict[str, Any] | No
 
 def anchoring_eval_from_actions(actions: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Project this event's anchoring eval from its actions, latest wins."""
-    action = _latest_quality_ref_action(actions)
-    if action is None:
-        return None
-    return anchoring_eval_from_action(action)
+    rows = _quality_ref_rows(actions)
+    return anchoring_eval_from_action(rows[-1]) if rows else None
 
 
 def anchoring_eval_from_timeline(timeline: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Project the session's anchoring eval across baseline events, latest wins."""
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    for event in timeline:
-        if not isinstance(event, Mapping) or str(event.get("type") or "") != EVENT_TYPE:
-            continue
-        action = _latest_quality_ref_action(_as_list(_as_dict(event.get("ext")).get("actions")))
-        if action is None:
-            continue
-        stamp = str(action.get("end_time") or action.get("start_time") or "")
-        candidates.append((stamp, action))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0])
-    return anchoring_eval_from_action(candidates[-1][1])
+    rows = quality_ref_actions(timeline)
+    return anchoring_eval_from_action(rows[-1].action) if rows else None
 
 
 @dataclass(frozen=True)
@@ -511,7 +538,7 @@ class BaselineRound:
 class BaselineEventRecorder:
     """Records one baseline action's facts into whichever event owns it."""
 
-    def __init__(self, sink: RecordSink, request: BaselineRequest, *, owns_event: bool = True):
+    def __init__(self, sink: EventSink, request: BaselineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event.
 
         ``request.task_kind`` is stated because this executor also measures
@@ -761,15 +788,18 @@ class BaselineEventRecorder:
         if not self._owns_event:
             return
         from .assembler import event_parts
+        from .construct import event_header
         from .recorder_warnings import RECORDING_ERRORS, note_failure
 
         try:
             parts = event_parts(BASELINE_EVENT_SECTIONS, event=self.event_id)
             ext, derived = assemble_baseline_ext(parts, event=self.event_id)
-            # This action's own start only dates the event when the shell write
+            # The timeline orders events by ``start_time``, so the event is
+            # dated by its first action's open, never by whichever action closes
+            # last. This action's own start only dates it when the shell write
             # failed, leaving this close as the first thing to put it on the
             # timeline.
-            opened_at = str(_event_header(parts, event=self.event_id).get("start_time") or "")
+            opened_at = str(event_header(parts, SECTION_EVENT, self.event_id).get("start_time") or "")
             finish_event(
                 EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, opened_at or self._start_time),
                 sequence=self._sequence,
@@ -864,20 +894,6 @@ def assemble_baseline_actions(
     return actions
 
 
-def assemble_baseline_action(
-    parts: Mapping[str, list[dict[str, Any]]],
-    *,
-    event: str,
-    task_id: str,
-) -> dict[str, Any] | None:
-    """Assemble one baseline action out of its recorded rows."""
-    wanted = str(task_id or "")
-    for action in assemble_baseline_actions(parts, event=event):
-        if str(action.get("task_id") or "") == wanted:
-            return action
-    return None
-
-
 def assemble_baseline_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -894,7 +910,7 @@ def assemble_baseline_ext(
 
 
 def make_baseline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     request: BaselineRequest = BaselineRequest(),
     *,
     owns_event: bool = True,

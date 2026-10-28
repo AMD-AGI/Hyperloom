@@ -11,13 +11,13 @@ from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller import parse_task_payload
 from kernelforge.kernel_rewrite_controller.forge_runner import (
-    _RESULT_SENTINEL,
     ForgeLoopInvocation,
     _read_result,
     build_forge_loop_invocation,
     run_forge_loop,
 )
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.loop.api import RESULT_SENTINEL
 from kernelforge.kernel_rewrite_controller.worktree import (
     DRIVER_STAGE_PREFIX,
     OperatorWorktree,
@@ -276,7 +276,7 @@ def test_a_corrupt_result_file_falls_back_to_the_sentinel_in_stdout(tmp_path: Pa
     """A truncated result file must not hide a result forge-loop already announced."""
     result_path = tmp_path / "result.json"
     result_path.write_text('{"improved": tr', encoding="utf-8")
-    stdout = f"log line\n{_RESULT_SENTINEL}\n{json.dumps({'improved': True})}\n{_RESULT_SENTINEL}\n"
+    stdout = f"log line\n{RESULT_SENTINEL}\n{json.dumps({'improved': True})}\n{RESULT_SENTINEL}\n"
 
     assert _read_result(result_path, stdout) == {"improved": True}
 
@@ -285,19 +285,19 @@ def test_a_result_file_holding_a_non_object_falls_back_to_stdout(tmp_path: Path)
     """The contract is an object; a bare list is not a result."""
     result_path = tmp_path / "result.json"
     result_path.write_text("[1, 2, 3]", encoding="utf-8")
-    stdout = f"{_RESULT_SENTINEL}{json.dumps({'improved': False})}{_RESULT_SENTINEL}"
+    stdout = f"{RESULT_SENTINEL}{json.dumps({'improved': False})}{RESULT_SENTINEL}"
 
     assert _read_result(result_path, stdout) == {"improved": False}
 
 
 def test_a_sentinel_block_that_is_not_json_yields_no_result(tmp_path: Path) -> None:
     """Garbage between the sentinels is reported as absent, not guessed at."""
-    assert _read_result(tmp_path / "absent.json", f"{_RESULT_SENTINEL}not json{_RESULT_SENTINEL}") is None
+    assert _read_result(tmp_path / "absent.json", f"{RESULT_SENTINEL}not json{RESULT_SENTINEL}") is None
 
 
 def test_a_sentinel_block_holding_a_non_object_yields_no_result(tmp_path: Path) -> None:
     """A scalar between the sentinels is not a result payload."""
-    assert _read_result(tmp_path / "absent.json", f"{_RESULT_SENTINEL}42{_RESULT_SENTINEL}") is None
+    assert _read_result(tmp_path / "absent.json", f"{RESULT_SENTINEL}42{RESULT_SENTINEL}") is None
 
 
 def test_stdout_without_a_sentinel_pair_yields_no_result(tmp_path: Path) -> None:

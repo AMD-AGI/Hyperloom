@@ -131,10 +131,15 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
     def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
         """The measurement is a floor, not a replacement: only the catalogue knows an action benches a whole grid rather than a single variant."""
         cost = expected_action_cost_minutes(
-            ACTION_CATALOGUE[_EXPENSIVE_ACTION],
+            ACTION_CATALOGUE["integrate"],
             measured_baseline_sec=10 * 60.0,
         )
-        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+        assert cost == pytest.approx(ACTION_CATALOGUE["integrate"].typical_runtime_min)
+
+    def test_a_sweep_is_admitted_on_one_measured_pair(self):
+        """A sweep runs until its grant is spent, so it needs room for two measured rounds, not its catalogue's 30 min."""
+        cost = expected_action_cost_minutes(ACTION_CATALOGUE["conc_sweep"], measured_baseline_sec=10 * 60.0)
+        assert cost == pytest.approx(20.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""
@@ -1090,7 +1095,7 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
         return {"ok": True}
 
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="retained-thread", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
@@ -1144,7 +1149,7 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
     monkeypatch.setattr(coord.db, "close", close)
     monkeypatch.setattr(coord.dispatcher, "close_db_after_executions", drain)
     coord.sub.register_executor(_CHEAP_ACTION, execute)
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
@@ -1178,7 +1183,9 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
-    task = await coord.tasks.create(TaskSpec(kind="specialist", params={}, idempotency_key="pending-cleanup"))
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="specialist", params={}, idempotency_key="pending-cleanup")
+    )
     await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -1203,7 +1210,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
             return confirmed
 
     coord.sub.register_executor(_CHEAP_ACTION, lambda _ctx: _done({"ok": True}))
-    task = await coord.tasks.create(
+    task, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="cleanup-order", requires_lanes=[_CHEAP_ACTION_LANE])
     )
     gpu = await coord.gpu_specialist_pool.try_acquire(count=1, holder_id=task.task_id, task_id=task.task_id)
@@ -1227,10 +1234,13 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
             await execution
         on_complete.assert_not_awaited()
         await coord.dispatcher.close_db_after_executions()
-        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
-    assert events == (["close", "gpu_release"] if confirmed else ["close"])
-    holders = await coord.locks.lane_holders()
-    assert bool(holders) is not confirmed
+        # The unconfirmed close is reported to the caller and recorded on the
+        # row; the slot still goes back, because the task it was held for is over.
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
+    # Cleanup is asked first either way -- its answer is evidence, so it has to
+    # be in hand before the row is written -- and the capacity follows it back.
+    assert events == ["close", "gpu_release"]
+    assert not await coord.locks.lane_holders()
 
 
 class TestTheRunnerRecordsACancellation:
@@ -1319,7 +1329,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
             return await asyncio.to_thread(work)
 
         coord.sub.register_executor(_CHEAP_ACTION, execute)
-        task = await coord.tasks.create(
+        task, _ = await coord.tasks.create_or_return_existing(
             TaskSpec(kind=_CHEAP_ACTION, params={}, idempotency_key="p-orphan", requires_lanes=[_CHEAP_ACTION_LANE])
         )
         try:
@@ -1695,8 +1705,6 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
             await coord.stop()
         assert reason == "time_exhausted"
         assert time.monotonic() - started < 15.0
-        assert "close_backends" in coord.shared_state.teardown_timings_sec
-        assert coord.shared_state.teardown_timings_sec["total"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_a_server_still_up_at_exit_is_reaped_by_teardown(self, coord: Coordinator):
@@ -1752,6 +1760,5 @@ class TestTheSessionBudgetIsSummedForwardOverLegs:
                 proc.kill()
                 proc.wait(timeout=10)
 
-        assert "reap_orphaned_servers" in coord.shared_state.teardown_timings_sec
         assert reaped, "teardown left the serving process alive"
         assert not pidfile.exists()

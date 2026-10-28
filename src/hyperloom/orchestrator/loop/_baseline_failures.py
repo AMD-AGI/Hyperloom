@@ -25,8 +25,9 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
-from ..phases.machine_state import PHASE_ENABLEMENT
+from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
+from ..state.failure_evidence import MAGPIE_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import ActionAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
@@ -48,6 +49,9 @@ _STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
     # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
     # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
     PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
+    # The round served its whole protocol and the harness around it still refused the result. The next
+    # attempt runs the same harness over the same workload, so it is refused the same way.
+    MAGPIE_NONZERO_INVALID_MEASUREMENT: _BASELINE_FAILED_STOP_REASON,
 }
 
 
@@ -244,10 +248,10 @@ class BaselineFailureMixin:
         """
         # A process that exited with the same output as last time (modulo numbers)
         # will do so again: stop at two instead of spending a third attempt. The
-        # executor signs only ``subprocess_nonzero``, from the process's whole
-        # output rather than the 2000-character ``error`` tail; other classes carry
-        # a fixed sentence that two unrelated failures share.
-        signature = str(result_payload.get("output_signature") or "") if err_class == "subprocess_nonzero" else ""
+        # executor decides which classes are worth signing and signs them from the
+        # process's whole output rather than the 2000-character ``error`` tail, so a
+        # signature is present exactly when it identifies the failure.
+        signature = str(result_payload.get("output_signature") or "")
         repeated = bool(
             signature
             and self.shared_state.baseline_failure_streak >= 1
@@ -396,9 +400,12 @@ class BaselineFailureMixin:
         # so does a session that never admitted the eval lane -- nothing would
         # re-run the eval, so holding the budget just stalls the run. Baseline
         # failures are also the ENABLEMENT phase's own input, and its attempt cap
-        # bounds them.
+        # bounds them -- including a PRELUDE retry that settles before the transition.
         eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
-        in_enablement = str(self.shared_state.phase or "").strip().upper() == PHASE_ENABLEMENT
+        phase = str(self.shared_state.phase or "").strip().upper()
+        in_enablement = phase == PHASE_ENABLEMENT or (
+            phase == PHASE_PRELUDE and self._coord.enablement_lane.enablement_admitted()
+        )
         retries_suppressed = bool(eval_pending_suppress or in_enablement)
         if eval_failed:
             self._persist_eval_failure(result_payload)

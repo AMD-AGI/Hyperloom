@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
@@ -79,7 +79,7 @@ def test_targeted_build_repo_match_rejects_wrong_component():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("gpu_type", "arch"),
-    sorted((b, a) for b, (a, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if targeted_build_validated(b)),
+    sorted((product, board.gfx) for product, board in AMD_GPU_BOARDS.items() if targeted_build_validated(product)),
 )
 async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, arch):
     """A build with no arch is refused at preflight, so every accepted board has to carry one."""

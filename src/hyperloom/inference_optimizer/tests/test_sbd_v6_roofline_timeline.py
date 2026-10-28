@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_INITIAL,
     ANALYSIS_ATTEMPT_N26_RETRY,
@@ -60,7 +60,7 @@ def _recorder(
 ):
     """Build a standalone recorder, the way a dispatched roofline gets one."""
     recorder = make_roofline_recorder(
-        make_sink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
+        EventSink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
         RooflineRequest(task_id=task_id, task_kind=task_kind, reason=reason, framework=framework),
     )
     assert recorder is not None
@@ -110,7 +110,7 @@ def _ta_result(**overrides: Any) -> dict[str, Any]:
 
 def test_begin_puts_the_event_on_the_timeline(tmp_path: Path) -> None:
     recorder = _recorder(reason="prelude_initial")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
 
     events = _roofline_events(tmp_path)
     assert len(events) == 1
@@ -121,20 +121,19 @@ def test_begin_puts_the_event_on_the_timeline(tmp_path: Path) -> None:
     assert recorder.event_id == roofline_event_id("prelude", 0)
 
 
-def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
+def test_the_action_carries_its_own_request(tmp_path: Path) -> None:
     recorder = _recorder(reason="prelude_initial")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_failed(phase="profile", message="never booted")
 
     action = _actions(tmp_path)[0]
     assert action["request"]["arm"] == "baseline"
-    assert action["profile"]["max_attempts"] == 3
 
 
 def test_preflight_conditions_survive_onto_the_action(tmp_path: Path) -> None:
     """What the action found before profiling is carried whether or not the run went on to succeed."""
     recorder = _recorder(reason="prelude_initial")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.record_preflight(
         {
             "orphans_reaped": [1234],
@@ -155,7 +154,7 @@ def test_preflight_conditions_survive_onto_the_action(tmp_path: Path) -> None:
 def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> None:
     """The process outcome rides on the attempt row, because the result dict cannot show it."""
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -174,7 +173,7 @@ def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
     recorder = _recorder(task_id="t-capture-1", task_kind="gemm_shape_capture", framework="vllm")
-    recorder.begin(max_profile_attempts=1)
+    recorder.begin()
     recorder.finish_failed(phase="profile", message="stopped")
 
     request = _actions(tmp_path)[0]["request"]
@@ -184,7 +183,7 @@ def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) ->
 
 def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) -> None:
     recorder = _recorder(task_id="t-2", task_kind="roofline")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_failed(phase="profile", message="stopped")
 
     request = _actions(tmp_path)[0]["request"]
@@ -258,7 +257,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
                 "annotations": {"step_root_count": 12},
             }
         ],
-        "chunk_level": [{"path": "/w/t/chunk0.json"}, {"path": "/w/t/chunk1.json"}],
         "checks": [],
     }
     validate.update(overrides)
@@ -268,7 +266,7 @@ def _validate(**overrides: Any) -> dict[str, Any]:
 def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) -> None:
     """The numbers a reader needs come inline; the per-rank and per-file tables stay behind a path."""
     recorder = _recorder()
-    recorder.begin(max_profile_attempts=1)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -304,21 +302,19 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     assert quality["capture_sidecar_files_present"] == 3
     assert quality["analyzed_rank"] == 0
     assert quality["rank_count_certified"] == 1
-    assert quality["chunk_count_certified"] == 2
     assert quality["file_count_by_role"]["capture_sidecar"] == 3
 
     # The unbounded tables must not have been copied in.
     flat = json.dumps(validate)
     assert "candidates" not in flat
     assert "rank_level" not in flat
-    assert "chunk_level" not in flat
     assert "capture_traces/bs_" not in flat
 
 
 def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_path: Path) -> None:
     """Patch facts cannot live in the certificate: the attempts whose patching is in question produce none."""
     recorder = _recorder()
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -350,7 +346,7 @@ def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_pat
 def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -> None:
     """A patch that succeeded used to write nothing, making "fine" and "nobody looked" the same record."""
     recorder = _recorder()
-    recorder.begin(max_profile_attempts=1)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -379,7 +375,7 @@ def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -
 
 def test_profile_runs_collapse_into_one_action(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -423,7 +419,7 @@ def test_the_recorder_numbers_each_half_and_times_each_run_from_its_begin(tmp_pa
     from hyperloom.inference_optimizer.breakdown.recorder import roofline_event
 
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     stamps = iter(f"2026-01-01T00:00:{second:02d}+00:00" for second in range(60))
     monkeypatch.setattr(roofline_event, "_now_iso", lambda: next(stamps))
 
@@ -455,7 +451,7 @@ def test_the_recorder_numbers_each_half_and_times_each_run_from_its_begin(tmp_pa
 
 def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_analysis_run(
         recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL),
         AnalysisRunOutcome(
@@ -500,7 +496,7 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
 
 def test_failed_action_names_the_failing_substep(tmp_path: Path) -> None:
     recorder = _recorder(reason="prelude_initial")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_failed(phase="trace_analyze", message="splitter produced no steady-state chunks")
 
     event = _roofline_events(tmp_path)[0]
@@ -527,7 +523,7 @@ def _succeed(recorder, *, snapshot_id: int = 1) -> None:
 def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Path) -> None:
     for index, reason in enumerate(("kernel_followup", "close_post_opt")):
         recorder = _recorder(task_id=f"t-{index}", reason=reason, phase="sweep", macro_cycle=2)
-        recorder.begin(max_profile_attempts=3)
+        recorder.begin()
         _succeed(recorder, snapshot_id=index + 1)
 
     events = _roofline_events(tmp_path)
@@ -543,7 +539,7 @@ def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Pat
 def test_a_different_phase_or_cycle_is_a_different_event(tmp_path: Path) -> None:
     for phase, cycle in (("prelude", 0), ("sweep", 1), ("sweep", 2)):
         recorder = _recorder(task_id=f"t-{phase}-{cycle}", phase=phase, macro_cycle=cycle)
-        recorder.begin(max_profile_attempts=3)
+        recorder.begin()
         _succeed(recorder)
 
     assert sorted(event["id"] for event in _roofline_events(tmp_path)) == [
@@ -555,10 +551,10 @@ def test_a_different_phase_or_cycle_is_a_different_event(tmp_path: Path) -> None
 
 def test_one_failed_action_is_not_hidden_by_a_later_success(tmp_path: Path) -> None:
     first = _recorder(task_id="t-0", phase="sweep", macro_cycle=2)
-    first.begin(max_profile_attempts=3)
+    first.begin()
     first.finish_failed(phase="profile", message="server never booted")
     second = _recorder(task_id="t-1", phase="sweep", macro_cycle=2)
-    second.begin(max_profile_attempts=3)
+    second.begin()
     _succeed(second)
 
     event = _roofline_events(tmp_path)[0]
@@ -568,7 +564,7 @@ def test_one_failed_action_is_not_hidden_by_a_later_success(tmp_path: Path) -> N
 
 def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_succeeded(
         RooflineConclusion(
             snapshot_id=2,
@@ -634,7 +630,7 @@ def _write_sidecar(session_dir: Path, **overrides: Any) -> str:
 
 def test_the_action_carries_the_per_kernel_roofline_table(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_succeeded(
         RooflineConclusion(
             snapshot_id=1,
@@ -667,7 +663,7 @@ def test_the_action_carries_the_per_kernel_roofline_table(tmp_path: Path) -> Non
 
 def test_a_missing_sidecar_does_not_fail_a_run_that_succeeded(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_succeeded(
         RooflineConclusion(
             snapshot_id=1,
@@ -685,7 +681,7 @@ def test_a_missing_sidecar_does_not_fail_a_run_that_succeeded(tmp_path: Path) ->
 
 def test_the_outcome_carries_the_snapshot_and_not_only_its_id(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_succeeded(
         RooflineConclusion(
             snapshot_id=7,
@@ -728,7 +724,7 @@ def test_the_outcome_carries_the_snapshot_and_not_only_its_id(tmp_path: Path) ->
 
 def test_an_analysis_with_no_snapshot_records_none_rather_than_an_empty_one(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     _succeed(recorder)
 
     assert _actions(tmp_path)[0]["outcome"]["snapshot"] is None
@@ -736,7 +732,7 @@ def test_an_analysis_with_no_snapshot_records_none_rather_than_an_empty_one(tmp_
 
 def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_succeeded(
         RooflineConclusion(
             snapshot_id=1,
@@ -761,12 +757,12 @@ def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
 
     event = kernel_event_id(3)
     recorder = make_roofline_recorder(
-        make_sink(event, producer=PRODUCER),
+        EventSink(event, producer=PRODUCER),
         RooflineRequest(task_id="t-reprofile", task_kind="roofline", reason="kernel_entry_g0_abc", framework="sglang"),
         owns_event=False,
     )
     assert recorder is not None
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     _succeed(recorder)
 
     assert _roofline_events(tmp_path) == []
@@ -861,7 +857,6 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    assert out["chunk_level"] == []
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"
@@ -931,7 +926,7 @@ def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
 
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(
@@ -979,7 +974,7 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
 
 def test_crash_closes_the_event(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_crashed(RuntimeError("record_trace_analyze blew up"))
 
     event = _roofline_events(tmp_path)[0]
@@ -992,7 +987,7 @@ def test_crash_closes_the_event(tmp_path: Path) -> None:
 
 def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.end_profile_run(
         recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
         ProfileRunOutcome(status="succeeded", disable_cuda_graph=False, profile_result=_profile_result()),
@@ -1008,7 +1003,7 @@ def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Pat
 
 def test_crash_does_not_overwrite_a_closed_action(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     _succeed(recorder)
     recorder.finish_crashed(RuntimeError("raised after the result was built"))
 
@@ -1019,7 +1014,7 @@ def test_crash_does_not_overwrite_a_closed_action(tmp_path: Path) -> None:
 
 def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     bloated = _ta_result()
     bloated["analysis_meta"]["route_ext"] = {
         "attribution": {f"kernel_{index}": {"share": 0.001, "note": "x" * 200} for index in range(500)},
@@ -1048,7 +1043,7 @@ def test_recorder_write_failure_does_not_raise(tmp_path: Path, monkeypatch) -> N
         "hyperloom.inference_optimizer.session.sbd_v6.write_timeline_event",
         _boom,
     )
-    recorder.begin(max_profile_attempts=3)
+    recorder.begin()
     recorder.finish_failed(phase="profile", message="unrelated")
 
     warnings = (tmp_path / "reports" / "sbd_v6" / "write_warnings.jsonl").read_text(encoding="utf-8")

@@ -32,6 +32,7 @@ from ._grid_runner import (
     GridRecipe,
     GridStop,
     GridVariant,
+    VariantResult,
     _num_gpus_for_config,
     run_grid,
     sanitize_result_dir,
@@ -189,7 +190,6 @@ class BenchStageMixin:
         model_path = resolve_session_model_path(
             params=params,
             state_model_path=bench_leg.state_model_path,
-            for_serving=True,
         )
         gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
         benchmark_script = sanitize_script_name(params.get("benchmark_script"))
@@ -244,7 +244,7 @@ class BenchStageMixin:
                 {
                     "status": "skipped",
                     "error_class": "filtered_before_bench",
-                    "error": str(rejection.get("reason") or rejection.get("source") or ""),
+                    "error": rejection["reason"],
                     "workspace": "",
                     "materialized_config": str(config_path),
                 },
@@ -257,20 +257,17 @@ class BenchStageMixin:
         # the local path (multi-node / RAY_EXEC off / pytest default).
         serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
         try:
+            base = LaunchLayer(
+                extra_server_args=base_extra_args,
+                extra_envs=dict(params.get("base_extra_envs") or {}),
+                remove_args=base_remove,
+                unset_envs=to_str_list(params.get("base_unset_envs")),
+                args_mode=args_mode,
+            )
             results = await run_grid(
                 grid=grid,
                 output_root=bench_leg.output_root,
-                recipe=GridRecipe(
-                    base_yaml_path=config_path,
-                    base=LaunchLayer(
-                        extra_server_args=base_extra_args,
-                        extra_envs=dict(params.get("base_extra_envs") or {}),
-                        remove_args=base_remove,
-                        unset_envs=to_str_list(params.get("base_unset_envs")),
-                        args_mode=args_mode,
-                    ),
-                    target=target,
-                ),
+                recipe=GridRecipe(base_yaml_path=config_path, base=base, target=target),
                 launch=GridLaunch(
                     magpie_python=params.get("magpie_python") or None,
                     result_dir=result_dir,
@@ -288,84 +285,10 @@ class BenchStageMixin:
 
         bench: dict[str, Any] = {}
         if results:
-            result = results[0]
-            effective_unset = list(dict.fromkeys(to_str_list(params.get("base_unset_envs")) + list(variant.unset_envs)))
-            base_envs = dict(params.get("base_extra_envs") or {})
-            bench = {
-                **result.to_dict(),
-                "status": result.status,
-                "output_throughput": result.output_throughput,
-                # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
-                # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
-                "ttft_ms": result.ttft_mean_ms,
-                "itl_ms": result.tpot_mean_ms,
-                # The session's constraints fail closed: a lane that drops these refuses every KEEP.
-                **constraint_fields(result),
-                # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
-                "workspace": result.workspace or "",
-                "error": result.error or "",
-                "error_class": result.error_class,
-                "nonfatal_warnings": list(result.nonfatal_warnings),
-                # Launch evidence is the immutable proof of the server that produced this
-                # measurement. It must survive the patch result and current-best
-                # promotion so GEAK can verify the handoff.
-                "launch_evidence": dict(result.launch_evidence),
-                "launch_evidence_path": result.launch_evidence_path or "",
-                "server_log_path": result.server_log_path or "",
-                # Materialized config used for this bench; needed by revalidation.
-                "materialized_config": str(config_path),
-                # The composed stack, not the variant alone: revalidation replays this
-                # and would otherwise boot without the base layer. RUN_EVAL is dropped --
-                # the replay owns its own eval contract.
-                "effective_config": {
-                    "extra_envs": {
-                        key: value
-                        for key, value in {**base_envs, **variant.extra_envs}.items()
-                        if key != "RUN_EVAL" and key not in effective_unset
-                    },
-                    "extra_server_args": compose_server_args(
-                        inherited_args="",
-                        base_extra_args=base_extra_args,
-                        variant_extra_args=variant.extra_server_args,
-                        remove_args=base_remove,
-                        args_mode=args_mode,
-                    ),
-                    "remove_args": list(base_remove),
-                    "unset_envs": list(effective_unset),
-                    "args_mode": args_mode,
-                },
-            }
+            bench = _bench_row(results[0], variant, base, config_path)
         # Classified here so the gate compares two observations produced by the same reader.
         bench["boot_observation_path"] = await asyncio.to_thread(self._observe_bench_boot, bench, bench_leg.output_root)
-        # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
-        # the ``benchmark_*`` workspace. Grade from the slot so the recursive
-        # search finds eval output while honoring an explicit ``result_dir``
-        # override the same way the grid subprocess does.
-        eval_search_root = result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
-        # Guarded: an empty root would send the recursive scan over the cwd.
-        if eval_search_root:
-            gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)
-        if bench.get("status") != "succeeded":
-            return bench, gate_evidence
-        framework = params.get("framework") or os.environ.get("FRAMEWORK") or None
-        results_payload = parse_eval_results(
-            eval_search_root, framework=framework, benchmark_mode=bench_leg.benchmark_mode
-        )
-        accuracy = results_payload.get("accuracy")
-        # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
-        measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
-        gate_evidence["accuracy_pass"] = grade_accuracy(
-            eval_search_root,
-            params.get("accuracy_baseline"),
-            framework=framework,
-            benchmark_mode=bench_leg.benchmark_mode,
-        )
-        gate_evidence["accuracy"] = measured
-        # The enablement branch applies a floor of its own, so it needs the raw score.
-        if params.get("enablement"):
-            gate_evidence["enablement_accuracy"] = measured
-            gate_evidence["enablement_accuracy_task"] = str(results_payload.get("task") or "")
-            gate_evidence["enablement_accuracy_metric"] = str(results_payload.get("metric") or "")
+        _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
         return bench, gate_evidence
 
     def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
@@ -377,14 +300,13 @@ class BenchStageMixin:
                 variant reports no slot of its own.
 
         Returns:
-            str: The observation artifact's path, empty when there was no server
-            log to classify or no session to write under.
+            str: The observation artifact's path, empty when there was no server log to classify.
         """
         from ...bringup import observe_bringup
         from .baseline import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
 
         server_log = str(bench.get("server_log_path") or "").strip()
-        if not server_log or self.session_dir is None:
+        if not server_log:
             return ""
         slot = Path(bench["workspace"]) if bench.get("workspace") else output_root
         read = read_bringup_log(Path(server_log))
@@ -392,11 +314,96 @@ class BenchStageMixin:
             server_log=read.text,
             server_elapsed_sec=server_child_elapsed_sec(read.text),
             wrapper_stderr=str(bench.get("error") or ""),
-            session_dir=Path(self.session_dir),
+            session_dir=self.session_dir,
         )
         return write_boot_observation(
             verdict.observation,
-            session_dir=Path(self.session_dir),
+            session_dir=self.session_dir,
             output_dir=slot,
             attempt=open_bringup_attempt(slot),
         )
+
+
+def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, config_path: Path) -> dict[str, Any]:
+    """The bench result dict for the variant's grid result, with the stack it launched with."""
+    effective_unset = list(dict.fromkeys(to_str_list(base.unset_envs) + list(variant.unset_envs)))
+    base_envs = dict(base.extra_envs or {})
+    base_remove = to_str_list(base.remove_args)
+    return {
+        **result.to_dict(),
+        "status": result.status,
+        "output_throughput": result.output_throughput,
+        # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+        # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+        "ttft_ms": result.ttft_mean_ms,
+        "itl_ms": result.tpot_mean_ms,
+        # The session's constraints fail closed: a lane that drops these refuses every KEEP.
+        **constraint_fields(result),
+        # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
+        "workspace": result.workspace or "",
+        "error": result.error or "",
+        "error_class": result.error_class,
+        "nonfatal_warnings": list(result.nonfatal_warnings),
+        # Launch evidence is the immutable proof of the server that produced this
+        # measurement. It must survive the patch result and current-best
+        # promotion so GEAK can verify the handoff.
+        "launch_evidence": dict(result.launch_evidence),
+        "launch_evidence_path": result.launch_evidence_path or "",
+        "server_log_path": result.server_log_path or "",
+        # Materialized config used for this bench; needed by revalidation.
+        "materialized_config": str(config_path),
+        # The composed stack, not the variant alone: revalidation replays this
+        # and would otherwise boot without the base layer. RUN_EVAL is dropped --
+        # the replay owns its own eval contract.
+        "effective_config": {
+            "extra_envs": {
+                key: value
+                for key, value in {**base_envs, **variant.extra_envs}.items()
+                if key != "RUN_EVAL" and key not in effective_unset
+            },
+            "extra_server_args": compose_server_args(
+                inherited_args="",
+                base_extra_args=base.extra_server_args,
+                variant_extra_args=variant.extra_server_args,
+                remove_args=base_remove,
+                args_mode=base.args_mode,
+            ),
+            "remove_args": base_remove,
+            "unset_envs": list(effective_unset),
+            "args_mode": base.args_mode,
+        },
+    }
+
+
+def _grade_bench_accuracy(
+    bench: dict[str, Any], bench_leg: _PatchBench, result_dir: str | None, gate_evidence: dict[str, Any]
+) -> None:
+    """Fill ``gate_evidence`` with the eval probe and, for a succeeded bench, the accuracy verdict."""
+    params = bench_leg.params
+    # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
+    # the ``benchmark_*`` workspace. Grade from the slot so the recursive
+    # search finds eval output while honoring an explicit ``result_dir``
+    # override the same way the grid subprocess does.
+    eval_search_root = result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
+    # Guarded: an empty root would send the recursive scan over the cwd.
+    if eval_search_root:
+        gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)
+    if bench.get("status") != "succeeded":
+        return
+    framework = params.get("framework") or os.environ.get("FRAMEWORK") or None
+    results_payload = parse_eval_results(eval_search_root, framework=framework, benchmark_mode=bench_leg.benchmark_mode)
+    accuracy = results_payload.get("accuracy")
+    # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
+    measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
+    gate_evidence["accuracy_pass"] = grade_accuracy(
+        eval_search_root,
+        params.get("accuracy_baseline"),
+        framework=framework,
+        benchmark_mode=bench_leg.benchmark_mode,
+    )
+    gate_evidence["accuracy"] = measured
+    # The enablement branch applies a floor of its own, so it needs the raw score.
+    if params.get("enablement"):
+        gate_evidence["enablement_accuracy"] = measured
+        gate_evidence["enablement_accuracy_task"] = str(results_payload.get("task") or "")
+        gate_evidence["enablement_accuracy_metric"] = str(results_payload.get("metric") or "")

@@ -17,9 +17,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
-from hyperloom.orchestrator.actions.executors import (
-    ReportExecutor,
-)
+from hyperloom.orchestrator.actions.executors.report import ReportExecutor
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -31,7 +29,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
@@ -56,7 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(
         _benchmark_interpreter,
         "_resolve_magpie_python",
-        lambda: "/usr/bin/python3",
+        lambda _env=None: "/usr/bin/python3",
     )
     return make_session_dir()
 
@@ -570,7 +567,6 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
         reference,
         candidate,
         config_path=str(base_yaml),
-        budget_minutes=1,
     )
 
     assert verdict is not None
@@ -618,7 +614,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -631,9 +627,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     # AgentX currently falls back to one round; admit its script only in this
     # test to exercise deferred double-run scheduling, not enable AgentX reuse.
     monkeypatch.setattr(
-        _server_lifecycle,
+        benchmark_backend,
         "MAGPIE_BUILTIN_SCRIPTS",
-        _server_lifecycle.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
+        benchmark_backend.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
     )
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -2478,15 +2474,15 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.stop()
 
     db = SqliteConnection(tmp_path_helper(session_dir))
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, session_dir=session_dir)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="report",
-            params={"session_dir": str(session_dir)},
+            params={},
             idempotency_key="rep-1",
         ),
     )
@@ -2520,26 +2516,3 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
 def tmp_path_helper(session_dir: Path) -> Path:
     """Point ReportExecutor's SqliteConnection at the session's DB."""
     return session_dir / "storage" / "coordinator.db"
-
-
-@pytest.mark.asyncio
-async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, monkeypatch):
-    """An unresolvable session_dir yields a structured failure, not a crash."""
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-    sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
-        TaskSpec(
-            kind="report",
-            params={},
-            idempotency_key="rep-fail-1",
-        ),
-    )
-    res = await sub.run_task(task)
-    db.close()
-    assert res.state == "succeeded"
-    assert res.result["status"] == "failed"
-    assert "session_dir" in res.result.get("error", "")

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.coerce import first_text
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
@@ -1345,9 +1346,9 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
         rows.extend(["", brief])
 
     if inp.pr_lead:
-        title = defang_prompt_structure(str(inp.pr_lead.get("title") or "").strip())
-        url = str(inp.pr_lead.get("url") or "").strip()
-        diff_url = str(inp.pr_lead.get("diff_url") or "").strip()
+        title = defang_prompt_structure(first_text(inp.pr_lead.get("title")))
+        url = first_text(inp.pr_lead.get("url"))
+        diff_url = first_text(inp.pr_lead.get("diff_url"))
         rows.append("")
         if title:
             rows.append(f"PR lead: {title}")
@@ -1364,13 +1365,13 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             ]
         )
         for att in inp.prior_attempts[:20]:
-            ref = str(att.get("ref") or "").strip()
+            ref = first_text(att.get("ref"))
             if not ref:
                 continue
-            status = str(att.get("status") or "?").strip()
+            status = first_text(att.get("status"), "?")
             gain = att.get("gain_pct")
             gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
-            why = str(att.get("why") or "").strip()
+            why = first_text(att.get("why"))
             why_str = f" — {why}" if why else ""
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
@@ -1850,7 +1851,7 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
 
-    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    Rows are the flat shape ``Recipe.to_dict`` writes —
     ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
     before they land on ``warm_start_lessons``.
 
@@ -1967,8 +1968,8 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
     """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
 
-    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
-    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict``
+    writes, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).

@@ -120,14 +120,6 @@ def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
     assert "close" not in json.loads(target.read_text(encoding="utf-8"))
 
 
-def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
-    target = tmp_path / exporter.BREAKDOWN_FILENAME
-    target.write_text("{not json", encoding="utf-8")
-
-    assert exporter.patch_breakdown_close(tmp_path) is False
-    assert target.read_text(encoding="utf-8") == "{not json"
-
-
 # what the consumer actually receives
 def _package_dest(tmp_path: Path, monkeypatch) -> Path:
     """Point session packaging at a scratch root and return it."""
@@ -304,6 +296,30 @@ def test_outcome_baseline_re_anchors_on_the_latest_anchoring_measurement():
     )
 
     assert outcome["baseline"]["output_throughput"] == 845.0
+
+
+def test_two_anchors_stamped_alike_resolve_on_timeline_order_for_outcome_and_report():
+    """An end-stamp tie goes to the anchor later on the timeline, whatever the start stamps say."""
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers import baseline as baseline_renderer
+
+    stamp = "2026-01-01T02:00:00+00:00"
+    first = {
+        **_baseline_action(task_id="b-1", throughput=800.0, end_time=stamp),
+        "start_time": "2026-01-01T01:30:00+00:00",
+    }
+    second = {
+        **_baseline_action(task_id="b-2", throughput=845.0, end_time=stamp),
+        "start_time": "2026-01-01T01:00:00+00:00",
+    }
+    timeline = [
+        {**_baseline_event(first), "id": "prelude:0:baseline"},
+        {**_baseline_event(second), "id": "enablement:1:baseline"},
+    ]
+
+    published = _v6_outcome(timeline)["baseline"]["output_throughput"]
+    section = baseline_renderer.render({"timeline": timeline})
+    assert published == 845.0
+    assert section.decisions[0].rationale == f"baseline_tput={published:.2f}"
 
 
 def test_outcome_final_names_the_recipe_throughput_as_the_whole_server_output_axis():

@@ -104,6 +104,38 @@ class ClassifiedFailure(NamedTuple):
     error: str
 
 
+def _round_entry_extras(
+    done_payload: dict[str, Any], task_params: dict[str, Any], *, run_error: str, source_phase: str
+) -> dict[str, Any]:
+    """The optional specialist-round fields: carried keys, lane flags, status, phase, GPUs and notes."""
+    extras: dict[str, Any] = {}
+    for key in _ROUND_CARRIED_KEYS:
+        value = done_payload.get(key)
+        if value in (None, "", [], {}):
+            value = task_params.get(key)
+        if value not in (None, "", [], {}):
+            extras[key] = value
+    for key in ("candidate_discovery", "framework_agent_authoring"):
+        if done_payload.get(key) or task_params.get(key):
+            extras[key] = True
+    if run_error:
+        extras["status"] = "failed"
+        extras["error"] = extras["run_error"] = str(run_error)[:1000]
+    elif done_payload.get("status") not in (None, ""):
+        extras["status"] = str(done_payload.get("status"))
+    if source_phase:
+        extras["source_phase"] = source_phase
+    gpu_ids = done_payload.get("allocated_gpu_ids")
+    if isinstance(gpu_ids, list) and gpu_ids:
+        extras["allocated_gpu_ids"] = [
+            int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
+        ]
+    specialist_notes = done_payload.get("_specialist_notes")
+    if isinstance(specialist_notes, list) and specialist_notes:
+        extras["notes"] = list(map(str, specialist_notes))
+    return extras
+
+
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     """Specialist dispatch: warmup, auto-retry, wave fan-out, stalled-domain forcing, and round-entry construction."""
 
@@ -166,108 +198,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             value = convert(getattr(state, attr))
             if value:
                 params.setdefault(key, value)
-        # runtime framework version for version-mismatch annotation.
-        if "framework_version" not in params:
-            fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
-            if isinstance(fp_meta, dict):
-                fw = str(params.get("framework") or getattr(state, "framework", "") or "").lower()
-                if fw in ("sglang", "vllm"):
-                    v = str(fp_meta.get(fw) or "").strip()
-                    if v and v != "unknown":
-                        params["framework_version"] = v
-
-        # Local-source navigation hint.
-        if "framework_source_roots" not in params:
-            try:
-                from hyperloom.inference_optimizer.framework_paths import (
-                    resolve_framework_tree,
-                    resolve_kernel_search_roots,
-                )
-
-                roots = resolve_kernel_search_roots()
-                if roots:
-                    params["framework_source_roots"] = list(roots)
-                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
-                if tree:
-                    params["session_framework_tree"] = tree
-            except (KeyError, OSError) as exc:
-                log.debug(
-                    "specialist warmup: framework_source_roots lookup failed: %r",
-                    exc,
-                )
-
-        # Hardware + workload hints from SharedState; else dataclass defaults win.
-        params.setdefault("gpu_type", state.gpu_type or "")
-
-        # Advisory model_arch profile via arch_notes carrier (prompt-context only).
-        if "arch_notes" not in params:
-            from ..state._shared_state.render import render_model_arch_compact
-
-            _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
-            if _arch_notes:
-                params["arch_notes"] = _arch_notes
-
-        if domain in _MODEL_INFO_DOMAINS and "model_info" not in params:
-            _minfo = getattr(state, "model_info", None)
-            if isinstance(_minfo, dict) and _minfo:
-                params["model_info"] = dict(_minfo)
-
-        # Checklist-derived focus directories; a caller that named its own keeps it.
-        if "source_hint_directories" not in params:
-            from ..knowledge import static_recon_checklist as _src_recon
-
-            _dirs = _src_recon.source_hint_directories_for(
-                model_class=str(getattr(state, "model_class", "") or ""),
-                gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                precision=_src_recon.workload_precision(state),
-            )
-            if _dirs:
-                params["source_hint_directories"] = list(_dirs)
-
-        if "target_gap_notes" not in params:
-            _gap_notes = self._coord.conversation.target_gap_advisory_block()
-            if _gap_notes:
-                params["target_gap_notes"] = _gap_notes
-
-        if "research_hints" not in params:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-            _hints_block = _research_hints.summarise_for_prompt(self.session_dir)
-            if _hints_block:
-                params["research_hints"] = _hints_block
-
-        # Fill gap-specific anchors from the gaps[] ledger.
-        gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
-        if gap_cid:
-            gap = state.find_gap(gap_cid)
-            if gap is not None:
-                if not params.get("gap_symptom"):
-                    params["gap_symptom"] = str(gap.get("symptom") or "")
-                if not params.get("gap_layer"):
-                    params["gap_layer"] = str(gap.get("layer") or "")
-                evidence = params.get("gap_evidence")
-                if not isinstance(evidence, dict) or not evidence:
-                    attempts = list(gap.get("attempts") or [])[-5:]
-                    if attempts:
-                        params["gap_evidence"] = {
-                            "recent_attempts": attempts,
-                            "severity": str(gap.get("severity") or ""),
-                        }
-
-        if "current_tput" not in params:
-            _ct = float((getattr(state, "current_best", None) or {}).get("tput") or 0.0)
-            if _ct > 0:
-                params["current_tput"] = _ct
-        if "keep_threshold_pct" not in params:
-            params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
-        if "applied_stack" not in params:
-            _stack = list(getattr(state, "optimization_stack", None) or [])
-            if _stack:
-                params["applied_stack"] = [
-                    {"variant_name": str(e.get("variant_name") or ""), "gain_pct": float(e.get("gain_pct") or 0.0)}
-                    for e in _stack
-                    if isinstance(e, dict)
-                ]
+        self._warm_framework_context(params)
+        self._warm_prompt_hints(params, domain)
+        self._warm_gap_anchors(params)
+        self._warm_progress(params)
 
         # Pack bottleneck signals into roofline_evidence for the specialist.
         # Hot kernels alone are enough: a trace whose quality gate withheld
@@ -304,6 +238,121 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             params["runtime_findings"] = await asyncio.to_thread(render_runtime_findings, measurement)
 
         await self._warm_experience_kb(params)
+
+    def _warm_framework_context(self, params: dict[str, Any]) -> None:
+        """Warm the runtime framework version and the local framework source roots."""
+        state = self.shared_state
+        # Runs after the ``_STATE_PARAMS`` warmup, whose ``str.strip`` requires ``state.framework`` to be a str.
+        # runtime framework version for version-mismatch annotation.
+        if "framework_version" not in params:
+            fp_meta = getattr(state, "stack_fingerprint_meta", None) or {}
+            if isinstance(fp_meta, dict):
+                fw = str(params.get("framework") or state.framework).lower()
+                if fw in ("sglang", "vllm"):
+                    v = str(fp_meta.get(fw) or "").strip()
+                    if v and v != "unknown":
+                        params["framework_version"] = v
+
+        # Local-source navigation hint.
+        if "framework_source_roots" not in params:
+            try:
+                from hyperloom.inference_optimizer.framework_paths import (
+                    resolve_framework_tree,
+                    resolve_kernel_search_roots,
+                )
+
+                roots = resolve_kernel_search_roots()
+                if roots:
+                    params["framework_source_roots"] = list(roots)
+                tree = resolve_framework_tree(state.framework)
+                if tree:
+                    params["session_framework_tree"] = tree
+            except (KeyError, OSError) as exc:
+                log.debug(
+                    "specialist warmup: framework_source_roots lookup failed: %r",
+                    exc,
+                )
+
+    def _warm_prompt_hints(self, params: dict[str, Any], domain: str) -> None:
+        """Warm the hardware, model-architecture and advisory prompt hints ``domain`` reads."""
+        state = self.shared_state
+        # Hardware + workload hints from SharedState; else dataclass defaults win.
+        params.setdefault("gpu_type", state.gpu_type or "")
+
+        # Advisory model_arch profile via arch_notes carrier (prompt-context only).
+        if "arch_notes" not in params:
+            from ..state._shared_state.render import render_model_arch_compact
+
+            _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
+            if _arch_notes:
+                params["arch_notes"] = _arch_notes
+
+        if domain in _MODEL_INFO_DOMAINS and "model_info" not in params:
+            _minfo = getattr(state, "model_info", None)
+            if isinstance(_minfo, dict) and _minfo:
+                params["model_info"] = dict(_minfo)
+
+        # Checklist-derived focus directories; a caller that named its own keeps it.
+        if "source_hint_directories" not in params:
+            from ..knowledge import static_recon_checklist as _src_recon
+
+            _dirs = _src_recon.source_hint_directories_for(
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=_src_recon.workload_precision(state),
+            )
+            if _dirs:
+                params["source_hint_directories"] = list(_dirs)
+
+        if "target_gap_notes" not in params:
+            _gap_notes = self._coord.conversation.target_gap_advisory_block()
+            if _gap_notes:
+                params["target_gap_notes"] = _gap_notes
+
+        if "research_hints" not in params:
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+
+            _hints_block = _research_hints.summarise_for_prompt(self.session_dir)
+            if _hints_block:
+                params["research_hints"] = _hints_block
+
+    def _warm_gap_anchors(self, params: dict[str, Any]) -> None:
+        """Warm the targeted gap's symptom, layer and recent attempts from the gaps[] ledger."""
+        state = self.shared_state
+        # Fill gap-specific anchors from the gaps[] ledger.
+        gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+        if gap_cid:
+            gap = state.find_gap(gap_cid)
+            if gap is not None:
+                if not params.get("gap_symptom"):
+                    params["gap_symptom"] = str(gap.get("symptom") or "")
+                if not params.get("gap_layer"):
+                    params["gap_layer"] = str(gap.get("layer") or "")
+                evidence = params.get("gap_evidence")
+                if not isinstance(evidence, dict) or not evidence:
+                    attempts = list(gap.get("attempts") or [])[-5:]
+                    if attempts:
+                        params["gap_evidence"] = {
+                            "recent_attempts": attempts,
+                            "severity": str(gap.get("severity") or ""),
+                        }
+
+    def _warm_progress(self, params: dict[str, Any]) -> None:
+        """Warm the session's current throughput, keep threshold and applied stack."""
+        state = self.shared_state
+        if "current_tput" not in params:
+            _ct = float(state.current_best.get("tput") or 0.0)
+            if _ct > 0:
+                params["current_tput"] = _ct
+        if "keep_threshold_pct" not in params:
+            params["keep_threshold_pct"] = _phase_state.resolve_keep_threshold(state)
+        if "applied_stack" not in params:
+            _stack = list(getattr(state, "optimization_stack", None) or [])
+            if _stack:
+                params["applied_stack"] = [
+                    {"variant_name": str(e.get("variant_name") or ""), "gain_pct": float(e.get("gain_pct") or 0.0)}
+                    for e in _stack
+                    if isinstance(e, dict)
+                ]
 
     async def _warm_experience_kb(self, params: dict[str, Any]) -> None:
         """Inject this dispatch's Experience KB block into a FRAMEWORK_AGENT specialist and record the injection."""
@@ -742,7 +791,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         entry: dict[str, Any] = {
             "round_id": str(task_params.get("round_id") or task.task_id),
             "task_id": task.task_id,
-            "source": source or "coordinator",
+            "source": source,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
             # Knowledge-domain tags; reported tags win over dispatch params.
@@ -756,30 +805,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
-        for key in _ROUND_CARRIED_KEYS:
-            value = done_payload.get(key)
-            if value in (None, "", [], {}):
-                value = task_params.get(key)
-            if value not in (None, "", [], {}):
-                entry[key] = value
-        for key in ("candidate_discovery", "framework_agent_authoring"):
-            if done_payload.get(key) or task_params.get(key):
-                entry[key] = True
-        if run_error:
-            entry["status"] = "failed"
-            entry["error"] = entry["run_error"] = str(run_error)[:1000]
-        elif done_payload.get("status") not in (None, ""):
-            entry["status"] = str(done_payload.get("status"))
-        if source_phase:
-            entry["source_phase"] = source_phase
-        gpu_ids = done_payload.get("allocated_gpu_ids")
-        if isinstance(gpu_ids, list) and gpu_ids:
-            entry["allocated_gpu_ids"] = [
-                int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
-            ]
-        specialist_notes = done_payload.get("_specialist_notes")
-        if isinstance(specialist_notes, list) and specialist_notes:
-            entry["notes"] = list(map(str, specialist_notes))
+        entry.update(_round_entry_extras(done_payload, task_params, run_error=run_error, source_phase=source_phase))
         return entry
 
     def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:

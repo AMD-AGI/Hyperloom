@@ -69,8 +69,6 @@ def _terminal_uncertainty(state: str, history_json: str) -> str:
             return "unreadable terminal execution evidence"
         if evidence.get("reason") == "cancelled_in_flight":
             return "cancelled_in_flight is not proof of execution exit"
-        if "lease_ttl_sec" in evidence and "dead_pid" not in evidence:
-            return "lease timeout is not proof of execution exit"
         return ""
     return "no recorded terminal execution transition"
 
@@ -200,6 +198,21 @@ def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     return ["other owner scopes: " + " ".join(scopes)] if scopes else []
 
 
+def foreign_owner_scopes(session_dir: Path, owner_scope: str) -> list[str]:
+    """The exact owner scopes, other than ``owner_scope``, that hold execution leases in the session's ledger.
+
+    Empty for a session without a readable ledger: ``ensure_resume_safe`` reports what cannot be read.
+    """
+    try:
+        with closing(sqlite3.connect(db_path_for(session_dir).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            if "owner_scope" not in _lease_columns(db):
+                return []
+            rows = db.execute("SELECT DISTINCT owner_scope FROM leases WHERE owner_scope != '' ORDER BY owner_scope")
+            return [row[0] for row in rows if not same_environment(row[0], owner_scope)]
+    except (OSError, sqlite3.Error):
+        return []
+
+
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     """Reject unobservable residual work without migrating or repairing the DB.
 
@@ -312,7 +325,6 @@ def _entry_contradicts_confirmation(entry: object, *, index: int, manual_index: 
         (index > manual_index and "outcome" in evidence)
         or evidence.get("cleanup_confirmed") is False
         or evidence.get("reason") == "cancelled_in_flight"
-        or ("lease_ttl_sec" in evidence and "dead_pid" not in evidence)
     ):
         return "later evidence contradicts the prior operator confirmation"
     transition = entry.get("to")

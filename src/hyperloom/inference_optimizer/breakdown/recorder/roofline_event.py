@@ -30,7 +30,7 @@ from .event_fields import (
 )
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import RecordSink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import ROOFLINE_EVENT_SECTIONS
 
@@ -132,6 +132,7 @@ __all__ = [
     "assemble_roofline_ext",
     "make_roofline_recorder",
     "read_kernel_roofline",
+    "roofline_arm",
     "roofline_event_id",
 ]
 
@@ -143,6 +144,11 @@ def roofline_event_id(phase: str, macro_cycle: Any) -> str:
         ValueError: If either segment is malformed.
     """
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
+
+
+def roofline_arm(reason: str) -> str:
+    """The configuration a roofline dispatched for ``reason`` measures."""
+    return "baseline" if reason == "prelude_initial" else "current_best"
 
 
 def _rank_of(path: str) -> str:
@@ -396,7 +402,6 @@ def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
         "production_selected_role": inventory.get("production_selected_role"),
         "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
         "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
-        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
         "verdict_measures": measures,
     }
 
@@ -453,11 +458,7 @@ class RooflineRequest:
         params = _as_dict(self.params)
         # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
         kind = str(self.task_kind or "")
-        arm = (
-            ""
-            if kind not in ("", EVENT_TYPE)
-            else ("baseline" if str(self.reason or "") == "prelude_initial" else "current_best")
-        )
+        arm = "" if kind not in ("", EVENT_TYPE) else roofline_arm(str(self.reason or ""))
         return {
             "task_id": str(self.task_id or ""),
             "task_kind": kind,
@@ -524,7 +525,7 @@ class RooflineConclusion:
 class RooflineEventRecorder:
     """Records one roofline action's facts into whichever event owns it."""
 
-    def __init__(self, sink: RecordSink, request: RooflineRequest, *, owns_event: bool = True):
+    def __init__(self, sink: EventSink, request: RooflineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
@@ -563,15 +564,10 @@ class RooflineEventRecorder:
         """str: The task id separating this action from others in its event."""
         return self._task_id
 
-    def _record_action(self, payload: Mapping[str, Any]) -> None:
-        """Update this action's own row."""
-        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
-
     # ---- lifecycle -------------------------------------------------------
 
-    def begin(self, *, max_profile_attempts: int) -> None:
-        """Record the profile budget and, when this action owns the event, open it."""
-        self._record_action({"max_profile_attempts": int(max_profile_attempts)})
+    def begin(self) -> None:
+        """Open the event when this action owns it."""
         if not self._owns_event:
             return
         self._sequence = open_event(
@@ -580,6 +576,10 @@ class RooflineEventRecorder:
             producer=PRODUCER,
             ext={"in_flight_substep": self._substep},
         )
+
+    def _record_action(self, payload: Mapping[str, Any]) -> None:
+        """Update this action's own row."""
+        self._sink.record(SECTION_ACTION, payload, row_type=ROW_ACTION, natural_ids=self._action_id)
 
     def record_preflight(self, payload: Mapping[str, Any]) -> None:
         """Record the conditions the action found before it profiled anything.
@@ -908,7 +908,6 @@ def assemble_roofline_actions(
                 "preflight": _as_dict(row.get("preflight")),
                 "profile": {
                     "attempt_count": len(profile_runs),
-                    "max_attempts": _int_or_none(row.get("max_profile_attempts")) or 0,
                     "effective_run_index": profile_index,
                     "recovered": bool(row.get("recovered")),
                     "graph_capture_disabled": bool(row.get("graph_capture_disabled")),
@@ -974,7 +973,7 @@ def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> 
 
 
 def make_roofline_recorder(
-    sink: RecordSink | None,
+    sink: EventSink | None,
     request: RooflineRequest,
     *,
     owns_event: bool = True,

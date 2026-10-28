@@ -10,19 +10,15 @@ import pytest
 
 from hyperloom.orchestrator.tests._helpers import init_git_repo
 
-from hyperloom.common.failure_signature import (
-    MISSING_MODEL_ARCH,
-    CapabilityGap,
-    FailureSignature,
-)
+from hyperloom.common.failure_signature import MISSING_MODEL_ARCH, FailureSignature
 from hyperloom.orchestrator.enablement.runtime import localization as loc
 from hyperloom.orchestrator.enablement.runtime.adapters import get_adapter
 from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 from hyperloom.orchestrator.actions.executors._git import _run_git_cp
 
 
-def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
-    return CapabilityGap.from_signature(FailureSignature(kind=kind, confidence=0.9))
+def _gap(kind: str = MISSING_MODEL_ARCH) -> FailureSignature:
+    return FailureSignature(kind=kind, confidence=0.9)
 
 
 # classify_closure — compiled-closure gate

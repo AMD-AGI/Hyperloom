@@ -73,7 +73,7 @@ from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stag
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
 from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
 from .trace_harvest import harvest_agent_trace
-from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
+from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom.common.git_safety import app_git, worktree_head
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -279,6 +279,12 @@ def _setup_worktree(
 _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
 
 
+def _raise_if_cancelled(scope: CancelScope | None) -> None:
+    """Raise ``CancelledError`` with the scope's reason once the action's cancel scope is cancelled."""
+    if scope is not None and scope.cancelled:
+        raise CancelledError(scope.reason)
+
+
 def _ray_specialist_pending_deadline_sec() -> float:
     """Max seconds to wait for a GPU-specialist actor to schedule before failing.
 
@@ -336,8 +342,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
     Nothing probes this number. A served process is setsid'd by design, so it
     leaves the group its spawn created, and every attempt to decide from such an
     identity whether a lane was free was refuted in review. What the number is
-    still worth is a starting point for the human who has to clear a retained
-    lane by hand.
+    still worth is a starting point for the human who has to go looking for
+    work a task may have left running.
 
     A local specialist is spawned with ``start_new_session=True``, so its root
     pid is also the id of the group and session it leads, and that number keeps
@@ -354,8 +360,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
 
     Returns:
         int | None: A local process group to record for an operator's benefit,
-        or None when there is none to name. Either way the lane is retained:
-        nothing reclaims it from this number.
+        or None when there is none to name. Either way it decides nothing:
+        no lane is held or released on the strength of this number.
     """
     if proc is None or isinstance(proc, _RayLeaseProcess):
         return None
@@ -449,8 +455,7 @@ class SpecialistSubprocessDispatcher:
                 process log path, and discovered patches.
         """
         scope = current_cancel_scope()
-        if scope is not None and scope.cancelled:
-            raise CancelledError(scope.reason)
+        _raise_if_cancelled(scope)
         # Drop any extension left over from a prior run of this task id.
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
@@ -479,8 +484,7 @@ class SpecialistSubprocessDispatcher:
         # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
-        # Bound the spawned CLI's request transport so a stalled gateway stream
-        # raises client-side instead of hanging forever.
+        # Keep the spawned CLI off its non-essential traffic and auto-updater.
         from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
@@ -513,8 +517,7 @@ class SpecialistSubprocessDispatcher:
             proc: Any = None
             proc_started: float
             try:
-                if scope is not None and scope.cancelled:
-                    raise CancelledError(scope.reason)
+                _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
                     # Non-blocking start: submit the actor launch, then poll for
                     # the pid with ``asyncio.sleep`` between polls. This keeps the
@@ -534,12 +537,11 @@ class SpecialistSubprocessDispatcher:
                                 env=env,
                                 cwd=str(request.worktree or request.workspace),
                                 log_path=str(process_log),
-                                env_mode="replace",
                                 stdin_path=str(prompt_file),
                             )
                         )
-                    except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
-                        log.warning("specialist GPU actor submit failed: %s", exc)
+                    except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
+                        log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,
@@ -551,12 +553,11 @@ class SpecialistSubprocessDispatcher:
                     pending_start = time.monotonic()
                     pid: int | None = None
                     while True:
-                        if scope is not None and scope.cancelled:
-                            raise CancelledError(scope.reason)
+                        _raise_if_cancelled(scope)
                         try:
                             pid = request.gpu_lease.poll_started()
-                        except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
-                            log.warning("specialist GPU actor start failed: %s", exc)
+                        except Exception as exc:  # isolation boundary: one specialist's GPU actor start
+                            log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
                             request.gpu_lease.close()
                             return SpecialistSubprocessResult(
                                 done_payload=None,
@@ -628,19 +629,7 @@ class SpecialistSubprocessDispatcher:
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
                 outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
             except (CancelledError, asyncio.CancelledError):
-                try:
-                    if request.gpu_lease is not None:
-                        confirmed = request.gpu_lease.close() is True or request.gpu_lease.close() is True
-                    else:
-                        confirmed = self._kill(proc) if proc is not None else True
-                except (OSError, subprocess.SubprocessError) as exc:
-                    raise ExecutionCleanupUnconfirmed(
-                        f"task={request.task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
-                    ) from exc
-                if confirmed is not True:
-                    raise ExecutionCleanupUnconfirmed(
-                        f"task={request.task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
-                    )
+                self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
                 if log_fh is not None:
@@ -650,26 +639,37 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
+        return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
+
+    def _harvest_result(
+        self,
+        request: SpecialistSpawn,
+        watch: ReapWatch,
+        backend: str,
+        outcome: dict[str, Any],
+        *,
+        worktree_base_commit: str,
+    ) -> SpecialistSubprocessResult:
+        """Read the reaped specialist's done payload, patches and agent trace into its result."""
+        process_log = watch.workspace / PROCESS_LOG_NAME
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
         for cand in watch.done_files:
-            if cand.exists():
-                done_payload = self._read_done(cand)
-                if done_payload is not None:
-                    break
+            done_payload = self._read_done(cand)
+            if done_payload is not None:
+                break
 
         # No final done.json — fall back to the most recent incremental partial
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
             for cand in watch.partial_files:
-                if cand.exists():
-                    partial = self._read_done(cand)
-                    if partial is not None:
-                        partial["_recovered_from_partial"] = True
-                        done_payload = partial
-                        if not outcome.get("error"):
-                            outcome["error"] = "recovered_from_partial"
-                        break
+                partial = self._read_done(cand)
+                if partial is not None:
+                    partial["_recovered_from_partial"] = True
+                    done_payload = partial
+                    if not outcome.get("error"):
+                        outcome["error"] = "recovered_from_partial"
+                    break
 
         # Patches: harvest from the worktree via git diff first, else scan
         # disk. Runs after the done payload, whose targets scope the harvest.
@@ -698,6 +698,22 @@ class SpecialistSubprocessDispatcher:
             trace=trace,
             error=outcome["error"],
         )
+
+    def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
+        """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
+        try:
+            if request.gpu_lease is not None:
+                confirmed = request.gpu_lease.close() is True or request.gpu_lease.close() is True
+            else:
+                confirmed = self._kill(proc) if proc is not None else True
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExecutionCleanupUnconfirmed(
+                f"task={request.task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
+            ) from exc
+        if confirmed is not True:
+            raise ExecutionCleanupUnconfirmed(
+                f"task={request.task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
+            )
 
     # Internals
     def _build_launch(
@@ -1049,11 +1065,9 @@ class SpecialistSubprocessDispatcher:
         scope = current_cancel_scope()
 
         while True:
-            if scope is not None and scope.cancelled:
-                raise CancelledError(scope.reason)
+            _raise_if_cancelled(scope)
             await asyncio.sleep(cfg.poll_interval_seconds)
-            if scope is not None and scope.cancelled:
-                raise CancelledError(scope.reason)
+            _raise_if_cancelled(scope)
             now = time.monotonic()
             elapsed = now - started
             outcome["elapsed"] = elapsed
@@ -1062,11 +1076,9 @@ class SpecialistSubprocessDispatcher:
             if any(p.exists() for p in watch.done_files):
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
-                    if scope is not None and scope.cancelled:
-                        raise CancelledError(scope.reason)
+                    _raise_if_cancelled(scope)
                     await asyncio.sleep(2.0)
-                if scope is not None and scope.cancelled:
-                    raise CancelledError(scope.reason)
+                _raise_if_cancelled(scope)
                 # Still alive after grace — reap it so no orphaned subprocess leaks.
                 if proc.poll() is None:
                     self._kill(proc)

@@ -11,7 +11,7 @@ import pytest
 
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store import writer as sink
-from kernelforge.knowledge.kb_store.config import KnowledgeConfig, KnowledgeStoreMode
+from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 from kernelforge.knowledge.kb_store.identity.run import (
     EXPERIENCE_ARTIFACT,
@@ -156,6 +156,18 @@ def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
     # Recorded, but not held up as the identity's best.
     assert losing["champion"] is False
     assert len(_candidates(_records(config, workspace), limit=5)) == 1
+
+
+def test_a_failed_llm_summary_files_nothing(config, workspace, monkeypatch):
+    """A summary the LLM never produced must not be filed as an "others" record with empty sections."""
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("no sdk")
+
+    monkeypatch.setattr(sink, "_query_llm", boom)
+
+    assert _write(config, workspace, summary_override=None) == {"written": False, "reason": "RuntimeError: no sdk"}
+    assert _candidates(_records(config, workspace)) == []
 
 
 def test_write_requires_explicit_mean_case_speedup(config, workspace):

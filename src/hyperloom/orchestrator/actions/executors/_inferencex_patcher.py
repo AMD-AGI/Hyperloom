@@ -57,6 +57,25 @@ _BENCH_SERVING_REL_PARTS: tuple[tuple[str, ...], ...] = (
     ("utils", "bench_serving", "benchmark_serving.py"),
 )
 
+# ``benchmark_serving.py`` samples its prompts from ``--seed``, which defaults to 0 and is never passed by
+# ``benchmark_lib.sh``. A discarded warmup round and the measured round after it run on the same server, so with one
+# seed they send the same prompts and the measured round is served from the warmup's prefix cache. The patch lets the
+# round pick the default; an explicit ``--seed`` still wins.
+_BENCH_SEED_LEGACY = '    parser.add_argument("--seed", type=int, default=0)'
+_BENCH_SEED_PATCHED = (
+    '    parser.add_argument("--seed", type=int, '
+    "default=int(__import__('os').environ.get('HYPERLOOM_BENCH_SEED') or 0))"
+)
+_BENCH_SEED_SENTINEL = "HYPERLOOM_BENCH_SEED"
+_BENCH_SEED_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_serving_seed_patcher.lock")
+_BENCH_SEED_ANCHOR_NAME = "bench_seed"
+#: Process env the patched client reads its default seed from. It must stay out of the YAML ``benchmark.envs``:
+#: Magpie keeps those in the server-reuse identity, so a warmup-only value there would refuse the measured round's
+#: reuse of the server the warmup booted.
+BENCH_SEED_ENV = "HYPERLOOM_BENCH_SEED"
+#: Seed of every discarded warmup round. Measured rounds keep upstream's 0 so they stay comparable with history.
+WARMUP_ROUND_SEED = 1
+
 # ``append_lm_eval_summary`` does ``mv ./`` — eval artifacts land in the process cwd (the InferenceX checkout),
 # escaping the session.
 _EVAL_DEST_LEGACY = 'mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2'
@@ -706,6 +725,11 @@ def ensure_benchmark_lib_patched(
 
 
 # PROFILE_EXTRA_BODY consumer patch for benchmark_serving.py
+
+#: Text only the implementation carries, patched or not: the forwarding shim holds none of it.
+_BENCH_SERVING_MARKERS = (_BENCH_SERVING_SENTINEL, _BENCH_SERVING_LEGACY, _BENCH_SEED_SENTINEL, _BENCH_SEED_LEGACY)
+
+
 def _pick_benchmark_serving(candidates: list[Path]) -> Path:
     """Return the copy this patch acts on: the one already patched or still holding the anchor.
 
@@ -721,7 +745,7 @@ def _pick_benchmark_serving(candidates: list[Path]) -> Path:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if _BENCH_SERVING_SENTINEL in text or _BENCH_SERVING_LEGACY in text:
+        if any(marker in text for marker in _BENCH_SERVING_MARKERS):
             return path
     return candidates[-1]
 
@@ -795,6 +819,60 @@ def ensure_benchmark_serving_patched(
             failure_msg="_inferencex_patcher: failed to PROFILE_EXTRA_BODY-patch %s; other discovered roots will still be attempted",
         ),
     )
+
+
+def _is_benchmark_serving_seed_patched(src: Path) -> bool:
+    """Return whether ``benchmark_serving.py`` already reads its default seed from :data:`BENCH_SEED_ENV`."""
+    return file_contains_sentinel(src, _BENCH_SEED_SENTINEL, log, "_inferencex_patcher")
+
+
+def ensure_benchmark_serving_seed_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure InferenceX ``benchmark_serving.py`` takes its default ``--seed`` from :data:`BENCH_SEED_ENV`."""
+    return _ensure_patched(
+        _resolve_benchmark_serving_paths(inferencex_path),
+        _SourcePatch(
+            _is_benchmark_serving_seed_patched,
+            partial(
+                _apply_line_replacement_atomic,
+                legacy=_BENCH_SEED_LEGACY,
+                patched_line=_BENCH_SEED_PATCHED,
+                missing_msg=(
+                    "_inferencex_patcher: expected `--seed` argument line not found in %s; "
+                    "InferenceX layout may have changed and Hyperloom needs an updated patch. "
+                    "Warmup rounds will send the measured round's prompts and pre-fill its prefix cache."
+                ),
+                success_msg="_inferencex_patcher: patched %s to read its default --seed from HYPERLOOM_BENCH_SEED",
+            ),
+            _BENCH_SEED_LOCK_PATH,
+            empty_msg="_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "benchmark_serving.py missing — skipping HYPERLOOM_BENCH_SEED "
+            "patch (this is fine for tests and dry-runs without a real "
+            "InferenceX tree)",
+            failure_msg="_inferencex_patcher: failed to HYPERLOOM_BENCH_SEED-patch %s; "
+            "other discovered roots will still be attempted",
+        ),
+    )
+
+
+def apply_round_seed(env: dict[str, str], *, warmup: bool) -> dict[str, str]:
+    """Give a discarded warmup round its own prompts; every other round keeps the client's default seed.
+
+    Args:
+        env: The benchmark subprocess env, edited in place.
+        warmup: Whether the round's result is discarded.
+
+    Returns:
+        ``env``, for chaining.
+    """
+    if warmup:
+        env[BENCH_SEED_ENV] = str(WARMUP_ROUND_SEED)
+    else:
+        # A value inherited from the orchestrator's own env must not reseed a measured round.
+        env.pop(BENCH_SEED_ENV, None)
+    return env
 
 
 def _is_eval_dest_patched(src: Path) -> bool:
@@ -943,8 +1021,6 @@ def _apply_eval_unbound_outputs_atomic(src: Path) -> bool:
     except OSError as e:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
-    if _is_eval_unbound_outputs_patched(src):
-        return True
     patched = original + _EVAL_UNBOUND_OUTPUTS_PY
     if not atomic_write_text(
         src,
@@ -1047,7 +1123,16 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         _BENCH_SERVING_SENTINEL,
         _BENCH_SERVING_LEGACY,
     ),
+    (
+        _BENCH_SEED_ANCHOR_NAME,
+        ("utils", "bench_serving", "benchmark_serving.py"),
+        _BENCH_SEED_SENTINEL,
+        _BENCH_SEED_LEGACY,
+    ),
 )
+
+#: Contract names that live in ``benchmark_serving.py`` and so resolve across its layouts.
+_BENCH_SERVING_ANCHOR_NAMES = frozenset({_BENCH_SERVING_ANCHOR_NAME, _BENCH_SEED_ANCHOR_NAME})
 
 
 def count_anchor_hits(text: str, anchor: str) -> int:
@@ -1077,7 +1162,7 @@ def verify_patch_anchors(
 
     def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
         """Name the files one patch targets across every discovered root."""
-        if name == _BENCH_SERVING_ANCHOR_NAME:
+        if name in _BENCH_SERVING_ANCHOR_NAMES:
             return _resolve_benchmark_serving_paths(inferencex_path)
         return _resolve_inferencex_files(inferencex_path, *parts)
 
@@ -1149,7 +1234,7 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
         Returns:
             A single-entry list, or ``[]`` when the file is absent.
         """
-        if name == _BENCH_SERVING_ANCHOR_NAME:
+        if name in _BENCH_SERVING_ANCHOR_NAMES:
             existing = [p for p in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if p.is_file()]
             return [_pick_benchmark_serving(existing)] if existing else []
         path = base.joinpath(*parts)
@@ -1160,12 +1245,16 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
 
 __all__ = [
     "AnchorStatus",
+    "BENCH_SEED_ENV",
+    "WARMUP_ROUND_SEED",
+    "apply_round_seed",
     "benchmark_serving_path_in",
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
+    "ensure_benchmark_serving_seed_patched",
     "ensure_eval_probe_patched",
     "ensure_eval_unbound_outputs_patched",
     "failed_patch_anchors",

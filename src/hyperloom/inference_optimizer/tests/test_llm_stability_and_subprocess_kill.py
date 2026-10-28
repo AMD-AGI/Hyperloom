@@ -12,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
@@ -39,12 +38,6 @@ def test_apply_llm_stability_env_respects_operator_override():
     # Must not clobber an operator-set value.
     assert env["API_TIMEOUT_MS"] == "60000"
     assert env["DISABLE_AUTOUPDATER"] == "1"
-
-
-def test_apply_llm_stability_env_custom_timeout():
-    env: dict[str, str] = {}
-    apply_llm_stability_env(env, api_timeout_ms="120000")
-    assert env["API_TIMEOUT_MS"] == "120000"
 
 
 async def test_run_subprocess_returns_output_normally():
@@ -109,23 +102,21 @@ async def test_run_subprocess_reports_activity_for_its_child_output(monkeypatch)
 
 
 @pytest.mark.parametrize("stream_name", ["stdout", "stderr"])
-@pytest.mark.parametrize("text", [True, False], ids=["text", "bytes"])
-def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, stream_name, text):
+def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, stream_name):
     """A partial UTF-8 codepoint counts as activity without blocking the visible prefix."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import _StreamCapture
 
     mirrored = threading.Event()
     activity = threading.Event()
-    sink_base = io.StringIO if text else io.BytesIO
 
-    class Sink(sink_base):
+    class Sink(io.StringIO):
         def write(self, data):
             written = super().write(data)
             mirrored.set()
             return written
 
     sink = Sink()
-    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink, flush=sink.flush))
+    monkeypatch.setattr(sys, stream_name, sink)
     descriptor = 1 if stream_name == "stdout" else 2
     script = (
         f"import os,sys; os.write({descriptor}, b'A\\xe2'); "
@@ -138,21 +129,21 @@ def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, strea
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ) as proc:
-        capture = _StreamCapture(proc, text=text, on_output=activity.set)
+        capture = _StreamCapture(proc, on_output=activity.set)
         capture.start()
         try:
             assert activity.wait(5), "partial bytes never registered as output activity"
             assert mirrored.wait(5), "output without a newline was not mirrored before EOF"
             assert proc.poll() is None, "the child must still be waiting for the parent"
             assert capture.last_activity_at is not None
-            assert sink.getvalue() == ("A" if text else b"A\xe2")
+            assert sink.getvalue() == "A"
             proc.stdin.write(b"x")
             proc.stdin.flush()
             assert proc.wait(timeout=5) == 0
             stdout, stderr = capture.finish()
-            expected = "A€B" if text else b"A\xe2\x82\xacB"
+            expected = "A€B"
             assert (stdout if stream_name == "stdout" else stderr) == expected
-            assert (stderr if stream_name == "stdout" else stdout) == ("" if text else b"")
+            assert (stderr if stream_name == "stdout" else stdout) == ""
             assert sink.getvalue() == expected
         finally:
             if proc.poll() is None:

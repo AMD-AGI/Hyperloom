@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.reference_script import ServingTarget
-from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, is_env_fault, load_boot_observation, observation_summary
+from ..bringup import ARGV_INVALID, ENV_FAULT, is_argv_invalid, load_boot_observation, observation_summary
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
@@ -152,7 +152,7 @@ class EnablementLane(CoordinatorCollaborator):
         try:
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build()
             await self._coord.enablement_build.maybe_escalate_to_targeted_build(launch_log, attempt=stalled)
-        except Exception:
+        except Exception:  # isolation boundary: the build escalation step, kept apart from the dispatch
             log.exception("enablement: build escalation failed")
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # This internal dispatch bypasses intent_router (adds gpu_research_lane + budget TTL).
@@ -218,18 +218,8 @@ class EnablementLane(CoordinatorCollaborator):
             routes to CLOSE on the next tick through ``_global_terminal``.
         """
         state = self.shared_state
-        loaded = load_boot_observation(state.enablement.launch_observation_path)
-        observation = loaded.observation
-        fault, detail = "", ""
-        if observation is not None and is_env_fault(observation):
-            excerpt = observation.excerpt
-            fault = str(observation.env_fault)
-            detail = (excerpt.text if excerpt is not None else "").replace("\n", " | ")
-        else:
-            verdict = self._environment_verdict()
-            if verdict is not None and verdict.terminal:
-                fault, detail = verdict.fault, verdict.detail
-        if not fault:
+        verdict = self._environment_verdict()
+        if verdict is None or not verdict.terminal:
             return False
         if not state.stop_reason:
             state.set_stop_reason(ENV_FAULT)
@@ -237,8 +227,8 @@ class EnablementLane(CoordinatorCollaborator):
             log.error(
                 "ENABLEMENT: this host cannot run the combo (%s); stopping the run rather than "
                 "authoring a framework patch for it -- %s",
-                fault,
-                detail,
+                verdict.fault,
+                verdict.detail,
             )
         return True
 
@@ -246,25 +236,20 @@ class EnablementLane(CoordinatorCollaborator):
         """Ask the host, structurally, whether it can run this combo.
 
         Returns:
-            EnvVerdict | None: The host's verdict, or ``None`` when the checks
-            could not be made -- they stat a checkout on a network mount and
-            open a socket, and neither failing is evidence about the host.
+            EnvVerdict | None: The host's verdict, or ``None`` when the check
+            could not be made -- it stats a checkout on a network mount, and
+            that failing is no evidence about the host.
         """
         from hyperloom.common.env_safety import build_benchmark_env
 
         from ..bringup import check_environment
 
-        state = self.shared_state
         try:
-            launch_env = build_benchmark_env()
+            # The session's own resolved checkpoint. The launch env is a
+            # scrubbed environ that only the CLI exports MODEL_PATH into,
+            # so reading it alone turns this check off everywhere else.
             return check_environment(
-                framework=state.framework or os.environ.get("FRAMEWORK", ""),
-                # The session's own resolved checkpoint. The launch env is a
-                # scrubbed environ that only the CLI exports MODEL_PATH into,
-                # so reading it alone turns this check off everywhere else.
-                model=state.model_path or launch_env.get("MODEL_PATH", ""),
-                port=int(launch_env.get("PORT") or 0),
-                launch_env=launch_env,
+                model=self.shared_state.model_path or build_benchmark_env().get("MODEL_PATH", ""),
             )
         except OSError:
             log.debug("enablement: environment preflight could not be made", exc_info=True)
@@ -302,7 +287,6 @@ class EnablementLane(CoordinatorCollaborator):
                     params=params,
                     idempotency_key=holder,
                     requires_lanes=lanes,
-                    side_effects=["writes_results", "writes_patches"],
                     lease_ttl_sec=lease_ttl_sec,
                     task_id=holder,
                     dispatch_class="coordinator",
@@ -636,7 +620,7 @@ class EnablementLane(CoordinatorCollaborator):
         ):
             try:
                 await pump()
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one enablement pump of the tick
                 log.exception("ENABLEMENT %s failed", pump.__name__)
                 stage = f"enablement_pump:{pump.__name__}"
                 # Named here rather than by the coordinator's generic handler:
@@ -877,7 +861,7 @@ def _archive_round(state: Any, res: dict[str, Any], session_dir: str | Path, att
                     gpu_type=state.gpu_type or os.environ.get("GPU_TYPE") or None,
                 ),
             )
-    except Exception:
+    except (OSError, ValueError):
         log.warning("enablement: artifact write failed", exc_info=True)
     # Absolute and not the session-relative path the archive records: the
     # revalidation baseline opens this file directly. Only a copy that

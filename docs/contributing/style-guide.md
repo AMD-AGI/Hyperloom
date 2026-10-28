@@ -76,7 +76,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 
 | Gated dimension | Fails when | Why this number | Tool |
 |-----------------|-----------|-----------------|------|
-| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
+| Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it. Every `and` / `or`, ternary, comprehension and `assert` counts as a branch, so it reads higher than ruff `C901` | radon `cc` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
 | Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
@@ -88,31 +88,31 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 
 The thresholds, the reason for each and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa` for the Ruff-measured dimensions, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and jscpd reads copies with its markers defused. Vulture alone honours `# noqa`, because that marker belongs to Ruff: `# noqa: F401` is the sanctioned form for a side-effect import or a re-export, and Ruff's `RUF100` flags one that suppresses nothing.
 
-Units that were already over a threshold when the gate landed are recorded with their value in `scripts/code_metrics_baseline.txt`, one sorted line per unit (`<metric> <path>::<Class.method> <value>`, or `<metric> <path> <value>` for a module), so moving code inside a file does not disturb them and a change to the baseline is one line per unit in the diff.
+Nothing is recorded in the repository: the reference is the base itself. In the same run the gate measures the tree at the merge base (for a push to `main`, the commit it replaced) with the same tools and this tree's config, and compares each unit with it, so the units already over a threshold on `main` are its backlog and a unit a merged PR improved is the next PR's limit.
 
-**Only the files a PR touches are judged** (the diff against the merge base; for a push to `main`, against the commit it replaced). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
+**Only the files a PR touches are judged** (the diff against the merge base). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
 
-- a unit over a threshold that is not in the baseline fails — new code meets the limits;
-- a baselined unit that got worse than its recorded value fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
-- in both cases the same file at the merge base is measured too, and a unit the base already had at that value or worse is backlog, not this PR's debt — the comparison the [Complexity ceiling](#complexity-ceiling) defines;
-- a baselined unit that improved, dropped under the limit or was deleted fails as *out of date* until `python scripts/code_metrics.py --update-baseline` is run and the baseline committed in the same PR (the command can only lower or remove entries). When the PR leaves the unit exactly as the merge base had it (`main` improved it without tightening the baseline), the entry is listed for information and does not fail; a PR that moves the value either way still tightens it; this covers the per-file dimensions, which the gate can measure at the base.
+- a unit over a threshold that the base did not have over it fails — new code meets the limits;
+- a unit worse than at the base fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
+- a unit the base already had at that value or worse passes — backlog, not this PR's debt, the comparison the [Complexity ceiling](#complexity-ceiling) defines; one the PR improved is listed, and there is nothing to update.
 
-Across the whole file, not only touched entries: relative to the base branch the PR's baseline may only lose entries or lower values, and the config may not loosen (no raised limit, no new exclusion, no file the base's scope measured left unmeasured). Adding a unit to the baseline is not a way to pass.
+The config may not loosen relative to the base branch (no raised limit, no new exclusion, no file the base's scope measured left unmeasured).
 
-**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, grow the baseline, or keep a failing design-check finding carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (adding or removing the label re-runs the job; the push to `main` reads the label of the PR whose merge it is); new, worse and baseline-growth findings and the failing design checks are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: an out-of-date entry, a loosened config and the checks without a baseline still fail.
+**Override: the `baseline-raise` label.** A PR that has to land a new or worse unit, or keep a failing design-check finding, carries the `baseline-raise` label, and its description says why. The gate reads the label from the GitHub API when it runs (adding or removing the label re-runs the job; the push to `main` reads the label of the PR whose merge it is); new and worse findings and the failing design checks are then *waived* — still listed in full in the job log and the report, no longer failing. It waives nothing else: a loosened config and the checks without a baseline still fail.
 
 CI judges a PR with the base branch's copy of the gate scripts, so a PR that edits `scripts/code_metrics*.py` does not grade itself; the report lists every edit to the gate's scripts, workflows or tool pins under *Gate implementation changed* for a reviewer. A gate change that the base's copy cannot run (a new config key, say) lands in two steps: first teach the scripts to accept it, then use it.
 
-A unit that only moved to another file keeps its baseline entry when its qualified name (a module: its file name) is unique among the moved units and its value is no worse; a renamed unit, or one moved to another class, does not, and has to meet the limits. The report — new, worse and out-of-date units with links to the lines — is on the job summary and in one sticky PR comment. Run the gate locally with the install line in the script's docstring; `--base-ref origin/main` judges the files changed since the merge base and adds the base-branch checks.
+A unit that only moved to another file is compared with the unit it left at the base when its qualified name (a module: its file name) is unique among the moved units, its value is no worse and the unit it left is no longer over there; a renamed unit, a copy, or one moved to another class is not, and has to meet the limits. The report — new, worse and improved units with links to the lines — is on the job summary and in one sticky PR comment; the job summary of each push to `main` also lists every unit over a threshold, which is where the backlog is read. Run the gate locally with the install line in the script's docstring: without arguments it lists every unit over a threshold and fails none; `--base-ref origin/main` judges the files changed since the merge base as CI does.
 
-Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the report lists the improvement; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Checks without a baseline.** The same job runs five checks that have no backlog to carry, and the design checks below. Each of the five fails the PR on its own, and `baseline-raise` does not waive them:
+**Checks without a baseline.** The same job runs six checks that have no backlog to carry, and the design checks below. Each of the six fails the PR on its own, and `baseline-raise` does not waive them:
 
 | Check | Fails when | Scope |
 |-------|-----------|-------|
 | Comments | an added run of more than 8 consecutive full-line `#` comments; an added comment that points at a PR or issue (`#1234`, `PR 1234`, `GH-1234`, `issue #12`, a `/pull/` link) or narrates an incident (`after the outage`, a dated `incident`, `postmortem`). A comment starting with `TODO` and the line after it may link an issue, as Ruff's `TD003` asks. A comment the PR only moves, re-indents or carries through a rename is not added | added lines of `.py` files, tests included; docstrings are not comments |
-| Broad catch reason | an added `# noqa: BLE001` with no reason after the code on the same line (`except Exception:  # noqa: BLE001 - outermost CLI boundary, logged`). A line the PR only moves or re-indents is not added | added lines of `.py` files, tests included |
+| Broad catch reason | an added `# noqa: BLE001` with no reason after the code on the same line (`except Exception:  # noqa: BLE001 - outermost CLI boundary, logged`, or `- isolation boundary: one sweep point`). A line the PR only moves or re-indents is not added | added lines of `.py` files, tests included |
+| Broad catch records the error | an added broad `except` (bare, `Exception`, `BaseException`) that neither re-raises -- directly, through a `raise*` helper, or by keeping the error for a later `raise` -- nor records it: a logger call, `print`, `traceback`, `warnings` or a `*log*` helper. Whether the handler sits at the boundary that owns the failure is review-pr rule S8; a handler that logs with `exc_info` needs no `# noqa: BLE001`, and names its boundary in a plain comment on the `except` line. An `except` whose body the PR does not touch and whose code its own file lost (only its comment changed) is not added; the same line removed in another file exempts nothing | added lines of production `.py` files |
 | English only | a CJK character (CJK ideographs, CJK symbols and punctuation, halfwidth and fullwidth forms) | every tracked text file, and on a PR its title, body and every commit message. Test data that needs a multi-byte character uses a non-CJK one (the euro sign is three bytes in UTF-8) |
 | Production code does not import test code | a module under `src/` or `scripts/` that is not itself a test imports a `tests` package or a `test_*` module (a module merely named `test` is not test code) | the whole tree. Move what both sides need into a non-test module |
 | Repeated literals | the PR takes a string or bytes value (3+ characters) or a number (other than 0, 1, -1 and 2) from fewer than 3 occurrences in a module to 3 or more | the production modules the PR touches, counted before and after (a renamed module against the file it came from; a literal that only moved between touched modules is not added); dict keys, `x["key"]` subscripts, the key of `.get`/`.pop`/`.setdefault` and of an `in` test, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
@@ -137,7 +137,7 @@ A10 is limited to the enum's own vocabulary on purpose: matched against every en
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
-| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `radon cc` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
@@ -147,7 +147,7 @@ Neither number identifies a problem on its own. A long function can be one promp
 Measure rather than argue:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+radon cc -s -n C src/hyperloom src/kernelforge
 ```
 
 Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. Passing the ceiling below is, and so is the `code-metrics` gate above.
@@ -163,17 +163,15 @@ The ceiling sits at twice the trigger because the trigger asks a question the ce
 Measure both sides — the head tree, and the same file at the merge base, since the verdict is a comparison:
 
 ```bash
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --force-exclude \
-  --output-format concise <changed .py files under src/, tests excluded>
+radon cc -s -n D <changed .py files under src/, tests excluded>
 
 git show "$(git merge-base origin/main HEAD)":<path> > /tmp/base.py
-ruff check --select C901 --config "lint.mccabe.max-complexity=20" --isolated \
-  --output-format concise /tmp/base.py
+radon cc -s -n D /tmp/base.py
 ```
 
 The tree carried 124 units above 20 when the ceiling was introduced (2026-10-10). The ceiling is what stops that number growing; it is not a demand to pay the 124 down.
 
-CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, and the units already above 20 are its baseline. The `baseline-raise` label waives that CI check; review then accepts the override only when the PR description gives the reason the function stays above 20.
+CI now measures the ceiling: the `code-metrics` job (see [Size and complexity](#size-and-complexity)) applies exactly these two cases to every function in the files a PR touches under `src/` and `scripts/`, comparing the head with the merge base, so the units already above 20 there are its backlog. The `baseline-raise` label waives that CI check; review then accepts the override only when the PR description gives the reason the function stays above 20.
 
 ### Module structure
 
@@ -213,9 +211,10 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
 | `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
+| `kf-public-interfaces` | `hyperloom` imports a kernelforge package only through what its `__init__` exports (or `kernelforge.loop.api` for the loop), never one of its modules |
 | `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
 
-Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, and a new stdio MCP server module is added to the `kf-mcp-servers-light` sources.
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, a new stdio MCP server module is added to the `kf-mcp-servers-light` sources, and a new top-level kernelforge package is added to the `kf-public-interfaces` list.
 
 Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
 

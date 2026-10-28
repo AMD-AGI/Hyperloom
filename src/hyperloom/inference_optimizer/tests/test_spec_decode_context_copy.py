@@ -17,14 +17,14 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import ExploreExecutor
+from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 from hyperloom.orchestrator.actions.executors._spec_decode_context_copy import (
     CONTEXT_COPY_REFUSAL,
     context_copy_method,
     context_copy_refusal,
 )
-from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -145,7 +145,7 @@ def test_a_speculative_env_change_on_a_copying_base_is_a_change():
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
-    runner = SubAgentRunner(ResourceLockManager(SqliteLeaseBackend(db)), TaskRegistry(db))
+    runner = SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db))
     yield runner, TaskRegistry(db)
     db.close()
 
@@ -236,7 +236,7 @@ async def _explore(sub_agent_runner, tmp_path, names: list[str], *, entry: dict 
         _write_round(slot, 7648.85)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params={

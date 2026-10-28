@@ -307,6 +307,8 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
         return
     if not _tracelens_patch_enabled() or not os.environ.get("TRACELENS_ROOT", "").strip():
         return
+    import httpx
+
     try:
         from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
@@ -327,7 +329,7 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
                 ">= 0.5.18, until patches succeed)",
                 patch_rc,
             )
-    except Exception as exc:  # noqa: BLE001 - fail-soft envelope
+    except (RuntimeError, ValueError, OSError, KeyError, httpx.HTTPError, httpx.InvalidURL) as exc:
         log.warning(
             "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
             exc,
@@ -549,11 +551,13 @@ async def restart_server_for_round(
                     "best-effort remote kill-inference + one retry",
                     first_exc,
                 )
+                import httpx
+
                 try:
                     from hyperloom.inference_optimizer.multi_node.cli import kill_inference_for_kernel_agent_best_effort
 
                     await asyncio.to_thread(kill_inference_for_kernel_agent_best_effort)
-                except Exception as reclaim_exc:  # noqa: BLE001 - reclaim is best-effort
+                except (ValueError, KeyError, httpx.HTTPError, httpx.InvalidURL) as reclaim_exc:
                     log.warning(
                         "restart_server_for_round: remote kill-inference reclaim raised (%s); retrying restart anyway",
                         reclaim_exc,

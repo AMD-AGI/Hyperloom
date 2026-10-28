@@ -299,12 +299,7 @@ class CurrentBestLiftMixin:
         self.shared_state.optimization_stack.append(stack_entry)
         report_missing_source_snapshot(stack_entry, request.task_kind, launch.variant_name)
         # Mirror the append into gain_per_stack_entry so the two lists stay index-aligned.
-        self.shared_state.append_stack_gain_entry(
-            action=request.task_kind,
-            variant_name=launch.variant_name,
-            new_tput=request.tput,
-            extra_server_args=launch.full_args,
-        )
+        self.shared_state.append_stack_gain_entry(new_tput=request.tput)
         if graded is None:
             return
         # ``graded.reference`` is the anchor this winner had to beat, and this
@@ -417,7 +412,12 @@ class CurrentBestLiftMixin:
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
             )
-        if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
+        # Magpie applies AgentX removals to its recipe argv; replace mode would drop every recipe option instead.
+        if (
+            (bv.get("remove_args") or bv.get("unset_envs"))
+            and not current_best.get("args_mode")
+            and self.shared_state.agentx_backend != "magpie"
+        ):
             current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1

@@ -136,8 +136,7 @@ def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> 
         {
             "target": str(target),
             "existed": True,
-            "backup_path": str(backup),
-            "revert_action": "restore",
+            "backup": str(backup),
             "pre_image_sha256": file_digest(target),
         },
     )

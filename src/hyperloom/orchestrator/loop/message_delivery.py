@@ -69,5 +69,5 @@ def deliver_specialist_inbox(session_dir: Path, source: str, to_agent: str, payl
         tmp = inbox.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
         tmp.replace(inbox)
-    except Exception:
+    except (OSError, ValueError):
         log.exception("failed to deliver inbox message to %s", to_agent)

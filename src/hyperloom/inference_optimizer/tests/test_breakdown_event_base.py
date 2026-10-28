@@ -141,7 +141,7 @@ def test_a_sink_writes_the_event_id_into_both_the_key_and_the_payload(tmp_path):
     # Both halves are load-bearing and protect against different failures, so the sink supplies them together rather
     # than trusting the caller.
     with session_scope(tmp_path):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         path = sink.record("kernel_lane_run", {"attempt_id": "att-7"}, row_type="lane", natural_ids="att-7")
 
     assert path is not None
@@ -155,7 +155,7 @@ def test_a_long_kernel_identity_uses_a_short_stable_filename(tmp_path):
     key = event_ids.fragment_key(_EID, "lane", kernel_id)
 
     with session_scope(tmp_path):
-        path = event_sink.make_sink(_EID, producer="orchestrator").record(
+        path = event_sink.EventSink(_EID, producer="orchestrator").record(
             "kernel_lane_run",
             {"kernel_id": kernel_id},
             row_type="lane",
@@ -172,7 +172,7 @@ def test_a_sink_drops_a_payload_that_claims_a_different_event_and_says_so_loudly
     # The core is meant to be ignorant of its event id, so a payload that names one is a leak rather than a value to
     # be trusted or silently overridden.
     with session_scope(tmp_path), caplog.at_level(logging.WARNING):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         written = sink.record(
             "kernel_lane_run",
             {"attempt_id": "att-7", "event_id": "prelude:0:roofline"},
@@ -188,7 +188,7 @@ def test_a_sink_drops_a_payload_that_claims_a_different_event_and_says_so_loudly
 def test_a_failing_row_is_dropped_loudly_rather_than_breaking_the_phase(tmp_path, caplog):
     # An empty natural id is data-dependent, not just an author slip: a task id can come back empty on some paths.
     with session_scope(tmp_path), caplog.at_level(logging.WARNING):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         written = sink.record("kernel_lane_run", {"attempt_id": ""}, row_type="lane", natural_ids="")
 
     assert written is None
@@ -200,10 +200,10 @@ def test_two_sinks_over_one_section_keep_their_rows_in_separate_files(tmp_path):
     # This is why the key carries the prefix: the spool is per session, so two events holding a row with the same
     # natural id would otherwise upsert into one file and the first event's row would be gone.
     with session_scope(tmp_path):
-        event_sink.make_sink(_EID, producer="orchestrator").record(
+        event_sink.EventSink(_EID, producer="orchestrator").record(
             "kernel_lane_run", {"attempt_id": "att-7", "lane": "kernel_rewrites"}, row_type="lane", natural_ids="att-7"
         )
-        event_sink.make_sink("prelude:0:roofline", producer="orchestrator").record(
+        event_sink.EventSink("prelude:0:roofline", producer="orchestrator").record(
             "kernel_lane_run", {"attempt_id": "att-7", "lane": "fusion_runs"}, row_type="lane", natural_ids="att-7"
         )
 
@@ -214,7 +214,7 @@ def test_a_second_write_on_one_key_merges_instead_of_replacing(tmp_path):
     # Three writers touch one lane row at three different moments, none of them knowing the other two's fields;
     # whole-object write-back would erase them.
     with session_scope(tmp_path):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         sink.record("kernel_lane_run", {"attempt_id": "att-7", "run_id": "r-1"}, row_type="lane", natural_ids="att-7")
         sink.record("kernel_lane_run", {"e2e": {"speedup": 1.07}}, row_type="lane", natural_ids="att-7")
         path = sink.record("kernel_lane_run", {"rebench_ref": "idem-9"}, row_type="lane", natural_ids="att-7")
@@ -231,14 +231,14 @@ def test_opaque_ids_support_existence_checks_resume_updates_and_event_filtered_r
     identity = "aiter:paged_attention_ragged"
     other_event = "kernel_agent:4:kernel"
     with session_scope(tmp_path):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         assert not sink.has_row("kernel_lane_run", row_type="lane", natural_ids=identity)
         first = sink.record("kernel_lane_run", {"attempt_id": identity}, row_type="lane", natural_ids=identity)
         assert sink.has_row("kernel_lane_run", row_type="lane", natural_ids=identity)
         assert not sink.has_row("kernel_lane_run", row_type="lane", natural_ids="aiter%3Apaged_attention_ragged")
-        resumed = event_sink.make_sink(_EID, producer="orchestrator")
+        resumed = event_sink.EventSink(_EID, producer="orchestrator")
         updated = resumed.record("kernel_lane_run", {"settled": True}, row_type="lane", natural_ids=identity)
-        other = event_sink.make_sink(other_event, producer="orchestrator").record(
+        other = event_sink.EventSink(other_event, producer="orchestrator").record(
             "kernel_lane_run", {"attempt_id": identity}, row_type="lane", natural_ids=identity
         )
         parts = assemble_parts(tmp_path, keep_event_rows=True, only_sections=("kernel_lane_run",), only_event=_EID)
@@ -251,12 +251,19 @@ def test_opaque_ids_support_existence_checks_resume_updates_and_event_filtered_r
 def test_opaque_and_marker_shaped_legacy_keys_write_distinct_fragments(tmp_path):
     digest = event_ids.fragment_key(_EID, "lane", "a:b").rsplit(":", 1)[1]
     with session_scope(tmp_path):
-        sink = event_sink.make_sink(_EID, producer="orchestrator")
+        sink = event_sink.EventSink(_EID, producer="orchestrator")
         opaque = sink.record("kernel_lane_run", {"kind": "opaque"}, row_type="lane", natural_ids="a:b")
         legacy = sink.record("kernel_lane_run", {"kind": "legacy"}, row_type="lane", natural_ids=("sha256", digest))
 
     assert opaque is not None and legacy is not None and opaque != legacy
     assert {json.loads(path.read_text())["payload"]["kind"] for path in _fragments(tmp_path)} == {"opaque", "legacy"}
+
+
+def test_a_bound_sink_exists_only_inside_a_bound_session(tmp_path):
+    assert event_sink.bound_sink(_EID, producer="orchestrator") is None
+    with session_scope(tmp_path):
+        sink = event_sink.bound_sink(_EID, producer="orchestrator")
+    assert sink is not None and sink.event_id == _EID
 
 
 # --- assembly primitives ---------------------------------------------------
@@ -312,6 +319,11 @@ def test_grouping_splits_one_section_into_its_wire_positions():
 def test_recording_side_bookkeeping_does_not_reach_the_wire():
     row = {"event_id": _EID, "ordinal": 4, "attempt_id": "att-7"}
     assert event_rows.wire_row(row) == {"attempt_id": "att-7"}
+
+
+def test_a_header_folds_every_event_fragment_with_the_later_one_winning():
+    rows = [{"event_id": _EID, "phase": "KERNEL_AGENT", "end_time": ""}, {"event_id": _EID, "end_time": "t1"}]
+    assert event_rows.fold_header(rows) == {"phase": "KERNEL_AGENT", "end_time": "t1"}
 
 
 # --- the two timeline writes ----------------------------------------------
@@ -396,7 +408,7 @@ def test_an_event_killed_after_it_opened_is_residual_with_its_sequence_recoverab
 def test_fragments_with_no_event_behind_them_are_residual_with_no_sequence(tmp_path):
     # The shell write failed, or rows were recorded before the event opened.
     with session_scope(tmp_path):
-        event_sink.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
+        event_sink.EventSink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
         residual = event_timeline.residual_events(
             event_parts(KERNEL_EVENT_SECTIONS)["kernel_event"], event_type="kernel"
         )
@@ -447,7 +459,7 @@ def _killed_kernel_entry(session_dir: Path):
         recorder = make_kernel_recorder(macro_cycle=3, route="forge")
         assert recorder is not None
         recorder.begin(tput_before=1000.0)
-        event_sink.make_sink(recorder.event_id, producer="orchestrator").record(
+        event_sink.EventSink(recorder.event_id, producer="orchestrator").record(
             "kernel_lane_run",
             {
                 "source_kind": "kernel_rewrite",
@@ -497,7 +509,7 @@ def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
 def test_finalize_recovers_an_event_whose_shell_write_never_landed(tmp_path):
     # No shell means no sequence to reuse, so finalize allocates an entry.
     with session_scope(tmp_path):
-        event_sink.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
+        event_sink.EventSink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
 
     assert event_finalize.finalize_events(tmp_path) == [_EID]
     files = _timeline_files(tmp_path)
@@ -507,7 +519,7 @@ def test_finalize_recovers_an_event_whose_shell_write_never_landed(tmp_path):
 
 def test_finalize_binds_the_session_itself_so_a_re_export_can_run_it(tmp_path):
     with session_scope(tmp_path):
-        event_sink.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
+        event_sink.EventSink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
 
     assert not session_is_bound()
     assert event_finalize.finalize_events(tmp_path) == [_EID]

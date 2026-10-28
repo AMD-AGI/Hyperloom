@@ -49,7 +49,6 @@ _REVERTED = "reverted"
 #: rather than a sum and is handled separately.
 _SUMMED = (
     "attempted",
-    "adopted",
     "needs_review",
     "rejected",
     "failed",
@@ -124,7 +123,6 @@ def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict
             # Without an end-to-end ruling the keep is micro-only: a rebench
             # promoted it, or a forge lane kept it ahead of the integrate gate.
             totals["keeps" if decision else "micro_only_keeps"] += 1
-            totals["adopted"] += 1
             totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
         elif outcome in totals:
             totals[outcome] += 1

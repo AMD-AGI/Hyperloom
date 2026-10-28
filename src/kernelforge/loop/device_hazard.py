@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from kernelforge.tools.durable_io import atomic_write_json
 from kernelforge.tools.process_reaping import device_holders, still_holding_device
 
 log = logging.getLogger(__name__)
@@ -90,8 +91,6 @@ class DeviceHazardLog:
             return None
 
     def _save(self, hazard: DeviceHazard) -> None:
-        from kernelforge.loop.recovery import atomic_write_json
-
         self._hazard = hazard
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)

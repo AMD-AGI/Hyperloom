@@ -68,7 +68,6 @@ def _clear_env(monkeypatch):
         "XDIT_QUALITY_REF_WRITE",
         "HYPERLOOM_QUALITY_REF",
         "HYPERLOOM_QUALITY_REF_WRITE",
-        "XDIT_MODEL_ARG",
         "XDIT_MODEL_ROOT",
         "XDIT_ATTENTION_BACKEND",
     ):
@@ -168,6 +167,23 @@ def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     _write(src)
     bench = _materialize(src, tmp_path / "out")
     assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+
+
+def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
+    # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    def _unreadable_handoff():
+        raise TopologyHandoffError("topology hand-off file is not valid JSON")
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", _unreadable_handoff)
+    src = tmp_path / "base.yaml"
+    _write(src)
+    with pytest.raises(TopologyHandoffError, match="topology hand-off file is not valid JSON"):
+        _materialize(src, tmp_path / "out")
 
 
 # ---- _visible_gpu_count ---------------------------------------------------
@@ -396,6 +412,33 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     src = _write(tmp_path / "cfg.yaml")
     bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
+
+
+def test_mimo_v2_attention_pin_is_not_suppressed_by_a_compound_backend_flag(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--decode-attention-backend aiter"})
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
+    tokens = bench["envs"]["EXTRA_SGLANG_ARGS"].split()
+    assert tokens[tokens.index("--attention-backend") + 1] == "triton"
+    assert "--decode-attention-backend" in tokens
+
+
+def test_sparse_block_size_is_not_suppressed_by_a_json_key(monkeypatch):
+    monkeypatch.setattr(we, "_sparse_kv_block_size", lambda _model: 128)
+    bench = {
+        "framework": "vllm",
+        "envs": {"EXTRA_VLLM_ARGS": '--speculative-config {"method":"mtp","block_size":4}'},
+    }
+    we._pin_model_launch_workarounds(bench, "/models/sparse")
+    assert "--block-size 128" in bench["envs"]["EXTRA_VLLM_ARGS"]
+
+
+def test_sparse_block_size_keeps_an_operator_pin(monkeypatch):
+    monkeypatch.setattr(we, "_sparse_kv_block_size", lambda _model: 128)
+    bench = {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--block_size=64"}}
+    we._pin_model_launch_workarounds(bench, "/models/sparse")
+    assert bench["envs"]["EXTRA_VLLM_ARGS"] == "--block_size=64"
 
 
 def test_run_eval_from_env(monkeypatch, tmp_path):
@@ -658,7 +701,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
 
-_XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
+_XDIT_ONLY_ENVS = ("XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
 
 
 def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
@@ -681,7 +724,6 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
     bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
-    assert bench["envs"]["XDIT_MODEL_ARG"] == "name"
     assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
     assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
 
@@ -770,28 +812,6 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
-
-
-# agentx_active: persisted benchmark_mode as a fallback for a missing env var
-
-
-def test_agentx_active_true_from_yaml(monkeypatch, native_benchmark):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    assert we.agentx_active() is True
-
-
-def test_agentx_active_false_with_neither_signal(monkeypatch):
-    _clear_env(monkeypatch)
-    assert we.agentx_active() is False
-    assert we.agentx_active(SimpleNamespace(benchmark_mode="")) is False
-
-
-def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
-    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still be recognized as AgentX-active from the
-    # session's persisted mode.
-    _clear_env(monkeypatch)
-    assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
 # Scriptable baseline sampling cost (measurement contract values)

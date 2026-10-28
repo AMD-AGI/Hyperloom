@@ -19,9 +19,11 @@ import pytest
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_integrate_verdict, seed_kernel_keep
+from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
@@ -36,11 +38,12 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _preferred_main_trace_path,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
+    _trace_size_bytes,
 )
+from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -49,7 +52,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -93,7 +95,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     )
 
     assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
-    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -1750,9 +1752,7 @@ def test_atom_disables_cuda_graphs_with_its_own_flag():
 
 def test_server_args_env_name_atom():
     """atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        server_args_env_name,
-    )
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
@@ -1978,7 +1978,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path):
     """FRAMEWORK=atom attempts the normal roofline profile sub-step."""
     from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
@@ -2000,10 +2000,9 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         task_id="t-atom-roofline",
         idempotency_key="t-atom-roofline",
         requires_lanes=[],
-        side_effects=[],
         lease_ttl_sec=0,
     )
-    ctx = SimpleNamespace(task=task, lease=None, extra=None)
+    ctx = SimpleNamespace(task=task, lease=None, extra={"session_dir": str(tmp_path)})
 
     result = await rexec(ctx)
     assert result["status"] == "failed"
@@ -2015,7 +2014,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
 async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(tmp_path):
     """A parseable measurement must not launder a non-zero process exit into success."""
     db = SqliteConnection(tmp_path / "baseline.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2045,7 +2044,7 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
         (ws / "benchmark_report.json").write_text(report_body)
         return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="cleanup failed")
 
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="baseline",
             params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
@@ -2150,7 +2149,7 @@ async def test_coordinator_promotes_valid_baseline_even_with_failed_status(sessi
 async def test_profile_executor_extracts_trace_dir(tmp_path):
     """When the workspace has torch_trace/*.trace.json.gz, the runner surfaces them in the result."""
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2195,7 +2194,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
         }
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="profile",
             params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
@@ -2238,7 +2237,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
     monkeypatch.setenv("INFERENCEX_PATH", str(fake_ix))
 
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2268,7 +2267,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="profile",
             params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
@@ -2291,7 +2290,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 @pytest.mark.asyncio
 async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
     sub = SubAgentRunner(locks, tr)
 
@@ -2327,7 +2326,7 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
-    task = await tr.create(
+    task, _ = await tr.create_or_return_existing(
         TaskSpec(
             kind="profile",
             params={"output_dir": str(output_dir), "config_path": str(_PROFILE_SGLANG_CONFIG)},
@@ -2486,7 +2485,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     monkeypatch.setattr(sys, "executable", "/task/deps/venv/bin/python")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2661,7 +2660,7 @@ async def test_trace_analyze_handler_env_route_forces_bypass(session_dir, monkey
 async def test_trace_analyze_handler_text_gen_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """Text-gen with no explicit route DEFAULTS to the TraceLens ``agent`` route (the shipped default)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -2715,7 +2714,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
     async def fail_run_subprocess(cmd, *, timeout_sec, **_kwargs):
         pytest.fail("invalid route must not launch a subprocess")
 
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", fail_resolve_tracelens_root)
+    monkeypatch.setattr(session_paths, "tracelens_root", fail_resolve_tracelens_root)
     monkeypatch.setattr(ta, "_run_subprocess", fail_run_subprocess)
     payload = {
         "trace_input": str(fake_trace),
@@ -2740,7 +2739,7 @@ async def test_trace_analyze_handler_rejects_invalid_route_before_dispatch(
 async def test_trace_analyze_handler_scriptable_converges_route_params(session_dir, monkeypatch):
     """Scriptable (xDiT) params converge by route: --steady-state-mode generic is TraceLens-only, while --num-denoise-steps is forwarded to BOTH routes (bypass consumes it)."""
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
-    monkeypatch.setattr(ta, "_resolve_tracelens_root", lambda: session_dir)
+    monkeypatch.setattr(session_paths, "tracelens_root", lambda: session_dir)
     monkeypatch.setattr(ta, "_tracelens_root_error", lambda root: None)
     fake_trace = session_dir / "fake_trace_dir"
     fake_trace.mkdir()
@@ -3516,7 +3515,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
         artifact="/tmp/k004.py",
         task_group_key="k004",
     )
-    assert state.untried_hot_reusable_kernels() == [], (
+    assert kd.untried_hot_reusable_kernels(state) == [], (
         "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
     )
 
@@ -4160,10 +4159,9 @@ def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     rank_zero.write_bytes(b"x" * 100)
     rank_one.write_bytes(b"rank-one")
 
-    selected = _preferred_main_trace_path(
-        trace_dir,
+    selected = select_primary_trace(
         [rank_zero_warmup, merged, rank_one, rank_zero],
-        require_single_rank=True,
+        file_size=_trace_size_bytes,
         tensor_parallel_size=2,
     )
 
@@ -4175,10 +4173,9 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4190,10 +4187,9 @@ def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
     trace = trace_dir / "worker.pt.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=None,
         )
         == trace
@@ -4212,10 +4208,9 @@ def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_n
     trace = trace_dir / trace_name
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4227,10 +4222,9 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=1,
         )
         == merged

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import make_session_dir
@@ -213,7 +214,7 @@ class TestFillIntegrateDefaultsFromState:
 
     def test_fusion_record_activates_the_env_flag_and_keep_bar(self, session_dir):
         """A fusion sibling's env flag + keep bar are folded in from its record."""
-        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.kernel_decisions import enqueue_nominated_patch
         from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
 
         state = _seed_state(session_dir, current_best_envs={"KEEP_ME": "1"})
@@ -328,7 +329,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
 
     @staticmethod
     def _enqueue(state, *, kernel_name: str, target_file: str, micro_speedup: float) -> dict:
-        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.kernel_decisions import enqueue_nominated_patch
         from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
 
         record = enqueue_nominated_patch(
@@ -350,7 +351,7 @@ class TestBareKernelIdMustNotGuessBetweenSiblings:
         second = self._enqueue(state, kernel_name="fuse_a", target_file="/repo/b.py", micro_speedup=1.2)
         state.save(session_dir)
 
-        pending = SharedState.load_or_init(session_dir).pending_kernel_integration_records()
+        pending = kd.pending_kernel_integration_records(SharedState.load_or_init(session_dir))
         assert [str(record.get("kernel_id")) for record in pending] == ["fuse_a", "fuse_a"]
         return [str(first["integration_id"]), str(second["integration_id"])]
 
@@ -496,7 +497,6 @@ class TestIntegrateHandlerHonoursStateDefault:
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
                 "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
-                "budget_minutes": 1,
             },
             session_dir=session_dir,
         )

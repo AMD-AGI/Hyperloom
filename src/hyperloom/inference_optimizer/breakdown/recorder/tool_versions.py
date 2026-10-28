@@ -59,7 +59,7 @@ def _run_first_line(argv: list[str]) -> str:
             timeout=3,
             check=False,
         )
-    except (OSError, TimeoutError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return ""
     if out.returncode != 0:
         return ""
@@ -83,10 +83,8 @@ def _git_describe(root: Path) -> str:
 
 def _dist_version(names: tuple[str, ...]) -> str:
     """First resolvable ``importlib.metadata`` version among ``names`` ("" if none)."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version as _dist_ver
-    except ImportError:
-        return ""
+    from importlib.metadata import PackageNotFoundError, version as _dist_ver
+
     for name in names:
         try:
             v = str(_dist_ver(name) or "").strip()
@@ -164,7 +162,6 @@ def record_tool_version(
     tool: str,
     root: str | None = None,
     version: str | None = None,
-    producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
     """Record one external tool's resolved provenance under ``metadata.versions.tools``.
 
@@ -177,7 +174,7 @@ def record_tool_version(
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
     meta = _tool_metadata(name, root=root, version=version)
-    recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
+    recorder_for(session_dir, producer=PRODUCER_KERNEL_AGENT).record_item(SECTION, meta, key=name)
 
 
 __all__ = ["record_tool_version"]

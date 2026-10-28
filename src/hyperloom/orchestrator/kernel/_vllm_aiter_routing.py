@@ -105,7 +105,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, routing: VllmA
     if not routing.fused_moe:
         return
     try:
-        from kernelforge.gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune import parse_log_file
     except ImportError:
         # Same reasoning as apply_verification._parse: kernelforge is in this
         # wheel, so a miss is a broken install, and a bare return makes the

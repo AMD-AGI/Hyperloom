@@ -19,7 +19,7 @@ from hyperloom.orchestrator.lever import (
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.common.timeutil import parse_iso_unix_or_zero, format_exc_brief
+from hyperloom.common.timeutil import format_exc_brief
 from .verdicts import (
     CriticRuling,
     collapse_verdict_map,
@@ -28,7 +28,7 @@ from .verdicts import (
     verdict_held_to_its_rule,
     verdict_map_entry_held_to_its_rule,
 )
-from hyperloom.common.coerce import to_int
+from hyperloom.common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
 from ..policy.gate import (
     PolicyDenied,
@@ -486,7 +486,7 @@ class IntentRouter(CoordinatorCollaborator):
                 )
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one routed intent
             log.exception("intent handler for %s raised", source)
             self._coord.record_exception(
                 stage="handle_intent",
@@ -515,26 +515,46 @@ class IntentRouter(CoordinatorCollaborator):
             meta is not None and self.shared_state.is_pruned(meta.family)
         )
 
+    async def _note_pruned_advisory(self, source: str, action_name: str, kind: str) -> None:
+        """Tell the proposer the action sits in a pruned family; the action is still admitted."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": kind,
+                "from": source,
+                "action": action_name,
+                "hint": (
+                    f"{action_name!r} is in pruned_families; if the "
+                    "prune was speculative the LLM may pick this "
+                    "action again, otherwise prefer another "
+                    "phase-allowed action."
+                ),
+            },
+        )
+
+    async def _reject_missing_patch_owner(
+        self, source: str, action_name: str, params: dict[str, Any], kind: str
+    ) -> None:
+        """Record that an integrate_patch intent was rejected because no author phase owns its patch."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": kind,
+                "reason": "integrate_patch_owner_missing",
+                "from_agent": source,
+                "action_name": action_name,
+                "specialist_task_id": str(params.get("specialist_task_id") or ""),
+            },
+        )
+
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self._is_pruned_action(action_name):
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "proposal_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
+            await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
@@ -544,17 +564,7 @@ class IntentRouter(CoordinatorCollaborator):
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
             if not await self._stamp_integrate_patch_owner(params):
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_rejected",
-                        "reason": "integrate_patch_owner_missing",
-                        "from_agent": source,
-                        "action_name": action_name,
-                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
-                    },
-                )
+                await self._reject_missing_patch_owner(source, action_name, params, "proposal_rejected")
                 return
             payload["params"] = params
         from .proposals import record_proposal
@@ -749,7 +759,7 @@ class IntentRouter(CoordinatorCollaborator):
                     patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception(
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
@@ -801,29 +811,22 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.record_critic_denial(pending, ruling.reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            try:
-                await self._coord.enablement_lane.maybe_rearm_enablement(
-                    {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
-                )
-            except Exception:
-                log.exception(
-                    "enablement rearm on critic-reject failed for task=%s",
-                    sid_candidate,
-                )
+            await self._coord.enablement_lane.maybe_rearm_enablement(
+                {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
+            )
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, ruling.advisory)
 
     def _seed_grid_params(self, request: DelegateRequest) -> None:
-        """Seed a grid-style delegate with the params an approved proposal would have carried."""
-        if request.action_name not in ("sweep", "explore"):
+        """Seed an explore delegate with the params an approved proposal would have carried."""
+        if request.action_name != "explore":
             return
         # Baseline's materialized YAML, which the delegator may override.
         if self.shared_state.baseline_config_path:
             request.params.setdefault("config_path", self.shared_state.baseline_config_path)
         inject_stack_base_params(request.params, self.shared_state, anchor=True)
-        if request.action_name == "explore":
-            self._coord.proposals.inject_explore_runtime_params(request.params)
-            self._coord.proposals.credit_predictor_proposals(request.params)
+        self._coord.proposals.inject_explore_runtime_params(request.params)
+        self._coord.proposals.credit_predictor_proposals(request.params)
 
     async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
         """Warm a specialist delegate's params through the KnowledgePlane.
@@ -936,21 +939,7 @@ class IntentRouter(CoordinatorCollaborator):
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "delegate_pruned_advisory",
-                    "from": source,
-                    "action": action_name,
-                    "hint": (
-                        f"{action_name!r} is in pruned_families; if the "
-                        "prune was speculative the LLM may pick this "
-                        "action again, otherwise prefer another "
-                        "phase-allowed action."
-                    ),
-                },
-            )
+            await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
@@ -962,17 +951,7 @@ class IntentRouter(CoordinatorCollaborator):
         request = DelegateRequest(source, intent, action_name, params)
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "delegate_rejected",
-                        "reason": "integrate_patch_owner_missing",
-                        "from_agent": source,
-                        "action_name": action_name,
-                        "specialist_task_id": str(params.get("specialist_task_id") or ""),
-                    },
-                )
+                await self._reject_missing_patch_owner(source, action_name, params, "delegate_rejected")
                 return
             self._coord.proposals.floor_keep_threshold(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
@@ -1202,7 +1181,7 @@ class IntentRouter(CoordinatorCollaborator):
         # Remaining budget = cumulative TTL minus the time already spent running.
         running_sec = 0.0
         try:
-            started = parse_iso_unix_or_zero((await self.tasks.get(task_id)).updated_at)
+            started = to_unix((await self.tasks.get(task_id)).updated_at, 0.0)
         except TaskNotFound:
             started = 0.0
         if started > 0:
@@ -1211,20 +1190,12 @@ class IntentRouter(CoordinatorCollaborator):
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
         # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
-        wall_budget_error = ""
-        granted_sec = 0.0
-        try:
-            granted_sec = grant_wall_budget_extension(task_id, extra_sec)
-        except Exception as exc:
-            log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
-            wall_budget_error = repr(exc)[:200]
-        # A swallowed wall-budget failure leaves the lane extended while the subprocess wall-clock cap can still
-        # interrupt the work — report the partial extension as degraded.
+        granted_sec = grant_wall_budget_extension(task_id, extra_sec)
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease_degraded" if wall_budget_error else "extend_lease",
+                "kind": "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
@@ -1232,7 +1203,6 @@ class IntentRouter(CoordinatorCollaborator):
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
                 "wall_budget_extension_sec": granted_sec,
-                **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )
@@ -1268,7 +1238,7 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_escalate_strategy_change(self, source: str, intent: Intent) -> None:
-        """Process ``escalate_strategy_change``: broadcast strategy_change, act on closed-vocab hints, drop unknown hints."""
+        """Broadcast strategy_change, then defer a closed-vocab hint; drop or deny the rest."""
         payload = dict(intent.payload or {})
         # Always emit the broadcast first.
         await self.bus.append_and_seq(
@@ -1280,7 +1250,15 @@ class IntentRouter(CoordinatorCollaborator):
             )
         )
         hint = str(payload.get("next_action_hint") or "").strip()
-        if not hint or not is_valid_escalate_hint(hint):
+        if not hint:
+            return
+        if not is_valid_escalate_hint(hint):
+            denied = PolicyDenied(
+                f"escalate_strategy_change hint {hint!r} is not accepted",
+                rule="escalate_hint_not_in_vocab",
+                hint="Request a phase advance such as skip_to_kernel; the run closes itself.",
+            )
+            await self.record_policy_denied(source, intent, denied)
             return
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
 
@@ -1289,7 +1267,7 @@ class IntentRouter(CoordinatorCollaborator):
             # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
             log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
             return
-        # skip_to_kernel / skip_to_close are deferred; next compute_next_phase picks them up.
+        # Deferred: the next compute_next_phase acts on the hint.
         self.shared_state.set_pending_escalate_hint(hint)
         self.shared_state.save(self.session_dir)
 

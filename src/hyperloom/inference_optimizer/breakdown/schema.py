@@ -7,13 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
-from ..session.sbd_v6 import SCHEMA_VERSION_V6
-
-
-#: Current breakdown schema version (v6.1). ``enablement`` carries its
-#: ledger-sourced round fields inside this version without reshaping the document.
-SCHEMA_VERSION = SCHEMA_VERSION_V6
-
 
 class V6ToolVersion(TypedDict, total=False):
     """One external tool's recorded provenance."""
@@ -713,10 +706,10 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the optimized arm runs
-    first as the more informative of the two, so a budget that runs out takes
-    the baseline arm with it. ``concs_ordered`` is descending because a
-    single-server arm boots at the most demanding rung and reuses down."""
+    ``arms_order`` matters to a reader of the budget: past its first rung the
+    first arm may spend half the time left, and the second runs only the rungs
+    it reached, so a budget that runs out drops whole pairs. ``concs_ordered``
+    is the session's own CONC first, then the rest cheapest first."""
 
     grid_source: str | None
     concs_requested: list[int]
@@ -727,21 +720,16 @@ class V6ConcSweepPlan(TypedDict, total=False):
 
 
 class V6ConcSweepBudget(TypedDict, total=False):
-    """The budget the ladder was admitted under.
+    """The budget the ladder ran under.
 
-    Both totals are kept because they disagree: the sweep raises its own
-    default when that default cannot fund even one rung at the cap the grid
-    runner will actually grant. ``rung_cost_sec`` is that granted cap rather
-    than the declared timeout, since pricing at the smaller admits a rung the
-    budget cannot pay for. ``deadline`` is a wall-clock epoch."""
+    ``gate_active`` says whether a total was declared. ``rung_cost_sec`` is null:
+    a rung is held to its arm's deadline rather than priced. ``deadline`` is a
+    wall-clock epoch."""
 
     declared_total_sec: int | None
-    granted_total_sec: int | None
     rung_cost_sec: float | None
-    raised: bool
     gate_active: bool
     deadline: float | None
-    session_soft_deadline_sec: float | None
 
 
 class V6ConcSweepEnvironment(TypedDict, total=False):
@@ -889,10 +877,10 @@ class V6ConcSweepRung(TypedDict, total=False):
 
 
 class V6ConcSweepBootAttempt(TypedDict, total=False):
-    """One rung the boot-retry-descend loop tried.
+    """One rung whose round tried to bring the arm's server up.
 
-    ``committed`` false is a concurrency the server would not come up at --
-    the capacity finding the sweep produces for free and the report discards."""
+    ``committed`` false appears only in older sessions, on an attempt a later
+    rung's boot superseded."""
 
     conc: int | None
     committed: bool
@@ -904,7 +892,7 @@ class V6ConcSweepBootAttempt(TypedDict, total=False):
 
 
 class V6ConcSweepBoot(TypedDict, total=False):
-    """How the boot-retry-descend loop resolved.
+    """How the arm's boot attempts resolved: each rung boots until one brings the server up.
 
     ``attempted_concs`` is in the order tried. Absent on an arm refused before
     it built anything."""
@@ -959,8 +947,8 @@ class V6ConcSweepArm(TypedDict, total=False):
 
     The two arms differ only by the server args and envs they add, so the
     curve is only readable alongside the decisions the ladder was run under.
-    The reuse path boots one server at the most demanding rung and reuses it
-    down; the restart path pays a server start per rung. They fail
+    The reuse path boots one server on its first rung and reuses it for the
+    rest; the restart path pays a server start per rung. They fail
     differently, and which one ran is not recoverable after the fact."""
 
     arm: str
@@ -1078,16 +1066,17 @@ class V6EnablementAttempt(TypedDict, total=False):
     ``launch_log`` for the whole lane and every advance overwrote it, so the
     export published the newest gap as the reason the lane had opened.
 
-    ``files`` and ``accepted_config_path`` are session-relative and name only
-    copies the round's archive took, which is a weaker claim than "fetchable":
+    ``files`` paths are session-relative and name only copies the round's
+    archive took, which is a weaker claim than "fetchable":
     ``reports/enablement/**`` is packaged outside ``RESERVED_PATHS``, so a
     session that hit the file or byte cap ships a truncated package and a
     consumer must tolerate a miss. ``patches_applied`` and
     ``artifacts_applied[].target`` are the workspace originals the round
     reported, which are never packaged -- they are identity, not a way to
-    fetch. Note the asymmetry with ``V6EnablementResult.accepted_config_path``,
-    which stays absolute because the revalidation baseline opens that one
-    directly."""
+    fetch. The round's accepted config is its ``files`` entry with role
+    ``launch_config``; note the asymmetry with
+    ``V6EnablementResult.accepted_config_path``, which stays absolute because
+    the revalidation baseline opens that one directly."""
 
     attempt: int
     task_id: str
@@ -1109,7 +1098,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     patches_span_multiple_roots: bool
     framework_root: str | None
     files: list[V6ArchivedFile]
-    accepted_config_path: str | None
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None
@@ -1433,58 +1421,6 @@ class V6StackExt(TypedDict, total=False):
     guards: dict[str, int]
 
 
-class V6CriticReviewVariant(TypedDict, total=False):
-    """One variant's ruling from a grid the Critic reviewed per variant.
-
-    A rejected variant never reaches a bench, so there is no attempt row for
-    its ruling to live on and this is the only record that it was judged. The
-    map is kept per variant rather than collapsed because the collapse is
-    deliberately lossy: a grid proceeds on its approved subset, and the
-    proposal's summary verdict does not say which variants that was."""
-
-    variant_name: str
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reason: str
-    failure_reason_code: str
-
-
-class V6CriticReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, recorded on the proposal itself.
-
-    The review is a sub-structure of its subject rather than a stream of its
-    own. On the bus a proposal and its verdict are two messages about one
-    thing, and the Critic reviews proposals raised by every phase -- so a
-    ruling attached to the proposal follows it wherever it was raised, needs no
-    per-phase home, and leaves nothing to reconcile between a review list and a
-    proposal list.
-
-    Both verdicts are kept. A reject the loop held to a rule that only declared
-    ``advise`` is two facts, and reporting either alone misreads the round: the
-    authored verdict alone says a proposal was refused that in fact ran, the
-    effective verdict alone says one was approved that the Critic refused."""
-
-    verdict: str
-    effective_verdict: str
-    held_to_rule: str
-    reviewer: str
-    reason: str
-    confidence: float | None
-    failure_reason_code: str
-    concerns: list[str]
-    reviewed_at: str
-    required_evidence: list[Any]
-    risks: list[Any]
-    notes: list[Any]
-    kb_evidence: list[Any]
-    packet_evidence: list[Any]
-    advice_text: str
-    alternative_action: str
-    variants: list[V6CriticReviewVariant]
-    outcome: dict[str, Any]
-
-
 class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
@@ -1574,7 +1510,6 @@ class V6FrameworkPolicySourceArm(TypedDict, total=False):
 
     no_keep_streak_threshold: int | None
     discovery_retry_limit: int | None
-    authoring_enabled: bool | None
 
 
 class V6FrameworkPolicy(TypedDict, total=False):
@@ -1694,8 +1629,7 @@ class V6FrameworkProposalTerminal(TypedDict, total=False):
     """Where a proposal ended up.
 
     ``dropped`` covers every way it never reached a measurement and ``reason``
-    says which; ``pending`` is one the phase never resolved, the honest reading
-    of a session killed mid-review."""
+    says which. A proposal the phase never resolved carries none."""
 
     disposition: str
     reason: str
@@ -2060,11 +1994,8 @@ class V6KernelRebenchAttempt(TypedDict, total=False):
 
     attempt_id: str
     source_kind: str
-    source_ref: str | None
     idempotency_key: str | None
     task_id: str | None
-    dispatched_at: str | None
-    settled_at: str | None
     base_tput: float | None
     measured_tput: float | None
     decision: str | None
@@ -2275,12 +2206,11 @@ class V6KernelGeakRebench(TypedDict, total=False):
     """How GEAK's re-measurement campaign was bounded, and how it ended.
 
     The attempts themselves are on ``ext.rebench``, which the settled attempts
-    point at by id. What stays here is what only GEAK's campaign has: the
-    per-cycle ceiling it ran under, which attempt the acceptances were settled
-    against, and the terminal error when it never reached one."""
+    point at by id. What stays here is what only GEAK's campaign has: how many
+    attempts it used, which attempt the acceptances were settled against, and
+    the terminal error when it never reached one."""
 
     required: bool
-    max_attempts: int | None
     attempts_used: int
     settled_against: str
     final_status: str | None
@@ -2554,8 +2484,6 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "CriticIteration",
-    "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V6",
     "SessionBreakdown",
     "V6ArchivedFile",
     "V6BaselineExt",
@@ -2583,8 +2511,6 @@ __all__ = [
     "V6ConcSweepRuntime",
     "V6ConcSweepWorkload",
     "V6Critic",
-    "V6CriticReview",
-    "V6CriticReviewVariant",
     "V6EnablementAttempt",
     "V6EnablementBuild",
     "V6EnablementExt",

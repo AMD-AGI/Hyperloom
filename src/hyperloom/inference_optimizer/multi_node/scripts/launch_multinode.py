@@ -836,7 +836,7 @@ def _rollback_spawned(pids: dict[str, tuple[str, int]]) -> None:
                 timeout=_ROLLBACK_TIMEOUT_SEC,
             )
             _log(f"rolling back {tag} pid={pid} on node={node_id[:16]}...: {outcome}")
-        except Exception as rb_exc:  # noqa: BLE001
+        except (ray.exceptions.RayError, OSError) as rb_exc:
             # An unreachable rank keeps its GPUs until the platform reclaims the cluster, so it is reported
             # rather than dropped.
             _log(

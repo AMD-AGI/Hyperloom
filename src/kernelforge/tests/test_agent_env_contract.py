@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
 
 _MODEL_VARS = (
@@ -84,7 +85,7 @@ def test_the_context_window_env_is_not_read(clean_env) -> None:
     clean_env.setenv("CLAUDE_CONTEXT_WINDOW", "1m")
     config = Config.from_env(agent_backend="claude", workspace="/tmp")
     assert not hasattr(config, "agent_context_window")
-    assert config.agent_runtime().model == "claude-opus-5-5"
+    assert agent_runtime(config).model == "claude-opus-5-5"
 
 
 def test_the_removed_alias_is_no_longer_read(clean_env) -> None:

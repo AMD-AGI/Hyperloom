@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_MCP_SERVER_NAME as MCP_SERVER_NAME,
+)
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    qualified_context_tool_name,
+)
+
+from .mcp_sdk import build_sdk_mcp_server
 
 log = logging.getLogger(__name__)
-
-
-MCP_SERVER_NAME = "inference_optimizer_context"
-
-
-def _qualified(tool_name: str) -> str:
-    """Return the fully-qualified MCP tool name."""
-    return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
 @dataclass
@@ -26,14 +27,11 @@ class ContextProvider:
     """Read-only accessor over live session context for the pull tools."""
 
     shared_state: Any
-    # Optional callables for context outside SharedState; ``None`` => absent.
-    inbox_reader: Callable[[int], str] | None = None
-    analysis_reader: Callable[[], str] | None = None
-    denial_reader: Callable[[int], str] | None = None
-    recent_outcomes_reader: Callable[[int], str] | None = None
-    running_tasks_reader: Callable[[], str] | None = None
-    # On-demand reference documents directory; ``None`` => unavailable.
-    reference_reader: Callable[[str], str] | None = None
+    inbox_reader: Callable[[int], str]
+    analysis_reader: Callable[[], str]
+    recent_outcomes_reader: Callable[[int], str]
+    running_tasks_reader: Callable[[], str]
+    reference_reader: Callable[[str], str]
 
     def _safe(self, fn: Callable[[], str], label: str) -> str:
         """Invoke a projection callable; an empty result reads as empty."""
@@ -66,17 +64,10 @@ class ContextProvider:
 
     def why_denied(self, top_k: int = 6) -> str:
         """Return a summary of recent policy denials."""
-        if self.denial_reader is not None:
-            return self._safe(lambda: self.denial_reader(top_k), "why_denied")
-        return self._safe(
-            lambda: self.shared_state.to_policy_denial_summary(top_k=top_k),
-            "why_denied",
-        )
+        return self._safe(lambda: self.shared_state.to_policy_denial_summary(top_k=top_k), "why_denied")
 
     def analysis_md(self) -> str:
         """Return the current ``analysis.md`` contents."""
-        if self.analysis_reader is None:
-            return "(analysis.md reader not wired)"
         return self._safe(self.analysis_reader, "analysis_md")
 
     def runtime_findings(self) -> str:
@@ -88,26 +79,18 @@ class ContextProvider:
 
     def inbox(self, since_seq: int = 0) -> str:
         """Return inbox messages newer than a sequence number."""
-        if self.inbox_reader is None:
-            return "(inbox reader not wired)"
         return self._safe(lambda: self.inbox_reader(since_seq), "inbox")
 
     def recent_outcomes(self, top_k: int = 8) -> str:
         """Return a summary of recent action outcomes."""
-        if self.recent_outcomes_reader is None:
-            return "(recent outcomes reader not wired)"
         return self._safe(lambda: self.recent_outcomes_reader(top_k), "recent_outcomes")
 
     def running_tasks(self) -> str:
         """Return the in-flight task set with the resources each one holds."""
-        if self.running_tasks_reader is None:
-            return "(running tasks reader not wired)"
         return self._safe(self.running_tasks_reader, "running_tasks")
 
     def read_reference(self, name: str = "") -> str:
         """Return the full text of a named on-demand reference document."""
-        if self.reference_reader is None:
-            return "(read_reference not wired)"
         return self._safe(lambda: self.reference_reader(name), "read_reference")
 
     def get_failure(self, failure_id: str = "") -> str:
@@ -305,25 +288,11 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
-        "failure_ids you can then inspect with get_failure.",
+        f"failure_ids you can then inspect with {qualified_context_tool_name('get_failure')}.",
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
 )
-
-
-CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
-CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
-
-
-def _resolve_sdk(sdk_module: Any | None) -> Any | None:
-    """Resolve the Claude Agent SDK module."""
-    if sdk_module is not None:
-        return sdk_module
-    try:
-        return importlib.import_module("claude_agent_sdk")
-    except ImportError:
-        return None
 
 
 def _make_handler(
@@ -376,23 +345,16 @@ def build_context_tools_server(
     server_factory: Callable[..., Any] | None = None,
 ) -> Any | None:
     """Build the in-process MCP server exposing the read-only context tools."""
-    sdk = _resolve_sdk(sdk_module)
-    if tool_factory is None:
-        tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
-    if server_factory is None:
-        server_factory = getattr(sdk, "create_sdk_mcp_server", None) if sdk is not None else None
-    if tool_factory is None or server_factory is None:
-        log.info(
-            "context-tools MCP server unavailable (sdk=%s).",
-            getattr(sdk, "__name__", "<none>"),
-        )
-        return None
-
-    decorated_tools = []
-    for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS:
-        decorator = tool_factory(tool_name, description, schema)
-        decorated_tools.append(decorator(_make_handler(provider, method_name)))
-    return server_factory(MCP_SERVER_NAME, "1.0.0", decorated_tools)
+    return build_sdk_mcp_server(
+        MCP_SERVER_NAME,
+        [
+            (tool_name, description, schema, _make_handler(provider, method_name))
+            for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS
+        ],
+        sdk_module=sdk_module,
+        tool_factory=tool_factory,
+        server_factory=server_factory,
+    )
 
 
 __all__ = [
@@ -402,4 +364,5 @@ __all__ = [
     "ContextProvider",
     "MCP_SERVER_NAME",
     "build_context_tools_server",
+    "qualified_context_tool_name",
 ]

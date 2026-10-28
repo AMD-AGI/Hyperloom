@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import types
 
 import pytest
@@ -14,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder import trace as trace_mod
 from hyperloom.inference_optimizer.breakdown.recorder.instrument import snapshot_state_sections
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
-from hyperloom.orchestrator.actions._recorder_trace import trace_recording_skipped
 
 
 def _record(session_dir, payload=None):
@@ -268,9 +266,9 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):
     """The recorder can only trace calls that arrive."""
-    trace_recording_skipped(
-        "kernel_invocations",
+    trace_mod.trace_skip(
         reason="caller raised before the recorder",
+        section="kernel_invocations",
         entity="k001",
         error=RuntimeError("boom"),
     )
@@ -281,22 +279,3 @@ def test_a_call_that_never_reached_the_recorder_says_so(traced):
     assert "outcome=skipped" in line
     assert "id=k001" in line
     assert "error=RuntimeError:boom" in line
-
-
-def test_a_missing_breakdown_package_leaves_the_skip_unreported(monkeypatch):
-    """The breakdown package is optional at import time; its absence is the only thing swallowed."""
-    monkeypatch.setitem(sys.modules, trace_mod.__name__, None)
-
-    assert trace_recording_skipped("kernel_invocations", reason="no recorder") is None
-
-
-def test_an_unexpected_trace_failure_reaches_the_caller(monkeypatch):
-    """Anything but a missing package is a bug in the trace sink and must not be hidden."""
-
-    def _explode(**_kwargs):
-        raise RuntimeError("sink broke")
-
-    monkeypatch.setattr(trace_mod, "trace_skip", _explode)
-
-    with pytest.raises(RuntimeError, match="sink broke"):
-        trace_recording_skipped("kernel_invocations", reason="no recorder")

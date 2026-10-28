@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     is_api_failure,
     resumable_session_id,
@@ -49,6 +50,7 @@ from kernelforge.config import Config
 from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.tracker.usage import UsageAccumulator
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -421,6 +423,7 @@ def _spec(repo: Path, kernel: Path, driver: Path, timeout: int = 2) -> AgentRunS
         timeout_sec=timeout,
         target_files=[str(kernel)],
         driver_script=str(driver),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
 
 
@@ -699,7 +702,7 @@ def test_config_loads_generic_provider_runtime(
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "workspace-write")
 
     config = Config.from_env()
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
 
     assert config.agent_backend == "codex"
     assert runtime.model == "gpt-test-codex"
@@ -1039,6 +1042,54 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
     assert captured["spec"].allow_dirty_baseline is True
     assert captured["spec"].commit_new_paths == ["kernels/*.s"]
     assert captured["spec"].allow_untracked is False
+
+
+@pytest.mark.parametrize("insession_gate", [False, True])
+def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    insession_gate: bool,
+) -> None:
+    """The session does not keep a reasoning log. A later turn writes the lesson."""
+    specs: list[AgentRunSpec] = []
+
+    class FakeBackend:
+        name = "codex"
+        capabilities = AgentCapabilities(stop_hooks=True)
+
+        async def run(self, spec: AgentRunSpec, usage: object = None) -> AgentRunResult:
+            specs.append(spec)
+            return AgentRunResult(text="PLAN: vectorize loads")
+
+    def fake_factory(runtime, **_kwargs: object) -> FakeBackend:
+        backend = FakeBackend()
+        backend.runtime = runtime
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", fake_factory)
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("VALUE = 1\n")
+    driver = tmp_path / "forge_driver.py"
+    driver.write_text("print('allclose: True')\n")
+    agent_fn = agent_module.make_agent_fn(
+        Config(workspace=str(tmp_path), agent_backend="codex", agent_model="m", agent_precheck=False),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=insession_gate),
+        ),
+    )
+
+    asyncio.run(agent_fn(str(kernel), "history"))
+
+    spec = specs[0]
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
+    assert "reasoning log" not in spec.system_prompt.lower()
+    assert "land in time.\n\n## Prior experience" in spec.user_prompt
+    assert "You do NOT write a takeaway" in spec.system_prompt
+    assert "separate turn" in spec.system_prompt
+    assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
 
 
 def test_outer_gate_counts_only_incremental_resume_target_edits(
@@ -1655,6 +1706,7 @@ def _read_only_spec(cwd: Path) -> AgentRunSpec:
         timeout_sec=2,
         writable=False,
         tool_policy=AgentToolPolicy(read=False, search=False, write=False, shell=False, max_turns=1),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=["*"],
     )
 

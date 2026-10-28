@@ -27,12 +27,14 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     TERMINAL_END_REASONS,
     ResumePolicy,
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
@@ -266,7 +268,7 @@ class _AnalysisSession:
                 log.warning("opportunity analysis resume failed: %s", exc)
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one resume turn; its drafts still merge below
                 log.exception("opportunity analysis resume failed")
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
@@ -607,7 +609,7 @@ class OpportunityAnalysisAgent:
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
-                except Exception as error:  # agent backend failure is not enumerable
+                except Exception as error:  # isolation boundary: the analysis session; published tasks still dispatch
                     log.warning("opportunity analysis session failed: %s", error, exc_info=True)
                     status = ANALYSIS_STATUS_FAILED
                     reason = f"opportunity analysis failed: {error}"
@@ -638,6 +640,7 @@ class OpportunityAnalysisAgent:
             writable=True,
             timeout_sec=self.timeout_sec,
             additional_directories=_additional_directories(handoff),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_paths=[
                 str(handoff.root / "workload.md"),
                 str(handoff.root / "serving-context.md"),
@@ -709,7 +712,7 @@ def run_opportunity_analysis(
                 workspace=str(layout.agent_root),
                 agent_timeout_sec=timeout_sec,
             )
-            runtime = with_writable_sandbox(config.agent_runtime())
+            runtime = with_writable_sandbox(agent_runtime(config))
             selected_backend = create_registered_backend(
                 runtime,
                 probe_cwd=str(layout.agent_root),
@@ -720,8 +723,8 @@ def run_opportunity_analysis(
             max_turns=config.max_turns if config is not None else 500,
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
-    except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
-        log.warning("opportunity analysis setup failed: %s", error)
+    except Exception as error:  # isolation boundary: the analysis phase; tasks it published still dispatch
+        log.warning("opportunity analysis setup failed: %s", error, exc_info=True)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

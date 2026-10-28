@@ -1916,16 +1916,20 @@ async def test_drain_cancels_queued_baselines_but_spares_revalidation(session_di
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 2195.86
 
-    stale_a = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-a"))
-    stale_b = await coord.tasks.create(TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b"))
-    reval = await coord.tasks.create(
+    stale_a, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-a")
+    )
+    stale_b, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={"tag": "x"}, idempotency_key="bl-b")
+    )
+    reval, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(
             kind="baseline",
             params={"reason": ENABLEMENT_REVALIDATION_REASON},
             idempotency_key="bl-reval",
         ),
     )
-    other = await coord.tasks.create(TaskSpec(kind="explore", params={}, idempotency_key="ex-a"))
+    other, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="ex-a"))
 
     cancelled = await coord.writeback.drain_queued_baselines(reason="baseline_established")
 
@@ -1940,7 +1944,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
     """The tracked id is honoured even when params carry no revalidation reason."""
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 1000.0
-    reval = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-tracked"))
+    reval, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-tracked")
+    )
     coord.shared_state.enablement.revalidation_task_id = reval.task_id
 
     assert await coord.writeback.drain_queued_baselines(reason="baseline_established") == []
@@ -1951,7 +1957,9 @@ async def test_drain_spares_the_tracked_revalidation_task_id(session_dir):
 async def test_promote_baseline_drains_the_backlog(session_dir):
     """The drain is wired into promotion, not just available as a helper."""
     coord = _coord(session_dir)
-    stale = await coord.tasks.create(TaskSpec(kind="baseline", params={}, idempotency_key="bl-stale"))
+    stale, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="baseline", params={}, idempotency_key="bl-stale")
+    )
 
     await coord.writeback.promote_to_shared_state(
         "baseline",
@@ -2214,7 +2222,7 @@ class TestWritebackRequiredAxes:
         else:
             await coord.writeback._promote_explore(
                 {
-                    "winners": [candidate],
+                    "winners": [{**candidate, "fingerprint": "fp-next"}],
                     "best_variant": candidate,
                     "output_throughput": 150.0,
                     "round_id": "r-local-win",

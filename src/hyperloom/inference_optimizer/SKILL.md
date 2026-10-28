@@ -422,8 +422,8 @@ brief:
   other lever. **Both arms dry advances the phase** via
   `optimize_no_more_leverage`. The LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'}` when it judges
-  further effort unproductive. `skip_to_close` is not a phase advance: it abandons
-  the remaining budget and is reserved for genuine early abandonment.
+  further effort unproductive. No hint ends the run; a hint outside the closed
+  vocabulary is denied (`escalate_hint_not_in_vocab`).
 
 ### FRAMEWORK_AGENT phase — the optimisation phase
 
@@ -758,6 +758,7 @@ and the operator's stated value is lost:
 | Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
 | Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. |
+| xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
 | GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
@@ -802,9 +803,11 @@ python3 -m hyperloom optimize \
 
 - The `--quantize` text is the quantization request only (scheme / kv-cache /
   excluded layers / acceptable eval gap). **Do not** repeat the model path or
-  export dir — the adapter folds `--model` + a per-model export dir under the
-  workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
-  prompt automatically.
+  export dir — the adapter folds `--model` and the export dir into the prompt
+  automatically. Each run quantizes in its own directory,
+  `<workspace_root>/quantization/<model>/runs/<run_id>/`, and exports to
+  `quantized/` inside it, so a rerun never overwrites a model an earlier
+  session is serving.
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
   `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
@@ -1203,7 +1206,8 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`,
+`radeon8060s`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped `sglang_mi308x.sh` /
 `sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you
@@ -1453,6 +1457,18 @@ cheaper liveness answer and the one that survives the pid moving, so prefer it
 and keep the `ps` check for the optimizer PID recorded in the pidfile.
 Health checks only observe and reconcile launch metadata; they must not kill,
 restart, or automatically resume the optimizer.
+
+## Hosted Run (`hyperloom hosted run`)
+
+Not a launch you run by hand: a hosting platform starts it. `hyperloom hosted run` takes no arguments. It reads the host's inputs
+(`HYPERLOOM_INPUT_FILE` for the campaign spec `hyperloom.campaign-spec/v1`, plus `HYPERLOOM_RUN_ID`, `HYPERLOOM_RUN_CREATED_AT`,
+`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables.md`), removes the host-only ones from its
+environment, and runs `optimize` in the same process: `--resume-from <dir> --plug-profile <profile>` when the run's session
+directory already holds `manifest.json` and `state.json`, otherwise the spec mapped to `optimize` flags plus
+`--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
+It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
+refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
+run` with the environment unchanged.
 
 ## Resume Existing Session
 

@@ -19,7 +19,7 @@ from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import add_recover_subparser
 from .session_target import add_session_dir_argument
 from hyperloom.common import predictor_config
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
 # Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
@@ -291,9 +291,9 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to the identities table is accepted here
+        # Sorted for a stable --help listing, and derived so a board added to the board table is accepted here
         # without a second edit.
-        choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
+        choices=sorted(AMD_GPU_BOARDS),
         default=None,
         help="Hint for the real target GPU. The rocm-smi probe always "
         "wins when both are present and disagree; a WARN is "
@@ -378,6 +378,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "emit a quality_gate block in its report: for a server-less workload "
         "that gate is the only correctness signal, and a missing one scores "
         "zero, so every candidate is rejected.",
+    )
+    opt.add_argument(
+        "--xdit-model-name",
+        default=None,
+        metavar="NAME",
+        help="xDiT HuggingFace repo ID (e.g., 'black-forest-labs/FLUX.2-dev'). Required for xDiT runs.",
     )
     opt.add_argument(
         "--nodes",
@@ -1059,9 +1065,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="conc_sweep_concs",
         type=str,
         default=None,
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
-        "high-to-low internally for single-server arm reuse, so the order given "
-        "does not matter. Defaults to the ladder for the workload: "
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Run with --conc first, then cheapest first "
+        "(low-to-high for synthetic, high-to-low for MLPerf), so the order given does not matter. "
+        "Defaults to the ladder for the workload: "
         "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
         "Unavailable for native Magpie AgentX.",
     )
@@ -1070,14 +1076,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="conc_sweep_total_budget_sec",
         type=int,
         default=9000,
-        help="Total wall-clock budget (seconds) for the whole conc-sweep "
-        "action, independent of the per-variant Magpie timeout. "
-        "Once exhausted, remaining variants are recorded as "
-        "status=skipped / error_class=budget_exhausted and the "
-        "JSON envelope carries budget_exhausted=true. Default 9000 "
-        "(~2.5h); set to 0 to disable. Also bounded above by the "
-        "main session wall-clock deadline since conc_sweep runs as "
-        "a SWEEP-phase action.",
+        help="Total wall-clock budget (seconds) for the whole conc-sweep action, independent of the per-variant "
+        "Magpie timeout. Past its first CONC the baseline arm may spend half of it; the optimized arm runs only the CONCs the "
+        "baseline reached, so a budget that runs out drops whole pairs. Once exhausted, remaining variants are "
+        "recorded as status=skipped / error_class=budget_exhausted and the JSON envelope carries "
+        "budget_exhausted=true. Default 9000 (~2.5h); set to 0 to disable. Also bounded above by the main "
+        "session wall-clock deadline since conc_sweep runs as a SWEEP-phase action.",
     )
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
     # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;

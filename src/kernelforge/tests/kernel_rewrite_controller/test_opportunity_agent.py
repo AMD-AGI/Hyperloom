@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,10 +16,12 @@ import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_ag
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderError,
+    AgentProviderUnavailableError,
     AgentRunResult,
     AgentRuntimeConfig,
 )
 from kernelforge.kernel_rewrite_controller import ControllerLayout, read_handoff
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
     ANALYSIS_STATUS_FAILED,
@@ -290,6 +293,7 @@ def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> No
     assert payload["driver_path"] == "driver.py"
     assert backend.spec.tool_policy.shell is False
     assert backend.spec.hooks is not None
+    assert backend.spec.protected_path_rules is FORGE_PROTECTED_PATHS
 
 
 def test_backend_model_probe_receives_an_existing_agent_directory(
@@ -299,16 +303,14 @@ def test_backend_model_probe_receives_an_existing_agent_directory(
     layout = ControllerLayout(tmp_path / "output")
     backend = _Backend(lambda _staging: None)
     runtime = AgentRuntimeConfig(provider="fake", model="fake")
-    config = SimpleNamespace(
-        max_turns=20,
-        agent_runtime=lambda: runtime,
-    )
+    config = SimpleNamespace(max_turns=20)
 
     monkeypatch.setattr(
         opportunity_agent_module.Config,
         "from_env",
         lambda **_kwargs: config,
     )
+    monkeypatch.setattr(opportunity_agent_module, "agent_runtime", lambda _config: runtime)
     monkeypatch.setattr(
         opportunity_agent_module,
         "with_writable_sandbox",
@@ -670,6 +672,60 @@ def test_hookless_resume_failure_is_reported(tmp_path: Path, monkeypatch: pytest
     assert result.status == ANALYSIS_STATUS_FAILED
     assert "resume unavailable" in result.reason
     assert len(backend.resumed) == 1
+
+
+def test_a_resume_whose_cli_is_gone_ends_the_analysis_with_its_stack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    missing = FileNotFoundError(2, "No such file or directory", "claude")
+    backend = _HooklessResumableBackend(lambda staging: _refused_draft(staging), resume_error=missing)
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=10, max_turns=5)
+
+    with caplog.at_level(logging.WARNING, logger=opportunity_agent_module.log.name):
+        result = asyncio.run(agent.run(handoff=_handoff(tmp_path), layout=layout))
+
+    assert (result.status, result.reason) == (ANALYSIS_STATUS_FAILED, "[Errno 2] No such file or directory: 'claude'")
+    assert len(backend.resumed) == 1
+    (record,) = [r for r in caplog.records if r.getMessage() == "opportunity analysis resume failed"]
+    assert record.exc_info[1] is missing
+
+
+def test_an_analysis_whose_provider_is_unavailable_is_a_recorded_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    monkeypatch.setattr(
+        opportunity_agent_module.Config,
+        "from_env",
+        lambda **_kwargs: SimpleNamespace(max_turns=20),
+    )
+    monkeypatch.setattr(opportunity_agent_module, "agent_runtime", lambda _config: runtime)
+    monkeypatch.setattr(opportunity_agent_module, "with_writable_sandbox", lambda selected: selected)
+    unavailable = AgentProviderUnavailableError("claude CLI not found on PATH")
+
+    def _create_backend(_runtime, *, probe_cwd):
+        raise unavailable
+
+    monkeypatch.setattr(opportunity_agent_module, "create_registered_backend", _create_backend)
+
+    with caplog.at_level(logging.WARNING, logger=opportunity_agent_module.log.name):
+        result = run_opportunity_analysis(
+            handoff=_handoff(tmp_path),
+            layout=layout,
+            controller_deadline_unix=time.time() + 60,
+        )
+
+    assert (result.status, result.reason) == (
+        ANALYSIS_STATUS_FAILED,
+        "opportunity analysis setup failed: claude CLI not found on PATH",
+    )
+    persisted = json.loads((layout.agent_root / "analysis-result.json").read_text(encoding="utf-8"))
+    assert (persisted["status"], persisted["reason"]) == (result.status, result.reason)
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("opportunity analysis setup failed: ")]
+    assert record.exc_info[1] is unavailable
 
 
 def test_an_analysis_that_called_nothing_reports_no_usage(tmp_path: Path) -> None:

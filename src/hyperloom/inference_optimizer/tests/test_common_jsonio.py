@@ -9,7 +9,7 @@ import re
 import pytest
 
 from hyperloom.common.jsonio import (
-    extract_first_json_with_key,
+    extract_last_json_matching,
     extract_last_json_with_key,
     read_json,
     read_jsonl,
@@ -90,68 +90,49 @@ class TestReadJsonl:
         p = tmp_path / "mixed.jsonl"
         p.write_text('{"ok": 1}\nnot-json\n[1, 2]\n{"ok": 2}\n')
         errors: list[BaseException] = []
-        assert read_jsonl(p, require_dict=True, skip_malformed=True, on_error=errors.append) == [
+        assert read_jsonl(p, on_error=errors.append) == [
             {"ok": 1},
             {"ok": 2},
         ]
         assert len(errors) == 2
 
-    def test_skip_non_dict_but_raise_malformed(self, tmp_path):
-        p = tmp_path / "mixed.jsonl"
-        p.write_text('{"ok": 1}\n[1, 2]\n')
-        assert read_jsonl(p, require_dict=True, skip_non_dict=True) == [{"ok": 1}]
-        p.write_text("not-json\n")
-        with pytest.raises(json.JSONDecodeError):
-            read_jsonl(p, require_dict=True, skip_non_dict=True)
 
-    def test_malformed_raises_by_default(self, tmp_path):
-        p = tmp_path / "bad.jsonl"
-        p.write_text("{not json}\n")
-        with pytest.raises(json.JSONDecodeError):
-            read_jsonl(p)
-
-
-class TestExtractFirstJson:
+class TestExtractLastJsonMatching:
     def test_fenced_with_key(self):
         text = 'blah ```json\n{"scores": [1]}\n``` end'
-        assert extract_first_json_with_key(text, "scores", _BARE) == {"scores": [1]}
+        assert extract_last_json_matching(text, "scores", _BARE) == {"scores": [1]}
 
     def test_bare_with_key(self):
         text = 'prefix {"intents": []} trailing prose'
-        assert extract_first_json_with_key(text, "intents", _BARE) == {"intents": []}
+        assert extract_last_json_matching(text, "intents", _BARE) == {"intents": []}
 
     def test_missing_key_returns_none(self):
         text = '{"other": 1}'
-        assert extract_first_json_with_key(text, "scores", _BARE) is None
-
-    def test_optional_key_any_object(self):
-        text = 'note ```json\n{"anything": 9}\n```'
-        assert extract_first_json_with_key(text) == {"anything": 9}
+        assert extract_last_json_matching(text, "scores", _BARE) is None
 
     def test_last_object(self):
         text = '```json\n{"k": 1}\n```\n```json\n{"k": 2}\n```'
-        assert extract_first_json_with_key(text, "k", last=True) == {"k": 2}
-        assert extract_first_json_with_key(text, "k") == {"k": 1}
+        assert extract_last_json_matching(text, "k", _BARE) == {"k": 2}
 
     def test_invalid_fenced_json_is_skipped(self):
-        text = '```json\n{bad}\n```\n```json\n{"k": 2}\n```'
-        assert extract_first_json_with_key(text, "k") == {"k": 2}
+        text = '```json\n{"k": 1}\n```\n```json\n{bad}\n```'
+        assert extract_last_json_matching(text, "k", re.compile(r"(?!)")) == {"k": 1}
 
     def test_bare_candidate_trims_trailing_text(self):
         bare_with_trailing = re.compile(r"(\{.*)", re.DOTALL)
         text = 'prefix {"k": 3} trailing prose'
-        assert extract_first_json_with_key(text, "k", bare_with_trailing) == {"k": 3}
+        assert extract_last_json_matching(text, "k", bare_with_trailing) == {"k": 3}
 
     def test_empty(self):
-        assert extract_first_json_with_key("", "k", _BARE) is None
-
-    def test_no_bare_re_only_fenced(self):
-        text = 'bare {"k": 1} no fence'
-        # bare_re None -> only fenced blocks considered
-        assert extract_first_json_with_key(text, "k") is None
+        assert extract_last_json_matching("", "k", _BARE) is None
 
 
 class TestExtractLastJson:
+    def test_no_match_returns_none(self):
+        assert extract_last_json_with_key("", "scores") is None
+        assert extract_last_json_with_key("no json here", "scores") is None
+        assert extract_last_json_with_key('{"foo": 1, "scores_x": 2}', "scores") is None
+
     def test_meta_prefix_scores(self):
         text = '{"meta": "draft", "scores": {"proposal_0": {"score": 9, "reason": "ok"}}}'
         out = extract_last_json_with_key(text, "scores")
@@ -173,12 +154,3 @@ class TestExtractLastJson:
             "meta": "final",
             "scores": {"proposal_0": {"score": 7}},
         }
-
-
-def test_extract_first_keeps_scanning_past_non_qualifying_object_in_fence() -> None:
-    """A fence may contain an example object before the real result."""
-    text = '```json\n{"example": 1}\n{"scores": [9]}\n```'
-    from hyperloom.common.jsonio import extract_first_json_with_key
-
-    result = extract_first_json_with_key(text, "scores")
-    assert result == {"scores": [9]}, f"got {result!r}"

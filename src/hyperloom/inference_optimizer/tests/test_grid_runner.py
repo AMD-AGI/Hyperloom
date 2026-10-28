@@ -23,27 +23,27 @@ from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
+    compose_server_args,
     dedup_vllm_server_args,
     remove_server_args,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import _parse_skip_spec
+from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+    _parse_skip_spec,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
+    resolve_skip_spec,
+)
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
     _run_magpie,
-    apply_runtime_benchmark_overrides,
-    apply_user_skip_list,
-    reorder_grid_for_multi_node,
-    resolve_skip_spec,
     run_grid,
     MagpieRound,
     GridRecipe,
@@ -287,10 +287,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: False)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         assert [v.name for v in out] == [v.name for v in grid]
 
     def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
@@ -300,10 +297,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the untagged variant sinks to the end (stable
         # sort).
         assert [v.name for v in out] == [
@@ -447,90 +441,8 @@ class TestSanitizeResultDir:
             gr.sanitize_result_dir(raw)
 
 
-class TestCoerceExtraEnvs:
-    """Lock the boundary contract for LLM-supplied grid env overrides."""
-
-    def test_dict_is_passthrough(self):
-        assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
-            "FOO": "1",
-            "BAR": "two",
-        }
-
-    def test_dict_coerces_values_to_str(self):
-        assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
-            "USE_AITER": "1",
-            "DEBUG": "True",
-        }
-
-    def test_space_delimited_string(self):
-        assert coerce_extra_envs("SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1") == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "1",
-        }
-
-    def test_newline_delimited_string(self):
-        assert coerce_extra_envs("FOO=1\nBAR=two\n\nBAZ=3") == {"FOO": "1", "BAR": "two", "BAZ": "3"}
-
-    def test_semicolon_delimited_string(self):
-        assert coerce_extra_envs("A=1;B=2;C=3") == {
-            "A": "1",
-            "B": "2",
-            "C": "3",
-        }
-
-    def test_string_preserves_url_in_value(self):
-        assert coerce_extra_envs("HF_ENDPOINT=https://hf.example.com/api") == {
-            "HF_ENDPOINT": "https://hf.example.com/api"
-        }
-
-    def test_string_drops_tokens_without_equals(self):
-        assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_kv_tokens(self):
-        assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_dicts(self):
-        assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_later_entries_win(self):
-        assert coerce_extra_envs([{"FOO": "first"}, {"FOO": "last"}]) == {
-            "FOO": "last",
-        }
-
-    def test_none_returns_empty(self):
-        assert coerce_extra_envs(None) == {}
-
-    def test_unknown_type_returns_empty(self):
-        assert coerce_extra_envs(42) == {}
-        assert coerce_extra_envs(object()) == {}
-
-    def test_used_by_backends_grid_override(self):
-        llm_entry = {
-            "name": "aiter_mla_off",
-            "extra_server_args": "--attention-backend aiter --disable-mla",
-            "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
-            "note": "aiter attn without MLA fast path",
-        }
-        v = GridVariant(
-            name=llm_entry["name"],
-            extra_server_args=llm_entry["extra_server_args"],
-            extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
-            note=llm_entry["note"],
-        )
-
-        assert dict(v.extra_envs.items()) == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "0",
-        }
+class TestGridVariantEnvSafety:
+    """Lock the env-safety filter on LLM-supplied grid env overrides."""
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(
@@ -957,6 +869,48 @@ def test_build_variant_yaml_can_remove_base_args_and_unset_envs(tmp_path):
     assert "--max-num-seqs 256" in args
     assert envs["SGLANG_KEEP"] == "1"
     assert "SGLANG_ENABLE_FOO" not in envs
+
+
+def test_build_variant_yaml_keeps_a_value_the_replacing_variant_re_adds(tmp_path):
+    """A removal scoped to the base's value must not take the variant's own copy of that flag with it."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+
+    out = _build_variant_yaml(
+        GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args="--cuda-graph-max-bs 8 --tp 8")),
+        GridVariant(
+            "bigger_graphs",
+            "--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8"],
+            args_mode="replace",
+        ),
+        output_subdir=tmp_path / "bigger_graphs",
+    )
+
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"]
+    assert "--cuda-graph-max-bs 16" in args
+    assert "--cuda-graph-max-bs 8" not in args
+
+
+def test_agentx_removals_reach_magpie_as_bare_names_without_losing_the_re_added_value():
+    """Magpie takes one bare option name per removal; only that boundary drops the value a spec is scoped to."""
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import LaunchChanges, apply_launch_changes
+
+    bench = {"framework": "sglang", "agentx": {"enabled": True}}
+    apply_launch_changes(
+        bench,
+        LaunchChanges(
+            args="--cuda-graph-max-bs 16 --tp 8",
+            remove_args=["--cuda-graph-max-bs 8", "--disable-cuda-graph --enable-dp-attention"],
+            replace_args=True,
+        ),
+    )
+
+    launch = bench["agentx"]["launch_overrides"]
+    # Magpie matches these against the recipe before our append_args, so the re-added value survives the removal.
+    assert launch["remove_args"] == ["--cuda-graph-max-bs", "--disable-cuda-graph", "--enable-dp-attention"]
+    argv = launch["append_args"]
+    assert argv[argv.index("--cuda-graph-max-bs") + 1] == "16"
 
 
 def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
@@ -2276,23 +2230,20 @@ class TestCompactJsonServerArgs:
     """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
-        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
+        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}')
         assert out == '--compilation-config {"full_cuda_graph":true}'
         # the JSON value is now a single shell word under bash word-splitting
         assert len(out.split()) == 2
 
     def test_speculative_config_multikey(self):
-        out = compact_json_server_args(
-            '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
-            "vllm",
-        )
+        out = compact_json_server_args('--speculative-config {"method": "eagle", "num_speculative_tokens": 3}')
         assert out == ('--speculative-config {"method":"eagle","num_speculative_tokens":3}')
         assert len(out.split()) == 2
 
     def test_compact_json_server_args_internal_space_unsupported(self):
         # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
         # unquoted expansion; this flag shape is unsupported.
-        out = compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
+        out = compact_json_server_args('--speculative-config {"model": "draft model name"}')
         # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
         # ...but it still splits into MORE than the ideal 2 words: the two internal spaces of "draft model name"
@@ -2305,8 +2256,7 @@ class TestCompactJsonServerArgs:
         # boot (observed: shape_capture server never boots -> shape_capture_failed). compact must repair the barewords
         # back to valid JSON.
         out = compact_json_server_args(
-            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}",
-            "vllm",
+            "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}"
         )
         assert out == (
             "--speculative-config "
@@ -2318,8 +2268,7 @@ class TestCompactJsonServerArgs:
     def test_quote_stripped_json_with_path_value_repaired(self):
         # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id) must also be re-quoted.
         out = compact_json_server_args(
-            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}",
-            "vllm",
+            "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}"
         )
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
@@ -2328,10 +2277,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_quote_stripped_nested_json_is_repaired(self):
-        out = compact_json_server_args(
-            "--compilation-config {method:ngram,nested:{a:1}}",
-            "vllm",
-        )
+        out = compact_json_server_args("--compilation-config {method:ngram,nested:{a:1}}")
         blob = out.split(" ", 1)[1]
         assert json.loads(blob) == {
             "method": "ngram",
@@ -2339,10 +2285,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_shell_single_quote_wrappers_are_removed(self):
-        out = compact_json_server_args(
-            """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
-            "vllm",
-        )
+        out = compact_json_server_args("""--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """)
         assert out.strip() == ('--speculative-config {"method":"ngram","num_speculative_tokens":7}')
         json.loads(out.split(" ", 1)[1].strip())
 
@@ -2350,38 +2293,36 @@ class TestCompactJsonServerArgs:
         # Genuinely broken blobs that cannot be repaired to valid JSON are left verbatim (no worse than before), never
         # raising.
         raw = "--compilation-config {this is : not ] json"
-        out = compact_json_server_args(raw, "vllm")
+        out = compact_json_server_args(raw)
         assert "{this is" in out
 
     def test_other_flags_around_json_untouched(self):
-        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
+        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}')
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
     def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
+        assert compact_json_server_args(raw) == ('--speculative-config {"method":"eagle"}')
 
-    def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
+    def test_legacy_shell_wrappers_removed(self):
         raw = """--json-model-override-args '{"rope_scaling":null}'"""
-        expected = '--json-model-override-args {"rope_scaling":null}'
-        assert compact_json_server_args(raw, "sglang") == expected
-        assert compact_json_server_args(raw, None) == expected
+        assert compact_json_server_args(raw) == '--json-model-override-args {"rope_scaling":null}'
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
         raw = "--compilation-config '{not json}'"
-        assert compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw) == raw
 
     def test_empty_is_noop(self):
-        assert compact_json_server_args("", "vllm") == ""
-        assert compact_json_server_args(None, "vllm") == ""
+        assert compact_json_server_args("") == ""
+        assert compact_json_server_args(None) == ""
 
 
 class TestRemoveServerArgsPreservesJson:
@@ -2433,12 +2374,12 @@ class TestRemoveServerArgsPreservesJson:
             {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
             {"base_extra_args": base, "args_mode": "replace"},
         ):
-            out = _grid_runner.compose_server_args(**kwargs)
+            out = compose_server_args(**kwargs)
             assert _blob(out, "--compilation-config") == json.loads(cc)
             assert _blob(out, "--speculative-config") == json.loads(sc)
         # Removing the JSON flag and supplying a variant replacement.
         repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
-        out = _grid_runner.compose_server_args(
+        out = compose_server_args(
             inherited_args=base,
             remove_args=["--compilation-config"],
             variant_extra_args=f"--compilation-config {repl}",
@@ -2546,18 +2487,18 @@ class TestServerArgTokenizerOnTheSyntheticPath:
     def test_a_plain_synthetic_arg_string_round_trips(self, monkeypatch):
         self._off(monkeypatch)
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
-        assert _grid_runner.compose_server_args(base_extra_args=args) == args
+        assert compose_server_args(base_extra_args=args) == args
 
     def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
         """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
         assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
         assert out == "--quantization fp8 --max-num-seqs 512"
 
     def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):

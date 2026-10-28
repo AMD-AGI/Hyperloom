@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.4"
+version = "1.1.5"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -243,6 +243,7 @@ exclude = [
 hyperloom = [
     "plugs/profiles/*.json",
     "contracts/*.json",
+    "hosted/*.sh",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
 ]
@@ -427,6 +428,24 @@ omit = [
     "src/kernelforge/evaluation/benchmark/runner.py",
     "src/kernelforge/evaluation/profiling/registers.py",
     "src/kernelforge/loop/runner.py",
+    # ... and the per-job modules it was split into, which answer to the same hardware.
+    "src/kernelforge/loop/iteration/attempt_verdict.py",
+    "src/kernelforge/loop/iteration/best_publication.py",
+    "src/kernelforge/loop/iteration/campaign_report.py",
+    "src/kernelforge/loop/iteration/campaign_runtime.py",
+    "src/kernelforge/loop/iteration/case_coverage.py",
+    "src/kernelforge/loop/iteration/ceiling_runtime.py",
+    "src/kernelforge/loop/iteration/iteration_phases.py",
+    "src/kernelforge/loop/iteration/iteration_types.py",
+    "src/kernelforge/loop/iteration/keep_checkpoint.py",
+    "src/kernelforge/loop/iteration/lane_runtime.py",
+    "src/kernelforge/loop/iteration/locked_run.py",
+    "src/kernelforge/loop/iteration/outcome_runtime.py",
+    "src/kernelforge/loop/iteration/resume_recovery.py",
+    "src/kernelforge/loop/iteration/round_admission.py",
+    "src/kernelforge/loop/iteration/scoring_runtime.py",
+    "src/kernelforge/loop/iteration/supervisor_review.py",
+    "src/kernelforge/loop/iteration/workspace_git.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
@@ -552,6 +571,7 @@ directory-entries = 50
 [tool.hyperloom.code_metrics.tools]
 ruff = "0.16.2"
 complexipy = "8.0.1"
+radon = "6.0.1"
 vulture = "2.16"
 jscpd = "5.4.1"
 
@@ -626,14 +646,10 @@ extend-select = [
 # the builtin ``aiter`` (async iterator) is never used in this tree.
 ignorelist = ["aiter"]
 
-# C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: the tree carries a
-# backlog above the default max of 10, so selecting it would red the tree instead
-# of gating new code. The code-metrics gate above measures it at 20 on the files a
-# change touches. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
-# [tool.ruff.lint.mccabe]
-# max-complexity = 10
+# C901 (mccabe) stays off: the style guide's complexity trigger (10) and the
+# code-metrics gate's ceiling (20) are counted with radon, which also counts every
+# and / or, ternary, comprehension and assert. Measure on demand:
+#   radon cc -s -n C src/hyperloom src/kernelforge
 
 [tool.ruff.lint.per-file-ignores]
 # Tests re-import inside function bodies (E402), redefine fixtures (F811), and

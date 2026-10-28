@@ -35,6 +35,22 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
+# Speculative-decoding flags: SGLang ``--speculative-*``, vLLM ``--speculative-config`` (JSON or dotted keys),
+# and the count each one bounds accepted tokens per step by, as (pattern, added to the count), in order of
+# preference: the first pattern present decides. SGLang's draft depth beats its draft-token count, because a
+# tree launch (``--speculative-eagle-topk`` > 1) verifies many more tokens than one step can accept.
+_SPECULATIVE_FLAG = re.compile(r"--speculative[-_.]|--num[-_]speculative[-_]tokens")
+_SPECULATIVE_BOUNDS = (
+    (re.compile(r"--speculative[-_]num[-_]steps[=\s]+(\d+)"), 1),
+    (re.compile(r"num[-_]speculative[-_]tokens[\"']?\s*[:=\s]\s*(\d+)"), 1),
+    (re.compile(r"--speculative[-_]num[-_]draft[-_]tokens[=\s]+(\d+)"), 0),
+)
+_SPECULATIVE_FALLBACK_TOKENS_PER_STEP = 8
+# vLLM ``--profiler-config`` keys that bound the capture window, and the delay an operator-set window defaults to.
+_DELAY_ITERATIONS = "delay_iterations"
+_MAX_ITERATIONS = "max_iterations"
+_DEFAULT_PROFILE_DELAY_ITERS = 8
+_VLLM_DELAY_FLAG = re.compile(r"(--profiler-config\.delay_iterations[=\s]+)\d+")
 
 # ``HYPERLOOM_PROFILE_DEGRADED_REASON`` value meaning the TraceLens runtime patch
 # was attempted and did not apply. Distinct from "never attempted": patching can
@@ -159,7 +175,7 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
     """
     if value is None:
         return False
-    if name == "max_iterations":
+    if name == _MAX_ITERATIONS:
         try:
             iterations = int(value)
         except ValueError:
@@ -181,18 +197,23 @@ def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
     return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
+def _explicit_capture_window(policy_env: Mapping[str, Any]) -> int:
+    """The operator's ``HYPERLOOM_PROFILE_MAX_ITERS``, or 0 when the window is computed."""
+    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
+    return int(override) if override.isdigit() else 0
+
+
 def _profile_capture_window(
     policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
 ) -> tuple[int, int]:
     """Resolve the synthetic workload's capture steps and delay."""
-    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
-    if not override.isdigit() or int(override) <= 0:
+    max_iters = _explicit_capture_window(policy_env)
+    if max_iters <= 0:
         return delay_iters, cap
-    max_iters = int(override)
     try:
-        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
+        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or _DEFAULT_PROFILE_DELAY_ITERS))
     except ValueError:
-        delay_iters = 8
+        delay_iters = _DEFAULT_PROFILE_DELAY_ITERS
     if steady_floor is not None and max_iters < steady_floor:
         log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
     elif max_iters > cap:
@@ -270,9 +291,70 @@ def _capture_plan(envs: dict[str, Any]) -> CapturePlan:
         delay_iters=max(0, int(osl_val * (ratio + 1) * 3 - cap / 2)),
         steady_floor=steady_floor,
     )
-    required_iters = delay_iters + max_iters
-    iters_to_prompts = max(1, (required_iters * safe_conc + safe_osl - 1) // safe_osl)
-    return CapturePlan(delay_iters, max_iters, osl_val, max(safe_conc, iters_to_prompts * 2))
+    return CapturePlan(
+        delay_iters, max_iters, osl_val, _prompts_for_steps(delay_iters + max_iters, safe_conc, safe_osl)
+    )
+
+
+def _prompts_for_steps(steps: int, conc: int, osl: int) -> int:
+    """Prompts whose one-token-per-step decode outlasts ``steps``, with the same margin again behind the window."""
+    steps_to_prompts = max(1, (steps * conc + osl - 1) // osl)
+    return max(conc, steps_to_prompts * 2)
+
+
+def speculative_tokens_per_step(server_args: str) -> int:
+    """The most tokens one decode forward step can emit under ``server_args``: 1 without speculative decoding.
+
+    SGLang accepts at most ``--speculative-num-steps`` + 1 tokens per step, whatever the tree width; vLLM
+    accepts at most ``num_speculative_tokens`` + 1. Only without either does ``--speculative-num-draft-tokens``
+    bound it (DSpark, whose verify window is gamma + 1). A launch that enables speculation without stating a
+    count gets a deliberately high fallback, because overestimating only moves the window earlier while
+    underestimating loses it.
+    """
+    if not _SPECULATIVE_FLAG.search(server_args):
+        return 1
+    for pattern, extra in _SPECULATIVE_BOUNDS:
+        values = pattern.findall(server_args)
+        if values:
+            return max(1, int(values[-1]) + extra)
+    return _SPECULATIVE_FALLBACK_TOKENS_PER_STEP
+
+
+def fit_capture_to_speculative(envs: dict[str, Any], framework_env: str) -> None:
+    """Move a computed capture window to where a speculative-decoding server still reaches it.
+
+    The window is counted in engine forward steps and was sized as if each step emits one token. With
+    speculative decoding a step emits up to :func:`speculative_tokens_per_step` tokens, so the run ends in a
+    fraction of those steps and a start step sized for one token per step is never reached: SGLang answers
+    ``/start_profile`` and writes no trace. The delay is divided by that upper bound, and the prompt count is
+    raised so the run still outlasts the window even when every draft token is accepted. Runs after every
+    server-args merge, because the speculative flags usually arrive with the reference recipe or the candidate.
+    An operator-set window (``HYPERLOOM_PROFILE_MAX_ITERS``) is left as written.
+    """
+    server_args = str(envs.get(framework_env, ""))
+    tokens = speculative_tokens_per_step(server_args)
+    if tokens == 1 or _explicit_capture_window(os.environ) > 0:
+        return
+    body = _profile_extra_body(envs)
+    vllm_delay = _profiler_flag_value(server_args, _DELAY_ITERATIONS)
+    if isinstance(body.get("start_step"), int):
+        delay, steps = body["start_step"], int(body.get("num_steps") or 0)
+        body["start_step"] = delay // tokens
+        envs["PROFILE_EXTRA_BODY"] = json.dumps(body)
+    elif vllm_delay is not None and vllm_delay.isdigit():
+        delay, steps = int(vllm_delay), int(_profiler_flag_value(server_args, _MAX_ITERATIONS) or 0)
+        envs[framework_env] = _VLLM_DELAY_FLAG.sub(rf"\g<1>{delay // tokens}", server_args)
+    else:
+        return
+    conc, osl = max(int(envs.get("CONC") or DEFAULT_CONC), 1), max(int(envs.get("OSL") or DEFAULT_OSL), 1)
+    needed = _prompts_for_steps((delay // tokens + steps) * tokens, conc, osl)
+    envs["NUM_PROMPTS"] = max(int(envs.get("NUM_PROMPTS") or 0), needed)
+    log.info(
+        "speculative decoding emits up to %d tokens per step: profile start step %d -> %d",
+        tokens,
+        delay,
+        delay // tokens,
+    )
 
 
 def _fit_profile_osl(osl: int, *, cap: int, ratio: float, safe_conc: int, explicit: bool) -> int:
@@ -331,6 +413,25 @@ def _apply_framework_profile(
     return ProfileInstrumentation(num_prompts, None, [], 0)
 
 
+def write_tracelens_patch_status(envs: dict[str, Any], *, attempted: bool, patched: bool, fw: str) -> None:
+    """Write ``HYPERLOOM_TRACELENS_PATCH_STATUS`` and the degraded reason from a single owner."""
+    if envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE:
+        envs.pop("HYPERLOOM_PROFILE_DEGRADED_REASON")
+    if not attempted:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+    elif patched:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
+    else:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit annotation-only flags and roofline "
+            "analysis may be degraded.",
+            fw or "<unset>",
+        )
+
+
 def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]:
     """Patch the installed server the way the fixed-sequence profile does."""
     from hyperloom.orchestrator.actions.executors._server_patcher import (
@@ -342,19 +443,15 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
     is_atom = "atom" in framework
     is_sglang = "sglang" in framework
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-    if envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE:
-        envs.pop("HYPERLOOM_PROFILE_DEGRADED_REASON")
+    write_tracelens_patch_status(envs, attempted=False, patched=False, fw=framework)
     if is_atom or not _tracelens_patch_enabled():
         return False, sitecustomize
     if "vllm" in framework:
         patch_ok = ensure_vllm_patched_for_tracelens()
     else:
         patch_ok = ensure_sglang_patched_for_tracelens()
-    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
     if sitecustomize:
-        # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
-        # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
         if not patch_ok:
             log.warning(
                 "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
@@ -364,14 +461,7 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
                 "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
             )
         return False, sitecustomize
-    if not patch_ok:
-        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-        log.warning(
-            "TraceLens runtime patch unavailable for framework=%s; "
-            "profile will omit annotation-only flags and roofline "
-            "analysis may be degraded.",
-            framework or "<unset>",
-        )
+    write_tracelens_patch_status(envs, attempted=True, patched=patch_ok, fw=framework)
     return patch_ok, sitecustomize
 
 
@@ -384,8 +474,8 @@ def _apply_vllm_profile(
 ) -> list[tuple[str, str]]:
     existing = str(envs.get("EXTRA_VLLM_ARGS", ""))
     flags = [
-        ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
-        ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
+        (_DELAY_ITERATIONS, f"--profiler-config.delay_iterations {delay_iters}"),
+        (_MAX_ITERATIONS, f"--profiler-config.max_iterations {max_iters}"),
     ]
     # Magpie's launcher puts ``profiler=torch`` before EXTRA_VLLM_ARGS. The argv
     # probe only sees EXTRA_VLLM_ARGS, and vLLM rejects the bounds without it.
@@ -402,7 +492,7 @@ def _apply_vllm_profile(
     profiler_args = " ".join(
         flag for sentinel, flag in flags if sentinel != "ignore_frontend" or "ignore_frontend" not in existing
     )
-    if "delay_iterations" not in existing:
+    if _DELAY_ITERATIONS not in existing:
         envs["EXTRA_VLLM_ARGS"] = f"{existing} {profiler_args}".strip()
     return flags
 

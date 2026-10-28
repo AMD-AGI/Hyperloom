@@ -416,14 +416,14 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
 @pytest.mark.asyncio
 async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     """The close-step timeout cancels its waiter, not the execution's ownership."""
-    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     db = SqliteConnection(coord.session_dir / "close-task.db")
     coord.tasks = TaskRegistry(db)
-    coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
+    coord.locks = SqliteLeaseBackend(db)
     coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
@@ -436,7 +436,7 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
         return {"status": "ok"}
 
     coord.sub.register_executor("report", execute)
-    queued = await coord.tasks.create(
+    queued, _ = await coord.tasks.create_or_return_existing(
         TaskSpec(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
     )
     try:
@@ -1166,20 +1166,9 @@ class TestEveryTerminalReachesAWrittenReport:
         assert coord.shared_state.phase_history[-1]["reason"] == "max_ticks"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "phase,hint,sweep_status,transition_reason",
-        [
-            ("PRELUDE", "", "", "signal"),
-            # No baseline was measured, so an early close is a baseline failure.
-            ("PRELUDE", "skip_to_close", "", "baseline_failed"),
-            ("SWEEP", "skip_to_close", "completed", "signal"),
-            ("FRAMEWORK_AGENT", "", "", "signal"),
-            ("KERNEL_AGENT", "", "", "signal"),
-        ],
-    )
-    async def test_terminal_close_records_the_phase_before_dispatch(
-        self, tmp_path, phase, hint, sweep_status, transition_reason
-    ):
+    @pytest.mark.parametrize("phase", ["PRELUDE", "FRAMEWORK_AGENT", "KERNEL_AGENT"])
+    async def test_terminal_close_records_the_phase_before_dispatch(self, tmp_path, phase):
+        transition_reason = "signal"
         coord = self._coordinator(tmp_path / "session")
         coord.sub.register_executor("session_breakdown", session_breakdown_executor)
         state = coord.shared_state
@@ -1192,8 +1181,7 @@ class TestEveryTerminalReachesAWrittenReport:
             coord.phase_kernel._open_kernel_timeline(
                 route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE"
             )
-        state.pending_escalate_hint = hint
-        state.last_conc_sweep = {"status": sweep_status}
+        state.pending_escalate_hint = "skip_to_kernel"
         state.set_stop_reason("signal")
         try:
             assert await coord.phase_close.ensure_close_sequence(reason="signal") is True
@@ -1580,8 +1568,6 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,
@@ -1621,8 +1607,6 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
-        kb_store_url="https://kb-store.example.test",
-        kb_store_token="test-token",
     )
     coord = Coordinator(
         session_dir=session_dir,

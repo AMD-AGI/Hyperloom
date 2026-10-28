@@ -11,6 +11,7 @@ import os
 import shlex
 from typing import Any
 
+from hyperloom.common.perf_metric import agentx_enabled
 
 __all__ = [
     "canonical_fingerprint",
@@ -109,7 +110,7 @@ def workload_signature(
 ) -> str:
     """Return a stable 12-char digest of the workload contract."""
     # ``benchmark_mode`` is in the digest so an AgentX and a synthetic session with the same CONC/TP never collide.
-    benchmark_mode = "agentx" if os.environ.get("HYPERLOOM_AGENTX", "").strip() else "synthetic"
+    benchmark_mode = "agentx" if agentx_enabled() else "synthetic"
     fields = {
         "benchmark_mode": benchmark_mode,
         "conc": str(conc if conc is not None else os.environ.get("CONC", "")).strip(),

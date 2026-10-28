@@ -9,12 +9,14 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.phases.machine import Transition
 
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
@@ -40,6 +42,7 @@ from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accura
 class _BareState(SharedState):
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
+    baseline_runtime_sec: float = 20.0
     save_count: int = 0
     usable_sec: float | None = None
 
@@ -136,7 +139,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
 
     assert calls == ["k004"]
     assert c.shared_state.kernel_integrate_attempts
-    assert c.shared_state.next_pending_keep_kernel_id() == ""
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
 
@@ -153,8 +156,7 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
     seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
     seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
-    assert state.pending_keep_kernel_ids() == ["k001", "k004"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001", "k004"]
 
 
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
@@ -175,8 +177,7 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
         }
     )
 
-    assert state.pending_keep_kernel_ids() == ["k001"]
-    assert state.next_pending_keep_kernel_id() == "k001"
+    assert kd.pending_keep_kernel_ids(state) == ["k001"]
 
 
 def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
@@ -773,7 +774,7 @@ async def test_on_enter_sweep_triggers_stack_validation_without_pending_keeps(
                 "workspace": f"/tmp/integrate-{kid}",
             }
         )
-    assert not c.shared_state.has_keep_pending_integrate
+    assert not kd.has_keep_pending_integrate(c.shared_state)
 
     validation_calls = []
 
@@ -937,7 +938,7 @@ async def test_on_enter_sweep_failure_records_evidence(coord, monkeypatch):
     """If conc_sweep enqueue raises, the hook records a terminal skip."""
 
     async def _boom(*args, **kwargs):
-        raise RuntimeError("simulated DB outage")
+        raise sqlite3.OperationalError("simulated DB outage")
 
     monkeypatch.setattr(coord.phase_sweep, "_enqueue_internal_conc_sweep_task", _boom)
     coord.shared_state.phase_history = [
@@ -972,7 +973,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     )
 
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
 
 @pytest.mark.asyncio
@@ -988,7 +989,27 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 
     assert task is None
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coord):
+    """The sweep's own budget, not only the session clock, has to hold the anchor pair: two measured rounds."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 600.0
+    coord.shared_state.baseline_runtime_sec = 40.0
+
+    coord.shared_state.conc_sweep_total_budget_sec = 79
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry") is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+    coord.shared_state.last_conc_sweep = {}
+    coord.shared_state.conc_sweep_total_budget_sec = 80
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    assert task is not None and task.params["total_budget_sec"] == 80
 
 
 @pytest.mark.asyncio
@@ -1095,8 +1116,9 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_sweep(coord):
-    """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
+    """A conc_sweep the clock cannot fit one measured pair into must not be enqueued, or SWEEP idles."""
     coord.shared_state.usable_sec = 14 * 60.0
+    coord.shared_state.baseline_runtime_sec = 8 * 60.0
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]
@@ -1253,6 +1275,7 @@ class _SweepPhaseState:
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
+        self.tp = 0
 
 
 def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:

@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_float, to_int
+
 
 def create_workspace(base_dir: Path, framework: str) -> Path:
     """Create a Magpie-compatible benchmark workspace."""
@@ -20,26 +22,6 @@ def create_workspace(base_dir: Path, framework: str) -> Path:
     (workspace / "torch_trace").mkdir(exist_ok=True)
     (workspace / "system_profile").mkdir(exist_ok=True)
     return workspace
-
-
-def _f(value: Any, default: float = 0.0) -> float:
-    """Coerce to float, tolerating None/str; return default on failure."""
-    if isinstance(value, bool) or value is None:
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _i(value: Any, default: int = 0) -> int:
-    """Coerce to int, tolerating None/str; return default on failure."""
-    if isinstance(value, bool) or value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 @dataclass(frozen=True)
@@ -53,12 +35,11 @@ class ReportSubject:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """How one benchmark run ended: its verdict, errors, raw client result and analysis."""
+    """How one benchmark run ended: its verdict, errors and raw client result."""
 
     success: bool
     errors: list[str] | None = None
     raw_result: dict[str, Any] | None = None
-    analysis: dict[str, Any] | None = None
 
 
 def build_report(
@@ -70,7 +51,6 @@ def build_report(
 ) -> dict[str, Any]:
     """Build a Magpie-compatible ``benchmark_report.json`` dict."""
     raw = outcome.raw_result or {}
-    analysis = outcome.analysis
     report: dict[str, Any] = {
         "success": bool(outcome.success),
         "framework": subject.framework,
@@ -83,45 +63,25 @@ def build_report(
         "gap_analysis": None,
         "gpu_monitor": None,
         "workspace_dir": workspace_dir,
-        "execution_time": _f(execution_time),
+        "execution_time": to_float(execution_time, 0.0),
         "errors": list(outcome.errors or []),
         "profiling_enabled": bool(subject.profiling_enabled),
     }
     if raw:
         report["throughput"] = {
-            "request_throughput": _f(raw.get("request_throughput")),
-            "output_throughput": _f(raw.get("output_throughput")),
-            "total_token_throughput": _f(raw.get("total_token_throughput")),
-            "completed_requests": _i(raw.get("completed")),
-            "total_input_tokens": _i(raw.get("total_input_tokens")),
-            "total_output_tokens": _i(raw.get("total_output_tokens")),
-            "duration_seconds": _f(raw.get("duration")),
+            "request_throughput": to_float(raw.get("request_throughput"), 0.0),
+            "output_throughput": to_float(raw.get("output_throughput"), 0.0),
+            "total_token_throughput": to_float(raw.get("total_token_throughput"), 0.0),
+            "completed_requests": to_int(raw.get("completed"), 0),
+            "total_input_tokens": to_int(raw.get("total_input_tokens"), 0),
+            "total_output_tokens": to_int(raw.get("total_output_tokens"), 0),
+            "duration_seconds": to_float(raw.get("duration"), 0.0),
         }
         report["latency"] = {
-            "ttft": {
-                "mean_ms": _f(raw.get("mean_ttft_ms")),
-                "median_ms": _f(raw.get("median_ttft_ms")),
-                "p99_ms": _f(raw.get("p99_ttft_ms")),
-                "std_ms": _f(raw.get("std_ttft_ms")),
-            },
-            "tpot": {
-                "mean_ms": _f(raw.get("mean_tpot_ms")),
-                "median_ms": _f(raw.get("median_tpot_ms")),
-                "p99_ms": _f(raw.get("p99_tpot_ms")),
-                "std_ms": _f(raw.get("std_tpot_ms")),
-            },
-            "itl": {
-                "mean_ms": _f(raw.get("mean_itl_ms")),
-                "median_ms": _f(raw.get("median_itl_ms")),
-                "p99_ms": _f(raw.get("p99_itl_ms")),
-                "std_ms": _f(raw.get("std_itl_ms")),
-            },
-            "e2el": {
-                "mean_ms": _f(raw.get("mean_e2el_ms")),
-                "median_ms": _f(raw.get("median_e2el_ms")),
-                "p99_ms": _f(raw.get("p99_e2el_ms")),
-                "std_ms": _f(raw.get("std_e2el_ms")),
-            },
+            metric: {
+                f"{stat}_ms": to_float(raw.get(f"{stat}_{metric}_ms"), 0.0) for stat in ("mean", "median", "p99", "std")
+            }
+            for metric in ("ttft", "tpot", "itl", "e2el")
         }
         # Scriptable extras are carried verbatim so downstream gates can branch; only emitted when present to keep the
         # serving schema unchanged.
@@ -137,8 +97,6 @@ def build_report(
         ):
             if raw.get(key) is not None:
                 report[key] = raw[key]
-    if analysis:
-        report["bypass_analysis"] = analysis
     return report
 
 

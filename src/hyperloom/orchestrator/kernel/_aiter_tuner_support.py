@@ -129,7 +129,7 @@ def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     """
     if not server_log:
         return []
-    from kernelforge.gemm_tune.evidence import moe_dispatch_keys, parse_log_file
+    from kernelforge.gemm_tune import moe_dispatch_keys, parse_log_file
 
     return moe_dispatch_keys(parse_log_file(server_log))
 
@@ -204,7 +204,7 @@ def _write_fmoe_untuned_csv_from_log(
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
-    from kernelforge.gemm_tune.evidence import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+    from kernelforge.gemm_tune import MOE_SHAPE_FIELDS, moe_untuned_csv_text
 
     report: dict[str, Any] = {
         "observed": 0,

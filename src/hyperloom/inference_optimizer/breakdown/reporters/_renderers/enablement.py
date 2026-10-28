@@ -15,7 +15,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_mapping
 
-from ..base import RenderedSection, md_kv_list, md_table, register_renderer
+from ..base import RenderedSection, events_of, md_kv_list, md_table, register_renderer
 
 _ATTEMPT_COLUMNS = ("attempt", "status", "failure_kind", "reason")
 _BUILD_COLUMNS = ("component", "ref", "gpu_arch", "ok", "failure_class")
@@ -29,11 +29,7 @@ def _table(rows: Any, columns: tuple[str, ...]) -> str:
 @register_renderer("enablement")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the enablement section from the lane's timeline event."""
-    events = [
-        event
-        for event in to_mapping(breakdown).get("timeline") or []
-        if isinstance(event, dict) and str(event.get("type") or "") == "enablement"
-    ]
+    events = events_of(breakdown, "enablement")
     if not events:
         return RenderedSection(section_id="enablement", title="Enablement", skipped=True)
 

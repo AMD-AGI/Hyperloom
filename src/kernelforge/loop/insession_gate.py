@@ -19,14 +19,10 @@ import sys
 import traceback
 from typing import Any
 
-from kernelforge.workspace.edit_policy import (
-    PROTECTED_GLOBS,
-    is_protected_path,
-    protected_path_inventory,
-)
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
 from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
-from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
+from kernelforge.evaluation.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -604,7 +600,7 @@ class InSessionGate:
     def _is_protected(self, fp: str) -> bool:
         if not fp:
             return False
-        return is_protected_path(
+        return FORGE_PROTECTED_PATHS.is_protected(
             fp,
             workspace=self.workspace_root,
             exact_paths=self.protected_abs,
@@ -616,7 +612,7 @@ class InSessionGate:
         if root is None:
             return sorted(Path(path) for path in self.protected_abs)
         return list(
-            protected_path_inventory(
+            FORGE_PROTECTED_PATHS.inventory(
                 root,
                 exact_paths=self.protected_abs,
                 extra_globs=self.protected_globs,
@@ -752,8 +748,6 @@ class InSessionGate:
             elif old.kind != new.kind or old.digest != new.digest or old.mode != new.mode:
                 modified.append(key)
 
-        if not (modified or deleted or added or errors):
-            return ""
         parts = []
         if modified:
             parts.append(f"modified={modified[:5]}")
@@ -770,8 +764,9 @@ class InSessionGate:
 
         try:
             reason = self._protected_changes()
-        except Exception as error:  # noqa: BLE001 - scan failure is fail-closed
+        except Exception as error:  # noqa: BLE001 - isolation boundary: one session's protected-integrity scan
             reason = f"protected integrity scan failed: {type(error).__name__}: {error}"
+            self._log(f"{reason}\n{traceback.format_exc().rstrip()}")
         self.integrity_reason = reason
         self.integrity_violation = bool(reason)
         self.integrity_verdict = "violation" if reason else "clean"

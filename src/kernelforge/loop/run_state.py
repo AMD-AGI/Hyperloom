@@ -22,6 +22,7 @@ from kernelforge.loop.agent_relay import (
     AgentRelayState,
     migrate_run_state_relay_fields,
 )
+from kernelforge.loop.experiments_layout import ARCHIVE_TIME_FORMAT, ExperimentsLayout
 from kernelforge.loop.search_policy import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
@@ -366,10 +367,14 @@ def finish_session(
     return state
 
 
+ITERATION_STARTED = "iteration_started"
+ITERATION_RESULT = "iteration_result"
+
+
 def make_event(event_type: str, iteration: int, **fields: object) -> dict:
     """Build one factual event record (timestamp + type + iteration + fields)."""
     event: dict = {
-        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": time.strftime(ARCHIVE_TIME_FORMAT),
         "type": str(event_type),
         "iter": int(iteration),
     }
@@ -665,9 +670,10 @@ class LoopStateStore:
     """Best-effort file store for ``run_state.json`` + ``events.jsonl``."""
 
     def __init__(self, workspace_dir: str):
-        self.root = Path(workspace_dir) / "forge_experiments"
-        self.state_path = self.root / "run_state.json"
-        self.events_path = self.root / "events.jsonl"
+        layout = ExperimentsLayout.of(workspace_dir)
+        self.root = layout.root
+        self.state_path = layout.run_state
+        self.events_path = layout.events
         self.lock_path = self.root / "workspace.lock"
         self.degraded = False
         self.persistence_errors: list[str] = []
@@ -702,7 +708,7 @@ class LoopStateStore:
         # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
         # is still inside the outcome window, and the deque keeps only what fits.
         for event in events:
-            if event.get("type") == "iteration_result":
+            if event.get("type") == ITERATION_RESULT:
                 self._recent_results.append(event)
 
     def load(self) -> RunState:
@@ -724,7 +730,7 @@ class LoopStateStore:
         # Update the in-memory tails first so the prompt view reflects this event even if the disk append fails (both
         # are best-effort).
         self._recent.append(event)
-        if event.get("type") == "iteration_result":
+        if event.get("type") == ITERATION_RESULT:
             self._recent_results.append(event)
         try:
             self.root.mkdir(parents=True, exist_ok=True)

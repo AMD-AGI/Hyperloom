@@ -433,7 +433,6 @@ async def test_a_kept_round_does_not_close_the_lane(_bound_session):
     assert row["validation_pending"] is True
     assert row["landed"] is False
     assert row["files"] == []
-    assert row["accepted_config_path"] is None
 
 
 @pytest.mark.asyncio
@@ -457,7 +456,6 @@ async def test_the_rearm_hands_the_round_its_archive(_bound_session):
     # The archive and the verdict are two calls on one tick, onto one row.
     assert len(rows) == 1
     assert {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"} in rows[0]["files"]
-    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
     assert rows[0]["status"] == "kept"
 
 
@@ -482,7 +480,6 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     # nothing landed. The round is still ruled.
     row = _ext()["attempts"]["rows"][0]
     assert "files" not in row
-    assert "accepted_config_path" not in row
     assert row["status"] == "reverted"
 
 
@@ -636,7 +633,9 @@ async def test_the_revalidation_enqueue_records_the_window_it_opened(_bound_sess
 
 def test_the_build_executor_records_the_build_it_ran(_bound_session):
     from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
+    from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 
+    action = TargetedBuildAction(gap_id="g7", framework="vllm", component="aiter", capability="fp4_moe", ref="abc123")
     result = types.SimpleNamespace(
         ok=False,
         failure_class="compile_error",
@@ -656,7 +655,7 @@ def test_the_build_executor_records_the_build_it_ran(_bound_session):
         enablement_event.LaneTrigger(origin=enablement_event.ORIGIN_BOOT, mode="all", kind="compiled_miss")
     )
 
-    TargetedBuildExecutor._record_result(result, None, task_id="build-7")
+    TargetedBuildExecutor._record_result(result, None, action=action, task_id="build-7")
 
     builds = _ext()["builds"]
     assert builds["count"] == 1

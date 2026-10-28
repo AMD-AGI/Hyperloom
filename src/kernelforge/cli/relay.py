@@ -16,6 +16,7 @@ from typing import Any
 
 from kernelforge.cli.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_for
 from kernelforge.agent_backends.gateway import (
     anthropic_environment_from_openai,
     openai_gateway_from_anthropic,
@@ -127,7 +128,7 @@ def resolve_relay_policy(
     """
     from kernelforge.agent_backends.registry import get_agent_provider, list_agent_providers
 
-    primary = replace(config, agent_fallback_provider="").agent_runtime().provider
+    primary = agent_runtime(replace(config, agent_fallback_provider="")).provider
     members = (name for name in list_agent_providers() if name != primary and get_agent_provider(name).auto_selectable)
     providers = [primary, *members]
     return AgentRelayPolicy(
@@ -157,7 +158,7 @@ def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> Ag
     profiles = []
     for member in policy.profiles:
         model = config.agent_model if member.profile_id == primary.profile_id else ""
-        runtime = strict_config.agent_runtime_for(member.provider, model or resolve_agent_model(member.provider))
+        runtime = agent_runtime_for(strict_config, member.provider, model or resolve_agent_model(member.provider))
         profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
     return AgentRelayConfig(
         primary_profile_id=primary.profile_id,
@@ -265,13 +266,14 @@ def probe_agent_profile(
                     file=sys.stderr,
                 )
             create_registered_backend(
-                strict_config.agent_runtime(),
+                agent_runtime(strict_config),
                 preflight=True,
                 probe_cwd=workspace,
             )
             model_available = True
             failure = ""
-        except Exception as error:  # noqa: BLE001 - isolate optional profiles
+        except Exception as error:  # isolation boundary: one agent profile's strict preflight
+            log.warning("Agent profile preflight failed for %s", profile.profile_id, exc_info=True)
             failure = f"{type(error).__name__}: {error}"
             if borrowed:
                 failure = _borrowed_line_failure(profile.provider, strict_config.agent_options, failure)
@@ -314,7 +316,8 @@ def build_search_actor_pool(
         if provider_available and (saved is None or saved.available):
             try:
                 bundle = bundle_factory(profile)
-            except Exception as error:  # noqa: BLE001 - availability must isolate one optional profile
+            except Exception as error:  # isolation boundary: one profile's search-actor build
+                log.warning("search actor build failed for %s", profile.profile_id, exc_info=True)
                 failure = f"{type(error).__name__}: {error}"
         available = bundle is not None
         provider_status[profile.provider] = ProviderAvailability(
@@ -405,7 +408,7 @@ def start_search_actors(
 
 
 def _single_profile_relay(config: Config) -> AgentRelayConfig:
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     profile = AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort)
     return AgentRelayConfig(primary_profile_id=profile.profile_id, profiles=(profile,))
 
@@ -469,7 +472,7 @@ def _provider_is_available(registration) -> tuple[bool, str]:
     try:
         if not registration.availability():
             return False, "provider SDK or CLI is not installed"
-    except Exception as error:  # third-party provider predicate
+    except Exception as error:  # isolation boundary: one provider's third-party availability predicate
         log.warning("Agent provider availability check failed: %s", error, exc_info=True)
         return False, f"{type(error).__name__}: {error}"
     return True, ""

@@ -46,7 +46,7 @@ def test_source_path_treats_blank_target_as_unset() -> None:
 
 
 def test_budget_defaults_when_nothing_is_configured() -> None:
-    assert pl.patch_budget() == pl.DEFAULT_PATCH_BUDGET
+    assert pl.patch_budget(None) == pl.DEFAULT_PATCH_BUDGET
 
 
 def test_budget_honours_a_configured_override() -> None:
@@ -65,57 +65,6 @@ def test_a_non_positive_override_falls_back_to_default(value: Any) -> None:
 @pytest.mark.parametrize("value", [None, "abc", object(), True, False])
 def test_an_unparsable_override_falls_back_to_default(value: Any) -> None:
     assert pl.patch_budget(value) == pl.DEFAULT_PATCH_BUDGET
-
-
-def test_a_broken_default_still_yields_the_module_floor() -> None:
-    """Even a nonsense default cannot produce a non-positive ceiling."""
-    assert pl.patch_budget(None, default=0) == pl.DEFAULT_PATCH_BUDGET
-
-
-# --- clamp_by_budget: fit vs deferred, nothing dropped ------------------------
-
-
-def _rows(n: int) -> list[dict[str, Any]]:
-    return [{"integration_id": str(i), "micro_speedup": float(i)} for i in range(n)]
-
-
-def test_clamp_splits_at_the_budget() -> None:
-    fit, deferred = pl.clamp_by_budget(_rows(5), 3)
-    assert [r["integration_id"] for r in fit] == ["0", "1", "2"]
-    assert [r["integration_id"] for r in deferred] == ["3", "4"]
-
-
-def test_clamp_defers_rather_than_drops() -> None:
-    """Every input reappears in exactly one of the two lists."""
-    fit, deferred = pl.clamp_by_budget(_rows(5), 2)
-    assert len(fit) + len(deferred) == 5
-
-
-def test_clamp_under_budget_defers_nothing() -> None:
-    fit, deferred = pl.clamp_by_budget(_rows(2), 3)
-    assert len(fit) == 2 and deferred == []
-
-
-def test_clamp_at_zero_budget_defers_everything() -> None:
-    fit, deferred = pl.clamp_by_budget(_rows(3), 0)
-    assert fit == [] and len(deferred) == 3
-
-
-def test_clamp_treats_a_negative_budget_as_zero() -> None:
-    fit, _deferred = pl.clamp_by_budget(_rows(3), -2)
-    assert fit == []
-
-
-def test_clamp_copies_rows_so_callers_cannot_mutate_state() -> None:
-    original = {"integration_id": "0", "micro_speedup": 1.0}
-    fit, _ = pl.clamp_by_budget([original], 1)
-    fit[0]["micro_speedup"] = 999.0
-    assert original["micro_speedup"] == 1.0
-
-
-def test_clamp_skips_non_mapping_rows() -> None:
-    fit, deferred = pl.clamp_by_budget([{"integration_id": "0"}, "junk", None], 5)
-    assert len(fit) == 1 and deferred == []
 
 
 # --- evict_terminal: the queue's only deletion point --------------------------
@@ -186,6 +135,16 @@ def test_a_non_numeric_micro_sorts_weakest() -> None:
     queue = {
         "num": _terminal("num", "integrated", micro=5.0),
         "bad": {"integration_id": "bad", "status": "integrated", "micro_speedup": "oops"},
+    }
+    kept = pl.evict_terminal(queue, budget=1, retention_multiple=1)
+    assert set(kept) == {"num"}
+
+
+@pytest.mark.parametrize("micro", [float("nan"), float("inf")])
+def test_a_non_finite_micro_sorts_weakest(micro: float) -> None:
+    queue = {
+        "num": _terminal("num", "integrated", micro=5.0),
+        "bad": _terminal("bad", "integrated", micro=micro),
     }
     kept = pl.evict_terminal(queue, budget=1, retention_multiple=1)
     assert set(kept) == {"num"}

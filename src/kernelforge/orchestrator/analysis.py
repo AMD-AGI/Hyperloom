@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import tempfile
 import time
@@ -19,26 +18,27 @@ from typing import Any
 from kernelforge.tools.git import git_bytes
 from kernelforge.agent_backends import (
     AgentBackend,
-    AgentHook,
-    AgentHooks,
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON, ResumePolicy, run_session_with_api_resume
 from kernelforge.config import Config
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
     EvidenceRef,
     OrchestrationContext,
 )
+from kernelforge.orchestrator.analysis_protection import AnalysisProtection
 from kernelforge.orchestrator.analysis_session import (
     AnalysisAttemptLimitError,
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
 )
-from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.tools.durable_io import atomic_write_json, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
@@ -64,18 +64,6 @@ _REQUIRED_BUNDLE_FILES = (
 _INCREMENTAL_DIFF_FILE = "incremental_diff.patch"
 
 log = logging.getLogger(__name__)
-_WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
-_BASH_WRITE_MARKERS = (
-    " >",
-    ">>",
-    "sed -i",
-    "perl -i",
-    " tee ",
-    " rm ",
-    " mv ",
-    " cp ",
-)
-_ROOT_FIND_RE = re.compile(r"""(?:^|[;&|]\s*)find\s+["']?/["']?(?:\s|$)""")
 
 
 @dataclass(frozen=True)
@@ -300,10 +288,6 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
     return digest.hexdigest()
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
 _GLOBAL_ARTIFACTS = {
     "request.json": (
         "analysis_request",
@@ -394,134 +378,6 @@ _CASE_ARTIFACTS = {
         ["failed step", "error reason", "degradation cause"],
     ),
 }
-
-
-class _AnalysisProtection:
-    """Keep every workspace input immutable while staging remains writable."""
-
-    def __init__(
-        self,
-        *,
-        workspace: Path,
-        staging_root: Path,
-        protected_paths: tuple[Path, ...],
-        deadline_monotonic: float,
-    ) -> None:
-        self.workspace = workspace.resolve()
-        self.staging_root = staging_root.resolve()
-        self.protected_paths = tuple(path.resolve() for path in protected_paths)
-        self.deadline_monotonic = deadline_monotonic
-        self._snapshots = {path: path.read_bytes() for path in self.protected_paths if path.is_file()}
-        self._protected_basenames = {path.name for path in self.protected_paths}
-
-    def hooks(self) -> AgentHooks:
-        return AgentHooks(
-            pre_tool_use=[
-                AgentHook(
-                    matcher="Edit|Write|MultiEdit|NotebookEdit",
-                    callback=self._on_pre_write,
-                ),
-                AgentHook(
-                    matcher="Bash",
-                    callback=self._on_pre_bash,
-                ),
-            ]
-        )
-
-    async def _on_pre_write(self, input_data, _tool_use_id, _context) -> dict:
-        if input_data.get("tool_name") not in _WRITE_TOOLS:
-            return {}
-        tool_input = input_data.get("tool_input") or {}
-        raw_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path") or ""
-        if self._inside_staging(raw_path):
-            return {}
-        return self._deny("Analysis output may only be written inside the supplied staging directory.")
-
-    async def _on_pre_bash(self, input_data, _tool_use_id, _context) -> dict:
-        if input_data.get("tool_name") != "Bash":
-            return {}
-        command = str((input_data.get("tool_input") or {}).get("command") or "")
-        if _ROOT_FIND_RE.search(command):
-            return self._deny(
-                "Unbounded root filesystem searches are forbidden. Use the exact "
-                "staging and knowledge paths supplied in the Analysis request."
-            )
-        lowered = f" {command.lower()} "
-        has_write_intent = any(marker in lowered for marker in _BASH_WRITE_MARKERS)
-        names_protected = any(basename.lower() in lowered for basename in self._protected_basenames)
-        if has_write_intent and names_protected:
-            return self._deny("This command may modify immutable source, driver, or test inputs.")
-        remaining = max(1, int(self.deadline_monotonic - time.monotonic()))
-        try:
-            tokens = shlex.split(command)
-        except ValueError:
-            return self._deny("Analysis Bash command could not be parsed safely.")
-        if not tokens or Path(tokens[0]).name != "timeout":
-            return self._deny(
-                "Every Analysis Bash command must be bounded by the shared "
-                "session deadline. Prefix it exactly with "
-                f"`timeout --signal=TERM --kill-after=5s {remaining}s ...`."
-            )
-        if "--signal=TERM" not in tokens or "--kill-after=5s" not in tokens:
-            return self._deny(
-                "Analysis Bash commands must use both `--signal=TERM` and "
-                "`--kill-after=5s` so child process groups terminate reliably."
-            )
-        duration = self._timeout_duration_sec(tokens)
-        if duration is None:
-            return self._deny("Analysis Bash timeout duration is missing or invalid.")
-        if duration > remaining:
-            return self._deny(
-                f"Analysis Bash timeout {duration:.1f}s exceeds the shared session remaining time {remaining}s."
-            )
-        return {}
-
-    @staticmethod
-    def _timeout_duration_sec(tokens: list[str]) -> float | None:
-        for token in tokens[1:]:
-            if token.startswith("-"):
-                continue
-            match = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", token)
-            if not match:
-                return None
-            value = float(match.group(1))
-            multiplier = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}[match.group(2)]
-            duration = value * multiplier
-            return duration if duration > 0 else None
-        return None
-
-    def _inside_staging(self, raw_path: str) -> bool:
-        if not raw_path:
-            return False
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = self.staging_root / path
-        try:
-            path.resolve().relative_to(self.staging_root)
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _deny(reason: str) -> dict:
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
-
-    def restore_and_report_changes(self) -> list[str]:
-        changed = []
-        for path, expected in self._snapshots.items():
-            current = path.read_bytes() if path.is_file() else None
-            if current == expected:
-                continue
-            changed.append(str(path))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(expected)
-        return changed
 
 
 @dataclass(frozen=True)
@@ -623,10 +479,10 @@ class AnalysisAgentService:
             case_root = work_root / "cases" / case.directory
             case_root.mkdir(parents=True, exist_ok=True)
             if not (case_root / "case.json").is_file():
-                _atomic_write_json(case_root / "case.json", case.to_dict())
+                atomic_write_json(case_root / "case.json", case.to_dict())
         inventory_path = work_root / "case_inventory.json"
         if not inventory_path.is_file():
-            _atomic_write_json(
+            atomic_write_json(
                 inventory_path,
                 {
                     "analysis_commit": context.analysis_commit,
@@ -635,7 +491,7 @@ class AnalysisAgentService:
             )
         progress_path = work_root / "progress.json"
         if not progress_path.is_file():
-            _atomic_write_json(
+            atomic_write_json(
                 progress_path,
                 {
                     "analysis_commit": context.analysis_commit,
@@ -698,7 +554,7 @@ class AnalysisAgentService:
                 stream.write(json.dumps(provenance_payload, sort_keys=True) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-        _atomic_write_json(
+        atomic_write_json(
             profile_root.parent / "profile_provenance.json",
             {
                 "case_id": case.case_id,
@@ -721,7 +577,7 @@ class AnalysisAgentService:
         case_states = []
         for case in cases:
             case_root = work_root / "cases" / case.directory
-            _atomic_write_json(case_root / "case.json", case.to_dict())
+            atomic_write_json(case_root / "case.json", case.to_dict())
             analysis_path = case_root / "analysis.md"
             profile_root = case_root / "profile"
             has_analysis = cls._nonempty_file(analysis_path)
@@ -753,14 +609,14 @@ class AnalysisAgentService:
             )
 
         status = "READY" if len(completed) == len(cases) else "PARTIAL"
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "case_inventory.json",
             {
                 "analysis_commit": context.analysis_commit,
                 "cases": case_states,
             },
         )
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "progress.json",
             {
                 "analysis_commit": context.analysis_commit,
@@ -774,7 +630,7 @@ class AnalysisAgentService:
                 ],
             },
         )
-        _atomic_write_json(
+        atomic_write_json(
             work_root / "manifest.json",
             {
                 "analysis_commit": context.analysis_commit,
@@ -921,7 +777,7 @@ class AnalysisAgentService:
         )
         self._initialize_framework_artifacts(work_root, context, cases)
         incremental = self._stage_incremental_diff(analysis_root, work_root, incremental)
-        protection = _AnalysisProtection(
+        protection = AnalysisProtection(
             workspace=workspace,
             staging_root=work_root,
             protected_paths=self._protected_paths(workspace, sources),
@@ -1004,7 +860,7 @@ class AnalysisAgentService:
             "changed_source_files": (list(incremental.changed_source_files) if incremental is not None else []),
         }
         if not session.request_path.is_file():
-            _atomic_write_json(session.request_path, request_payload)
+            atomic_write_json(session.request_path, request_payload)
             return
         try:
             durable_request = json.loads(session.request_path.read_text())
@@ -1025,7 +881,7 @@ class AnalysisAgentService:
             raise AnalysisBundleError("durable analysis request does not match current inputs")
         if retry_published_bundle:
             durable_request["analysis_profiling_enabled"] = self.profiling_enabled
-            _atomic_write_json(session.request_path, durable_request)
+            atomic_write_json(session.request_path, durable_request)
 
     def _publish_session_bundle(
         self,
@@ -1174,7 +1030,7 @@ class AnalysisAgentService:
                 ],
             }
         )
-        _atomic_write_json(
+        atomic_write_json(
             catalog_path,
             {
                 "analysis_commit": workflow.analysis_commit,
@@ -1207,27 +1063,7 @@ class AnalysisAgentService:
         ):
             return context
         evidence_by_path = {reference.path: reference for reference in context.evidence_refs}
-        for artifact in catalog["artifacts"]:
-            if not isinstance(artifact, dict):
-                continue
-            path = str(artifact.get("path") or "")
-            information = artifact.get("available_information")
-            if (
-                not path
-                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
-                or not isinstance(information, list)
-                or not Path(path).resolve().is_relative_to(work_root.resolve())
-            ):
-                continue
-            evidence_by_path[path] = EvidenceRef(
-                kind=str(artifact.get("kind") or "analysis_artifact"),
-                path=path,
-                summary=(
-                    f"{artifact.get('description') or 'Analysis artifact'} "
-                    f"Available information: "
-                    f"{', '.join(str(item) for item in information)}."
-                ),
-            )
+        evidence_by_path.update(self._checkpoint_artifact_refs(catalog["artifacts"], work_root=work_root))
         normalized_cases = tuple(
             self._checkpoint_case_evidence(
                 original,
@@ -1305,12 +1141,34 @@ class AnalysisAgentService:
             )
         return replace(applied, evidence_status=context.evidence_status)
 
+    def _session_spec(
+        self, session: _AnalysisSession, cases: tuple[AnalysisCase, ...], protection: AnalysisProtection
+    ) -> AgentRunSpec:
+        """The one Analysis session: it writes only into its staging root and reads the workspace and knowledge."""
+        system_prompt, user_prompt = self._prompts(session, cases)
+        return AgentRunSpec(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            role="analysis",
+            cwd=str(session.work_root),
+            writable=True,
+            timeout_sec=session.timeout_sec,
+            additional_directories=[
+                session.context.workspace,
+                str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
+            ],
+            allow_untracked=True,
+            tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=self.max_turns),
+            hooks=protection.hooks(),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
+        )
+
     async def _run_analysis_session(
         self,
         session: _AnalysisSession,
         *,
         workflow: AnalysisSessionJournal,
-        protection: _AnalysisProtection,
+        protection: AnalysisProtection,
         usage,
         force_refresh: bool,
     ) -> None:
@@ -1342,32 +1200,10 @@ class AnalysisAgentService:
         workflow.begin()
         sync_checkpoint()
         try:
-            system_prompt, user_prompt = self._prompts(session, cases)
-            hooks = protection.hooks()
             run_result = await asyncio.wait_for(
                 run_session_with_api_resume(
                     self.backend,
-                    AgentRunSpec(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        role="analysis",
-                        cwd=str(work_root),
-                        writable=True,
-                        timeout_sec=timeout_sec,
-                        additional_directories=[
-                            context.workspace,
-                            str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
-                        ],
-                        allow_untracked=True,
-                        tool_policy=AgentToolPolicy(
-                            read=True,
-                            search=True,
-                            write=True,
-                            shell=True,
-                            max_turns=self.max_turns,
-                        ),
-                        hooks=hooks,
-                    ),
+                    self._session_spec(session, cases, protection),
                     usage=usage,
                     policy=ResumePolicy(deadline_sec=timeout_sec),
                 ),
@@ -1815,6 +1651,33 @@ Update analysis incrementally:
         )
 
     @staticmethod
+    def _checkpoint_artifact_refs(artifacts: list, *, work_root: Path) -> dict[str, EvidenceRef]:
+        """The well-formed catalog entries of an unpublished checkpoint that stay inside its work root, by path."""
+        refs: dict[str, EvidenceRef] = {}
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = str(artifact.get("path") or "")
+            information = artifact.get("available_information")
+            if (
+                not path
+                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
+                or not isinstance(information, list)
+                or not Path(path).resolve().is_relative_to(work_root.resolve())
+            ):
+                continue
+            refs[path] = EvidenceRef(
+                kind=str(artifact.get("kind") or "analysis_artifact"),
+                path=path,
+                summary=(
+                    f"{artifact.get('description') or 'Analysis artifact'} "
+                    f"Available information: "
+                    f"{', '.join(str(item) for item in information)}."
+                ),
+            )
+        return refs
+
+    @staticmethod
     def _checkpoint_case_evidence(original: CaseEvidence, *, case_root: Path, profiling_enabled: bool) -> CaseEvidence:
         """A case's evidence from an unpublished checkpoint, flagged by how far the session got with it."""
         bottleneck_path = case_root / "bottleneck.json"
@@ -1911,7 +1774,7 @@ Update analysis incrementally:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-        _atomic_write_json(
+        atomic_write_json(
             commit_root / "published.json",
             {
                 "generation_root": generation_root.name,
@@ -1937,7 +1800,7 @@ def make_analysis_agent_service(
     profiling_enabled: bool = True,
 ) -> AnalysisAgentService:
     """Build the Analysis Agent through the configured provider."""
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     backend = create_registered_backend(
         runtime,
         probe_cwd=config.workspace,

@@ -24,8 +24,10 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 from kernelforge.resources import resource_path
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
@@ -339,7 +341,7 @@ async def _run_agent(
     turn: _AuthoringTurn,
     usage: UsageAccumulator | None = None,
 ) -> str:
-    runtime = with_writable_sandbox(config.agent_runtime())
+    runtime = with_writable_sandbox(agent_runtime(config))
     backend = create_registered_backend(runtime)
     run_spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
@@ -351,6 +353,7 @@ async def _run_agent(
         target_files=[str(turn.stage_driver)],
         # Deliberately no driver_script, for the reason task_preparer records at its own AgentRunSpec: that field
         # declares the measurement surface the guard must defend, so it snapshots the driver as protected.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=[path.name for path in turn.evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,
@@ -580,8 +583,10 @@ class _DriverAuthoring:
                         self.last_preflight = preflight_rewrite_driver(
                             self.spec, str(self.destination), deadline_unix=deadline_unix
                         )
-                    except Exception as error:  # noqa: BLE001
-                        log.warning("driver preparation attempt %d: preflight raised: %s", attempt, error)
+                    except Exception as error:  # isolation boundary: one attempt's deterministic driver preflight
+                        log.warning(
+                            "driver preparation attempt %d: preflight raised: %s", attempt, error, exc_info=True
+                        )
                         _restore_driver(self.destination, self.original)
                         self.prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
                         continue
@@ -631,8 +636,10 @@ class _DriverAuthoring:
             _audit_text(record, "agent_output.txt", output)
         except asyncio.TimeoutError:
             _audit_json(record, "agent_event.json", {"status": "timeout", "timeout_sec": turn.timeout_sec})
-        except Exception as error:  # noqa: BLE001
-            log.warning("driver preparation attempt %d: agent invocation failed: %s", self.attempts_run, error)
+        except Exception as error:  # isolation boundary: one driver-authoring agent session
+            log.warning(
+                "driver preparation attempt %d: agent invocation failed: %s", self.attempts_run, error, exc_info=True
+            )
             _audit_json(
                 record, "agent_event.json", {"status": "error", "type": type(error).__name__, "error": str(error)}
             )

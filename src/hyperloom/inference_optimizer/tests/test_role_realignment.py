@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
 from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
-from hyperloom.common.timeutil import parse_iso_unix_or_zero
+from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -63,7 +64,8 @@ def test_orchestration_prompt_defers_rescue_moves_to_reference(registry):
     )
 
     assert "kill_task" not in text
-    assert "read_reference('specialist_rescue')" in text
+    read_reference = qualified_context_tool_name("read_reference")
+    assert f"{read_reference}(name='specialist_rescue')" in text
 
 
 def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
@@ -148,7 +150,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
-    assert "entered" in out
+    assert "entered   : 1970-01-12T13:46:40Z" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
     expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
@@ -344,13 +346,81 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
         before = await c.conversation.compose_prompt("orchestration")
         c.shared_state.tick = int(c.shared_state.tick or 0) + 7
         c.shared_state.agent_last_active["orchestration"] = 1.0
-        c.shared_state.phase_started_ts = "2026-01-01T00:00:00+00:00"
+        c.shared_state.phase_started_unix = 1_767_225_600.0
         after = await c.conversation.compose_prompt("orchestration")
 
         assert after.context == before.context
         assert f"tick={c.shared_state.tick}" in after.turn
         for heading in ("=== Phase ===", "=== Mission progress ===", "=== Tick ===", "=== Inbox for orchestration"):
             assert heading in after.turn
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordinator_with_mocks):
+    """The ledger moves whenever an action lands, so it must not sit in the cached prefix."""
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.crash_count = int(c.shared_state.crash_count or 0) + 1
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert after.turn != before.turn
+        assert "=== Shared session state ===" not in after.context
+        assert "target_gap_pct=" not in after.context
+        assert "=== Resource pools ===" in after.context
+        # Stable blocks first, then the per-tick ones, ledger just above the inbox tail.
+        assert after.turn.index("=== Tick ===") < after.turn.index("=== Shared session state ===")
+        assert after.turn.index("=== Shared session state ===") < after.turn.index("=== Inbox for orchestration")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_context(coordinator_with_mocks):
+    """A denial lands and a proposal is benched between two ticks; the cached prefix has to survive both."""
+    from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, normalize_proposal
+    from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
+
+    c = coordinator_with_mocks
+    tried = {"name": "proposal-alpha", "extra_args": "--enable-fused-rmsnorm"}
+    waiting = {"name": "proposal-beta", "extra_args": "--chunked-prefill-size 8192"}
+    try:
+        c.shared_state.phase = PHASE_FRAMEWORK_AGENT
+        c.shared_state.macro_cycle = 0
+        c.shared_state.specialist_rounds = [
+            {"cycle": 0, "domain": "serving_specialist", "gap_canonical_id": "", "proposal_set": [tried, waiting]}
+        ]
+        first = await c.conversation.compose_prompt("orchestration")
+        assert "=== Untested proposals (current cycle) ===" in first.turn
+        assert tried["name"] in first.turn
+
+        c.shared_state.record_policy_denial(
+            action_name="explore",
+            rule="phase_gate",
+            hint="wait for the bench slot",
+            intent_type="DISPATCH_TASK",
+        )
+        fields = normalize_proposal(tried)
+        tested_row = {
+            "extra_server_args": fields["extra_args"],
+            "extra_envs": fields["extra_envs"],
+            **controls_of(fields),
+        }
+        c.shared_state.explore_search = {"tested": {"explore-1": dict(tested_row, outcome="REVERT")}}
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 1
+        second = await c.conversation.compose_prompt("orchestration")
+
+        assert second.context == first.context
+        assert "=== Recent policy denials" in second.turn
+        assert "=== Recent policy denials" not in second.context
+        assert "=== Untested proposals (current cycle) ===" not in second.context
+        # The benched proposal left the queue; the prefix above it did not move.
+        queue = second.turn.split("=== Untested proposals (current cycle) ===", 1)[1]
+        assert tried["name"] not in queue
+        assert waiting["name"] in queue
     finally:
         await c.stop()
 
@@ -367,7 +437,9 @@ async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_pr
         (call,) = backend.calls
 
         assert (composed.context in call["system_prompt"]) is cached
-        assert ("=== Shared session state ===" in call["prompt"]) is not cached
+        # The ledger is a per-tick block, so it rides the prompt and never the cached half.
+        assert "=== Shared session state ===" in call["prompt"]
+        assert "=== Shared session state ===" not in call["system_prompt"]
         assert "=== Phase ===" in call["prompt"]
         assert call["prompt"].endswith("ASK")
     finally:
@@ -449,7 +521,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
     """Lease expiry, lanes and GPU ids reach the planner."""
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -466,7 +538,7 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
         ):
             c.bus.db.raw.execute(
                 "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-                "acquired_at, expires_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?)",
+                "acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
                 (
                     lane,
                     holder,
@@ -475,21 +547,12 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
                     1,
                     "2026-05-19T18:00:00+00:00",
                     expires,
-                    "2026-05-19T18:00:00+00:00",
                 ),
             )
         for gpu_id in (3, 1):
             c.bus.db.raw.execute(
-                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, "
-                "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
-                (
-                    gpu_id,
-                    f"h-gpu{gpu_id}",
-                    task.task_id,
-                    "2026-05-19T18:00:00+00:00",
-                    "2099-12-31T23:59:59+00:00",
-                    "2026-05-19T18:00:00+00:00",
-                ),
+                "INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)",
+                (gpu_id, f"h-gpu{gpu_id}", task.task_id),
             )
         c.bus.db.raw.commit()
 
@@ -518,7 +581,7 @@ async def test_running_tasks_reader_reports_heartbeat_age(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -552,7 +615,9 @@ async def test_running_tasks_reader_counts_a_dsh_session_log_like_the_reaper(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(TaskSpec(kind="specialist", params={}, idempotency_key="k-dsh-heartbeat"))
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="k-dsh-heartbeat")
+        )
         await c.tasks.transition(task.task_id, "running")
         ws = runs_dir(c.session_dir, "specialist", task.task_id)
         session_log = ws / ".dsh" / "sessions" / "ws" / "session-0" / "session.v3.jsonl"
@@ -581,7 +646,7 @@ async def test_running_tasks_reader_skips_heartbeat_for_non_specialist(
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="explore",
                 params={},
@@ -608,7 +673,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     c = coordinator_with_mocks
     try:
         assert "no tasks in flight" in c.conversation._context_running_tasks_reader()
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={"domain": "serving_specialist", "gap_canonical_id": "gap.x"},
@@ -645,7 +710,7 @@ async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinato
     try:
         c.shared_state.phase = phase
         for i, kind in enumerate(kinds):
-            await c.tasks.create(TaskSpec(kind=kind, params={}, idempotency_key=f"k-backlog-{i}"))
+            await c.tasks.create_or_return_existing(TaskSpec(kind=kind, params={}, idempotency_key=f"k-backlog-{i}"))
         out = c.conversation._context_running_tasks_reader()
         assert "queued backlog: " in out
         assert "dispatches before" in out if order_note else "dispatches before" not in out
@@ -662,7 +727,7 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -698,9 +763,9 @@ async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
         assert [r["lane"] for r in rows] == ["research_lane"]
         # The lane must expire at the REMAINING budget (cumulative TTL minus the elapsed run time), not at now + the
         # full cumulative TTL.
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         assert expires_in <= 2400
-        started = parse_iso_unix_or_zero(updated.updated_at)
+        started = to_unix(updated.updated_at, 0.0)
         remaining_budget = 2400 - (time.time() - started)
         assert abs(expires_in - remaining_budget) < 5
     finally:
@@ -714,7 +779,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -747,7 +812,7 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         # 1800 + 600 cumulative, 1000 already spent -> ~1400s left, not 2400.
         assert 1300 < expires_in < 1450
     finally:
@@ -759,7 +824,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
     """A late extension must not reduce newly granted lane time to one second."""
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -788,7 +853,7 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator
         )
 
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        expires_in = to_unix(str(rows[0]["expires_at"]), 0.0) - time.time()
         assert 550 < expires_in < 650
     finally:
         await c.stop()
@@ -802,7 +867,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -837,14 +902,14 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 
 
 @pytest.mark.asyncio
-async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_mocks):
-    """A wall-budget failure retains DB changes but reports a degraded extension."""
+async def test_extend_lease_wall_budget_grant_failure_is_recorded_as_an_intent_exception(coordinator_with_mocks):
+    """A wall-budget failure retains DB changes and reaches the intent boundary's exception record."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.loop import intent_router as _sub
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -881,8 +946,40 @@ async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_
         # The DB-side extension still stands.
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
-        degraded = next(r for r in recorded if r.get("kind") == "extend_lease_degraded")
-        assert "registry unavailable" in degraded["wall_budget_extension_error"]
+        failures = [r for r in recorded if r.get("kind") == "handle_intent_exception"]
+        assert [(r["intent_type"], r["error"]) for r in failures] == [
+            ("extend_lease", "RuntimeError: registry unavailable")
+        ]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_enablement_rearm_failure_on_critic_reject_reaches_the_router(coordinator_with_mocks, monkeypatch):
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
+    from hyperloom.orchestrator.loop.verdicts import CriticRuling
+
+    c = coordinator_with_mocks
+    try:
+
+        async def _rearm_broke(_result):
+            raise RuntimeError("enablement lane unavailable")
+
+        monkeypatch.setattr(c.enablement_lane, "maybe_rearm_enablement", _rearm_broke)
+        pending = PendingProposal(
+            proposal_msg_id="m-reject",
+            from_agent="orchestration",
+            action_name="integrate_patch",
+            predicted_gain_pct=0.0,
+            payload={"params": {"enablement": True}},
+        )
+        with pytest.raises(RuntimeError, match="enablement lane unavailable"):
+            await c.router._apply_verdict_outcome(
+                pending,
+                ruling=CriticRuling(verdict="reject", reasoning="regresses accuracy"),
+                pa_params={"enablement": True},
+                sid_candidate="t-enable",
+            )
     finally:
         await c.stop()
 
@@ -894,7 +991,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -936,7 +1033,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
         # Lane still moved — falling back to the full TTL is the safe direction (a lease that outlives the task beats
         # one reaped mid-run).
         rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        assert parse_iso_unix_or_zero(str(rows[0]["expires_at"])) > time.time()
+        assert to_unix(str(rows[0]["expires_at"]), 0.0) > time.time()
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 2400
     finally:
@@ -950,7 +1047,7 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
 
     c = coordinator_with_mocks
     try:
-        task = await c.tasks.create(
+        task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(
                 kind="specialist",
                 params={},
@@ -979,10 +1076,19 @@ async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(co
         members = sorted(name for name, meta in ACTION_CATALOGUE.items() if meta.family == "prep")
         assert len(members) > 1
         queued = [
-            await c.tasks.create(TaskSpec(kind=kind, params={}, idempotency_key=f"k-prune-{kind}")) for kind in members
+            (
+                await c.tasks.create_or_return_existing(
+                    TaskSpec(kind=kind, params={}, idempotency_key=f"k-prune-{kind}")
+                )
+            )[0]
+            for kind in members
         ]
-        bystander = await c.tasks.create(TaskSpec(kind="explore", params={}, idempotency_key="k-prune-bystander"))
-        running = await c.tasks.create(TaskSpec(kind=members[0], params={}, idempotency_key="k-prune-running"))
+        bystander, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="explore", params={}, idempotency_key="k-prune-bystander")
+        )
+        running, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind=members[0], params={}, idempotency_key="k-prune-running")
+        )
         await c.tasks.transition(running.task_id, "running")
 
         await c.router.handle_intent(
@@ -1013,8 +1119,12 @@ async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind
     """A single action name still works, and ``scope='queued'`` leaves the family usable."""
     c = coordinator_with_mocks
     try:
-        target = await c.tasks.create(TaskSpec(kind="profile", params={}, idempotency_key="k-drain-profile"))
-        sibling = await c.tasks.create(TaskSpec(kind="roofline", params={}, idempotency_key="k-drain-roofline"))
+        target, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="profile", params={}, idempotency_key="k-drain-profile")
+        )
+        sibling, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="roofline", params={}, idempotency_key="k-drain-roofline")
+        )
 
         await c.router.handle_intent(
             "orchestration",

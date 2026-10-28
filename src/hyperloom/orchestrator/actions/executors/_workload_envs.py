@@ -33,15 +33,14 @@ import yaml
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     INTVTY_OBJECTIVES,
-    agentx_enabled as agentx_enabled,
+    agentx_enabled,
     intvty_grading_enabled,
-    agentx_active as _agentx_active,
     parse_intvty_noise_pct,
 )
 from hyperloom.common.env_safety import (
@@ -66,33 +65,31 @@ from hyperloom.inference_optimizer.grid_server_args import (
     inject_sglang_attention_backend,
     inject_sglang_context_length,
     inject_sglang_watchdog_timeout,
-    server_args_env_name,
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
-from ._profile_setup import (
-    _AtomTracelensCaps,
-    _profiler_bound_holds,
-    _profiler_flag_value,
-    apply_atom_profile_caps,
-)
+from ._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
+from ._profile_setup import fit_capture_to_speculative
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
-    _load_model_config_dict,
+    load_model_config_dict,
     _sparse_kv_block_size,
 )
 
 log = logging.getLogger(__name__)
 
+_XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
+
 # The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
 # has no such kernel. The gate is the arch, so the board list is read off the
-# identity table rather than typed out beside it.
-_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
+# board table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(product for product, board in AMD_GPU_BOARDS.items() if board.gfx == "gfx942")
 
 
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
@@ -127,25 +124,6 @@ def _first_env(names: tuple[str, ...]) -> str:
     return ""
 
 
-def agentx_active(shared_state: Any = None) -> bool:
-    """Whether AgentX is enabled, preferring persisted state over the ambient env var.
-
-    ``benchmark_mode`` is stamped at seed precisely so it survives a restart,
-    while ``HYPERLOOM_AGENTX`` only describes the shell that happens to be
-    running -- an SDK caller, or a re-baseline/variant round driven from a
-    subprocess that did not inherit it, would otherwise miss the AgentX-sized
-    timeout or publish the agentic number under a synthetic tag. Either saying
-    "agentx" is enough.
-
-    Args:
-        shared_state: Session state, when the caller has one.
-
-    Returns:
-        True when AgentX is enabled for this session, by either signal.
-    """
-    return _agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
-
-
 def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     """The environment the AgentX derivations read, carrying a rung's own CONC.
 
@@ -154,9 +132,9 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     here -- re-merging them would make this reader resolve a knob differently
     from every other one.
 
-    Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
-    so every bound derived from it is linear in the concurrency being measured,
-    not in the one the session was launched at.
+    The AgentX warmup scales with ``CONC``, so every bound derived from it is
+    linear in the concurrency being measured, not in the one the session was
+    launched at.
 
     Args:
         conc: The rung's concurrency, or ``None`` to read the session's.
@@ -258,22 +236,9 @@ def geak_acceptance(metric_basis: str, noise_pct: float) -> dict[str, Any] | Non
     }
 
 
-def cli_workload_defaults() -> tuple[int, int, int]:
-    """The CLI's ``ISL``/``OSL``/``CONC`` defaults, as one source for fallbacks.
-
-    Every last-resort fallback in this module reads them from here, so a
-    materialized recipe and the workload spec published beside it cannot
-    disagree about what "unset" means. The CLI resolves its own flags from the
-    same ``hyperloom.common`` constants, so the two cannot drift apart.
-    """
-    return DEFAULT_ISL, DEFAULT_OSL, DEFAULT_CONC
-
-
 def build_agentx_workload_spec(
-    bench: dict[str, Any],
     envs: dict[str, Any],
     *,
-    model_path: str | None = None,
     env: Mapping[str, str] | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -289,16 +254,13 @@ def build_agentx_workload_spec(
     will actually run with, not the operator's raw inputs.
 
     Args:
-        bench: The benchmark mapping being materialized.
-        envs: That mapping's ``envs``, already carrying the switch's overrides.
-        model_path: The model this round serves, when the caller knows it.
+        envs: The benchmark mapping's ``envs``, already carrying the switch's overrides.
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
     from hyperloom.common.agentx_workload import (
         MLPERF_CORPUS,
         MLPERF_PORT,
-        is_mlperf_backend,
         mlperf_flow,
         mlperf_trajectories,
     )
@@ -325,8 +287,7 @@ def build_agentx_workload_spec(
         """
         return str(proc_env.get(key) or envs.get(key) or default)
 
-    default_isl, default_osl, default_conc = cli_workload_defaults()
-    conc = int(served_knob("CONC", default_conc))
+    conc = int(served_knob("CONC", DEFAULT_CONC))
     metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
     intvty_p90_veto_pct = (
         float(grading["noise_pct"])
@@ -336,32 +297,29 @@ def build_agentx_workload_spec(
     acceptance = geak_acceptance(metric_basis, intvty_p90_veto_pct)
     keep_rule = {"acceptance": acceptance} if acceptance else {}
     isl_osl_placeholder = {
-        "isl": int(served_knob("ISL", default_isl)),
-        "osl": int(served_knob("OSL", default_osl)),
+        "isl": int(served_knob("ISL", DEFAULT_ISL)),
+        "osl": int(served_knob("OSL", DEFAULT_OSL)),
         "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
     }
-    if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
-        return {
-            "kind": "agentx_mlperf_agentic",
-            "client": "mlperf",
-            "scenario": "mlperf-agentic-v6",
-            "corpus": MLPERF_CORPUS,
-            "canonical_corpus": MLPERF_CORPUS,
-            "num_entries": mlperf_trajectories(envs),
-            "duration_s": 0,
-            "geak_loop_duration_s": 0,
-            "concurrency": conc,
-            "metric_basis": metric_basis,
-            "intvty_p90_veto_pct": intvty_p90_veto_pct,
-            **keep_rule,
-            "metric_window_s": 0.0,
-            "flow": mlperf_flow(envs),
-            "port": int(envs.get("PORT") or MLPERF_PORT),
-            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-            "isl_osl_placeholder": isl_osl_placeholder,
-        }
-
-    raise ValueError("Only the MLPerf client uses a Hyperloom workload spec")
+    return {
+        "kind": "agentx_mlperf_agentic",
+        "client": "mlperf",
+        "scenario": "mlperf-agentic-v6",
+        "corpus": MLPERF_CORPUS,
+        "canonical_corpus": MLPERF_CORPUS,
+        "num_entries": mlperf_trajectories(envs),
+        "duration_s": 0,
+        "geak_loop_duration_s": 0,
+        "concurrency": conc,
+        "metric_basis": metric_basis,
+        "intvty_p90_veto_pct": intvty_p90_veto_pct,
+        **keep_rule,
+        "metric_window_s": 0.0,
+        "flow": mlperf_flow(envs),
+        "port": int(envs.get("PORT") or MLPERF_PORT),
+        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+        "isl_osl_placeholder": isl_osl_placeholder,
+    }
 
 
 def apply_agentx_switch(
@@ -400,7 +358,6 @@ def apply_agentx_switch(
         MLPERF_PORT,
         MLPERF_SERVED_MODEL,
         agentx_client_script,
-        is_mlperf_backend,
         mlperf_flow,
         mlperf_trajectories,
     )
@@ -413,37 +370,28 @@ def apply_agentx_switch(
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
-    if is_mlperf_backend(_agentx_env):
-        envs[BACKEND_ENV] = "mlperf"
-        # The harness dials a fixed port and model name. Pinning both here is the
-        # one place they are enforced, so a recipe PORT cannot leave the server
-        # and the client on different sockets.
-        envs["PORT"] = str(MLPERF_PORT)
-        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
-        # Settled once here; the client and the published spec read these back.
-        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
-        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
-        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
-        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
-        # The round's CONC is what the measurement is recorded under. A baseline
-        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
-        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
-        pin_mlperf_round_concurrency(envs)
-        from ._server_argv import add_server_arg_unless_pinned
-
-        add_server_arg_unless_pinned(
-            envs,
-            framework,
-            f"--served-model-name {MLPERF_SERVED_MODEL}",
-            pinned_by=("served-model-name", "served_model_name"),
-        )
-    bench["workload_spec"] = build_agentx_workload_spec(
-        bench,
+    envs[BACKEND_ENV] = "mlperf"
+    # The harness dials a fixed port and model name. Pinning both here is the
+    # one place they are enforced, so a recipe PORT cannot leave the server
+    # and the client on different sockets.
+    envs["PORT"] = str(MLPERF_PORT)
+    envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+    # Settled once here; the client and the published spec read these back.
+    envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+    envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+    envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+    envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+    # The round's CONC is what the measurement is recorded under. A baseline
+    # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+    envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+    pin_mlperf_round_concurrency(envs)
+    add_server_arg_unless_pinned(
         envs,
-        model_path=model_path,
-        env=_agentx_env,
-        grading=grading,
+        framework,
+        f"--served-model-name {MLPERF_SERVED_MODEL}",
+        pinned_by=("--served-model-name", "--served_model_name"),
     )
+    bench["workload_spec"] = build_agentx_workload_spec(envs, env=_agentx_env, grading=grading)
 
 
 def prepare_agentx_runtime(
@@ -451,7 +399,6 @@ def prepare_agentx_runtime(
     env: dict[str, str] | None = None,
     inferencex_path: str | None = None,
     config_path: Path | str | None = None,
-    output_dir: Path | str | None = None,
     active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
@@ -575,12 +522,11 @@ def _resolve_framework_repo_path(
     envs: dict[str, Any],
     *,
     framework: str,
-    extra_aliases: tuple[str, ...] = (),
 ) -> str:
     """Resolve the framework checkout a session may patch, prefixed forms first.
 
-    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` > any
-    per-framework alias > :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
+    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` >
+    :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
     ahead of the materialized ``envs`` at each rung. The prefixed names keep
     precedence because they are the more specific statement, so adding the generic
     form changes no existing behaviour; it exists because a session is
@@ -590,13 +536,12 @@ def _resolve_framework_repo_path(
     Args:
         envs: The materialized ``benchmark.envs`` mapping.
         framework: Framework name, used for the env prefix.
-        extra_aliases: Additional per-framework spellings to accept, in order.
 
     Returns:
         The resolved path, or ``""`` when nothing was supplied.
     """
     prefix = str(framework or "").strip().upper()
-    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", *extra_aliases, GENERIC_FRAMEWORK_ROOT_ENV)
+    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", GENERIC_FRAMEWORK_ROOT_ENV)
     for name in names:
         value = os.environ.get(name, "").strip() or str(envs.get(name) or "").strip()
         if value:
@@ -663,18 +608,20 @@ def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
     return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
 
 
-def _apply_custom_runtime_defaults(
+def apply_scriptable_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
     *,
     gpu_type: str | None,
     explicit_benchmark_script: bool,
 ) -> None:
-    """Resolve an operator-supplied workload's checkout, entrypoint and pins.
+    """Re-pin an operator's scriptable entrypoint and its runtime paths.
 
-    The other scriptable helpers know their framework's repo URL and shipped
-    script; here both arrive at launch, so this only wires what was given and
-    leaves anything missing to fail where it is diagnosable.
+    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
+    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
+    replaces the resolved absolute path. Only the ``custom`` framework has such
+    an entrypoint: its repo and script arrive at launch, so this only wires what
+    was given and leaves anything missing to fail where it is diagnosable.
 
     ``--extra-env`` is the only channel an operator has for the knobs their own
     script reads, so those pins are written into ``benchmark.envs`` rather than
@@ -715,29 +662,6 @@ def _apply_custom_runtime_defaults(
     _publish_scriptable_repo_root("custom", repo_path)
 
 
-def apply_scriptable_runtime_defaults(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    gpu_type: str | None,
-    explicit_benchmark_script: bool,
-) -> None:
-    """Re-pin an operator's scriptable entrypoint and its runtime paths.
-
-    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
-    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
-    replaces the resolved absolute path. Each helper is a no-op for frameworks
-    other than its own, so a new one is added here once.
-    """
-    for apply in (_apply_custom_runtime_defaults,):
-        apply(
-            bench,
-            envs,
-            gpu_type=gpu_type,
-            explicit_benchmark_script=explicit_benchmark_script,
-        )
-
-
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
 
@@ -748,7 +672,7 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
     model = str(model_path or "").strip()
     if not model:
         return False
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     basename = Path(model).name.lower()
     if data is None:
         # Fallback for mounted model dirs whose config is unreadable.
@@ -790,7 +714,7 @@ def _client_tokenizer_mode(model_path: str | None) -> str:
     model = str(model_path or "").strip()
     if not model:
         return ""
-    data = _load_model_config_dict(model)
+    data = load_model_config_dict(model)
     if data is None:
         return ""
     model_type = str(data.get("model_type") or "").strip().lower()
@@ -899,7 +823,7 @@ def default_baseline_config() -> Path:
 
 
 def _finalize_framework_server_args(
-    bench: dict[str, Any], window: _RequestWindow, *, gpu_type: str | None, drop_moe_runner_backend: bool = False
+    bench: dict[str, Any], window: _RequestWindow, *, drop_moe_runner_backend: bool = False
 ) -> None:
     """Apply the final framework server-arg guard pipeline in place
     (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
@@ -938,7 +862,6 @@ def _finalize_framework_server_args(
         resolved_server_args,
         bench.get("framework"),
         bench.get("model"),
-        gpu_type=gpu_type or bench.get("runner_type"),
     )
     # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
     #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
@@ -956,11 +879,8 @@ def _finalize_framework_server_args(
     # 6. JSON-valued flags (--speculative-config / --compilation-config /
     #    --hf-overrides ...): Magpie expands $EXTRA_VLLM_ARGS unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
-    #    word. No-op for sglang and for arg strings with no JSON.
-    resolved_server_args = compact_json_server_args(
-        resolved_server_args,
-        bench.get("framework"),
-    )
+    #    word. No-op for arg strings with no JSON.
+    resolved_server_args = compact_json_server_args(resolved_server_args)
     resolved_server_args = validate_server_args_shell_safe(resolved_server_args)
     if resolved_server_args:
         envs[framework_env] = resolved_server_args
@@ -978,6 +898,7 @@ class _RequestWindow(NamedTuple):
     #: limit) a surviving ``max_iterations`` is rejected rather than trusted.
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
+    xdit_profiler_args: tuple[str, ...] = ()
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -1072,6 +993,34 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
 
+def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
+    """Set xDiT profiler flags and write patch status; return the flags for restore."""
+    from ._server_patcher import ensure_xdit_patched_for_tracelens
+    from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
+
+    xdit_patch_attempted = _tracelens_patch_enabled()
+    xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+    needed = ["--profile_wait 1"]
+    if xdit_patched:
+        needed += ["--profile_capture_phase", "--profile_with_stack"]
+    existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
+    missing = [f for f in needed if f not in existing]
+    if missing:
+        envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
+    write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+    return tuple(needed)
+
+
+def num_prompts_per_conc(isl: int, osl: int) -> int:
+    """Requests a benchmark round sends per unit of concurrency: fewer waves the longer each sequence runs."""
+    seq_cost = isl + osl
+    if seq_cost <= 1024:
+        return 10
+    if seq_cost <= 4096:
+        return 5
+    return 3 if seq_cost <= 16384 else 2
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1080,10 +1029,9 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # recipe and the workload spec published beside it cannot disagree about what
     # "unset" means; normally the CLI has already projected the resolved values
     # into these envs before materialization.
-    _default_isl, _default_osl, _default_conc = cli_workload_defaults()
-    isl_val = int(envs.get("ISL") or _default_isl)
-    osl_val = int(envs.get("OSL") or _default_osl)
-    conc_val = int(envs.get("CONC") or _default_conc)
+    isl_val = int(envs.get("ISL") or DEFAULT_ISL)
+    osl_val = int(envs.get("OSL") or DEFAULT_OSL)
+    conc_val = int(envs.get("CONC") or DEFAULT_CONC)
     # Steady-state window for profiling configs (detected by YAML
     # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
     # The captured-step count is capped at
@@ -1098,6 +1046,8 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # Scriptable image frameworks (xDiT diffusion) have no LLM decode steady-state
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
+    _is_xdit_profile = is_profile and framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV
+    xdit_saved_args = _apply_xdit_profile(envs) if _is_xdit_profile else ()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1118,21 +1068,13 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # Profile mode: force-override NUM_PROMPTS to reach the steady-state
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
-        else:
-            seq_cost = isl_val + osl_val
-            if seq_cost <= 1024:
-                factor = 10
-            elif seq_cost <= 4096:
-                factor = 5
-            elif seq_cost <= 16384:
-                factor = 3
-            else:
-                factor = 2
-            if "NUM_PROMPTS" not in envs:
-                envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
+        elif "NUM_PROMPTS" not in envs:
+            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
-    return _RequestWindow(isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps)
+    return _RequestWindow(
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+    )
 
 
 def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1275,13 +1217,10 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
-    if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+    if framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV:
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1320,7 +1259,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
             envs,
             bench.get("framework"),
             f"--attention-backend {_mimo_attn_backend}",
-            pinned_by=("attention-backend",),
+            pinned_by=("--attention-backend", "--attention_backend"),
         )
         # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
         # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
@@ -1331,7 +1270,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
                 envs,
                 bench.get("framework"),
                 '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}',
-                pinned_by=("hf-overrides", "hf_overrides"),
+                pinned_by=("--hf-overrides", "--hf_overrides"),
             )
     # Sparse-attention KV-cache block size (config-derived, model-agnostic).
     # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
@@ -1356,7 +1295,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
                 envs,
                 bench.get("framework"),
                 f"--block-size {_sparse_bs}",
-                pinned_by=("block-size", "block_size"),
+                pinned_by=("--block-size", "--block_size"),
             )
     return _model_basename
 
@@ -1386,7 +1325,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
             envs,
             bench.get("framework"),
             "--trust-remote-code",
-            pinned_by=("trust-remote-code",),
+            pinned_by=("--trust-remote-code", "--trust_remote_code"),
         )
 
 
@@ -1407,23 +1346,10 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
     # sglang server directly, which accepts token-id prompts).
     _eval_tok_env = os.environ.get("MAGPIE_EVAL_TOKENIZED_REQUESTS", "").strip()
     if not _eval_tok_env:
-        try:
-            from ._multi_node_env import resolve_kb_topology
+        from ._multi_node_env import resolve_kb_topology
 
-            if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
-                _eval_tok_env = "false"
-        except Exception as exc:  # noqa: BLE001 - best-effort; never block config materialization
-            # Don't degrade silently: if this IS a PD run, failing to resolve the
-            # topology leaves MAGPIE_EVAL_TOKENIZED_REQUESTS unset, lm_eval keeps
-            # sending token-id prompts, and the sglang_router 422s every request
-            # -> accuracy reads 0 with no other clue pointing back here.
-            log.warning(
-                "_workload_envs: could not resolve PD topology to gate the lm_eval prompt format (%s); "
-                "if this is a disaggregated run, MAGPIE_EVAL_TOKENIZED_REQUESTS stays unset and the "
-                "sglang_router may reject token-id prompts with HTTP 422 (accuracy eval would read 0)",
-                exc,
-            )
-            _eval_tok_env = ""
+        if str(resolve_kb_topology().pd_mode or "").lower() == "disaggregated":
+            _eval_tok_env = "false"
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
 
@@ -1506,6 +1432,19 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
+        current = str(envs.get(framework_env, "")).strip()
+        missing = [f for f in window.xdit_profiler_args if f not in current]
+        if missing:
+            log.warning(
+                "profile server args lost xDiT profiler flags %r (replace_args=%s); restoring.",
+                missing,
+                bool(replace_args),
+            )
+            envs[framework_env] = merge_server_args(current, " ".join(missing))
+    # After the restore, so a vLLM delay it re-added is divided like any other.
+    if window.profiling and window.serves_requests:
+        fit_capture_to_speculative(envs, framework_env)
     # After extra_envs / replace_args / remove_args so TraceLens knobs survive the
     # same last-wins path as vLLM profiler bounds, and before the seal.
     apply_atom_profile_caps(envs, window.atom_caps)
@@ -1673,9 +1612,7 @@ def materialize_config_with_envs(
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
-    _finalize_framework_server_args(
-        bench, window, gpu_type=target.gpu_type, drop_moe_runner_backend=options.drop_moe_runner_backend
-    )
+    _finalize_framework_server_args(bench, window, drop_moe_runner_backend=options.drop_moe_runner_backend)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)

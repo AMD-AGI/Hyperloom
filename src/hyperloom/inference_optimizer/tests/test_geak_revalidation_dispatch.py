@@ -58,7 +58,6 @@ def _geak_rebench_params(**extra: object) -> dict:
 def _arm_kernel_to_sweep(st) -> None:
     now = datetime.now(timezone.utc)
     st.phase = ps.PHASE_KERNEL_AGENT
-    st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
@@ -275,7 +274,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -307,7 +307,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.current_best = {"tput": 110.0, **current}
     state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
     enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
-    task = await coordinator.tasks.create(
+    task, _ = await coordinator.tasks.create_or_return_existing(
         TaskSpec(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
     )
     calls = []
@@ -335,15 +335,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
             output_subdir=output,
         )
         calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
-        if len(calls) > 1:
-            return []
         return [
             VariantResult(
                 name="geak_revalidate",
                 extra_server_args=kwargs["grid"][0].extra_server_args,
                 extra_envs=dict(kwargs["grid"][0].extra_envs),
-                status="succeeded",
-                output_throughput=120.0,
+                status="succeeded" if len(calls) == 1 else "failed",
+                output_throughput=120.0 if len(calls) == 1 else None,
             )
         ]
 
@@ -416,7 +414,9 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     st.current_best = {"extra_server_args": "--incumbent", **controls}
 
     params = c.writeback.geak_rebench_params(reason="geak_e2e_win")
-    task = await c.tasks.create(TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0"))
+    task, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    )
     entry = task.params["grid"][0]
     ran = GridVariant(
         str(entry["name"]),
@@ -610,7 +610,7 @@ async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordina
         "accepted_kernels": ["replacement_kernel"],
     }
 
-    task = await c.tasks.create(
+    task, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params=_geak_rebench_params(),
@@ -1084,7 +1084,7 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
 ) -> None:
     import time
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1107,7 +1107,7 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
         params = coordinator.writeback.geak_rebench_params(reason="runtime_budget_regression")
-        task = await coordinator.tasks.create(
+        task, _ = await coordinator.tasks.create_or_return_existing(
             TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
         )
     else:
@@ -1149,8 +1149,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
-    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1161,7 +1161,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     state = coordinator.shared_state
     state.baseline_tput = 0.0
     for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
-        task = await coordinator.tasks.create(
+        task, _ = await coordinator.tasks.create_or_return_existing(
             TaskSpec(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
         )
         await coordinator.writeback.promote_to_shared_state(
@@ -1170,7 +1170,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     assert state.baseline_tput == 100.0
     assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
     if enablement_revalidation:
-        task = await coordinator.tasks.create(
+        task, _ = await coordinator.tasks.create_or_return_existing(
             TaskSpec(
                 kind="baseline",
                 params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
@@ -1190,7 +1190,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
     monkeypatch.setenv("GPU_TYPE", "mi355x")
     if source == "geak":
         params = coordinator.writeback.geak_rebench_params(reason="script_regression")
-        task = await coordinator.tasks.create(
+        task, _ = await coordinator.tasks.create_or_return_existing(
             TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
         )
     else:
@@ -1213,7 +1213,8 @@ async def test_internal_stack_rebench_preserves_baseline_script(
             output_subdir=output,
         )
         calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
-        return []
+        variant = kwargs["grid"][0]
+        return [VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="failed")]
 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
@@ -1398,7 +1399,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     st.start_ts = (now - timedelta(minutes=30)).isoformat()
     st.max_minutes = 96 * 60
     st.phase_budget_pct = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    st.phase_started_ts = (now - timedelta(minutes=20)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=20)).timestamp()
 
     async def _noop(**_kwargs):
@@ -1435,7 +1435,6 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
     await asyncio.wait_for(c.dispatcher.pump_dispatcher_once(), timeout=2.0)
     await asyncio.wait_for(measuring.wait(), timeout=2.0)
     spent = now - timedelta(hours=30)
-    st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
     await asyncio.wait_for(c.phase_machine.advance_phase_if_needed(), timeout=30.0)
@@ -1480,7 +1479,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
 
     # A config-identity miss makes 2b inconclusive, which hands the candidate to
     # the GEAK harness (2a), and that refuses the canonical AgentX workload.
-    rebench = await c.tasks.create(
+    rebench, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
             kind="explore",
             params=_geak_rebench_params(expected_cfg_hash="expected-hash"),

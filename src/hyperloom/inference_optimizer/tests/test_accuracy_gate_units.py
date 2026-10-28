@@ -38,6 +38,36 @@ class TestParseEvalResults:
         assert out["metric"] == "exact_match,strict-match"
         assert out["source_file"].endswith("results.json")
 
+    @pytest.mark.parametrize(
+        ("recorded", "post_ready", "expected"),
+        [
+            ("450.0", 550.0, 100.0),
+            (450.0, 550.0, 100.0),
+            (550.0, 550.0, 550.0),
+            (900.0, 550.0, 550.0),
+            ("inf", 550.0, 550.0),
+            ("nan", 550.0, 550.0),
+            ("0", 550.0, 550.0),
+            ("n/a", 550.0, 550.0),
+            (None, 550.0, 550.0),
+            ("450.0", None, None),
+        ],
+        ids=["enclosed", "numeric", "equal", "oversized", "inf", "nan", "zero", "text", "unrecorded", "no-post-ready"],
+    )
+    def test_post_ready_time_drops_only_an_eval_it_encloses(self, tmp_path, recorded, post_ready, expected):
+        results = {"results": {"gsm8k": {"exact_match,strict-match": 0.845}}}
+        if recorded is not None:
+            results["total_evaluation_time_seconds"] = recorded
+        results_file = tmp_path / "results.json"
+        results_file.write_text(json.dumps(results))
+        round_result = {"post_ready_runtime_sec": post_ready, "accuracy_source": str(results_file)}
+        assert ag.post_ready_sec_without_eval(round_result) == expected
+
+    @pytest.mark.parametrize("source", ["", "eval_unavailable", None])
+    def test_post_ready_time_is_kept_without_a_readable_results_file(self, tmp_path, source):
+        round_result = {"post_ready_runtime_sec": 550.0, "accuracy_source": source}
+        assert ag.post_ready_sec_without_eval(round_result) == 550.0
+
     def test_falls_back_to_secondary_metric(self, tmp_path):
         eval_dir = tmp_path / "eval_002"
         eval_dir.mkdir()
@@ -254,23 +284,6 @@ class TestEvalContractFingerprint:
         a = ag.eval_contract_fingerprint(config_path=cfg)
         b = ag.eval_contract_fingerprint(config_path=cfg)
         assert a == b and len(a) == 16
-
-    def test_task_metric_do_not_affect_fingerprint(self, tmp_path):
-        """Result-level task/metric do not change the fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_no_task = ag.eval_contract_fingerprint(config_path=cfg)
-        fp_with_task = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match")
-        fp_other_task = ag.eval_contract_fingerprint(config_path=cfg, task="mmlu", metric="acc")
-        assert fp_no_task == fp_with_task == fp_other_task
-
-    def test_crash_and_success_produce_same_fingerprint(self, tmp_path):
-        """eval crash (no task/metric) and successful eval produce identical fingerprint."""
-        cfg = tmp_path / "c.yaml"
-        _write_minimal_bench_yaml(cfg)
-        fp_crash = ag.eval_contract_fingerprint(config_path=cfg, task=None, metric=None)
-        fp_success = ag.eval_contract_fingerprint(config_path=cfg, task="gsm8k", metric="exact_match,strict-match")
-        assert fp_crash == fp_success
 
     def test_workload_change_changes_fingerprint(self, tmp_path):
         """A change to workload shape (ISL) changes the fingerprint."""

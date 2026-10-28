@@ -78,6 +78,14 @@ def optional_positive_int(value: Any, default: _T | None = None) -> int | _T | N
     return parsed
 
 
+def optional_positive_float(value: Any, default: _T | None = None) -> float | _T | None:
+    """Coerce *value* to a strictly positive finite ``float``, else *default*."""
+    parsed = to_float(value)
+    if parsed is None or parsed <= 0:
+        return default
+    return parsed
+
+
 def to_unix(value: Any, default: _T | None = None) -> float | _T | None:
     """Coerce a timestamp *value* to unix seconds, rejecting ``bool``."""
     if value is None or isinstance(value, bool):

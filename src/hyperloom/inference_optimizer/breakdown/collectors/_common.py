@@ -59,7 +59,7 @@ def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, A
         prefix = "failed to read" if isinstance(exc, OSError) else "malformed jsonl line in"
         warnings.append(f"{prefix} {path}: {exc!r}")
 
-    return read_jsonl(path, require_dict=True, skip_malformed=True, on_error=_warn)
+    return read_jsonl(path, on_error=_warn)
 
 
 def _to_float(value: Any) -> float | None:

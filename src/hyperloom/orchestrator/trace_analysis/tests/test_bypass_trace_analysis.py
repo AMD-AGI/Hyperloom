@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import csv
+import errno
 import gzip
 import io
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -81,7 +83,7 @@ def _assert_artifacts(result):
 
 
 def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
-    rc, result, _ = _run(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]), capsys)
+    rc, result, _ = _run(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]), capsys)
     assert rc == 0
     assert result["status"] == "ok" and result["route"] == "bypass"
     _assert_artifacts(result)
@@ -90,7 +92,7 @@ def test_dry_run_emits_valid_artifacts(tmp_path, capsys, monkeypatch):
 def test_num_denoise_steps_accepted_and_recorded(tmp_path, capsys, monkeypatch):
     # bypass must accept --num-denoise-steps and surface it in the result.
     rc, result, _ = _run(
-        _base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run", "--num-denoise-steps", "20"]),
+        _base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run", "--num-denoise-steps", "20"]),
         capsys,
     )
     assert rc == 0
@@ -730,7 +732,7 @@ def test_a_manifest_that_cannot_be_built_fails_the_analysis(tmp_path, monkeypatc
 
     monkeypatch.setattr(bta._tsm, "build_shape_manifest", _disk_full)
     with pytest.raises(OSError, match="No space left on device"):
-        bta.main(_base_argv(tmp_path, "/tmp/whatever", extra=["--dry-run"]))
+        bta.main(_base_argv(tmp_path, str(tmp_path / "trace.json"), extra=["--dry-run"]))
 
 
 def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
@@ -1168,3 +1170,43 @@ def test_duration_warning_severity_is_graded(tmp_path, capsys):
     assert warn is not None and warn["severity"] == "warning"
     assert "unreliable" in warn["message"]
     assert "% of the" in warn["message"], "share of summed device time should be reported"
+
+
+def test_a_trace_the_reader_cannot_open_is_carried_as_a_degraded_analysis(tmp_path, capsys, monkeypatch, caplog):
+    trace = tmp_path / "t.trace.json"
+    denied = PermissionError(13, "Permission denied", str(trace))
+
+    def _unreadable(*_args, **_kwargs):
+        raise denied
+
+    monkeypatch.setattr(bta._reader, "analyze_trace", _unreadable)
+    with caplog.at_level(logging.WARNING, logger=bta.log.name):
+        rc, result, _ = _run(_base_argv(tmp_path, str(trace)), capsys)
+
+    assert (rc, result["status"], result["analysis_degraded"]) == (0, "ok", True)
+    assert [w for w in result["trace_health_warnings"] if w["code"] == "bypass_trace_parse_failed"] == [
+        {
+            "code": "bypass_trace_parse_failed",
+            "severity": "warning",
+            "message": f"bypass reader could not analyze trace: PermissionError: [Errno 13] Permission denied: '{trace}'",
+        }
+    ]
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("bypass trace analysis failed: ")]
+    assert record.exc_info[1] is denied
+
+
+def test_a_diffusion_sidecar_that_cannot_be_written_leaves_no_path(tmp_path, monkeypatch, caplog):
+    full = OSError(errno.ENOSPC, "No space left on device")
+
+    def _disk_full(*_args, **_kwargs):
+        raise full
+
+    monkeypatch.setattr(bta, "atomic_write_json", _disk_full)
+    args = _mk_args(framework="xdit", num_denoise_steps=20, target_platform="MI300X")
+    analyze = {"status": "ok", "timeline": {}, "kernels": []}
+    with caplog.at_level(logging.WARNING, logger=bta.log.name):
+        path = bta._write_diffusion_roofline(args, analyze, {"hot_kernels": []}, tmp_path, 0)
+
+    assert path is None
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("diffusion roofline sidecar failed: ")]
+    assert record.exc_info[1] is full

@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import to_unix
+from hyperloom.common.coerce import first_str, to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import _to_int
@@ -20,39 +19,6 @@ from ..session_facts import recovery_block
 
 
 log = logging.getLogger(__name__)
-
-
-def _detect_image_for_session(manifest: dict[str, Any]) -> str | None:
-    """Resolve the container image for ``collect_session``."""
-    manifest_image = manifest.get("image") if isinstance(manifest, dict) else None
-    if isinstance(manifest_image, str) and manifest_image.strip():
-        return manifest_image.strip()
-    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        val = (os.environ.get(var) or "").strip()
-        if val:
-            return val
-    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
-        try:
-            p = Path(marker)
-            if p.exists():
-                txt = p.read_text(encoding="utf-8", errors="replace").strip()
-                if txt:
-                    return txt
-        except OSError:
-            continue
-    try:
-        cgroup = Path("/proc/1/cgroup")
-        if cgroup.exists():
-            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
-                if "docker" not in line and "containerd" not in line:
-                    continue
-                m = re.search(r"([0-9a-f]{12,64})", line)
-                if m:
-                    return f"unknown@{m.group(1)[:12]}"
-    except OSError as exc:
-        # /proc/1/cgroup may be unreadable; fall through to None.
-        log.debug("cgroup-based image detection failed: %r", exc)
-    return None
 
 
 def _leg_start_ts(state: dict[str, Any], start_ts: str) -> str:
@@ -138,7 +104,7 @@ def collect_session(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Collect the session-identification + lifecycle section."""
-    start_ts = str(state.get("start_ts") or manifest.get("created_at_utc") or "")
+    start_ts = first_str(state.get("start_ts"), manifest.get("created_at_utc"))
     stop_reason = str(state.get("stop_reason") or "").strip()
     close_stop_reason, close_ts = _close_phase_stop_reason(state, leg_start_ts=_leg_start_ts(state, start_ts))
     if _should_use_close_stop_reason(stop_reason, close_stop_reason):
@@ -148,11 +114,11 @@ def collect_session(
         # ``stop_ts`` is stamped once, when the reason is written, so a re-export of a finished session keeps
         # reporting the same end.
         ended_at_utc = _first_recorded_end(state.get("stop_ts"), close_ts) or now_iso(timespec="seconds")
-    image = _detect_image_for_session(manifest)
+    image = str(manifest.get("image") or "").strip() or None
     if image is None:
-        warnings.append("image: not configured (set HYPERLOOM_IMAGE env var)")
+        warnings.append("image: manifest.json records no image")
     section = {
-        "session_id": str(state.get("session_id") or manifest.get("session_id") or ""),
+        "session_id": first_str(state.get("session_id"), manifest.get("session_id")),
         "claw_session_id": manifest.get("claw_session_id") or state.get("claw_session_id"),
         "sandbox_user_id": manifest.get("sandbox_user_id") or state.get("sandbox_user_id"),
         "created_at_utc": manifest.get("created_at_utc") or start_ts,
@@ -167,8 +133,8 @@ def collect_session(
         "pid": int(manifest.get("pid") or 0),
         "session_dir": str(session_dir),
         # USER_DATA_PATH root (the operator-chosen workspace base).
-        "user_data_path": str(
-            manifest.get("user_data_path") or state.get("user_data_path") or os.environ.get("USER_DATA_PATH") or ""
+        "user_data_path": first_str(
+            manifest.get("user_data_path"), state.get("user_data_path"), os.environ.get("USER_DATA_PATH")
         ),
         "tick_count": int(state.get("tick") or 0),
         # Crash / interruption / resume history.

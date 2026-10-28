@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
@@ -31,6 +32,8 @@ from kernelforge.knowledge.kb_store.record_store import (
     create_rewrite_record_store,
 )
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+
+log = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 1
 _REWRITE_KIND = "standalone_flydsl"
@@ -277,7 +280,8 @@ class _Trials:
             snr = validation.results[-1].snr_db if validation.results else None
             attempt.update(reason="measured", best_ms=benched.timing_ms, speedup=speedup)
             self.measured.append({"index": index, "content": content, "snr_db": snr, "attempt": attempt})
-        except Exception as error:  # noqa: BLE001 - candidate becomes reference
+        except Exception as error:  # isolation boundary: one KB candidate kernel; it becomes a reference
+            log.warning("KB candidate %s validation raised", attempt.get("solution_slug", ""), exc_info=True)
             self.reject(attempt, content, f"validation_error:{type(error).__name__}")
 
     def settle(self, result: RewriteKbReadResult, original: bytes | None) -> None:

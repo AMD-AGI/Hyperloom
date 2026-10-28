@@ -38,7 +38,7 @@ _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 # How many turns in a row one agent may answer without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.paths import db_path_for
+from hyperloom.inference_optimizer.session.paths import db_path_for, stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
 from ..roles.agent_role import AgentRole, default_role_registry
@@ -50,17 +50,15 @@ from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
+from ..policy.projection import serving_tp_for_policy
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
     SpecialistGpuPool,
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
 )
-from ..bus.resource_lock import (
-    ResourceLockManager,
-    SqliteLeaseBackend,
-)
-from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
+from ..bus.resource_lock import SqliteLeaseBackend
+from ..state.shared_state import SharedState, effective_closing_grace_sec
 from .signals import SignalDrain
 from .intent_router import IntentRouter
 from hyperloom.inference_optimizer.model_config_utils import infer_model_class
@@ -136,7 +134,7 @@ def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
                 phase,
                 reaped,
             )
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
 
@@ -241,7 +239,7 @@ class Coordinator:
         self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
 
         self.bus = MessageBus(self.db)
-        self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
+        self.locks = SqliteLeaseBackend(self.db)
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
@@ -263,7 +261,7 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_gpu_specialist_devices(
                 int(self.shared_state.gpu_specialist_capacity or 0),
-                serving_tp=self.dispatcher.resolve_serving_tp(),
+                serving_tp=serving_tp_for_policy(self.shared_state),
             ),
         )
         # Whole-node pool for enablement and bench specialists.
@@ -794,13 +792,13 @@ class Coordinator:
     def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
-        Reads both the asyncio event and the drain's threading event, so the
-        end-of-tick check sees a signal that arrived during that tick.
+        Reads the asyncio event, the drain's threading event and the stop-request file, so the end-of-tick check
+        sees a signal that arrived during that tick and a request that came while no drain was armed.
 
         Returns:
             bool: True once a stop has been asked for by either route.
         """
-        if self._stop.is_set():
+        if self._stop.is_set() or stop_request_path(self.session_dir).is_file():
             return True
         drain = self._signals
         return drain is not None and drain.requested.is_set()
@@ -979,12 +977,10 @@ class Coordinator:
             self.shared_state.cumulative_gain_validated,
             max_minutes,
         )
-        with timed_teardown_step(self.shared_state, "close_backends"):
-            await self._close_backends()
+        await self._close_backends()
         # A server outliving the run holds every GPU it was given, so the
         # session's last act is to reap its own pidfiles.
-        with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-            await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
+        await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
         self.shared_state.save(self.session_dir)
         return stop_reason
 
@@ -1133,8 +1129,7 @@ class Coordinator:
             await self._record_no_intent_turn(agent_name, str(exc)[:500])
             await self.conversation.advance_rendered_cursor(agent_name)
             return None
-        except Exception as exc:
-            # Catch-all so one agent's bad turn never stops the loop.
+        except Exception as exc:  # isolation boundary: one agent's reactor turn
             log.exception("reactor pass for %s raised", agent_name)
             await self.bus.record_observation(
                 "coordinator",

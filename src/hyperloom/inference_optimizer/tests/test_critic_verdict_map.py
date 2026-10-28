@@ -37,7 +37,6 @@ from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyDenied,
     PolicyGate,
-    REVIEW_VERDICTS,
 )
 from hyperloom.orchestrator.specialists.patch_safety import (
     QUANTITATIVE_CLAIM_REASON_CODE,
@@ -215,12 +214,6 @@ def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
         )
     assert "verdict_map" in str(exc.value)
     assert "obliterate" in str(exc.value)
-
-
-def test_policy_gate_review_verdicts_vocab_contains_canonical_set():
-    """REVIEW_VERDICTS must cover the five canonical strings the Critic prompt documents."""
-    for v in ("approve", "reject", "redirect", "advise", "needs_review"):
-        assert v in REVIEW_VERDICTS
 
 
 # 3. Coordinator helpers — _handle_review_verdict dispatch
@@ -1728,7 +1721,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_c"]
-    assert create_calls[0]["params"]["critic_filtered_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -1811,7 +1803,6 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     grid = create_calls[0]["params"]["grid"]
     names = [v["name"] for v in grid]
     assert names == ["v_a", "v_b", "v_c"]
-    assert "critic_filtered_count" not in create_calls[0]["params"]
 
 
 # 5. handle_delegate — explore grid runs directly (no Critic pre-review)
@@ -1944,48 +1935,6 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
-@pytest.mark.asyncio
-async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
-    """A delegated sweep scans on top of current_best, as its action contract states."""
-    coord = _delegate_coord(tmp_path)
-    coord.shared_state.baseline_tput = 4663.79
-    coord.shared_state.current_best = {
-        "tput": 7725.6,
-        "extra_server_args": "--max-num-seqs 64",
-        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-    }
-    created: list[dict[str, Any]] = []
-
-    class _TaskRegistry:
-        async def create_or_return_existing(self, spec):
-            created.append(dict(spec.params))
-            from hyperloom.orchestrator.state.task_registry import Task
-
-            return (
-                Task(
-                    task_id="t-sweep-stack",
-                    kind=spec.kind,
-                    state="queued",
-                    params=spec.params,
-                    idempotency_key=spec.idempotency_key,
-                ),
-                False,
-            )
-
-    coord.tasks = _TaskRegistry()
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"action_name": "sweep", "params": {}, "idempotency_key": "sweep-1"},
-    )
-    await coord.router.handle_delegate("orchestration", intent)
-    assert len(created) == 1
-    params = created[0]
-    assert params["base_extra_args"] == "--max-num-seqs 64"
-    assert params["base_extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
-    # explore-only runtime knobs must not leak onto a sweep task.
-    assert "explore_overtime_kill_ratio" not in params
-
-
 # 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
@@ -2094,7 +2043,6 @@ class TestN38ActionVerdictClass:
             session_dir=sd,
             codex_client_factory=_fake_client_factory,
             runtime_caller_factory=_fake_runtime_caller_factory,
-            static_context={"model": "m", "framework": "sglang"},
             action_verdict_policy={"baseline": "exploration", "integrate": "promotion"},
         )
         assert backend.action_verdict_policy == {
@@ -2178,7 +2126,6 @@ class TestN38ActionVerdictClass:
             session_dir=sd,
             codex_client_factory=_FakeAsyncOpenAI,
             runtime_caller_factory=_fake_runtime_caller_factory,
-            static_context={"model": "m", "framework": "sglang"},
             action_verdict_policy={
                 "params": "exploration",
                 "integrate": "promotion",

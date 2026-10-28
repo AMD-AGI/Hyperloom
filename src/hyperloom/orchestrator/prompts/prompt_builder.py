@@ -30,8 +30,9 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     NO_KERNEL_AGENT_ENABLED_ACTIONS,
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
+from ..mcp_tool_names import qualified_context_tool_name
 from . import read_rules_fragment as _read_rules_fragment
-from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
+from .agentx_context import agentx_session_lines, reference_out_of_mode
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
@@ -212,18 +213,14 @@ def _section_session_context(session: SessionContext) -> list[str]:
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(session.benchmark_mode):
-        lines += [
-            "",
-            *corpus_lines(session.agentx_corpus_shape),
-            "",
-            *grading_lines(session.agentx_grading, session.agentx_backend),
-            *launch_ownership_lines(session.agentx_backend),
-        ]
+        lines += agentx_session_lines(session.agentx_corpus_shape, session.agentx_grading, session.agentx_backend)
     lines += [
         "",
-        "The Coordinator supplies the session context (Shared session state, KB hints,",
-        "advisories) and the per-tick blocks (Phase, Mission progress, Time budget,",
-        "Tick, inbox tail) every tick.",
+        "The Coordinator supplies the session context (resource pools,",
+        "constraints, advisories) first, then the per-tick blocks (Phase,",
+        "Mission progress, Time budget, Tick, Shared session state, recent",
+        "policy denials, Untested proposals, KB hints, Plateau advisory,",
+        "inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
@@ -287,22 +284,18 @@ def _section_phase_semantics(
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
             "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
-            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
-            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
-            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
-            "to CLOSE.",
+            "exits ENABLEMENT and `baseline_tput > 0` exits PRELUDE, each after",
+            "the initial roofline it enqueued completes (the Phase block's `hold` line);",
+            "the per-phase budget cap or a terminal stop_reason exits FRAMEWORK_AGENT",
+            "/ KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
-            "vocab and routes the transition on the next tick. `skip_to_close`",
-            "is not in that set — see the exception below for when it applies.",
-            "`skip_to_close` is reserved, in EVERY phase, for genuine early",
-            "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it closes the run instead of advancing a phase. Running low on",
-            "budget is not abandonment — the",
-            "Coordinator prices the remaining budget itself and exits with an",
-            "honest terminal stop_reason (`sweep_done` / `global_converged` /",
-            "`time_exhausted`) once a further cycle cannot be funded.",
+            "vocab and routes the transition on the next tick. No hint ends the",
+            "run: the Coordinator prices the remaining budget itself and exits",
+            "with an honest terminal stop_reason (`sweep_done` /",
+            "`global_converged` / `time_exhausted`) once a further cycle cannot",
+            "be funded.",
         ]
     )
     return lines
@@ -537,10 +530,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "base_extra_args?, base_tput?, accuracy_baseline?, "
             "keep_threshold_pct?: <raise only; floored at the session-cycle bar>}}`. "
             "Variants run serially; a KEEP is graded on its decision "
-            "round. Variant identity is content-based (args+envs+"
-            "remove_args+unset_envs+args_mode); only exact duplicates within "
-            "the same submitted grid are collapsed, so any prior fingerprint "
-            "may be re-proposed. "
+            "round. A row that starts the stack's own server (see "
+            "`current_launch_flags`) is skipped, and rows starting the same server "
+            "are benched once; any prior fingerprint may be re-proposed. "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "Every variant requires action-time reasoning that names the "
@@ -706,8 +698,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   the next phase-compute, while one arm dry means work the other.",
             "   When you judge FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
-            "   'skip_to_kernel'}``. `skip_to_close` is not a",
-            "   phase advance -- see PHASE CONTRACT before emitting it.",
+            "   'skip_to_kernel'}``. No hint ends the run.",
             "",
             "If you cannot move forward, emit",
             "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
@@ -737,12 +728,13 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         list[str]: Markdown lines for the failure-recovery block.
     """
     baseline_scoped = _renders_in(phase, _BASELINE_RECOVERY_PHASES)
+    read_reference = qualified_context_tool_name("read_reference")
     detail = (
         "/ `last_action_failures` for the error detail."
         if transport == TRANSPORT_STRUCTURED_OUTPUT
         else (
             "/ `last_action_failures` for the error detail. Full diagnostic surfaces,\n"
-            "fingerprint semantics, and examples: ``read_reference('failure_recovery')``."
+            f"fingerprint semantics, and examples: ``{read_reference}('failure_recovery')``."
         )
     )
     lines = [
@@ -768,8 +760,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         )
     lines.extend(
         [
-            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …'."
+            "* **RULE F3** — repeated `error_class='subprocess_nonzero'` or `'magpie_nonzero_invalid_measurement'`"
+            " on `baseline` → stop retrying baseline; send observation 'blocked: …' quoting the failure excerpt."
             " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
@@ -806,8 +798,7 @@ def _idea_generation_lines() -> list[str]:
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",
-        "Variant identity is content-based (args+envs+remove_args+",
-        "unset_envs+args_mode); only exact same-grid duplicates are collapsed.",
+        "A row starting the stack's own server is skipped; rows starting the same server run once.",
         "`extra_server_args` is framework-neutral (routed to EXTRA_SGLANG_ARGS",
         "/ EXTRA_VLLM_ARGS / EXTRA_ATOM_ARGS by `--framework`).",
         "",
@@ -1016,10 +1007,6 @@ def _section_cycle_directive(
 
 
 _WHEN_TAG_RE = re.compile(r"^<!--\s*when:\s*(?P<when>.+?)\s*-->$")
-# Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's
-# benchmark_mode, i.e. HYPERLOOM_AGENTX) rather than by an orchestration.md rule,
-# so a synthetic run never lists a doc it should not act on.
-_AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
 
 
 def _section_reference_index(
@@ -1034,17 +1021,14 @@ def _section_reference_index(
         references_dir: Directory containing the reference markdown files.
         phase: Normalised current pipeline phase; ``""`` includes all entries.
         benchmark_mode: The session's benchmark mode (i.e. HYPERLOOM_AGENTX);
-            docs in :data:`_AGENTX_ONLY_REFERENCES` are listed only when it names
-            the AgentX workload. ``""`` (unscoped) still lists every doc.
+            :func:`reference_out_of_mode` keeps an AgentX-only doc out of a
+            synthetic run's index.
 
     Returns:
         Markdown lines, or ``[]`` when the directory is absent or empty.
     """
     if not references_dir.is_dir():
         return []
-    # Only filter AgentX-only docs when a concrete mode is set; unscoped renders all.
-    mode_set = bool(str(benchmark_mode or "").strip())
-    agentx = is_agentx_mode(benchmark_mode)
     entries: list[tuple[str, str]] = []
     for path in sorted(references_dir.glob("*.md")):
         when_text = ""
@@ -1064,15 +1048,16 @@ def _section_reference_index(
             break
         if file_phases and not _renders_in(phase, file_phases):
             continue
-        if path.stem in _AGENTX_ONLY_REFERENCES and mode_set and not agentx:
+        if reference_out_of_mode(path.stem, benchmark_mode):
             continue
         entries.append((path.stem, when_text or "see document"))
     if not entries:
         return []
+    read_reference = qualified_context_tool_name("read_reference")
     lines: list[str] = [
         "## 8. ON-DEMAND REFERENCE INDEX",
         "",
-        "Use ``read_reference(name='<name>')`` to pull the full document.",
+        f"Use ``{read_reference}(name='<name>')`` to pull the full document.",
         "",
     ]
     for stem, when in entries:

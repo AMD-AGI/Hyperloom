@@ -49,13 +49,11 @@ class AgentRole:
     allowed_intents: frozenset[IntentType]
     can_delegate_side_effects: bool = False
     no_tools: bool = False
-    system_prompt_filename: str = ""
-    prompt_driven: bool = True  # False = deterministic role; no system prompt is loaded
 
     @property
     def system_prompt_path(self) -> Path:
         """Path to this role's system prompt markdown file."""
-        return asset_system_prompts_dir() / (self.system_prompt_filename or f"{self.name}.md")
+        return asset_system_prompts_dir() / f"{self.name}.md"
 
     def load_system_prompt(self) -> str:
         """Read and return this role's system prompt text."""
