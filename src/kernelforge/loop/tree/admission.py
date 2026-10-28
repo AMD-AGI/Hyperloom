@@ -24,7 +24,7 @@ from kernelforge.loop.tree.model import (
     TreeNode,
 )
 from kernelforge.loop.tree.planning import SlotPlan
-from kernelforge.loop.tree.refs import pin_node, point_direction_branch
+from kernelforge.loop.tree.refs import is_ancestor, node_holding_tree, pin_node, point_direction_branch
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.tools.git import git
 
@@ -132,6 +132,10 @@ class TreeAdmissionMixin:
         worktree = self._start_worktrees.ensure(slot.start)
         if not self._start_worktrees.apply(worktree, lane.diff):
             return self._unmeasured(iteration, slot, AttemptOutcome.ERROR, "the lane's diff did not apply to its start")
+        holder = self._node_holding(tree, worktree)
+        if holder:
+            self._start_worktrees.restore(worktree, slot.start)
+            return self._unmeasured(iteration, slot, AttemptOutcome.NO_CHANGES, f"the candidate is node {holder}")
         result = await self._measure_at(iteration, plan.text, worktree)
         self._write_slot_record(iteration, slot, "measurement.json", _measurement_record(result))
         if not measured_correct(result):
@@ -140,6 +144,10 @@ class TreeAdmissionMixin:
         node = self._admit(tree, iteration, plan, result, worktree)
         self._start_worktrees.restore(worktree, slot.start)
         return SlotOutcome(self._attempt(iteration, slot, AttemptOutcome.NODE, result, node.commit), node, result)
+
+    def _node_holding(self, tree: SearchTree, worktree: Path) -> str:
+        """The node whose files a worktree's staged candidate already is, or an empty string."""
+        return node_holding_tree(self.ic.workspace_dir, tree, self._start_worktrees.staged_tree(worktree))
 
     def _candidate_refusal(self, lane: LaneResult | None) -> str:
         if lane is None:
@@ -171,7 +179,8 @@ class TreeAdmissionMixin:
         direction_id = self._direction_for(tree, iteration, plan)
         commit = self._start_worktrees.commit(worktree, _commit_message(iteration, slot, direction_id, plan, result))
         pin_node(self.ic.workspace_dir, commit)
-        node = _node_of(result, _Placement(commit, slot.start, direction_id), slot=slot, plan=plan.title)
+        provenance = (slot.source,) if slot.slot_type is SlotType.PORT else ()
+        node = _node_of(result, _Placement(commit, slot.start, direction_id, provenance), slot=slot, plan=plan.title)
         tree.add_node(node)
         self._point_direction(tree, direction_id)
         return node
@@ -202,14 +211,20 @@ class TreeAdmissionMixin:
     async def _compose_onto_published(
         self, tree: SearchTree, iteration: int, new_nodes: Sequence[TreeNode]
     ) -> Composition:
-        """Stack each new node that wins cases the published best loses onto the published best."""
+        """Stack each new node that wins cases the published best loses onto the published best.
+
+        A node grown from the published best already holds everything the published best has; stacking its change
+        back onto the published best would only reproduce it.
+        """
         published = tree.require_node(tree.published_best)
         composed: list[tuple[TreeNode, IterationResult]] = []
         unstacked: list[tuple[str, str]] = []
         if published.is_root:
             return Composition((), ())
         for node in new_nodes:
-            if node.parent == published.commit or not _wins_both_ways(node, published):
+            if is_ancestor(self.ic.workspace_dir, published.commit, node.commit):
+                continue
+            if not _wins_both_ways(node, published):
                 continue
             outcome = await self._compose(tree, iteration, node, published)
             if outcome is None:
@@ -224,6 +239,11 @@ class TreeAdmissionMixin:
         worktree = self._start_worktrees.ensure(target.commit)
         if not self._start_worktrees.apply(worktree, patch):
             return None
+        holder = self._node_holding(tree, worktree)
+        if holder:
+            print(f"  [tree] stacking {source.commit[:12]} onto {target.commit[:12]} reproduces node {holder[:12]}")
+            self._start_worktrees.restore(worktree, target.commit)
+            return (None, None)
         plan = f"compose: the change of {source.commit} since {ancestor} onto {target.commit}"
         result = await self._measure_at(iteration, plan, worktree)
         if not measured_correct(result):
@@ -232,7 +252,8 @@ class TreeAdmissionMixin:
         message = f"iter-{iteration}-compose: {source.commit[:12]} onto {target.commit[:12]}"
         commit = self._start_worktrees.commit(worktree, message)
         pin_node(self.ic.workspace_dir, commit)
-        node = _node_of(result, _Placement(commit, target.commit, target.direction), slot=None, plan=plan)
+        placement = _Placement(commit, target.commit, target.direction, (source.commit,))
+        node = _node_of(result, placement, slot=None, plan=plan)
         tree.add_node(node)
         self._point_direction(tree, target.direction)
         self._start_worktrees.restore(worktree, target.commit)
@@ -284,11 +305,12 @@ def _wins_both_ways(node: TreeNode, published: TreeNode) -> bool:
 
 @dataclass(frozen=True)
 class _Placement:
-    """Where a new node sits: its commit, the node it grew from, and the direction it is on."""
+    """Where a new node sits: its commit, the node it grew from, its direction, and the nodes it carries changes of."""
 
     commit: str
     parent: str
     direction: str
+    provenance: tuple[str, ...] = ()
 
 
 def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | None, plan: str) -> TreeNode:
@@ -307,6 +329,7 @@ def _node_of(result: IterationResult, placement: _Placement, *, slot: Slot | Non
         snr_db=result.snr_db,
         plan=_summary(plan),
         source=_source_of(slot),
+        provenance=placement.provenance,
     )
 
 

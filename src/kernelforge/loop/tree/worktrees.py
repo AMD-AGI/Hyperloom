@@ -57,11 +57,16 @@ class StartWorktrees:
         git("apply", "--index", cwd=path, input=text)
         return True
 
+    def staged_tree(self, path: Path) -> str:
+        """The file tree a commit of ``path`` would record now."""
+        _stage_tracked(path)
+        return git("write-tree", cwd=path).stdout.strip()
+
     def commit(self, path: Path, message: str) -> str:
         """Commit every staged and tracked edit of a worktree and return the new commit."""
         ensure_commit_identity(path)
         before = _head(path)
-        git("add", "-u", cwd=path)
+        _stage_tracked(path)
         git("commit", "--quiet", "-m", message, cwd=path)
         after = _head(path)
         if after == before:
@@ -96,6 +101,11 @@ class StartWorktrees:
 
 def _head(path: Path) -> str:
     return git("rev-parse", "HEAD", cwd=path).stdout.strip()
+
+
+def _stage_tracked(path: Path) -> None:
+    """Stage every edit of a tracked file; a new file is never a node's."""
+    git("add", "-u", cwd=path)
 
 
 def untracked_outside(workspace_dir: str | Path, allowed: Iterable[str]) -> list[str]:

@@ -39,7 +39,7 @@ from kernelforge.loop.tree.model import (
     TreeNode,
 )
 from kernelforge.loop.tree.planning import RoundPlans, TreePlanningMixin
-from kernelforge.loop.tree.refs import pin_node, reconcile_node_refs
+from kernelforge.loop.tree.refs import node_holding_tree, pin_node, reconcile_node_refs
 from kernelforge.loop.tree.selection import Selection, read_selection
 from kernelforge.loop.tree.store import SearchTreeStore
 from kernelforge.loop.tree.worktrees import StartWorktrees, untracked_outside
@@ -123,11 +123,10 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         return tree
 
     def _node_with_tree_of(self, tree: SearchTree, commit: str) -> str:
-        wanted = self._rev_parse(f"{commit}^{{tree}}")
-        for node in reversed(tree.nodes):
-            if self._rev_parse(f"{node.commit}^{{tree}}") == wanted:
-                return node.commit
-        raise ValueError(f"the campaign branch is at {commit}, whose tree no node of the search tree holds")
+        holder = node_holding_tree(self.ic.workspace_dir, tree, self._rev_parse(f"{commit}^{{tree}}"))
+        if not holder:
+            raise ValueError(f"the campaign branch is at {commit}, whose tree no node of the search tree holds")
+        return holder
 
     async def _search_iteration(self, turn: IterationTurn, *, agents: LoopAgents, callbacks: LoopCallbacks) -> bool:
         if turn.hazard is not None:

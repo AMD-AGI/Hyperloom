@@ -81,6 +81,8 @@ def check_consistency(tree: SearchTree) -> None:
             raise ValueError(f"the search tree holds {node.commit} twice")
         if not node.is_root and (node.parent not in seen or node.direction not in known_directions):
             raise ValueError(f"node {node.commit} names a parent or direction recorded after it, or never")
+        if any(source not in seen for source in node.provenance):
+            raise ValueError(f"node {node.commit} carries changes of a node recorded after it, or never")
         seen.add(node.commit)
     for direction in tree.directions:
         if direction.origin not in seen:

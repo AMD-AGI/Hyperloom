@@ -33,6 +33,18 @@ def commit_exists(repo: str | Path, commit: str) -> bool:
     return result.returncode == 0
 
 
+def node_holding_tree(repo: str | Path, tree: SearchTree, file_tree: str) -> str:
+    """The node whose commit records exactly ``file_tree``, or an empty string when none does."""
+    commits = [node.commit for node in tree.nodes]
+    listed = git("rev-parse", *(f"{commit}^{{tree}}" for commit in commits), cwd=repo).stdout.split()
+    return next((commit for commit, held in zip(commits, listed) if held == file_tree), "")
+
+
+def is_ancestor(repo: str | Path, ancestor: str, commit: str) -> bool:
+    """Whether ``ancestor`` is ``commit`` or one of its ancestors."""
+    return git("merge-base", "--is-ancestor", ancestor, commit, cwd=repo, check=False).returncode == 0
+
+
 def pinned_nodes(repo: str | Path) -> set[str]:
     """Every commit a node ref holds."""
     listed = git("for-each-ref", "--format=%(objectname)", NODE_REF_PREFIX, cwd=repo).stdout
@@ -67,6 +79,8 @@ __all__ = [
     "NODE_REF_PREFIX",
     "RefRepair",
     "commit_exists",
+    "is_ancestor",
+    "node_holding_tree",
     "node_ref",
     "pin_node",
     "pinned_nodes",
