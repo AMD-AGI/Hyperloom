@@ -27,7 +27,6 @@ from kernelforge.serving_windows import step_windows
 from .diagnose import (
     LAUNCH_BOUND_CATEGORIES,
     _kernel_span,
-    _load_trace_events,
     categories_in_text,
     categorize_kernel_name,
 )
@@ -143,7 +142,7 @@ def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
     """Top GPU kernels from a kineto trace by total-duration share, over its decode steps when it annotates them."""
-    events = _load_trace_events(trace_path)
+    events = load_trace_events(trace_path)
     decode = [(w.start_us, w.end_us) for w in step_windows(events) if w.is_decode]
     agg: dict[str, list[float]] = {}
     total = 0.0

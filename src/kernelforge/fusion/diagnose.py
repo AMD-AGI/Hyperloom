@@ -5,15 +5,13 @@
 
 from __future__ import annotations
 
-import gzip
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from kernelforge.serving_windows import step_windows
-from kernelforge.trace_events import COLLECTIVE_KERNEL_PATTERN
+from kernelforge.trace_events import COLLECTIVE_KERNEL_PATTERN, load_trace_events
 
 from .calibration import (
     DEFAULT_MIN_PREDICTED_GAIN,
@@ -93,21 +91,6 @@ def categories_in_text(text: str) -> list[str]:
     )
 
 
-def _load_trace_events(path: str | Path) -> list[dict[str, Any]]:
-    """Every event in a kineto trace, gzipped or not; an unreadable or malformed trace reads as empty."""
-    p = Path(path)
-    try:
-        opener = gzip.open if p.suffix == ".gz" else open
-        with opener(p, "rt", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    events = data.get("traceEvents") if isinstance(data, dict) else None
-    if not isinstance(events, list):
-        return []
-    return [ev for ev in events if isinstance(ev, dict)]
-
-
 def _kernel_span(ev: dict[str, Any]) -> tuple[float, float | None] | None:
     """A kernel event's duration and start (``None`` when unparseable); ``None`` for anything not a timed kernel."""
     if ev.get("cat") != "kernel":
@@ -131,7 +114,7 @@ def load_op_busy_from_kineto_trace(
 
     The shares cover the decode steps when the trace annotates them, the whole trace otherwise.
     """
-    events = _load_trace_events(path)
+    events = load_trace_events(path)
     decode = [(w.start_us, w.end_us) for w in step_windows(events) if w.is_decode]
     busy_by_cat: dict[str, float] = {}
     decode_by_cat: dict[str, float] = {}
@@ -226,7 +209,7 @@ def load_op_bytes_from_kineto_trace(path: str | Path) -> dict[str, float]:
     """MEASURED per-category memory-traffic shares from a kineto trace's op shapes."""
     bytes_by_cat: dict[str, float] = {}
     total = 0.0
-    for ev in _load_trace_events(path):
+    for ev in load_trace_events(path):
         if ev.get("cat") != "cpu_op":
             continue
         args = ev.get("args")

@@ -36,7 +36,7 @@ def load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
     """Every event in a trace, gzipped or not; an unreadable or malformed trace reads as empty."""
     path = Path(trace_path)
     try:
-        opener = gzip.open if path.suffix == ".gz" or path.name.endswith(".json.gz") else open
+        opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, ValueError):
