@@ -90,7 +90,12 @@ from hyperloom_multibranch.tests.test_skeleton import (
     _judge_prompts,
     _judge_state,
     _stage,
+    child_framework,
 )
+
+#: ``child_framework`` is test_skeleton's autouse fixture, imported so that it applies here too: each session's PRELUDE
+#: child roots on the framework checkout it was built on, as the root the session commits before it starts does.
+__all__ = ["child_framework"]
 
 #: Changes that measure the root's value, so a branch testing them commits nothing.
 FLAT = tuple(tagged(f"flat{n}") for n in range(9))
