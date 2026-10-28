@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 log = _logging.getLogger(__name__)
 
 _COORDINATOR_SOURCE = "coordinator_internal"
+_INTEGRATE = "integrate_patch"
 
 #: A reference batch cancelled (a recovered pod) or failed (a server that did not boot) is enqueued again, this often.
 _CYCLE_REFERENCE_ATTEMPTS = 3
@@ -175,7 +176,7 @@ class ProposalBench(CoordinatorCollaborator):
 
     async def on_task_settled(self, task: Task, result: Any, verdict: Verdict) -> None:
         """Hand a promoted settlement to FRAMEWORK: an integrate's outcome, and a moved stack's cycle batch."""
-        if task.kind == "integrate_patch":
+        if task.kind == _INTEGRATE:
             await self.on_integrate_patch_settled(task, result, verdict)
         if verdict is Verdict.ADOPTED:
             await self.on_stack_adopted()
@@ -298,9 +299,9 @@ class ProposalBench(CoordinatorCollaborator):
             return
         if await self.operator_work_pending():
             return
-        if any(t.kind == "integrate_patch" for t in (*await self.tasks.queued(), *await self.tasks.running())):
+        if any(t.kind == _INTEGRATE for t in (*await self.tasks.queued(), *await self.tasks.running())):
             return
-        if any(p.action_name == "integrate_patch" for p in self.state.pending_proposals.values()):
+        if any(p.action_name == _INTEGRATE for p in self.state.pending_proposals.values()):
             return
         if state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP):
             log.info("custom-specialist-only: cycle %s done; leaving FRAMEWORK_AGENT", state.macro_cycle)

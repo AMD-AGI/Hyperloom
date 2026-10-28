@@ -19,6 +19,7 @@ __all__ = ["LEVER_BUNDLE_REASON", "PHASE_DISPATCH_FIRST", "in_dispatch_order", "
 #: its patches are already written and in the tree, each missed the KEEP threshold alone, and benched together is the
 #: only way they clear it. Behind the integrates it never ran -- they filled the phase first.
 LEVER_BUNDLE_REASON: str = "dormant_lever_bundle"
+_EXPLORE = "explore"
 
 # In FRAMEWORK_AGENT a reviewed patch and a configuration grid hold the same serving lanes for a whole round: a grid
 # can be proposed again, but a patch still queued when the phase exits is cancelled unmeasured.
@@ -35,19 +36,19 @@ def is_operator_work(kind: str, params: dict[str, Any] | None) -> bool:
     params = params or {}
     if kind == "specialist":
         return str(params.get("domain") or "") == CUSTOM_SPECIALIST_KEY
-    return kind == "explore" and bool(params.get("operator_priority"))
+    return kind == _EXPLORE and bool(params.get("operator_priority"))
 
 
 def _is_lever_bundle(kind: str, params: dict[str, Any] | None) -> bool:
     """Whether a task is the round benching every dormant rewrite lever together."""
-    return kind == "explore" and str((params or {}).get("reason") or "") == LEVER_BUNDLE_REASON
+    return kind == _EXPLORE and str((params or {}).get("reason") or "") == LEVER_BUNDLE_REASON
 
 
 def _is_cycle_batch(kind: str, params: dict[str, Any] | None) -> bool:
     """Whether a task is a cycle-bench batch; the integrates queued behind it are admitted dormant only once it ran."""
     from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
 
-    return kind == "explore" and CYCLE_ARMS_PARAM in (params or {})
+    return kind == _EXPLORE and CYCLE_ARMS_PARAM in (params or {})
 
 
 def _is_host_patch(params: dict[str, Any] | None) -> bool:
