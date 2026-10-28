@@ -632,6 +632,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     cycle_reference: dict[str, Any] = field(default_factory=dict)
     # Why dormant admission for the cycle screen is closed for the rest of the session; empty while it is open.
     cycle_screen_refused: str = ""
+    # The cycle verdict of each dormant-lever bundle's switches on together, keyed by the bundle round's key.
+    cycle_bundle_screens: dict[str, str] = field(default_factory=dict)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;

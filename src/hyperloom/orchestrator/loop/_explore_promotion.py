@@ -15,7 +15,7 @@ from ..actions.executors._integrate_vocabulary import (
     ATTRIBUTION_CYCLE_BROKEN,
     ATTRIBUTION_CYCLE_INCONCLUSIVE,
 )
-from ..actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+from ..actions.executors.cycle_bench_arm import BUNDLE_ARM_KEY, BUNDLE_INCONCLUSIVE, BUNDLE_REFUSED, CYCLE_ARMS_PARAM
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from ..measurement.cycle_bench import STATUS_SCREENED, VERDICT_BROKEN
 from ._promote_outcome import _PromoteOutcome
@@ -140,9 +140,28 @@ class ExplorePromotionMixin:
         self._keep_cycle_reference(result)
         verdicts = result.get("verdicts") or {}
         for arm in result.get(CYCLE_ARMS_PARAM) or []:
-            gain, source = _cycle_attribution(verdicts.get(str(arm.get("name") or "")) or {})
+            verdict = verdicts.get(str(arm.get("name") or "")) or {}
+            if arm.get(BUNDLE_ARM_KEY):
+                await self._record_bundle_screen(arm, str(verdict.get("verdict") or VERDICT_BROKEN))
+                continue
+            gain, source = _cycle_attribution(verdict)
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
+
+    async def _record_bundle_screen(self, arm: Mapping[str, Any], verdict: str) -> None:
+        """Keep a bundle arm's verdict on its bundle; its levers keep the verdicts they earned alone."""
+        key = str(arm[BUNDLE_ARM_KEY])
+        self.shared_state.cycle_bundle_screens = {**(self.shared_state.cycle_bundle_screens or {}), key: verdict}
+        if verdict in BUNDLE_REFUSED:
+            switches = sorted(arm.get("envs") or {})
+            log.warning(
+                "cycle bench: lever bundle %s is %s with %s on together; it stays dormant", key, verdict, switches
+            )
+            await self.bus.record_observation(
+                _OBSERVER,
+                _OBSERVATION,
+                {"kind": "lever_bundle_screened_out", "bundle": key, "verdict": verdict, "switches": switches},
+            )
 
     def _keep_cycle_reference(self, result: Mapping[str, Any]) -> None:
         base2 = ((result.get("arms") or {}).get("base2") or {}).get("cycle_ms") or {}
@@ -159,8 +178,13 @@ class ExplorePromotionMixin:
         await self.bus.record_observation(_OBSERVER, _OBSERVATION, {"kind": "cycle_screen_closed", "reason": reason})
 
     def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
-        """Hand a cycle batch's levers back to replay attribution when the batch ended without verdicts."""
+        """Hand a cycle batch's levers back to replay attribution, and its bundle to its replay round, when the batch
+        ended without verdicts."""
         for arm in (params or {}).get(CYCLE_ARMS_PARAM) or []:
+            if arm.get(BUNDLE_ARM_KEY):
+                screens = self.shared_state.cycle_bundle_screens or {}
+                self.shared_state.cycle_bundle_screens = {**screens, str(arm[BUNDLE_ARM_KEY]): BUNDLE_INCONCLUSIVE}
+                continue
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(
                     str(switch), gain_pct=None, source=ATTRIBUTION_CYCLE_INCONCLUSIVE

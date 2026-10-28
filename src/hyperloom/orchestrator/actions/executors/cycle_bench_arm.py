@@ -49,6 +49,15 @@ CYCLE_BATCH_MAX_ARMS = 6
 
 #: Explore ``reason`` of a Coordinator-enqueued cycle-bench batch.
 CYCLE_BATCH_REASON = "cycle_bench_batch"
+
+#: Arm key naming the dormant-lever bundle whose switches the arm turns on together, by the bundle's round key.
+BUNDLE_ARM_KEY = "lever_bundle"
+
+#: A bundle screen whose batch ended without grading the bundle's arm.
+BUNDLE_INCONCLUSIVE = "inconclusive"
+
+#: Bundle screens that keep the bundle from its replay round: its levers did not boot, or ran slower, together.
+BUNDLE_REFUSED = frozenset({cb.VERDICT_BROKEN, cb.VERDICT_REGRESS})
 _BASES = ("base", "base2")
 _ENCODING = "utf-8"
 _SERVER_LOG = "server.log"
@@ -81,6 +90,11 @@ def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
             patch = str(row.get("specialist_task_id") or row.get("switch") or "")
             arms.setdefault(patch, {})[str(row["switch"])] = str(row.get("value") or "1")
     return [{"name": name, "envs": envs} for name, envs in arms.items()][:CYCLE_BATCH_MAX_ARMS]
+
+
+def bundle_arm(key: str, envs: dict[str, str]) -> dict[str, Any]:
+    """The arm that switches every lever of the bundle round *key* on together."""
+    return {"name": "lever-bundle", "envs": dict(envs), BUNDLE_ARM_KEY: key}
 
 
 def _weighting_log(launch_dir: Path, baseline: str) -> Path:

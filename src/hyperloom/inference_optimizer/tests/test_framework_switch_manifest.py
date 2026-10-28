@@ -1461,6 +1461,68 @@ async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribu
     ]
 
 
+def _screened_bundle(tmp_path):
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, (name, gain) in enumerate((("HL_A", 0.8), ("HL_B", 0.4))):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=gain, source="cycle_bench")
+    arms = [{"name": "lever-bundle", "envs": {"HL_A": "1", "HL_B": "1"}, "lever_bundle": "lever-bundle-c0-k"}]
+    return coord, arms
+
+
+_SCREENED_ROWS = [("HL_A", 0.8, "cycle_bench"), ("HL_B", 0.4, "cycle_bench")]
+
+
+@pytest.mark.parametrize(
+    ("valid", "verdicts", "screen"),
+    [
+        (True, {"lever-bundle": {"verdict": "regress", "gain_pct": -2.1}}, "regress"),
+        (True, {"lever-bundle": {"verdict": "broken", "error": "server did not become ready"}}, "broken"),
+        (True, {"lever-bundle": {"verdict": "pass", "gain_pct": 1.2}}, "pass"),
+        (False, {}, "inconclusive"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_bundle_arm_records_its_verdict_on_the_bundle_and_leaves_its_levers_alone(
+    tmp_path, valid, verdicts, screen
+):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    coord, arms = _screened_bundle(tmp_path)
+    result = {"status": STATUS_SCREENED, "cycle_arms": arms, "valid": valid, "verdicts": verdicts, "arms": {}}
+
+    await coord.writeback._promote_explore(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
+    assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": screen}
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_screen_that_failed_is_recorded_inconclusive(tmp_path):
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord, arms = _screened_bundle(tmp_path)
+    task = Task(task_id="cb", kind="explore", state="failed", params={"cycle_arms": arms}, idempotency_key="cb")
+
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "cycle_bench_unavailable"}
+    )
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
+    assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": "inconclusive"}
+
+
 @pytest.mark.asyncio
 async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
