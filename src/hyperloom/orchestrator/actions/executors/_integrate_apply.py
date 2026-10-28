@@ -87,58 +87,9 @@ class ApplyStageMixin:
         deliverable = _Deliverable.resolve(attempt, params)
         attempt.switch_manifest = deliverable.switch_manifest
 
-        # The manifest states the arming contract; this checks it against the
-        # diff that is about to be benched. A gate the patch itself adds and
-        # that nothing sets leaves the rewrite inert, so the bench would grade
-        # the unpatched path and the round would report the same failure it was
-        # dispatched on. Refuse here, before the bench, and name the variable:
-        # an inert bench costs the lane a round of its stall budget and says
-        # nothing the next author can act on.
-        if is_enablement and deliverable.patch_paths:
-            armed_env = {
-                *(str(name).upper() for name in deliverable.extra_envs),
-                *(str(name).upper() for name in inherited_envs),
-                # What the launch inherits is armed too, whoever set it.
-                *(name.upper() for name in os.environ),
-            }
-            unarmed_gates = _switch_manifest.unarmed_switch_gates(
-                _read_patch_texts(deliverable.patch_paths),
-                armed=armed_env,
-            )
-            if unarmed_gates:
-                return await self._refuse_apply(
-                    attempt,
-                    params,
-                    "framework_switch_gates_unarmed",
-                    [f"{name} is read by the patch but armed nowhere" for name in unarmed_gates],
-                    unarmed_switch_gates=unarmed_gates,
-                    **_reauthor_fields(
-                        params,
-                        deliverable.patch_paths,
-                        advisory=(
-                            "the patch turns its own change on with environment variable(s) "
-                            + ", ".join(unarmed_gates)
-                            + f", which neither the {_switch_manifest.MANIFEST_KEY} manifest nor "
-                            "extra_envs arms, so the bench would measure the unpatched path. "
-                            "Declare each one in the manifest or set it in proposal_set's "
-                            "extra_envs, or ship the change ungated."
-                        ),
-                    ),
-                )
-
-        if deliverable.artifact_runtime_errors:
-            return await self._refuse_apply(
-                attempt,
-                params,
-                "artifact_not_runtime_ready",
-                deliverable.artifact_runtime_errors,
-                artifacts_applied=[],
-                artifact_errors=deliverable.artifact_runtime_errors,
-                reason=(
-                    "AITER GEMM model-config artifacts must contain measured, "
-                    "non-placeholder rows for the target GPU architecture and CU count"
-                ),
-            )
+        pre_mutation_refusal = await self._refuse_before_mutation(attempt, params, deliverable, inherited_envs)
+        if pre_mutation_refusal is not None:
+            return pre_mutation_refusal
 
         if not (deliverable.patch_paths or _changes_beyond_patches(attempt, deliverable)):
             if params.get("enablement_launch_only"):
@@ -235,6 +186,76 @@ class ApplyStageMixin:
                 "reason": "apply_only=True; benchmark skipped",
                 "workspace": str(attempt.output_root),
             }
+        return None
+
+    async def _refuse_before_mutation(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        deliverable: _Deliverable,
+        inherited_envs: dict[str, str],
+    ) -> dict[str, Any] | None:
+        """Refuse what the resolved deliverable already disqualifies, before the live tree is touched.
+
+        Args:
+            attempt: The integration attempt being staged.
+            params: The action's parameters.
+            deliverable: The patch series, artifacts and switch manifest this round resolved.
+            inherited_envs: The environment earlier enablement rounds established.
+
+        Returns:
+            The refusal result dict, or None when the deliverable may be applied.
+        """
+        # The manifest states the arming contract; this checks it against the
+        # diff that is about to be benched. A gate the patch itself adds and
+        # that nothing sets leaves the rewrite inert, so the bench would grade
+        # the unpatched path and the round would report the same failure it was
+        # dispatched on. Refuse here, before the bench, and name the variable:
+        # an inert bench costs the lane a round of its stall budget and says
+        # nothing the next author can act on.
+        if params.get("enablement") and deliverable.patch_paths:
+            # ``unarmed_switch_gates`` folds the case of what it is given, and
+            # what the launch inherits is armed too, whoever set it.
+            armed_env = {*deliverable.extra_envs, *inherited_envs, *os.environ}
+            unarmed_gates = _switch_manifest.unarmed_switch_gates(
+                _read_patch_texts(deliverable.patch_paths),
+                armed=armed_env,
+            )
+            if unarmed_gates:
+                return await self._refuse_apply(
+                    attempt,
+                    params,
+                    "framework_switch_gates_unarmed",
+                    [f"{name} is read by the patch but armed nowhere" for name in unarmed_gates],
+                    unarmed_switch_gates=unarmed_gates,
+                    **_reauthor_fields(
+                        params,
+                        deliverable.patch_paths,
+                        advisory=(
+                            "the patch turns its own change on with environment variable(s) "
+                            + ", ".join(unarmed_gates)
+                            + f", which neither the {_switch_manifest.MANIFEST_KEY} manifest nor "
+                            "extra_envs arms, so the bench would measure the unpatched path. "
+                            "Declare each one in the manifest or set it in proposal_set's "
+                            "extra_envs, or ship the change ungated."
+                        ),
+                    ),
+                )
+
+        if deliverable.artifact_runtime_errors:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                "artifact_not_runtime_ready",
+                deliverable.artifact_runtime_errors,
+                artifacts_applied=[],
+                artifact_errors=deliverable.artifact_runtime_errors,
+                reason=(
+                    "AITER GEMM model-config artifacts must contain measured, "
+                    "non-placeholder rows for the target GPU architecture and CU count"
+                ),
+            )
+
         return None
 
     async def _resolve_apply_root(
