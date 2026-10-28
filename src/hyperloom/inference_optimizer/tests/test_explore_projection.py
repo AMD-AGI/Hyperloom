@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter import _projecti
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
+from hyperloom.orchestrator.actions.executors._spec_decode_pin import SpeculativeDecodingPinnedError
 
 STACK_ENVS = {"TP": 8, "CONC": 64, "ISL": 1024, "OSL": 1024, "EXTRA_VLLM_ARGS": ""}
 
@@ -140,6 +141,25 @@ def test_a_failed_variant_projection_is_benchmarked(tmp_path):
     kept, dropped, summary = _route(tmp_path, [variant], project)
     assert kept == [variant] and dropped == []
     assert summary["variants"][0]["reason"] == "projection_failed"
+
+
+def test_a_variant_that_cannot_be_materialized_is_benchmarked_and_a_bug_raises(tmp_path):
+    variant = GridVariant(name="c8", extra_envs={"CONC": "8"})
+
+    def route(error):
+        def materialize(gv, subdir):
+            if gv.name == "c8":
+                raise error
+            return _materialize(gv, subdir)
+
+        request = ep.ProjectionRequest(materialize=materialize, output_root=tmp_path)
+        return ep.route_variants([variant], request, project=lambda s, mode=None: _metrics(1000.0))
+
+    routed = route(SpeculativeDecodingPinnedError("the stack pins its speculative-decoding config"))
+    assert routed.survivors == [variant] and routed.dropped == []
+    assert routed.summary["variants"][0]["reason"] == "materialize_failed"
+    with pytest.raises(TypeError):
+        route(TypeError("bad stack entry"))
 
 
 def test_a_failed_stack_projection_leaves_the_round_untouched(tmp_path):

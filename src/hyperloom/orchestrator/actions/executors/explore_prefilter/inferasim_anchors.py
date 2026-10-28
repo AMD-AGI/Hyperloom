@@ -551,7 +551,8 @@ def _index_artifact(store_root: str, path: str) -> None:
     try:
         bridge._ensure_infera_importable()
         from infera.projection.core.projection.inference_projection.search.anchor_store import AnchorStore
-    except Exception:  # noqa: BLE001 - AnchorStore.discover() indexes it on next open
+    except (bridge.InferasimBridgeError, ImportError):
+        # AnchorStore.discover() indexes it on next open.
         return
     with _regime_lock(store_root, "index"):
         AnchorStore(store_root, discover=False).add_artifact(path)
