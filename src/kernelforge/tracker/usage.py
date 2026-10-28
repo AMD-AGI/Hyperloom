@@ -40,14 +40,17 @@ class UsageAccumulator:
         # by what was actually being paid for. Ordinary dict: insertion order is
         # first-seen order, which is roughly the order of the run.
         self._by_role: dict[str, dict[str, float]] = {}
+        # provider -> the same counters plus how many of its calls carried a price, so a partial total names the
+        # provider whose cost it lacks.
+        self._by_provider: dict[str, dict[str, float]] = {}
         # Called with the new totals after every counted call, so an external ledger survives a hard kill between one
         # call and the next instead of stopping at the run's last coarse checkpoint.
         self._on_update = on_update
 
-    def _role_bucket(self, role: str) -> dict[str, float]:
-        """Return the counters for one role, creating them on first sight."""
-        name = (role or "").strip() or self.UNATTRIBUTED
-        bucket = self._by_role.get(name)
+    def _bucket(self, table: dict[str, dict[str, float]], name: str) -> dict[str, float]:
+        """Return the counters ``table`` keeps under ``name``, creating them on first sight."""
+        key = (name or "").strip() or self.UNATTRIBUTED
+        bucket = table.get(key)
         if bucket is None:
             bucket = {
                 "input_tokens": 0,
@@ -56,11 +59,12 @@ class UsageAccumulator:
                 "cache_read_input_tokens": 0,
                 "total_cost_usd": 0.0,
                 "calls": 0,
+                "priced_calls": 0,
             }
-            self._by_role[name] = bucket
+            table[key] = bucket
         return bucket
 
-    def add_from_message(self, message: Any, *, role: str = "") -> bool:
+    def add_from_message(self, message: Any, *, role: str = "", provider: str = "") -> bool:
         """Fold one SDK message's usage into the running totals.
 
         Gated on ``total_cost_usd`` so each query is counted once: only the
@@ -71,7 +75,7 @@ class UsageAccumulator:
             return False
         usage = getattr(message, "usage", None)
         cost = getattr(message, "total_cost_usd", None)
-        return self.add_usage(usage, total_cost_usd=cost, role=role)
+        return self.add_usage(usage, total_cost_usd=cost, role=role, provider=provider)
 
     def add_usage(
         self,
@@ -79,29 +83,32 @@ class UsageAccumulator:
         *,
         total_cost_usd: Any = None,
         role: str = "",
+        provider: str = "",
     ) -> bool:
         """Fold one normalized provider usage record into the totals.
 
-        ``role`` names what the call was for. It only ever splits the same
-        numbers into buckets -- the campaign total is unchanged by it -- so an
-        unnamed call is counted exactly as before, under ``UNATTRIBUTED``.
+        ``role`` names what the call was for and ``provider`` who served it. They only ever split the same numbers
+        into buckets -- the campaign total is unchanged by them -- so an unnamed call is counted exactly as before,
+        under ``UNATTRIBUTED``.
         """
-        bucket = self._role_bucket(role)
+        buckets = (self._bucket(self._by_role, role), self._bucket(self._by_provider, provider))
         if isinstance(usage, dict):
             for key in _TOKEN_KEYS:
                 with contextlib.suppress(TypeError, ValueError):
                     value = int(usage.get(key) or 0)
                     setattr(self, key, getattr(self, key) + value)
-                    bucket[key] += value
-        if total_cost_usd is not None and not isinstance(total_cost_usd, bool):
-            with contextlib.suppress(TypeError, ValueError):
-                cost = float(total_cost_usd)
-                if math.isfinite(cost) and cost >= 0:
-                    self.total_cost_usd += cost
-                    bucket["total_cost_usd"] += cost
-                    self._priced_calls += 1
+                    for bucket in buckets:
+                        bucket[key] += value
+        cost = _price(total_cost_usd)
+        if cost is not None:
+            self.total_cost_usd += cost
+            self._priced_calls += 1
+        for bucket in buckets:
+            bucket["calls"] += 1
+            if cost is not None:
+                bucket["total_cost_usd"] += cost
+                bucket["priced_calls"] += 1
         self.calls += 1
-        bucket["calls"] += 1
         if self._on_update is not None:
             with contextlib.suppress(Exception):  # broad-suppress: caller-supplied observer
                 self._on_update(self.totals())
@@ -121,36 +128,45 @@ class UsageAccumulator:
             "cost_source": cost_source,
             "calls": self.calls,
             "by_role": self.by_role(),
+            "by_provider": self.by_provider(),
         }
 
     def by_role(self) -> dict[str, dict[str, Any]]:
-        """Return the same totals split by what the tokens were spent on.
+        """Return the same totals split by what the tokens were spent on, most expensive first."""
+        return _ranked(self._by_role, priced_calls=False)
 
-        Ordered most expensive first -- by cost where the provider priced the
-        calls, and by input tokens where it did not, because input is what a
-        long agent session actually accumulates and it is the only ranking
-        available when cost is missing.
-        """
-
-        def _weight(item: tuple[str, dict[str, float]]) -> tuple[float, float]:
-            counters = item[1]
-            return (counters["total_cost_usd"], counters["input_tokens"])
-
-        return {
-            name: {
-                "input_tokens": int(counters["input_tokens"]),
-                "output_tokens": int(counters["output_tokens"]),
-                "cache_creation_input_tokens": int(counters["cache_creation_input_tokens"]),
-                "cache_read_input_tokens": int(counters["cache_read_input_tokens"]),
-                "total_cost_usd": round(counters["total_cost_usd"], 6),
-                "calls": int(counters["calls"]),
-            }
-            for name, counters in sorted(self._by_role.items(), key=_weight, reverse=True)
-        }
+    def by_provider(self) -> dict[str, dict[str, Any]]:
+        """Return the same totals split by the provider that served them, with how many of its calls were priced."""
+        return _ranked(self._by_provider, priced_calls=True)
 
     def __bool__(self) -> bool:
         """Truthy once at least one LLM call has been counted."""
         return self.calls > 0
+
+
+def _price(total_cost_usd: Any) -> float | None:
+    """A provider-reported cost, or ``None`` when the call carried no usable price."""
+    if total_cost_usd is None or isinstance(total_cost_usd, bool):
+        return None
+    try:
+        cost = float(total_cost_usd)
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0 else None
+
+
+def _ranked(table: dict[str, dict[str, float]], *, priced_calls: bool) -> dict[str, dict[str, Any]]:
+    """Buckets ordered most expensive first.
+
+    By cost where the provider priced the calls, and by input tokens where it did not, because input is what a long
+    agent session actually accumulates and it is the only ranking available when cost is missing.
+    """
+    keys = (*_TOKEN_KEYS, "calls", *(("priced_calls",) if priced_calls else ()))
+    ordered = sorted(table.items(), key=lambda item: (item[1]["total_cost_usd"], item[1]["input_tokens"]), reverse=True)
+    return {
+        name: {**{key: int(counters[key]) for key in keys}, "total_cost_usd": round(counters["total_cost_usd"], 6)}
+        for name, counters in ordered
+    }
 
 
 def combine_usage_totals(

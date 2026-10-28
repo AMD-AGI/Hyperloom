@@ -568,8 +568,8 @@ function-lines src/hyperloom_kb/query_view.py::QueryViewBuilder.build 51
 function-lines src/hyperloom_kb/retrieval_policy.py::LexicalFuzzyProvider.recall 54
 function-lines src/hyperloom_kb/sync.py::GlobalSync.pull 54
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 89
-function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 90
-function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 70
+function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 77
+function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 65
 function-lines src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 53
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 81
 function-lines src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard._restore_baseline 61

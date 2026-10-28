@@ -688,7 +688,7 @@ class ClaudeBackend:
                 async with deadline:
                     async for message in agen:
                         if usage is not None:
-                            usage.add_from_message(message, role=spec.role)
+                            usage.add_from_message(message, role=spec.role, provider=self.name)
                         _record_progress(spec.progress_log, message)
                         transcript.absorb(message)
             except Exception as exc:

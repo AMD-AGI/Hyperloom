@@ -103,6 +103,28 @@ def test_accumulator_marks_missing_provider_cost_unavailable():
     assert totals["cost_source"] == "unavailable"
 
 
+def test_accumulator_names_the_provider_whose_cost_a_partial_total_lacks():
+    """A campaign that relays from a priced provider to an unpriced one says which part of its total is missing."""
+    acc = UsageAccumulator()
+    acc.add_usage({"input_tokens": 10, "output_tokens": 4}, total_cost_usd=0.5, role="implementer", provider="claude")
+    acc.add_usage({"input_tokens": 20, "output_tokens": 6}, role="implementer", provider="codex")
+
+    totals = acc.totals()
+
+    assert totals["cost_source"] == "partial" and totals["total_cost_usd"] == 0.5
+    assert totals["by_provider"]["claude"] == {
+        "input_tokens": 10,
+        "output_tokens": 4,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "calls": 1,
+        "priced_calls": 1,
+        "total_cost_usd": 0.5,
+    }
+    assert (totals["by_provider"]["codex"]["calls"], totals["by_provider"]["codex"]["priced_calls"]) == (1, 0)
+    assert totals["by_role"]["implementer"]["calls"] == 2
+
+
 def test_accumulator_rejects_boolean_provider_cost():
     """Treat a boolean cost field as unavailable provider pricing."""
     acc = UsageAccumulator()

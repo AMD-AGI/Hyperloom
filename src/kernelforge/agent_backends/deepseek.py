@@ -383,19 +383,8 @@ class DeepSeekHarnessBackend:
 
         result = _normalize_run_result(sdk_result, session_id)
         if usage is not None:
-            usage.add_usage(result.usage, role=spec.role)
-        try:
-            actual_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
-            # paths that fail before it gets there.
-            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
-                guard.rollback()
-            raise
-        result.file_changes = actual_changes
-        result.target_edit_count = guard.count_target_edits()
-        result.edit_count = max(result.edit_count, result.target_edit_count)
-        return result
+            usage.add_usage(result.usage, role=spec.role, provider=self.name)
+        return guard.settle_into(result)
 
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one new DeepSeek Harness session."""

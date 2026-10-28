@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,9 @@ log = logging.getLogger(__name__)
 _ignored_agent_clis: set[str] = set()
 
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# The counters of one Codex SDK token breakdown that Forge's accounting reads.
+_BREAKDOWN_COUNTERS = ("input_tokens", "cached_input_tokens", "output_tokens", "cache_write_input_tokens")
 
 
 class CodexBackendError(AgentProviderError):
@@ -209,26 +213,95 @@ def _usage_value(payload: dict[str, Any], *keys: str) -> int:
     return 0
 
 
-def _normalize_sdk_usage(usage: Any) -> dict[str, Any]:
-    """Normalize the latest SDK turn usage into Forge accounting fields."""
-    if usage is None:
-        return {}
-    breakdown = getattr(usage, "last", usage)
-    if hasattr(breakdown, "model_dump"):
-        payload = breakdown.model_dump()
-    elif isinstance(breakdown, dict):
-        payload = breakdown
-    else:
-        return {}
+def _counters(breakdown: Any) -> dict[str, int]:
+    """One SDK token breakdown as plain counters."""
+    payload = breakdown.model_dump() if hasattr(breakdown, "model_dump") else dict(breakdown or {})
+    return {key: _usage_value(payload, key) for key in _BREAKDOWN_COUNTERS}
+
+
+def _tokens_spent(total: Any, *, since: dict[str, int] | None = None) -> dict[str, int]:
+    """Forge's four counters for what a thread spent past ``since``, from its running ``total``.
+
+    OpenAI input counts include the cached input, which Forge counts separately as cache reads.
+    """
+    end = _counters(total)
+    start = since or dict.fromkeys(_BREAKDOWN_COUNTERS, 0)
+    spent = {key: max(0, end[key] - start[key]) for key in _BREAKDOWN_COUNTERS}
     return {
-        "input_tokens": _usage_value(payload, "input_tokens"),
-        "output_tokens": _usage_value(payload, "output_tokens"),
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": _usage_value(
-            payload,
-            "cached_input_tokens",
-        ),
+        "input_tokens": max(0, spent["input_tokens"] - spent["cached_input_tokens"]),
+        "output_tokens": spent["output_tokens"],
+        "cache_creation_input_tokens": spent["cache_write_input_tokens"],
+        "cache_read_input_tokens": spent["cached_input_tokens"],
     }
+
+
+def _thread_total_before(first_usage: Any) -> dict[str, int]:
+    """What a thread had spent before the request its first usage notification of a turn reports."""
+    total, request = _counters(first_usage.total), _counters(first_usage.last)
+    return {key: max(0, total[key] - request[key]) for key in _BREAKDOWN_COUNTERS}
+
+
+def _final_response(items: list[Any]) -> str | None:
+    """A turn's answer as the SDK reports it: its final-answer message, else its last message of unstated phase."""
+    from openai_codex.generated.v2_all import MessagePhase
+
+    unstated = None
+    for raw_item in reversed(items):
+        item = _sdk_item_dict(raw_item)
+        if str(item.get("type") or "").replace("_", "").lower() != "agentmessage":
+            continue
+        if item.get("phase") == MessagePhase.final_answer.value:
+            return str(item.get("text") or "")
+        if item.get("phase") is None and unstated is None:
+            unstated = str(item.get("text") or "")
+    return unstated
+
+
+@dataclass(frozen=True)
+class _TurnRecord:
+    """One finished turn as its own notifications reported it: its items, its answer, its error, what it spent."""
+
+    items: tuple[Any, ...]
+    final_response: str | None
+    error: Any
+    usage: dict[str, int]
+
+
+async def _record_turn(turn_handle: Any) -> _TurnRecord:
+    """Consume one turn's notifications and keep what Forge reads from them.
+
+    The SDK's own collector keeps only the last token-usage notification, whose ``last`` is the turn's final model
+    request and whose ``total`` is the thread's running total since its first turn: neither is what this turn spent.
+    The turn's first notification says what the thread had spent before the turn began.
+    """
+    from openai_codex.models import (
+        ItemCompletedNotification,
+        ThreadTokenUsageUpdatedNotification,
+        TurnCompletedNotification,
+    )
+    from openai_codex.types import TurnStatus
+
+    items: list[Any] = []
+    first = last = turn = None
+    stream = turn_handle.stream()
+    try:
+        async for event in stream:
+            payload = event.payload
+            if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn_handle.id:
+                items.append(payload.item)
+            elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == turn_handle.id:
+                first = first or payload.token_usage
+                last = payload.token_usage
+            elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn_handle.id:
+                turn = payload.turn
+    finally:
+        await stream.aclose()
+    if turn is None:
+        raise RuntimeError("the turn ended without a turn/completed notification")
+    if turn.status == TurnStatus.failed:
+        raise RuntimeError(getattr(turn.error, "message", "") or f"turn failed with status {turn.status.value}")
+    usage = _tokens_spent(last.total, since=_thread_total_before(first)) if last is not None else {}
+    return _TurnRecord(tuple(items), _final_response(items), turn.error, usage)
 
 
 def _sdk_item_dict(item: Any) -> dict[str, Any]:
@@ -248,8 +321,8 @@ def _present_fields(item: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: item[key] for key in keys if key in item}
 
 
-def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
-    """Normalize one completed SDK turn into the shared backend result."""
+def _normalize_sdk_result(result: Any, session_id: str, *, usage: dict[str, int]) -> AgentRunResult:
+    """Normalize one completed SDK turn, and the tokens it spent, into the shared backend result."""
     text = str(getattr(result, "final_response", "") or "").strip()
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     findings: list[str] = []
@@ -302,7 +375,7 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
         end_reason=end_reason,
         session_id=session_id,
         tool_calls=tool_calls,
-        usage=_normalize_sdk_usage(getattr(result, "usage", None)),
+        usage=usage,
         findings=findings,
         edit_count=edit_count,
         stderr_tail=stderr_tail,
@@ -680,10 +753,10 @@ class CodexBackend:
                     raise CodexUnavailableError(f"Codex gateway precheck failed: {outcome['error']}") from outcome[
                         "error"
                     ]
-                result = _normalize_sdk_result(
-                    outcome["result"],
-                    thread.id,
-                )
+                probe_result = outcome["result"]
+                # A probe is the first turn of its own thread, so the thread's total is what it spent.
+                spent = _tokens_spent(probe_result.usage.total) if probe_result.usage is not None else {}
+                result = _normalize_sdk_result(probe_result, thread.id, usage=spent)
         except CodexUnavailableError:
             raise
         except Exception as exc:
@@ -693,11 +766,7 @@ class CodexBackend:
                 client.close()
 
         if result.usage and usage is not None:
-            usage.add_usage(
-                result.usage,
-                total_cost_usd=result.usage.get("total_cost_usd"),
-                role=spec.role,
-            )
+            usage.add_usage(result.usage, role=spec.role, provider=self.name)
         if not result.text:
             raise CodexUnavailableError("Codex gateway precheck returned an empty SDK response")
         return result
@@ -738,7 +807,7 @@ class CodexBackend:
                         prompt,
                         **self._turn_options(sdk, spec),
                     )
-                    turn_task = asyncio.create_task(turn_handle.run())
+                    turn_task = asyncio.create_task(_record_turn(turn_handle))
                     try:
                         completed, _ = await asyncio.wait(
                             {turn_task},
@@ -787,26 +856,12 @@ class CodexBackend:
                 with contextlib.suppress(asyncio.CancelledError, Exception):  # broad-suppress: reaping a cancelled task
                     _ = await turn_task
 
-        result = _normalize_sdk_result(sdk_result, thread_id)
+        result = _normalize_sdk_result(sdk_result, thread_id, usage=sdk_result.usage)
 
         if usage is not None:
-            usage.add_usage(
-                result.usage,
-                total_cost_usd=result.usage.get("total_cost_usd"),
-                role=spec.role,
-            )
-        try:
-            actual_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising a rejection, so this second call only covers the
-            # paths that fail before it gets there.
-            with contextlib.suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
-                guard.rollback()
-            raise
-        result.file_changes = actual_changes
-        result.target_edit_count = guard.count_target_edits()
-        result.edit_count = max(result.edit_count, result.target_edit_count)
-        return result
+            # The Codex SDK reports no price, so the call is counted as unpriced rather than as free.
+            usage.add_usage(result.usage, role=spec.role, provider=self.name)
+        return guard.settle_into(result)
 
     async def run(self, spec: AgentRunSpec, usage: Any = None) -> AgentRunResult:
         """Run one new Codex SDK thread."""

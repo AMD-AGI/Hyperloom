@@ -42,9 +42,16 @@ from kernelforge.agent_backends.codex import (
     CodexExecutionError,
     CodexUnavailableError,
     _normalize_sdk_result,
+    _record_turn,
     resolve_codex_model,
     resolve_codex_reasoning_effort,
 )
+from openai_codex.models import (
+    ItemCompletedNotification,
+    ThreadTokenUsageUpdatedNotification,
+    TurnCompletedNotification,
+)
+from openai_codex.types import ThreadTokenUsage, Turn, TurnStatus
 from kernelforge.config import Config
 from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
@@ -185,17 +192,54 @@ def _fake_turn_result(stdout: str) -> SimpleNamespace:
             raise RuntimeError(str(event.get("message") or event_type))
     if not completed:
         raise RuntimeError("fake SDK turn did not complete")
-    breakdown = {
+    breakdown = _fake_breakdown(usage)
+    # Every fake turn is the first of its thread, so the thread's running total is the turn's own usage.
+    return SimpleNamespace(
+        final_response=final_response,
+        items=items,
+        usage=SimpleNamespace(last=breakdown, total=breakdown),
+        error=None,
+    )
+
+
+def _fake_breakdown(usage: dict[str, object]) -> dict[str, int]:
+    return {
         "input_tokens": int(usage.get("input_tokens", 0)),
         "output_tokens": int(usage.get("output_tokens", 0)),
         "cached_input_tokens": int(usage.get("cached_input_tokens", 0)),
     }
-    return SimpleNamespace(
-        final_response=final_response,
-        items=items,
-        usage=SimpleNamespace(last=breakdown),
-        error=None,
-    )
+
+
+def _fake_notifications(stdout: str, *, thread_id: str, turn_id: str) -> list[SimpleNamespace]:
+    """Convert fake runtime JSONL into the SDK notifications one turn streams, in order."""
+    notifications = []
+    completed = False
+    for raw in stdout.splitlines():
+        try:
+            event = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            continue
+        event_type = event.get("type")
+        if event_type == "item.completed" and isinstance(event.get("item"), dict):
+            payload = ItemCompletedNotification.model_construct(
+                item=event["item"], thread_id=thread_id, turn_id=turn_id
+            )
+            notifications.append(SimpleNamespace(method="item/completed", payload=payload))
+        elif event_type == "turn.completed":
+            breakdown = _fake_breakdown(event.get("usage") or {})
+            token_usage = ThreadTokenUsage.model_construct(last=breakdown, total=breakdown)
+            usage = ThreadTokenUsageUpdatedNotification.model_construct(
+                thread_id=thread_id, turn_id=turn_id, token_usage=token_usage
+            )
+            notifications.append(SimpleNamespace(method="thread/tokenUsage/updated", payload=usage))
+            completed = True
+        elif event_type in {"turn.failed", "error"}:
+            raise RuntimeError(str(event.get("message") or event_type))
+    if completed:
+        turn = Turn.model_construct(id=turn_id, status=TurnStatus.completed, error=None)
+        done = TurnCompletedNotification.model_construct(thread_id=thread_id, turn=turn)
+        notifications.append(SimpleNamespace(method="turn/completed", payload=done))
+    return notifications
 
 
 class _FakeSyncTurn:
@@ -298,16 +342,19 @@ class _FakeAsyncTurn:
         prompt: str,
         options: dict[str, object],
         resumed: bool,
+        thread_id: str = "thread-fake",
     ) -> None:
         """Capture runtime state used by one asynchronous turn."""
         self.config = config
         self.prompt = prompt
         self.options = options
         self.resumed = resumed
+        self.thread_id = thread_id
+        self.id = "turn-fake"
         self.process: asyncio.subprocess.Process | None = None
 
-    async def run(self) -> SimpleNamespace:
-        """Execute the fake runtime and return an SDK-shaped result."""
+    async def stream(self):
+        """Execute the fake runtime and yield what it printed as the SDK notifications of this turn."""
         command = [self.config.codex_bin, "resume" if self.resumed else "exec"]
         self.process = await asyncio.create_subprocess_exec(
             *command,
@@ -321,7 +368,10 @@ class _FakeAsyncTurn:
         if self.process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or f"exit {self.process.returncode}")
-        return _fake_turn_result(stdout.decode(errors="replace"))
+        for notification in _fake_notifications(
+            stdout.decode(errors="replace"), thread_id=self.thread_id, turn_id=self.id
+        ):
+            yield notification
 
     async def interrupt(self) -> SimpleNamespace:
         """Terminate an active asynchronous fake turn."""
@@ -350,7 +400,7 @@ class _FakeAsyncThread:
     async def turn(self, prompt: str, **options: object) -> _FakeAsyncTurn:
         """Create one asynchronous fake turn."""
         merged = {**self.options, **options}
-        return _FakeAsyncTurn(self.config, prompt, merged, self.resumed)
+        return _FakeAsyncTurn(self.config, prompt, merged, self.resumed, self.id)
 
 
 class _FakeAsyncCodex:
@@ -474,7 +524,7 @@ def test_codex_sdk_sandbox_keeps_runtime_and_write_policy_separate(
 
 
 def test_normalize_codex_sdk_result() -> None:
-    """Normalize SDK items, session identity, and canonical token usage."""
+    """Normalize SDK items, session identity, and the tokens the turn spent."""
     sdk_result = SimpleNamespace(
         final_response="PLAN: vectorize loads",
         items=[
@@ -490,24 +540,16 @@ def test_normalize_codex_sdk_result() -> None:
                 "receiverThreadIds": ["thread-child"],
             },
         ],
-        usage=SimpleNamespace(
-            last={
-                "input_tokens": 120,
-                "cached_input_tokens": 20,
-                "output_tokens": 30,
-            }
-        ),
         error=None,
     )
+    spent = {"input_tokens": 100, "output_tokens": 30, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 20}
 
-    result = _normalize_sdk_result(sdk_result, "thread-1")
+    result = _normalize_sdk_result(sdk_result, "thread-1", usage=spent)
 
     assert result.session_id == "thread-1"
     assert result.text == "PLAN: vectorize loads"
     assert result.edit_count == 1
-    assert result.usage["input_tokens"] == 120
-    assert result.usage["output_tokens"] == 30
-    assert result.usage["cache_read_input_tokens"] == 20
+    assert result.usage == spent
     assert result.end_reason == "agent_stopped"
     assert result.tool_calls == [
         (
@@ -615,33 +657,86 @@ def test_codex_role_sandbox_comes_from_the_role_not_the_parent(
     assert f'sandbox_mode = "{expected}"' in role_text
 
 
-def test_normalize_codex_sdk_usage_uses_last_turn() -> None:
-    """Count the resumed turn without recounting thread-total usage."""
-    sdk_result = SimpleNamespace(
-        final_response="PLAN: resumed response",
-        items=[],
-        usage=SimpleNamespace(
-            last={
-                "input_tokens": 8,
-                "output_tokens": 3,
-                "cached_input_tokens": 2,
-            },
-            total={
-                "input_tokens": 80,
-                "output_tokens": 30,
-                "cached_input_tokens": 20,
-            },
-        ),
-        error=None,
+class _StreamedTurn:
+    """A turn handle whose stream replays the given notification payloads."""
+
+    def __init__(self, payloads: list[object]) -> None:
+        self.id = "turn-2"
+        self._payloads = payloads
+
+    async def stream(self):
+        for payload in self._payloads:
+            yield SimpleNamespace(payload=payload)
+
+
+def _usage_update(last: dict[str, int], total: dict[str, int]) -> ThreadTokenUsageUpdatedNotification:
+    return ThreadTokenUsageUpdatedNotification.model_construct(
+        thread_id="thread-1", turn_id="turn-2", token_usage=ThreadTokenUsage.model_construct(last=last, total=total)
     )
 
-    result = _normalize_sdk_result(sdk_result, "resumed-session")
 
-    assert result.session_id == "resumed-session"
-    assert result.text == "PLAN: resumed response"
-    assert result.usage["input_tokens"] == 8
-    assert result.usage["output_tokens"] == 3
-    assert result.usage["cache_read_input_tokens"] == 2
+def _turn_completed(status: TurnStatus, error: object = None) -> TurnCompletedNotification:
+    turn = Turn.model_construct(id="turn-2", status=status, error=error)
+    return TurnCompletedNotification.model_construct(thread_id="thread-1", turn=turn)
+
+
+def _message(text: str, phase: str | None) -> ItemCompletedNotification:
+    item = {"type": "agentMessage", "text": text, "phase": phase}
+    return ItemCompletedNotification.model_construct(item=item, thread_id="thread-1", turn_id="turn-2")
+
+
+def test_a_resumed_turn_counts_every_request_it_made_and_nothing_before_it() -> None:
+    """Counts measured on a real resumed turn: ``last`` is one request, ``total`` the whole thread."""
+    record = asyncio.run(
+        _record_turn(
+            _StreamedTurn(
+                [
+                    _usage_update(
+                        {"input_tokens": 11201, "cached_input_tokens": 11173, "output_tokens": 36},
+                        {"input_tokens": 44245, "cached_input_tokens": 33035, "output_tokens": 101},
+                    ),
+                    _usage_update(
+                        {"input_tokens": 11372, "cached_input_tokens": 11198, "output_tokens": 5},
+                        {"input_tokens": 55617, "cached_input_tokens": 44233, "output_tokens": 106},
+                    ),
+                    _turn_completed(TurnStatus.completed),
+                ]
+            )
+        )
+    )
+
+    # 55617 - 33044 input, 22371 of it cached; 106 - 65 output.
+    assert record.usage == {
+        "input_tokens": 202,
+        "output_tokens": 41,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 22371,
+    }
+
+
+def test_a_turn_answers_with_its_final_answer_message() -> None:
+    record = asyncio.run(
+        _record_turn(
+            _StreamedTurn(
+                [
+                    _message("checking the driver", "commentary"),
+                    _message("PLAN: raise the tile", "final_answer"),
+                    _message("one more note", None),
+                    _turn_completed(TurnStatus.completed),
+                ]
+            )
+        )
+    )
+
+    assert record.final_response == "PLAN: raise the tile"
+    assert record.usage == {}
+
+
+def test_a_failed_turn_raises_its_error() -> None:
+    error = SimpleNamespace(message="upstream refused the request")
+
+    with pytest.raises(RuntimeError, match="upstream refused the request"):
+        asyncio.run(_record_turn(_StreamedTurn([_turn_completed(TurnStatus.failed, error)])))
 
 
 def test_normalize_codex_sdk_result_reports_an_sdk_error_as_an_api_failure() -> None:
@@ -650,10 +745,10 @@ def test_normalize_codex_sdk_result_reports_an_sdk_error_as_an_api_failure() -> 
         SimpleNamespace(
             final_response=None,
             items=[],
-            usage=None,
             error=SimpleNamespace(message="rate limited"),
         ),
         "thread-textless",
+        usage={},
     )
 
     assert result.end_reason == "sdk_error"
@@ -670,10 +765,10 @@ def test_normalize_codex_sdk_result_keeps_a_turn_cap_terminal() -> None:
         SimpleNamespace(
             final_response=None,
             items=[],
-            usage=None,
             error=SimpleNamespace(message="reached the maximum number of turns"),
         ),
         "thread-capped",
+        usage={},
     )
 
     assert result.end_reason == "turn_cap"
@@ -1274,9 +1369,14 @@ def test_codex_backend_keeps_allowed_edit_and_counts_usage(
     assert result.file_changes == ["kernel.py"]
     assert result.target_edit_count == 1
     assert result.edit_count == 1
-    assert usage.totals()["input_tokens"] == 10
+    # OpenAI's 10 input tokens include the 3 served from cache, which Forge counts as cache reads.
+    assert usage.totals()["input_tokens"] == 7
     assert usage.totals()["output_tokens"] == 4
     assert usage.totals()["cache_read_input_tokens"] == 3
+    # The SDK reports no price: the call is unpriced, not free, and the ledger says which provider it was.
+    assert usage.totals()["by_provider"]["codex"]["calls"] == 1
+    assert usage.totals()["by_provider"]["codex"]["priced_calls"] == 0
+    assert usage.totals()["cost_source"] == "unavailable"
     assert usage.totals()["calls"] == 1
 
 
