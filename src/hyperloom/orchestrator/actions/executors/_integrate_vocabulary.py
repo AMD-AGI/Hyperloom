@@ -33,6 +33,9 @@ SCREEN_PARAM = "screen"
 #: The cycle bench screens the patch's levers, so integration commits the patch dormant without benching it.
 SCREEN_CYCLE = "cycle"
 
+#: The patch touches a host path the cycle bench cannot see: it takes its own replay round, dispatched first.
+SCREEN_HOST = "host"
+
 #: Attribution source of a lever admitted for the cycle screen and not measured yet.
 ATTRIBUTION_CYCLE_PENDING = "cycle_bench_pending"
 

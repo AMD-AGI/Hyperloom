@@ -50,9 +50,16 @@ def _is_cycle_batch(kind: str, params: dict[str, Any] | None) -> bool:
     return kind == "explore" and CYCLE_ARMS_PARAM in (params or {})
 
 
+def _is_host_patch(params: dict[str, Any] | None) -> bool:
+    """Whether a patch touches a host path the cycle bench cannot see, so its replay round is its only measurement."""
+    from ..actions.executors._integrate_vocabulary import SCREEN_HOST, SCREEN_PARAM
+
+    return (params or {}).get(SCREEN_PARAM) == SCREEN_HOST
+
+
 def in_dispatch_order(queued: list[Task], phase: str) -> list[Task]:
-    """Return ``queued`` grouped as operator work, the dormant-lever bundle and cycle batches, then ``phase``'s
-    dispatch-first kinds, then the rest, each in order."""
+    """Return ``queued`` grouped as operator work, the dormant-lever bundle, cycle batches and host-side patches, then
+    ``phase``'s dispatch-first kinds, then the rest, each in order."""
     first = PHASE_DISPATCH_FIRST.get(phase, frozenset())
 
     def tier(task: Task) -> int:
@@ -62,6 +69,8 @@ def in_dispatch_order(queued: list[Task], phase: str) -> list[Task]:
             or _is_cycle_batch(task.kind, task.params)
         ):
             return 0
-        return 1 if task.kind in first else 2
+        if task.kind in first:
+            return 0 if _is_host_patch(task.params) else 1
+        return 2
 
     return sorted(queued, key=tier)

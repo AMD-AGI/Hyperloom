@@ -695,6 +695,28 @@ def test_a_cycle_batch_goes_ahead_of_queued_integrates():
     assert order == ["reference", "screen", "patch-1", "patch-2", "explore"]
 
 
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("FRAMEWORK_AGENT", ["host", "bundle", "patch-1", "patch-2", "explore"]),
+        ("SWEEP", ["bundle", "patch-1", "explore", "patch-2", "host"]),
+    ],
+)
+def test_a_host_side_patch_goes_ahead_of_the_other_integrates(phase, expected):
+    """An earlier run cancelled a +5.5% tokenizer cache patch after 13 h queued behind integrates the screen could hold."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    queued = [
+        _task("patch-1", "integrate_patch", screen="cycle"),
+        _task("explore", "explore", grid=[]),
+        _task("patch-2", "integrate_patch"),
+        _task("host", "integrate_patch", screen="host"),
+        _task("bundle", "explore", grid=[], reason=LEVER_BUNDLE_REASON),
+    ]
+
+    assert [t.task_id for t in in_dispatch_order(queued, phase)] == expected
+
+
 # Bench of custom proposals
 class _BenchTasks:
     def __init__(self, queued=(), running=()) -> None:

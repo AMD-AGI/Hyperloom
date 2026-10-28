@@ -3071,12 +3071,12 @@ class FrameworkPhase(ProposalBench):
             markers["framework_agent_authoring"] = True
         if identity["line_keys"]:
             markers["patch_identity"] = identity
+        from ..actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_HOST, SCREEN_PARAM
         from ..actions.executors.cycle_bench_arm import cycle_bench_enabled, cycle_bench_sees
 
-        screenable = cycle_bench_enabled() and cycle_bench_sees(identity["files"])
-        if not enablement and screenable and agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
-            # Admitted dormant only if switched and the screen can hold it to a reference when it runs.
-            markers[_integrate_vocabulary.SCREEN_PARAM] = _integrate_vocabulary.SCREEN_CYCLE
+        if not enablement and cycle_bench_enabled() and agentx_active(benchmark_mode=self.shared_state.benchmark_mode):
+            # A seen patch is admitted dormant only if switched and held to a reference; an unseen one is dispatched first.
+            markers[SCREEN_PARAM] = SCREEN_CYCLE if cycle_bench_sees(identity["files"]) else SCREEN_HOST
         return markers
 
     async def maybe_autosubmit_framework_config(

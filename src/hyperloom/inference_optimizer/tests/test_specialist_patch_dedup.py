@@ -129,13 +129,15 @@ _TOKENIZER_FIX = """\
 """
 
 
-@pytest.mark.parametrize(("diff", "screen"), [(_TOKENIZER_FIX, None), (_FIX_A, "cycle")])
+@pytest.mark.parametrize(
+    ("diff", "switch", "screen"), [(_TOKENIZER_FIX, "1", "host"), (_TOKENIZER_FIX, "", None), (_FIX_A, "1", "cycle")]
+)
 @pytest.mark.asyncio
 async def test_a_patch_the_decode_cycle_cannot_see_goes_to_its_own_replay_round(
-    session_dir: Path, monkeypatch, diff: str, screen: str | None
+    session_dir: Path, monkeypatch, diff: str, switch: str, screen: str | None
 ) -> None:
     """Tokenizer, API and KV-cache paths stay out of steady decode, so the cycle screen would read them flat."""
-    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
     coord = _coordinator(session_dir)
     coord.shared_state.benchmark_mode = "agentx"
     try:
