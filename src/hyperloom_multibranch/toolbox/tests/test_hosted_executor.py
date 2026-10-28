@@ -9,7 +9,7 @@ import asyncio
 import contextlib
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -468,6 +468,15 @@ async def test_every_attempt_carries_the_ten_minute_silence_timeout_under_the_ha
     (call,) = backend.calls
     assert (call.silence_timeout_sec, call.timeout_sec) == (600.0, DEFAULT_TEST_TIMEOUT_SEC)
     assert TEST_SILENCE_TIMEOUT_SEC == 600.0
+
+
+async def test_an_infrastructure_failure_keeps_the_beginning_of_what_the_runner_said(tmp_path: Path) -> None:
+    """The start step names the failing check first; a long message must not push it out of the reason."""
+    said = "runner_start_failed: bootstrap.sh or manifest of the cache entry is missing " + "x" * 1900
+    outcome = _outcome(1, FailureClass.INFRA.value, "runner_start_failed")
+    outcome = replace(outcome, stderr=f"{said} (sandbox sbx-1 on node n)")
+    result = await HostedExecutor(_Stub(outcome), tmp_path).run(_job(point_yaml(tmp_path)))  # type: ignore[arg-type]
+    assert result.failure_reason == f"{said} (sandbox sbx-1 on node n)"
 
 
 @pytest.mark.parametrize("failure", list(FailureClass), ids=lambda f: f.value)

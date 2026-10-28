@@ -42,7 +42,17 @@ from hyperloom.measure.bundle import (
 )
 from hyperloom.measure.failures import RUNNER_EXITED, Disposition, FailureClassification, classify_test_failure
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
-from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
+from hyperloom.measure.hosted_log import (
+    STATE_FINISHED,
+    STATE_SENT,
+    STATE_SUBMITTED,
+    MeasurementJournal,
+    Record,
+    bounded,
+    runner_status,
+    status_evidence,
+    where,
+)
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.jit.publish import publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
@@ -426,13 +436,21 @@ class HostedMeasurementBackend:
         except SandboxUnavailable as exc:
             return _infra(call, HOSTED_RUNNER_UNAVAILABLE_RC, "runner_start_timeout", str(exc))
         except SandboxGone as exc:
-            return _infra(call, HOSTED_INFRA_FAILURE_RC, RUNNER_LOST, f"the sandbox ended during creation: {exc}")
+            return self._create_failed(call, number, RUNNER_LOST, f"the sandbox ended during creation: {exc}")
         except SandboxCreateFailed as exc:
-            return _infra(call, HOSTED_INFRA_FAILURE_RC, SANDBOX_CREATE_FAILED, str(exc))
+            return self._create_failed(call, number, SANDBOX_CREATE_FAILED, str(exc))
         except SandboxDenied as exc:
             return _refusal(call, HOSTED_SPEC_REJECTED_RC, "sandbox_denied", str(exc))
         except PoolClosed:
             return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the pool is closed")
+
+    def _create_failed(self, call: TestCall, number: int, reason: str, message: str) -> TestOutcome:
+        """A create that made no usable sandbox: the platform's message goes to the outcome and to the journal, the only
+        place it outlives this process."""
+        outcome = _infra(call, HOSTED_INFRA_FAILURE_RC, reason, bounded(message))
+        fields = {"verdict": reason, "detail": bounded(outcome.stderr)}
+        self._journal_end(call.task_id, number, None, call, _end_fields(outcome, self._clock(), fields))
+        return outcome
 
     def _submit(self, attempt: _Attempt) -> None:
         """Journal the sandbox, then write the sheet, then the READY marker (so the runner never reads half a sheet)."""
@@ -504,13 +522,24 @@ class HostedMeasurementBackend:
         attempt.timeline.mark(RUNNER_DONE)
         try:
             if isinstance(status, TestOutcome):
-                self._finish_record(attempt, status, {"verdict": "ended_without_result"})
-                return status
+                return self._ended_without_result(attempt, status)
             if status.get("state") == "succeeded":
                 return self._accept(attempt)
             return self._runner_failed(attempt, status)
         finally:
             attempt.timeline.mark(LANDED)
+
+    def _ended_without_result(self, attempt: _Attempt, outcome: TestOutcome) -> TestOutcome:
+        """A failed test with no status read: what ``status.json`` holds now, or that it is missing or unreadable, goes
+        with the outcome and its journal line, since ``/out`` is gone once the sandbox is."""
+        fields: dict[str, Any] = {"verdict": "ended_without_result"}
+        if outcome.failure_class is not None:  # a stopped test is no failure to explain
+            evidence = status_evidence(attempt.runner.handle, STATUS_PATH)
+            fields["runner_status"] = evidence
+            told = "; ".join(f"{key} {value}" for key, value in evidence.items() if value)
+            outcome = replace(outcome, stderr=f"{outcome.stderr} ({where(*_place(attempt.runner))}; {told})")
+        self._finish_record(attempt, outcome, fields)
+        return outcome
 
     def _wait(self, attempt: _Attempt) -> dict[str, Any] | TestOutcome:
         """Poll until the runner writes ``status.json``; a stop, a timeout, a lost sandbox or a test silent before its server
@@ -555,7 +584,9 @@ class HostedMeasurementBackend:
             if self._timed_out(attempt):
                 attempt.timeline.mark(RUNNER_DONE)
                 self._save_logs(handle, Path(call.output_dir))
-                self._record_end(attempt, HOSTED_INFRA_FAILURE_RC, None, "timeout", {"verdict": "timeout"})
+                evidence = status_evidence(handle, STATUS_PATH)
+                ending = {"verdict": "timeout", "runner_status": evidence}
+                self._record_end(attempt, HOSTED_INFRA_FAILURE_RC, None, "timeout", ending)
                 attempt.timeline.mark(LANDED)
                 self._pool.release(attempt.runner)
                 raise subprocess.TimeoutExpired(cmd=f"hosted test {call.task_id}", timeout=call.timeout_sec)
@@ -591,9 +622,12 @@ class HostedMeasurementBackend:
         rc = HOSTED_INFRA_FAILURE_RC if verdict.disposition is Disposition.FAILED else HOSTED_SPEC_REJECTED_RC
         if verdict.disposition is Disposition.PROGRAM_ERROR and error_class != "spec_rejected":
             rc = HOSTED_RESULT_REJECTED_RC
-        text = f"{error_class}: {status.get('message', '')}".strip()
+        reported = runner_status(status)
+        text = f"{error_class}: {reported['message']}"
+        if rc == HOSTED_INFRA_FAILURE_RC:  # where it failed matters for the node; a refused sheet is the sheet's
+            text = f"{text} ({where(*_place(attempt.runner))})"
         outcome = _outcome(call, rc, facts=_facts_of(attempt.runner, None), stderr=text, failure=verdict)
-        self._finish_record(attempt, outcome, {"verdict": error_class})
+        self._finish_record(attempt, outcome, {"verdict": error_class, "runner_status": reported})
         return outcome
 
     # -- the result -----------------------------------------------------------------------------------------------
@@ -810,8 +844,10 @@ class HostedMeasurementBackend:
         )
 
     def _finish_record(self, attempt: _Attempt, outcome: TestOutcome, extra: Mapping[str, Any]) -> None:
+        """The journal line of an attempt's end; a failure also keeps what was said about it (``detail``)."""
         failure_class = getattr(outcome.failure_class, "value", outcome.failure_class)
-        self._record_end(attempt, outcome.returncode, failure_class, outcome.failure_reason, extra)
+        said = {"detail": bounded(outcome.stderr)} if failure_class is not None and outcome.stderr else {}
+        self._record_end(attempt, outcome.returncode, failure_class, outcome.failure_reason, {**said, **extra})
 
     def _record_end(
         self,
@@ -821,23 +857,22 @@ class HostedMeasurementBackend:
         reason: str | None,
         extra: Mapping[str, Any],
     ) -> None:
-        self.journal.append(
-            Record(
-                attempt.request_id,
-                attempt.number,
-                STATE_FINISHED,
-                attempt.runner.sandbox_id,
-                str(attempt.call.output_dir),
-                attempt.call.task_id,
-                {
-                    "returncode": returncode,
-                    "failure_class": failure_class,
-                    "failure_reason": reason,
-                    "finished_unix": self._clock(),
-                    **extra,
-                },
-            )
-        )
+        fields = {
+            "returncode": returncode,
+            "failure_class": failure_class,
+            "failure_reason": reason,
+            "finished_unix": self._clock(),
+            "node": attempt.runner.node_name,
+            **extra,
+        }
+        self._journal_end(attempt.request_id, attempt.number, attempt.runner.sandbox_id, attempt.call, fields)
+
+    def _journal_end(
+        self, request_id: str, number: int, sandbox_id: str | None, call: TestCall, fields: Mapping[str, Any]
+    ) -> None:
+        """One ``finished`` line for attempt ``number``; ``sandbox_id`` is ``None`` when no sandbox ran."""
+        record = Record(request_id, number, STATE_FINISHED, sandbox_id, str(call.output_dir), call.task_id, fields)
+        self.journal.append(record)
 
     def _mark_finished(self, previous: Record, extra: Mapping[str, Any]) -> None:
         self.journal.append(
@@ -926,6 +961,21 @@ def _read_json(handle: Sandbox, path: str) -> dict[str, Any] | None:
     if not isinstance(document, dict):
         raise ValueError(f"{path} is not a JSON object")
     return document
+
+
+def _place(runner: RunnerSandbox) -> tuple[str, str | None]:
+    return runner.sandbox_id, runner.node_name
+
+
+def _end_fields(outcome: TestOutcome, finished_unix: float, extra: Mapping[str, Any]) -> dict[str, Any]:
+    """The fields of a ``finished`` line for ``outcome``."""
+    return {
+        "returncode": outcome.returncode,
+        "failure_class": getattr(outcome.failure_class, "value", outcome.failure_class),
+        "failure_reason": outcome.failure_reason,
+        "finished_unix": finished_unix,
+        **extra,
+    }
 
 
 def _meta_of(call: TestCall) -> dict[str, object]:

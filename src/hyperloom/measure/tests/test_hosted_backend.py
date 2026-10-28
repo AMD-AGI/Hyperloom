@@ -397,6 +397,10 @@ def test_a_sandbox_that_failed_before_it_ran_is_an_infrastructure_failure_with_t
     assert outcome.stderr == f"sandbox_create_failed: {message}"
     assert keys == ["run-1:req-1:1"], "one create, its key not replayed"
     assert r.backend._pool.active == 0
+    [line] = r.backend.journal.records()
+    assert (line.attempt, line.state, line.sandbox_id) == (1, "finished", None), "no sandbox ran"
+    assert line.extra["detail"] == outcome.stderr, "the platform's message outlives the process"
+    assert r.backend.journal.next_attempt("req-1") == 2, "the toolbox's one retry is a new attempt with a new key"
 
 
 def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path) -> None:

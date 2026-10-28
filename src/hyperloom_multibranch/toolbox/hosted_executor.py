@@ -55,7 +55,7 @@ from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
-from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
+from hyperloom.measure.hosted_log import FAILURE_DETAIL_CHARS, STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
@@ -108,6 +108,9 @@ _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
+#: What an infrastructure failure's reason keeps of what the runner or the platform said: its beginning, which names the
+#: failing step, with room for the sandbox and node it names after the runner's bounded message.
+_INFRA_DETAIL_CHARS = FAILURE_DETAIL_CHARS + 300
 #: Why a profile whose traces are all CUDA-graph capture sidecars is no result. Measured on a NEXTN head: the server's log
 #: has ``POST /start_profile`` but never ``Profiling starts``, because the run's last forward step came before the step the
 #: capture window starts at (speculative decoding takes several tokens per step).
@@ -586,7 +589,7 @@ def _failure_reason(outcome: TestOutcome, failure: FailureClass | None) -> str |
     if failure is None:
         return None
     reason = outcome.failure_reason
-    detail = _CONTROL_CHARS.sub(" ", (outcome.stderr or "").strip()[-_REASON_DETAIL_CHARS:]).strip()
+    detail = _CONTROL_CHARS.sub(" ", (outcome.stderr or "").strip()[:_INFRA_DETAIL_CHARS]).strip()
     if failure is not FailureClass.INFRA or not detail or detail == reason:
         return reason
     return detail if reason and detail.startswith(reason) else f"{reason}: {detail}"

@@ -9,6 +9,11 @@ decided. After a restart the newest line of a request tells whether a sandbox ma
 re-attach and wait; ``submitted``: re-attach and send the sheet again, it may never have arrived) or the attempt is
 over (``finished``: the next call is the next attempt). The sheet bytes of every attempt are kept beside the journal
 so a re-attached attempt is verified against exactly the sheet that was sent.
+
+A failed attempt's ``finished`` line also keeps what was said about the failure, since a runner sandbox's ``/out`` goes
+with the sandbox: the runner's own ``status.json`` (only its ``state``, ``error_class`` and ``message``), or that it was
+missing or could not be read, and the platform's message for a create that made no usable sandbox, each bounded to
+:data:`FAILURE_DETAIL_CHARS`. No environment value is read.
 """
 
 from __future__ import annotations
@@ -22,7 +27,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-__all__ = ["JournalCorrupt", "MeasurementJournal", "Record", "STATE_FINISHED", "STATE_SENT", "STATE_SUBMITTED"]
+from hyperloom.sandbox.socket import Sandbox, SandboxError
+
+__all__ = [
+    "FAILURE_DETAIL_CHARS",
+    "JournalCorrupt",
+    "MeasurementJournal",
+    "Record",
+    "STATE_FINISHED",
+    "STATE_SENT",
+    "STATE_SUBMITTED",
+    "STATUS_JSON",
+    "bounded",
+    "runner_status",
+    "status_evidence",
+    "where",
+]
 
 STATE_SUBMITTED = "submitted"
 STATE_SENT = "sent"
@@ -139,3 +159,47 @@ class MeasurementJournal:
         if not _SAFE_ID.fullmatch(request_id):
             raise ValueError(f"request id {request_id!r} is not usable as a file name")
         return self._specs / f"{request_id}.{int(attempt)}.json"
+
+
+# -- what a failed attempt's line keeps ------------------------------------------------------------------------------
+
+#: How much of a message is kept: the start step's verify message whole, a runaway one cut.
+FAILURE_DETAIL_CHARS = 2000
+#: The key of the journal field that says what ``status.json`` held, or why nothing could be read.
+STATUS_JSON = "status_json"
+_STATUS_FIELDS = ("state", "error_class", "message")
+_READ, _MISSING, _UNREADABLE = "read", "missing", "unreadable"
+
+
+def bounded(text: object) -> str:
+    """``text`` as a string of at most :data:`FAILURE_DETAIL_CHARS` characters, its beginning kept."""
+    return "" if text is None else str(text)[:FAILURE_DETAIL_CHARS]
+
+
+def runner_status(status: Mapping[str, Any]) -> dict[str, str]:
+    """The runner's ``state``, ``error_class`` and ``message`` as it wrote them, bounded; nothing else of the file."""
+    return {STATUS_JSON: _READ, **{name: bounded(status.get(name)) for name in _STATUS_FIELDS}}
+
+
+def status_evidence(handle: Sandbox | None, path: str) -> dict[str, str]:
+    """What ``path`` in the sandbox says, read once more, or why it could not be read (a sandbox already gone, say)."""
+    if handle is None:
+        return {STATUS_JSON: f"{_UNREADABLE}: the sandbox has no handle"}
+    try:
+        raw = handle.read_file(path)
+    except FileNotFoundError:
+        return {STATUS_JSON: _MISSING}
+    except (SandboxError, OSError) as exc:
+        return {STATUS_JSON: f"{_UNREADABLE}: {type(exc).__name__}"}
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError both are
+        return {STATUS_JSON: f"{_UNREADABLE}: {type(exc).__name__}"}
+    if not isinstance(document, dict):
+        return {STATUS_JSON: f"{_UNREADABLE}: not a JSON object"}
+    return runner_status(document)
+
+
+def where(sandbox_id: str | None, node_name: str | None) -> str:
+    """``sandbox <id> on node <name>``: where a failure happened, for the reason a reader sees first."""
+    return f"sandbox {sandbox_id or 'unknown'} on node {node_name or 'unknown'}"

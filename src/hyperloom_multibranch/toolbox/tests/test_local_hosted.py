@@ -176,6 +176,11 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
         assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
         assert result.failure_reason and "runner_start_failed" in result.failure_reason
         assert "git fetch failed" in result.failure_reason, result.failure_reason
+        assert result.sandbox and f"(sandbox {result.sandbox.sandbox_id} on node " in result.failure_reason
+        journal = [json.loads(line) for line in (session / "hosted" / "measurements.jsonl").read_text().splitlines()]
+        status = [line["runner_status"] for line in journal if line["state"] == "finished"]
+        assert [s["error_class"] for s in status] == ["runner_start_failed"], journal
+        assert "git fetch failed" in status[0]["message"], "the runner's own message is in the journal line"
         assert "could not be saved" not in caplog.text, "a runner with no out/files has no logs: that is not a warning"
     finally:
         await toolbox.close()
