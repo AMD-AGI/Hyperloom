@@ -669,16 +669,16 @@ FREE_CARDS = (6, 7)
 
 class LeasingToolbox(RecordingToolbox):
     """The recording toolbox with :data:`FREE_CARDS` to lease, or ``lease_refusal`` in their place. ``leased`` holds
-    every lease asked for, ``released`` every lease given back, and ``beside_a_lease`` whether a lease was held as each
-    baseline test was submitted. As the toolbox does, it records each grant and return in the blackboard, as the
-    lease's charge says, timed by ``clock``, the session's. Not a placeholder: the fake is the toolbox owner's own,
-    which leases nothing."""
+    every lease asked for, ``released`` every lease given back, and ``beside_a_lease`` the purpose of each test
+    submitted and whether a lease was held then. As the toolbox does, it records each grant and return in the
+    blackboard, as the lease's charge says, timed by ``clock``, the session's. Not a placeholder: the fake is the
+    toolbox owner's own, which leases nothing."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.leased: list[tuple[str, int]] = []
         self.released: list[str] = []
-        self.beside_a_lease: list[bool] = []
+        self.beside_a_lease: list[tuple[Purpose, bool]] = []
         self.lease_refusal: RequestRejected | None = None
         self.clock: Callable[[], float] = time.time
 
@@ -702,8 +702,7 @@ class LeasingToolbox(RecordingToolbox):
         await self.blackboard.record_lease_end(LeaseEnd(lease_id, self.clock(), LeaseEndReason.RELEASED))
 
     async def submit_test(self, request: TestRequest) -> str:
-        if request.purpose is Purpose.BASELINE:
-            self.beside_a_lease.append(len(self.leased) > len(self.released))
+        self.beside_a_lease.append((request.purpose, len(self.leased) > len(self.released)))
         return await super().submit_test(request)
 
 

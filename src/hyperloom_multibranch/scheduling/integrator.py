@@ -43,7 +43,7 @@ foundation fix. A branch's head is adopted at most once per integration head, an
 it is an adoption.
 
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
-root the same way and by the same rule. It is nobody's candidate, so no merge attempt records it and the regression
+root the same way and by the same rule, judged once PRELUDE has anchored the baseline. It is nobody's candidate, so no merge attempt records it and the regression
 set it would run is still empty; what it leaves the integration branch at is the commit EXPLORE opens on.
 """
 
@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Sequence, Set
+from collections.abc import Awaitable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from functools import partial
 
@@ -634,11 +634,12 @@ class Integrator:
                 await self._repo.rewind(INTEGRATION_BRANCH, merged, tested.onto)
         return merged
 
-    async def replay_champion(self, champion: PreparedReplay, root: str) -> str:
+    async def replay_champion(self, champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
         """Put the Recipe KB's ``champion`` on the integration branch at ``root``; the commit EXPLORE opens on.
 
-        The champion is judged by the rule every candidate is judged by, so EXPLORE opens on it only where it
-        improved on the baseline ``root`` just anchored, and every later gain is still measured from ``root``. It is
+        The replay is submitted at once and judged, by the rule every candidate is judged by, once ``anchored`` -- the
+        anchoring of ``root``'s baseline -- has ended, so EXPLORE opens on it only where it improved on that baseline,
+        and every later gain is still measured from ``root``. It is
         no specialist's commit: nothing offered it, so no merge attempt records it, and the regression set it would
         run is empty before EXPLORE. A champion whose recipe ``root`` carries already, whose test did not measure,
         that the toolbox refuses or that the rule gate does not stack leaves the head at ``root``: the session
@@ -650,13 +651,14 @@ class Integrator:
             return self._record_champion(root, champion.canonical_id, ALREADY_ON_HEAD)
         request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root, replay.delta)
         try:
-            return await self._tests.judged(request, partial(self._stack_champion, replay))
+            return await self._tests.judged(request, partial(self._stack_champion, replay, anchored))
         except RequestRejected as exc:
             return self._record_champion(root, champion.canonical_id, f"the toolbox refused the replay: {exc.reason}")
 
-    async def _stack_champion(self, replay: WarmReplay, request_id: str) -> str:
+    async def _stack_champion(self, replay: WarmReplay, anchored: Awaitable[object], request_id: str) -> str:
         root = replay.parent_commit
         name = replay.canonical_id
+        await asyncio.shield(anchored)
         try:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:

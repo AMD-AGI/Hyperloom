@@ -105,7 +105,7 @@ from hyperloom_multibranch.rulegate.critic import (
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
-from hyperloom_multibranch.rulegate.service import Polling
+from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, Polling
 from hyperloom_multibranch.scheduling.budget import (
     MB_SECONDS_PER_HOUR,
     SessionBudget,
@@ -907,11 +907,12 @@ async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
 
 
-async def test_a_session_on_this_machine_runs_its_root_tests_beside_the_prelude_child_on_leased_cards(
+async def test_a_session_on_this_machine_runs_its_root_tests_and_champion_beside_the_prelude_child_on_leased_cards(
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path), linger=CHILD_BESIDE_SECONDS)
     stage.toolbox_type, stage.on_this_machine = LeasingToolbox, True
+    stage.recipe_kb = OneChampionKB()
     stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
 
     outcome = await stage.run()
@@ -920,7 +921,10 @@ async def test_a_session_on_this_machine_runs_its_root_tests_beside_the_prelude_
     toolbox = stage.toolbox
     assert isinstance(toolbox, LeasingToolbox)
     assert (toolbox.leased, toolbox.released) == ([("prelude", WORKLOAD.tp)], ["lease-1"])
-    assert toolbox.beside_a_lease and all(toolbox.beside_a_lease)
+    beside = sorted(
+        purpose.value for purpose, held in toolbox.beside_a_lease if held and purpose is not Purpose.CONFIRM
+    )
+    assert beside == sorted([Purpose.BASELINE.value] * BASELINE_TESTS + [Purpose.INTEGRATION.value])
     assert stage.processes.env is not None and stage.processes.env[CHILD_CARDS_ENV] == "6"
     baseline = await stage.handle(Role.OBSERVER).baseline()
     assert sorted(baseline.request_ids) == sorted(

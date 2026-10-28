@@ -319,8 +319,16 @@ async def bench(tmp_path: Path) -> Bench:
 CHAMPION = PreparedReplay("inference:champion", None, LaunchConfig(server_args=f"{ARGS['c1']} {TAG_FLAG}c1"))
 
 
+def _anchored() -> asyncio.Future[None]:
+    """A baseline anchoring that has ended, as the bench's root has its baseline."""
+
+    done = asyncio.get_running_loop().create_future()
+    done.set_result(None)
+    return done
+
+
 async def test_a_champion_that_improves_on_the_root_is_where_explore_opens(bench: Bench) -> None:
-    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
     head = await bench.repo.head(INTEGRATION_BRANCH)
     assert opened == head != bench.root
@@ -342,10 +350,26 @@ async def test_a_champion_that_improves_on_the_root_is_where_explore_opens(bench
     }
 
 
+async def test_a_champion_is_replayed_at_once_and_judged_once_the_baseline_is_anchored(bench: Bench) -> None:
+    anchored = asyncio.get_running_loop().create_future()
+
+    replaying = asyncio.ensure_future(bench.integrator.replay_champion(CHAMPION, bench.root, anchored))
+    while not bench.merge_tests():
+        await asyncio.sleep(0.01)
+    [request_id] = bench.merge_tests()
+    while (await bench.handle(Role.OBSERVER).record(request_id)).result is None:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
+
+    assert not replaying.done() and await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    anchored.set_result(None)
+    assert await replaying == await bench.repo.head(INTEGRATION_BRANCH) != bench.root
+
+
 async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}})
 
-    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
     assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
     [request_id] = bench.merge_tests()
@@ -361,7 +385,7 @@ async def test_a_champion_the_toolbox_refuses_leaves_explore_on_the_root(bench: 
 
     bench.refuse("c1")
 
-    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root, _anchored())
 
     assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
     [logged] = bench.logged()
@@ -375,7 +399,9 @@ async def test_a_champion_the_toolbox_refuses_leaves_explore_on_the_root(bench: 
 
 
 async def test_a_champion_the_root_carries_already_is_never_tested(bench: Bench) -> None:
-    opened = await bench.integrator.replay_champion(replace(CHAMPION, launch=ROOT_RECIPE.launch), bench.root)
+    opened = await bench.integrator.replay_champion(
+        replace(CHAMPION, launch=ROOT_RECIPE.launch), bench.root, _anchored()
+    )
 
     assert opened == bench.root and not bench.merge_tests()
     [logged] = bench.logged()

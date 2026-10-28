@@ -36,6 +36,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
 )
 
 from hyperloom_multibranch.scheduling.prelude_reader import (
+    MB_FRAMEWORK_VERSION_ENV,
     MB_LATEST_STATE_SCHEMA_VERSION,
     ChildBaselineRun,
     MB_TRACE_FILE_GLOB,
@@ -43,6 +44,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeReadError,
     UpstreamPin,
     framework_pin,
+    launched_framework_version,
     read_child_session,
     read_prelude,
     root_recipe,
@@ -80,7 +82,11 @@ def test_completed_child_session_is_read(tmp_path: Path) -> None:
 
     assert artifacts.framework_root == tmp_path / "framework"
     assert artifacts.roofline_ceiling == {GRADED_OUTPUT: ROOFLINE_PEAK}
-    assert artifacts.framework_version == "0.4.1"
+
+
+def test_the_framework_version_a_child_records_is_the_one_its_environment_names_else_the_installed_one() -> None:
+    assert launched_framework_version("sglang", {MB_FRAMEWORK_VERSION_ENV: " 0.5.2 "}) == "0.5.2"
+    assert launched_framework_version("no-such-framework", {}) == ""
 
 
 def test_a_child_that_named_no_framework_checkout_is_read(tmp_path: Path) -> None:

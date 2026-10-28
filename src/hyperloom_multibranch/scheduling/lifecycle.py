@@ -221,11 +221,17 @@ class Session:
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
+        self._integrator = self._build_integrator(peers.repo, checks, services)
         prelude_services = PreludeServices(
-            peers.repo, peers.gate, tests, peers.toolbox, peers.on_this_machine, self._open_integration
+            peers.repo,
+            peers.gate,
+            tests,
+            peers.toolbox,
+            peers.on_this_machine,
+            self._open_integration,
+            self._integrator.replay_champion,
         )
         self._prelude = Prelude(context, prelude_services, warm_start=warm_start)
-        self._integrator = self._build_integrator(peers.repo, checks, services)
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._blackboard, self._clock)
@@ -410,7 +416,6 @@ class Session:
             prelude = await self._root_session(budget, hard_stop)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
-        start_commit = await self._replay_champion(prelude)
         await self._adopt_playbook()
         manifest = read_manifest(self._layout.manifest)
         replace(manifest, policy_versions=self._policy_versions()).write(self._layout.manifest)
@@ -427,7 +432,7 @@ class Session:
         self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
             prelude.root_commit,
-            start_commit,
+            prelude.start_commit,
             prelude.profile.roofline_ceiling,
             explore_end,
             budget.deadline,
@@ -445,15 +450,6 @@ class Session:
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
         return await self._final(candidates, reason)
-
-    async def _replay_champion(self, prelude: PreludeResult) -> str:
-        """The commit EXPLORE opens on: the root with the Recipe KB's champion replayed onto it, where PRELUDE found
-        one and the integrator measured it better than the root, and the root itself otherwise."""
-
-        champion = prelude.champion
-        if champion is None:
-            return prelude.root_commit
-        return await self._integrator.replay_champion(champion, prelude.root_commit)
 
     async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
@@ -534,7 +530,7 @@ class Session:
         return Closer(self._layout, self._stopper, closing, self._clock)
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """PRELUDE but for the champion's replay: the root commit with its baseline, and the warm-start leads every
+        """PRELUDE: the root commit with its baseline, the commit EXPLORE opens on and the warm-start leads every
         specialist is briefed on. A reused PRELUDE starts no child."""
 
         workload, reused = self._settings.workload, self._settings.reuse_prelude

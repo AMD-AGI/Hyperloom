@@ -27,6 +27,10 @@ from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeError
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
+from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+    DEFAULT_FRAMEWORK_VERSION_SLUG,
+    detect_framework_version,
+)
 
 #: ``LATEST_STATE_SCHEMA_VERSION`` of src/hyperloom/orchestrator/state/shared_state.py, which this package may not
 #: import; a test compares the two.
@@ -39,6 +43,10 @@ MB_STATE_FILE = "state.json"
 #: The main flow seeds ``framework_repo_path`` from this variable of its environment
 #: (src/hyperloom/inference_optimizer/cli/bootstrap.py), which the child inherits from the scheduler.
 MB_FRAMEWORK_REPO_ENV = "FRAMEWORK_REPO_PATH"
+#: The framework version the main flow records when its command line names none, before it detects one
+#: (``resolve_framework_version`` of src/hyperloom/inference_optimizer/cli/bootstrap.py, which the scheduler may not
+#: import: it loads the main flow's command line).
+MB_FRAMEWORK_VERSION_ENV = "FRAMEWORK_VERSION"
 #: The key of the main flow's ``--launch-info-file`` (src/hyperloom/inference_optimizer/cli ``_emit_launch_info``).
 MB_LAUNCH_SESSION_DIR_KEY = "session_dir"
 #: The decode ceiling of a roofline snapshot (src/hyperloom/inference_optimizer/roofline_snapshot.py).
@@ -112,7 +120,6 @@ class PreludeArtifacts:
 
     session_dir: Path
     framework_root: Path | None
-    framework_version: str
     roofline_ceiling: Mapping[str, float]
     profile: ChildProfile | None
     baseline_run: ChildBaselineRun | None = None
@@ -153,7 +160,6 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
     return PreludeArtifacts(
         session_dir=session_dir,
         framework_root=_checkout(str(state.get("framework_repo_path") or "")),
-        framework_version=str(state.get("framework_version") or ""),
         roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
         profile=_latest_profile(session_dir),
         baseline_run=baseline_run,
@@ -249,6 +255,18 @@ def launched_root(framework: str, env: Mapping[str, str], base_image_digest: str
     :class:`PreludeReadError`. Blocks."""
 
     return root_recipe(framework, framework_pin(_checkout(env.get(MB_FRAMEWORK_REPO_ENV, ""))), base_image_digest)
+
+
+def launched_framework_version(framework: str, env: Mapping[str, str]) -> str:
+    """The version of ``framework`` a child launched with ``env`` records, as the main flow resolves it for a command
+    line that names none: :data:`MB_FRAMEWORK_VERSION_ENV`, else the installed package's, ``""`` when that cannot be
+    told. Blocks: detecting it imports the framework's package."""
+
+    named = env.get(MB_FRAMEWORK_VERSION_ENV, "").strip()
+    if named:
+        return named
+    detected = detect_framework_version(framework)
+    return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
 
 def framework_pin(root: Path | None) -> UpstreamPin | None:
@@ -356,6 +374,7 @@ __all__ = [
     "PreludeReadError",
     "UpstreamPin",
     "framework_pin",
+    "launched_framework_version",
     "launched_root",
     "read_child_session",
     "read_prelude",

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -64,7 +64,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     prelude_argv,
     reused_prelude,
 )
-from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
+from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV, MB_FRAMEWORK_VERSION_ENV
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, ReusedPrelude, Workload
@@ -139,13 +139,15 @@ class StubbornRegistry(ProcessRegistry):
 class PreludePeers:
     """The repository, toolbox and rule gate PRELUDE works with, on the session's blackboard; ``tests`` waits for the
     toolbox's outcomes without real sleeps. ``opened`` holds each commit the integration branch was opened on, with
-    whether the child had been started then; ``on_this_machine`` says whether the toolbox leases the child its cards."""
+    whether the child had been started then, and ``replays`` each champion replayed, with whether the child had
+    exited then; ``on_this_machine`` says whether the toolbox leases the child its cards."""
 
     repo: GitExperimentRepo
     toolbox: LeasingToolbox
     tests: SessionTests
     gate: GateService
     opened: list[tuple[str, bool]] = field(default_factory=list)
+    replays: list[tuple[str, bool]] = field(default_factory=list)
     on_this_machine: bool = False
 
 
@@ -197,11 +199,18 @@ def _prelude(
     )
     warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
 
+    child = processes if isinstance(processes, MbFakeChildRegistry) else None
+
     async def open_integration(root: str) -> None:
-        peers.opened.append((root, isinstance(processes, MbFakeChildRegistry) and processes.child is not None))
+        peers.opened.append((root, child is not None and child.child is not None))
+
+    async def replay_champion(champion: PreparedReplay, root: str, anchored: Awaitable[object]) -> str:
+        peers.replays.append((champion.canonical_id, child is not None and child.child_exited()))
+        await asyncio.shield(anchored)
+        return root
 
     services = PreludeServices(
-        peers.repo, peers.gate, peers.tests, peers.toolbox, peers.on_this_machine, open_integration
+        peers.repo, peers.gate, peers.tests, peers.toolbox, peers.on_this_machine, open_integration, replay_champion
     )
     return Prelude(context, services, warm_start=warm_start)
 
@@ -298,7 +307,7 @@ async def test_the_root_is_the_checkout_the_child_runs_on_committed_before_the_c
     assert (root.branch, root.recipe_digest) == (INTEGRATION_BRANCH, recipe.digest())
     profile = await _blackboard(layout).session_profile()
     assert profile == result.profile
-    assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
+    assert (profile.session_id, profile.hardware) == (layout.session_id, "mi355x")
     assert dict(profile.roofline_ceiling) == {GRADED_OUTPUT: ROOFLINE_PEAK}
     assert (profile.isl, profile.osl) == (1024, 1024)
     assert profile.kernel_optimizer == "geak"
@@ -440,8 +449,9 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_p
     layout = _layout(tmp_path)
     kb = OneChampionKB()
     budget = SessionBudget.from_hours(2.0, NOW)
+    peers = _peers(layout)
 
-    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=kb)
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers, recipe_kb=kb)
     result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
     [lead] = result.warm_leads
@@ -453,7 +463,7 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_p
     assert kb.searched[0]["match"]["hardware"] == result.profile.hardware
     assert lead.replay is not None and lead.replay.recipe is None and lead.refusal is None
     assert lead.replay.launch.server_args == "--enable-expert-parallel"
-    assert result.champion is lead.replay
+    assert [canonical_id for canonical_id, _ in peers.replays] == [lead.canonical_id]
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
 
 
@@ -573,7 +583,7 @@ async def test_without_a_readable_recipe_kb_the_session_roots_with_no_leads(
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=recipe_kb)
     result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
-    assert result.warm_leads == () and result.champion is None
+    assert result.warm_leads == () and result.start_commit == result.root_commit
     assert _warm_start_decision(layout) == {"leads": [], "unread": unread}
 
 
@@ -779,9 +789,9 @@ async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the
     peers.toolbox.lease_refusal = RequestRejected("one test needs both cards", "lease_leaves_no_measurement")
     exited = _submitted_after_the_child(peers, processes)
 
-    await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+    await _run(_prelude(layout, processes, peers, recipe_kb=OneChampionKB()), SessionBudget.from_hours(2.0, NOW))
 
-    assert exited == [True] * BASELINE_TESTS
+    assert exited == [True] * BASELINE_TESTS and peers.replays == [("inference:champion", True)]
     assert processes.env is None and peers.toolbox.released == []
     [first] = [entry for entry in _logged(layout) if entry["reason"] == CHILD_FIRST]
     assert first["detail"] == {"refusal": "one test needs both cards"}
@@ -814,6 +824,40 @@ async def test_a_child_that_ran_on_another_checkout_than_the_root_fails_prelude(
         await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
 
     assert "root committed" not in [entry["reason"] for entry in _logged(layout)]
+
+
+async def test_the_champion_is_replayed_while_the_child_runs_on_the_profile_known_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(MB_FRAMEWORK_VERSION_ENV, "0.5.2")
+    layout = _layout(tmp_path)
+    kb = OneChampionKB()
+    processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
+    peers.on_this_machine = True
+
+    result = await _run(_prelude(layout, processes, peers, recipe_kb=kb), SessionBudget.from_hours(2.0, NOW))
+
+    assert peers.replays == [("inference:champion", False)]
+    assert kb.searched and result.profile.framework_version == "0.5.2"
+    assert (await _blackboard(layout).session_profile()).framework_version == "0.5.2"
+    reasons = [entry["reason"] for entry in _logged(layout)]
+    assert reasons.index("warm start read") < reasons.index("root committed")
+
+
+async def test_an_agentx_champion_is_replayed_once_the_childs_run_anchored_the_baseline(tmp_path: Path) -> None:
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child)
+    layout, peers, _ = _agentx_prelude(tmp_path, child)
+
+    await _run(
+        _prelude(layout, _registry(layout, child), peers, recipe_kb=OneChampionKB()),
+        SessionBudget.from_hours(2.0, NOW),
+        AGENTX,
+    )
+
+    assert [exited for _, exited in peers.replays] == [True]
+    reasons = [entry["reason"] for entry in _logged(layout)]
+    assert reasons.index("baseline established") < reasons.index("warm start read")
 
 
 def _logged(layout: SessionLayout) -> list[dict[str, Any]]:
