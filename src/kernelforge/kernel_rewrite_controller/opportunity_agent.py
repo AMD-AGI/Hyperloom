@@ -302,6 +302,19 @@ def _additional_directories(handoff: HandoffBundle) -> list[str]:
     return [str(path.resolve()) for path in sorted(directories, key=str)]
 
 
+#: Opportunity rule 3. A whole-trace share ranks prefill and out-of-step kernels as if they were decode work.
+DECODE_SHARE_RULE = """\
+Rank on the decode step. Use each operator's share in the decode classes
+   (VERIFY, DECODE) of the "Hot Kernels by Step Class" section of
+   trace-evidence.md, and prefer the largest; assign lower numeric priority
+   values to higher-share operators. Do not publish an operator that is
+   below 1% of the kernel time in every decode class. A row marked
+   (collective) includes the time that rank waited for the others, so rank a
+   collective on its communication total (rule 9), not on that row. When no
+   decode ranking is available, rank only from clearly labeled corroborated
+   evidence and never fabricate a percentage."""
+
+
 def _system_prompt() -> str:
     return """\
 You are the KernelForge kernel rewrite opportunity analyst.
@@ -344,10 +357,7 @@ Apply these non-negotiable opportunity rules:
    here -- which algorithm is chosen, the size thresholds that choose it, buffer
    and IPC registration, the quantized path, how it is captured into a graph --
    and rewriting that layer is a real optimization, not a workaround.
-3. Prefer the largest measured end-to-end GPU-time share. Assign lower numeric
-   priority values to higher-share operators. When exact percentages are
-   unavailable, rank only from clearly labeled corroborated evidence and never
-   fabricate a percentage.
+3. {decode_share_rule}
 4. Derive driver cases from the current workload and serving state, including
    its prefill/decode phases, TP/EP partitioning, concurrency, sequence lengths,
    active backend, tensor shapes, dtypes, layouts, and dispatch boundaries.
@@ -491,7 +501,9 @@ draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
 delete a directory, so this is how a draft is taken back, and a withdrawn one
 is neither published nor held against you. You cannot end the session while a
 refused draft is neither fixed nor withdrawn.
-""".replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS))
+""".replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS)).replace(
+        "{decode_share_rule}", DECODE_SHARE_RULE
+    )
 
 
 def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:

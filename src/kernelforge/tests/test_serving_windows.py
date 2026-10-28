@@ -153,3 +153,20 @@ def test_a_templated_kernel_name_is_cut_for_the_reader(tmp_path):
 def test_nothing_renders_without_a_ranking():
     assert sw.render_hot_kernels_by_class({}) == []
     assert sw.render_hot_kernels_by_class(None) == []
+
+
+def test_a_collective_row_says_its_time_includes_the_wait_for_other_ranks(tmp_path):
+    """GLM-5.3 EXTEND bs=1: cross_device_reduce ranked first at 194.8 ms/step on TP0 and spent 29.7 on TP2."""
+    events = [
+        step("step[VERIFY bs=4]", 0.0, 20.0),
+        kernel("mfma_moe1_silu_mul", 1.0, 9.0),
+        kernel("void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>", 10.0, 6.0),
+    ]
+
+    body = sw.render_hot_kernels_by_class(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
+
+    assert [line for line in body if line.startswith("| ") and "`" in line] == [
+        "| 60.0% | 0.01 | `mfma_moe1_silu_mul` |",
+        "| 40.0% | 0.01 | `void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>` (collective) |",
+    ]
+    assert sw.COLLECTIVE_NOTE in body

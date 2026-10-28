@@ -170,6 +170,21 @@ def _short(name: str) -> str:
     return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1] + "…"
 
 
+#: Said beneath a ranking that holds a collective: one rank's collective time is also its wait for the others.
+COLLECTIVE_NOTE = (
+    "A row marked (collective) is one rank's time in a collective, which includes the time it waited for the "
+    "other ranks: do not rank it against compute kernels on this figure."
+)
+
+
+def _row(kernel: dict[str, Any]) -> str:
+    """One ranking row, marking a collective."""
+    from kernelforge.fusion.diagnose import categorize_kernel_name
+
+    marker = " (collective)" if categorize_kernel_name(kernel["name"]) == "collective" else ""
+    return f"| {kernel['pct']:.1f}% | {kernel['ms']:.2f} | `{_short(kernel['name'])}`{marker} |"
+
+
 def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, top_n: int = 8) -> list[str]:
     """Render one ranking per window class, with what each class is, as report lines."""
     if not by_class:
@@ -188,8 +203,10 @@ def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, t
                 "|---:|---:|---|",
             ]
         )
-        lines.extend(f"| {k['pct']:.1f}% | {k['ms']:.2f} | `{_short(k['name'])}` |" for k in data["kernels"][:top_n])
+        lines.extend(_row(k) for k in data["kernels"][:top_n])
         lines.append("")
+    if any(" (collective) |" in line for line in lines):
+        lines.extend([COLLECTIVE_NOTE, ""])
     lines.append(
         "Rankings are per class because the classes are not comparable: a prefill step runs tens of times "
         "longer than a decode step, so one ranking over the whole trace is a ranking of prefill. Optimise "
@@ -199,6 +216,7 @@ def render_hot_kernels_by_class(by_class: dict[str, dict[str, Any]] | None, *, t
 
 
 __all__ = [
+    "COLLECTIVE_NOTE",
     "DECODE_KINDS",
     "TOP_N",
     "StepWindow",
