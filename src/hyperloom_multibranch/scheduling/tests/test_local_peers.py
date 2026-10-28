@@ -1041,3 +1041,27 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
     with_native, without = roles[0], roles[-1]
     assert "python/sglang/kernels/aot" in with_native and "pending_build" in with_native
     assert without == role_prompt(_specialist_role(WORKLOAD), references={})
+
+
+def test_the_toolbox_is_told_how_many_root_tests_the_rule_asks_prelude_for(tmp_path: Path) -> None:
+    """The last of them tops the root's short-prompt pool up (#146 c3217); AgentX's rule asks for none."""
+    handed: list[object] = []
+    image = SimpleNamespace(ref="registry.invalid/image:1", digest="sha256:" + "a" * 64)
+    host = SimpleNamespace(
+        image=image,
+        magpie_commit="1" * 40,
+        inferencex=SimpleNamespace(commit="2" * 40),
+        backend=SimpleNamespace(toolbox=lambda _setup, _notebook, acceptance, _spec: handed.append(acceptance)),
+    )
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    setup = SimpleNamespace(
+        layout=SimpleNamespace(toolbox=tmp_path / "toolbox", notebook=tmp_path / "notebook"),
+        workload=WORKLOAD,
+        blobs=blobs,
+    )
+    rule = workload_rule(WORKLOAD, LocalNotebook(tmp_path / "gate", Writer(Role.GATE, "rule-gate")))
+
+    local_peers_module._toolbox(host, setup, object(), object(), root_tests=rule.baseline_tests)  # type: ignore[arg-type]
+
+    assert [acceptance.root_tests for acceptance in handed] == [BASELINE_TESTS]  # type: ignore[attr-defined]
+    assert workload_rule(AGENTX, LocalNotebook(tmp_path / "gate", Writer(Role.GATE, "rule-gate"))).baseline_tests == 0

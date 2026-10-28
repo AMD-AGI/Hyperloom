@@ -22,8 +22,9 @@ logs why). A builder whose runners read this host's runner cache reads what it i
 *What against.* The outputs of server processes of one recipe are compared with each other only: the test's own, and
 every process the toolbox pooled for the same recipe (``short_prompt_pool``). Every test that runs the check adds its own
 server (process 0); a merge test (``integration``) or a final candidate whose recipe has fewer pooled processes than the
-pack's ``processes`` also boots fresh ones up to that count (:func:`with_extra_processes`), and an explore is judged over
-the processes it has. A comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8
+pack's ``processes`` also boots fresh ones up to that count (:func:`with_extra_processes`), and so does the session's last
+BASELINE test, once, for the root (the floor then rests on the same count as every candidate the gate holds to it); an
+explore is judged over the processes it has. A comparison with the parent's outputs fires on every change that moves greedy tokens early (fp8
 KV, quantized GEMMs), and a defect that is wrong in every process is the accuracy evaluation's to see.
 
 *What is recorded.* :func:`consistency_of` reads the landed ``outputs.json`` and states counts and positions
@@ -374,11 +375,13 @@ def decide(
     )
 
 
-def with_extra_processes(plan: ShortPromptPlan, request: TestRequest, pooled: int) -> ShortPromptPlan:
-    """``plan`` with the fresh processes ``request`` boots after its own server's answers: for a merge test or a final
-    candidate, as many as the recipe's pool (``pooled`` processes so far) lacks of the pack's ``processes``; for any other
-    test, none."""
-    if request.purpose not in _FULL_COUNT_PURPOSES:
+def with_extra_processes(
+    plan: ShortPromptPlan, request: TestRequest, pooled: int, *, root_top_up: bool = False
+) -> ShortPromptPlan:
+    """``plan`` with the fresh processes ``request`` boots after its own server's answers: for a merge test, a final
+    candidate or the root's top-up (``root_top_up``: the session's last BASELINE test, see ``Acceptance``), as many as the
+    recipe's pool (``pooled`` processes so far) lacks of the pack's ``processes``; for any other test, none."""
+    if request.purpose not in _FULL_COUNT_PURPOSES and not root_top_up:
         return plan
     return replace(plan, processes=max(1, short_prompt_rules().processes - pooled))
 

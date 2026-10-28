@@ -19,7 +19,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import (
+    AttachmentRef,
+    FailureClass,
+    Purpose,
+    TestKind,
+    TestRequest,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     ClaimLost,
@@ -51,7 +59,7 @@ from hyperloom_multibranch.toolbox.analysis import (
     analysis_request,
     root_profile_request,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, EarlierBaselines, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import landed_agentx_baseline
@@ -149,6 +157,7 @@ class RealToolbox:
             is_accepted=self._is_accepted,
             live_profile=self._live_profile,
             pooled=self._pool_count,
+            earlier_baselines=self._earlier_baselines,
         )
         self._runner = AttemptRunner(
             executor,
@@ -561,6 +570,22 @@ class RealToolbox:
             ):
                 return entry.request_id
         return None
+
+    def _earlier_baselines(self, request: TestRequest, recipe_digest: str) -> EarlierBaselines:
+        """The BASELINE tests of the recipe whose digest is ``recipe_digest`` the submit log holds as accepted before
+        ``request`` (all of them for a request not logged yet), and how many of those have no outcome. Read from the log,
+        so a restarted toolbox re-preparing a request counts what the one before it counted, less what has ended since."""
+        accepted = unfinished = 0
+        for entry in self._log.entries():
+            if request.request_id is not None and entry.request_id == request.request_id:
+                break
+            if entry.aborted or entry.recipe_digest != recipe_digest:
+                continue
+            if entry.request.get("purpose") != Purpose.BASELINE.value:
+                continue
+            accepted += 1
+            unfinished += entry.outcome is None and not entry.settled
+        return EarlierBaselines(accepted, unfinished)
 
     @staticmethod
     def _holds_profile(entry: LogEntry) -> bool:

@@ -3,9 +3,9 @@
 
 """The short-prompt answers the toolbox pools per recipe, kept across a restart.
 
-Every test that runs the short-prompt check answers it on its own server after its rounds (process 0), and a merge test or
-a final candidate whose recipe has fewer pooled processes than the pack's ``processes`` boots fresh ones up to that count
-(``short_prompts.with_extra_processes``). Every server boot is an independent launch, so the answers of every test of one
+Every test that runs the short-prompt check answers it on its own server after its rounds (process 0), and a merge test,
+a final candidate or the session's last root test whose recipe has fewer pooled processes than the pack's ``processes``
+boots fresh ones up to that count (``short_prompts.with_extra_processes``). Every server boot is an independent launch, so the answers of every test of one
 recipe (first test, confirm, merge test, final) are one sample of that recipe's launches: :func:`pooled_result` adds a
 test's completed processes to the pool and compares every process pooled for its recipe.
 

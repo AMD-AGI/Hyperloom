@@ -306,9 +306,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
-    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host))
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_notebook)
+    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host), root_tests=rule.baseline_tests)
 
     @cache
     def runtime_notebook(branch: str) -> LocalNotebook:
@@ -339,11 +339,17 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
 
 def _toolbox(
-    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement
+    host: MeasurementHost,
+    setup: PeerSetup,
+    repo: ExperimentRepo,
+    canonical: CanonicalMeasurement,
+    *,
+    root_tests: int,
 ) -> RealToolbox:
     """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
     canonical measurement, and compiled from the session's blob store. A plain explore runs no accuracy evaluation:
-    the rule gate judges it on throughput, and the confirm that follows a candidate runs the evaluation."""
+    the rule gate judges it on throughput, and the confirm that follows a candidate runs the evaluation. ``root_tests``
+    is how many root tests the rule gate asks PRELUDE for; the last of them tops the root's short-prompt pool up."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
@@ -365,7 +371,14 @@ def _toolbox(
     return host.backend.toolbox(
         setup,
         LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False),
+        AcceptanceSetup(
+            repo,
+            planner,
+            image.digest,
+            workload_kind=workload.kind,
+            explore_accuracy=False,
+            root_tests=root_tests,
+        ),
         spec,
     )
 
