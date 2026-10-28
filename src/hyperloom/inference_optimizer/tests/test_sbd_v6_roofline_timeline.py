@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors.profile import (
     CHECK_GRAPH_LAUNCH_COVERAGE,
+    CHECK_PHASE_COVERAGE,
     CHECK_RANK_SHAPE,
     CHECK_TRACE_HAS_OPS,
     _TraceProbe,
@@ -921,7 +922,8 @@ def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
     assert out["probe_status"] == "failed"
     assert out["probe_error"] == "OSError: trace unreadable"
     assert out["verdict"] == {}
-    assert [row["check_id"] for row in out["checks"]] == [CHECK_TRACE_HAS_OPS]
+    # The phase-coverage check is always appended (skipped here — no trace_split under /w).
+    assert [row["check_id"] for row in out["checks"]] == [CHECK_TRACE_HAS_OPS, CHECK_PHASE_COVERAGE]
 
 
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:

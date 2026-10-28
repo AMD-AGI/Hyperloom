@@ -116,6 +116,21 @@ class GapsStateMixin:
         gap["last_updated_ts"] = now_iso()
         return gap
 
+    def retire_gap(self, canonical_id: str) -> bool:
+        """Drop the gap matching ``canonical_id`` if present; returns whether a row was removed. Coordinator-only writer.
+
+        ``upsert_gap`` only ever adds or ages rows out under the cap, so a signal-derived gap whose condition has
+        cleared would otherwise keep its severity and keep being ranked. The deriving extractor retires it here.
+        """
+        cid = str(canonical_id or "")
+        if not cid:
+            return False
+        kept = [g for g in self.gaps if not (isinstance(g, dict) and str(g.get("canonical_id") or "") == cid)]
+        if len(kept) == len(self.gaps):
+            return False
+        self.gaps = kept
+        return True
+
 
 # Artifact references copied from a per-variant outcome onto its gap attempt.
 _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
@@ -142,6 +157,13 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
+        profile_gaps = self._extract_gaps_from_profile(workload_id)
+        for entry in profile_gaps:
+            state.upsert_gap(entry)
+        if not profile_gaps:
+            # Coverage is complete (or no longer applicable): retire the prefill gap so a resolved, high-severity row
+            # does not keep steering specialists. A no-op when the gap was never raised.
+            state.retire_gap(f"{workload_id}#phase_unmeasured:prefill")
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,
@@ -257,6 +279,42 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                 "severity": "high" if no_promote >= 6 else "medium",
                 "domain_hint": self._framework_authoring_domain(),
                 "source": "attempts",
+            }
+        ]
+
+    def _extract_gaps_from_profile(self, workload_id: str) -> list[dict[str, Any]]:
+        """Emit a gap when the last profile covered only one serving phase on a workload that exercises the other.
+
+        A partial capture drops the missing phase out of the Amdahl denominator, so ranking against it steers the run
+        to the phase that happened to be measured. Scoped to a prefill miss on an agentic (prefill-heavy) workload —
+        the failure mode where the dominant phase goes unseen — so a synthetic decode-steady-state capture stays quiet.
+        When a later profile captures prefill the extractor emits nothing and ``refresh_gaps`` retires the gap, so a
+        resolved row does not linger at ``severity: high``.
+
+        Returns:
+            A single-row list carrying the prefill-unmeasured gap, or empty when coverage is complete or the workload
+            is not agentic.
+        """
+        from hyperloom.common.perf_metric import is_agentx_mode
+
+        state = self.shared_state
+        coverage = getattr(state, "last_profile_phase_coverage", None) or {}
+        if not coverage.get("partial") or str(coverage.get("missing") or "") != "prefill":
+            return []
+        if not is_agentx_mode(getattr(state, "benchmark_mode", "")):
+            return []
+        return [
+            {
+                "canonical_id": f"{workload_id}#phase_unmeasured:prefill",
+                "symptom": (
+                    "prefill is absent from the last profile split — on this agentic workload prefill dominates the "
+                    "engine, so its component shares are unmeasured, not zero. Instrument the prefill path directly "
+                    "(a targeted per-component eval) before ranking against decode-only data."
+                ),
+                "layer": "framework",
+                "severity": "high",
+                "domain_hint": self._framework_authoring_domain(),
+                "source": "profile",
             }
         ]
 
