@@ -87,6 +87,28 @@ These flags are rejected with `unrecognized arguments`:
 * `kernelforge forge-loop --return-after-read-kb`, and the TraceLens kernel tool's
   `--skip-split` / `--source-root` (with `TRACELENS_SOURCE_ROOT`): drop them.
 * `hyperloom multi-node kernel-bench` is removed; nothing in the optimizer calls it.
+* The TraceLens kernel tool's `--use-llm-orchestrator` / `--no-llm-orchestrator`:
+  use `--route {agent,non-llm}`. Its `--num-denoise-steps`, `--model-path` and
+  `--precision` fed the removed diffusion latency roofline: drop them.
+* `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` is
+  removed and fails with `No module named`; use `tracelens_analysis --route non-llm`.
+
+### Required: the `bypass` trace-analysis route is replaced by `non-llm`
+
+`HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a
+`trace_analyze` request, now fails the request with `invalid_analysis_route`.
+Set `non-llm` instead; it needs a TraceLens checkout and writes `analysis.json`
+rather than `analysis.md`.
+
+These are no longer read and are silently ignored, so drop them:
+
+* `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`,
+  `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST` and
+  `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES` (the bypass route).
+* `HYPERLOOM_NUM_DENOISE_STEPS` and the `trace_analyze` keys `num_denoise_steps`,
+  `model_path`, `precision` and `analysis_mode`.
+* `KERNEL_AGENT_USE_LLM_ORCHESTRATOR`; the agent route always runs unless
+  `--route non-llm` is given.
 
 ### Required: sessions created before this release do not resume
 
