@@ -264,7 +264,10 @@ def test_the_next_round_deepens_both_routes_from_their_own_code(tmp_path, monkey
     # Round 2 measured 11 in the slow route's checkout and 4 in the fast one's, then 4 again on the campaign branch.
     assert measured[-3:] == [4, 11, 4] or measured[-3:] == [11, 4, 4]
     assert "structural route" in selector.facts[1]
-    assert len([event for event in loop.state_store.recent_events(50) if event["type"] == "iteration_result"]) == 2
+    events = loop.state_store.recent_events(50)
+    assert len([event for event in events if event["type"] == "iteration_result"]) == 2
+    # Each start's slots decide how it is planned; no campaign-wide search mode is decided or recorded.
+    assert not [event for event in events if event["type"] == "search_policy_decision"]
 
 
 def test_a_port_carries_gains_onto_another_route_and_can_publish_it(tmp_path, monkeypatch):

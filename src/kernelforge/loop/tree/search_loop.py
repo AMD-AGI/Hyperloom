@@ -69,6 +69,9 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
     async def _run_supervisor_review(self, *_args, **_kwargs) -> None:
         """A tree campaign has no Supervisor: the selector owns every change of direction."""
 
+    def _update_search_policy(self, _iteration: int) -> None:
+        """A tree campaign has no campaign-wide search mode: each start's slots decide how it is planned."""
+
     def _begin_search_tree(self) -> None:
         """Root a fresh campaign's tree at the published best, or reconcile a resumed one with the repository."""
         untracked = untracked_outside(self.ic.workspace_dir, [EXPERIMENTS_DIR])
