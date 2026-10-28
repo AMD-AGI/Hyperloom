@@ -61,16 +61,6 @@ class LaneAllocation:
         """Whether the share pays for at least one target."""
         return self.max_targets > 0
 
-    @property
-    def is_underfunded(self) -> bool:
-        """Whether a share that was derived is too small to pay for one target.
-
-        Distinct from ``not is_fundable``: a zero share means no budget could be derived at all -- an unbounded
-        session has no remaining-minutes to divide -- and that is not the same as a phase with minutes left that
-        cannot pay for the work. Only the latter is a reason to decline.
-        """
-        return self.budget_sec > 0 and self.max_targets == 0
-
 
 def phase_budget_sec(remaining_minutes: object, *, reserve_sec: int = PHASE_RESERVE_SEC) -> int:
     """Convert time left in the phase into the seconds the lanes may divide."""

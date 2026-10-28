@@ -467,16 +467,12 @@ def server_hit_logging(server_log: Path) -> bool:
 
 
 def _launched_server_env(server_log: Path) -> dict[str, Any] | None:
-    """The env Magpie launched the server with, else the env the round's launch evidence recorded."""
+    """The env Magpie launched the server with."""
     native = server_log.parent / "agentx_server_launch.json"
-    if native.is_file():
-        launch = read_json(native, {}, require_dict=True)
-        return {**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})}
-    for folder in server_log.parents[:3]:
-        evidence = folder / "launch_evidence.json"
-        if evidence.is_file():
-            return dict(read_json(evidence, {}, require_dict=True).get("observed_server_env") or {})
-    return None
+    if not native.is_file():
+        return None
+    launch = read_json(native, {}, require_dict=True)
+    return {**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})}
 
 
 def _safe_mtime(path: Path) -> float:
