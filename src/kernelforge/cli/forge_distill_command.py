@@ -38,12 +38,29 @@ from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_options,
     type=click.Path(exists=True, file_okay=False, resolve_path=True),
     help="A source tree the curator may read to check a claim, e.g. the installed FlyDSL. Repeatable",
 )
+@click.option(
+    "--guide",
+    "guides",
+    multiple=True,
+    help="A file of the skill, by its path inside it (e.g. CONTRIBUTING.md), that holds the skill's own rules for "
+    "adding to it; the curator follows it where it differs from the built-in rules. Repeatable",
+)
+@click.option(
+    "--lint",
+    "lint_commands",
+    multiple=True,
+    help="A check the files the patch adds or changes must pass, run in the edited copy with their paths appended; "
+    "{repo} stands for the skill's repository root, e.g. 'python3 tools/kb_lint.py --repo-root {repo}'. Repeatable; "
+    "one that already fails on those files in the skill is reported as such",
+)
 @_agent_runtime_options
 def forge_distill(
     workspace: str,
     skill_dir: str,
     out: str | None,
     references: tuple[str, ...],
+    guides: tuple[str, ...],
+    lint_commands: tuple[str, ...],
     agent: AgentRuntimeOptions,
 ) -> None:
     """Audit what the campaign learned against the skill and write the edits worth making as a patch to review.
@@ -66,6 +83,8 @@ def forge_distill(
                 out=target,
                 distill_fn=make_distill_fn(config),
                 references=references,
+                guides=guides,
+                lint_commands=lint_commands,
             )
         )
     except DistillError as error:
@@ -75,3 +94,5 @@ def forge_distill(
     click.echo(Path(result["patch"]).read_text() or "No edit proposed.")
     click.echo(f"proposed edits to {len(result['files'])} file(s), not applied: {result['patch']}")
     click.echo(f"evidence and rejected candidates: {result['report']}")
+    if result["lint"]:
+        click.echo(f"lint fails on the edited files: {', '.join(result['lint'])}; see the report")

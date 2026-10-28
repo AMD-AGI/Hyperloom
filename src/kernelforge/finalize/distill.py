@@ -44,7 +44,7 @@ class DistillError(RuntimeError):
 
 @dataclass(frozen=True)
 class DistillBrief:
-    """Where the evidence and the skill copy are."""
+    """Where the evidence and the skill copy are, and the copy's own rules for adding to it."""
 
     skill_copy: str
     workspace: str
@@ -52,11 +52,43 @@ class DistillBrief:
     delivered: str
     history: str
     references: tuple[str, ...] = ()
+    guides: tuple[str, ...] = ()
+
+
+def _writing_rules(guides: tuple[str, ...]) -> tuple[str, str, str, str]:
+    """Rules 4, 5 and 7 and where the detail of an edit goes: a skill's own guide decides how a measured number is
+    written down and where a new page goes."""
+    if not guides:
+        return (
+            '4. Numbers this campaign measured are marked "(field)" and given as an order of magnitude; a number you '
+            "inferred rather than measured says so.",
+            "5. Cards carry no dates, campaign names, iteration numbers or source citations; the evidence goes in your "
+            "report.",
+            "7. Edit the card where the topic lives, in its style; create a card only when none fits, and route it from "
+            "SKILL.md.",
+            "the mechanism, the numbers behind it and the caveats go in your report, not in the card.",
+        )
+    listed = ", ".join(guides)
+    return (
+        f"4. A number this campaign measured is written down the way {listed} says, with its conditions where it "
+        "puts them; a number you inferred rather than measured says so.",
+        "5. Cards carry no account of the campaign; what each edit rests on also goes in your report.",
+        f"7. Edit the card where the topic lives, in its style; a page no card fits goes where {listed} puts new "
+        "pages, from its template.",
+        "the mechanism and the caveats go in your report.",
+    )
 
 
 def distill_prompt(brief: DistillBrief) -> str:
     ws = brief.workspace
     references = "\n".join(f"- {path}" for path in brief.references) or "- the installed packages themselves"
+    numbers, citations, placement, detail = _writing_rules(brief.guides)
+    guides = (
+        f"\nThe skill's own rules for adding to it: {', '.join(brief.guides)}. Read them before you edit; where they "
+        "and the rules below differ, they win.\n"
+        if brief.guides
+        else ""
+    )
     return f"""The skill to improve is the copy at {brief.skill_copy}; its entry is SKILL.md. Read SKILL.md and the \
 cards it routes to before you write anything. Edit nothing outside that directory, and run no command that deletes or changes anything outside it: a card's own cleanup commands (a cache wipe, a glob) are text to check, not steps to run. Compile or probe in a new directory beside the copy.
 
@@ -64,13 +96,13 @@ The campaign's evidence, in {ws}:
 - forge_experiments/ablation.md: what each kept round gained beside the version before it (pays, within noise, \
 hurts) and what each change costs when reverted from the best.
 - forge_experiments/lessons/iter_NNN.md: each round's own account of what it tried, measured and ruled out, kept or \
-not.
+not. Its `KB: no-match` lines name questions the round looked up in the skill and found unanswered.
 - forge_experiments/finalize.md: the delivery review.
 - program.md: the task. The delivered change: `git -C {ws} diff {brief.base} {brief.delivered}`; round by round: \
 `git -C {ws} log -p {brief.base}..{brief.history}`.
 Read-only references for checking claims:
 {references}
-
+{guides}
 What enters the skill (audit each candidate; do not copy):
 1. General, not this kernel's tuned configuration: a lever, a mechanism, a pitfall, a dead end or a measurement fact \
 that would change what someone does on another kernel. One shape's best tile or split count is not knowledge.
@@ -78,14 +110,13 @@ that would change what someone does on another kernel. One shape's best tile or 
 measurements contradict it, propose a correction.
 3. Checked: an API, symbol or behaviour claim against the installed source; a hardware claim against the ISA \
 documentation or the code the compiler emits. What you cannot check, leave out.
-4. Numbers this campaign measured are marked "(field)" and given as an order of magnitude; a number you inferred \
-rather than measured says so.
-5. Cards carry no dates, campaign names, iteration numbers or source citations; the evidence goes in your report.
+{numbers}
+{citations}
 6. A dead end counts when the reason it failed is general: what the campaign tried that sat within noise or hurt.
-7. Edit the card where the topic lives, in its style; create a card only when none fits, and route it from SKILL.md.
+{placement}
 
 Keep the patch small enough for a maintainer to review. Each edit states one claim in one or two lines, as a row or bullet in a list or table the card already has wherever one fits; \
-the mechanism, the numbers behind it and the caveats go in your report, not in the card. Where the skill says the \
+{detail} Where the skill says the \
 same wrong thing in several places, correct each place with the smallest change and add no explanation. Few \
 well-checked edits beat many.
 
@@ -177,6 +208,24 @@ def _fresh_copy(skill_dir: Path, copy: Path) -> None:
     _git(copy, "-c", "user.name=distill", "-c", "user.email=distill@local", "commit", "-qm", "skill")
 
 
+def _lint_patch(skill_dir: Path, copy: Path, commands: tuple[str, ...], repo: str) -> dict[str, dict]:
+    """Each lint command that fails on the files the patch adds or changes, with the end of what it said and whether
+    it already failed on those files in the skill itself. ``{repo}`` in a command stands for the skill's repository
+    root, which the copy is not in."""
+    from kernelforge.finalize.delivery import lint_failures
+
+    changed = tuple(
+        path for path in _git(copy, "diff", "--cached", "--name-only", "--diff-filter=AM").stdout.splitlines() if path
+    )
+    if not commands or not changed:
+        return {}
+    filled = tuple(command.replace("{repo}", repo) for command in commands)
+    after = lint_failures(copy, filled, changed)
+    existed = tuple(path for path in changed if (skill_dir / path).is_file())
+    before = lint_failures(skill_dir, tuple(after), existed) if after and existed else {}
+    return {command: {"output": output, "already_failing": command in before} for command, output in after.items()}
+
+
 async def distill_campaign(
     workspace: str | Path,
     *,
@@ -184,12 +233,18 @@ async def distill_campaign(
     out: str | Path,
     distill_fn,
     references: tuple[str, ...] = (),
+    guides: tuple[str, ...] = (),
+    lint_commands: tuple[str, ...] = (),
 ) -> dict:
     """Propose a patch to ``skill_dir`` from the campaign in ``workspace``; write it, the report and the result
-    under ``out``, and return the result."""
+    under ``out``, and return the result. ``guides`` are files of the skill, by their path inside it, that hold its
+    rules for adding to it; ``lint_commands`` run on the files the patch adds or changes."""
     workspace, skill_dir, out = Path(workspace).resolve(), Path(skill_dir).resolve(), Path(out).resolve()
     if not (skill_dir / "SKILL.md").is_file():
         raise DistillError(f"{skill_dir} holds no SKILL.md")
+    for guide in guides:
+        if not (skill_dir / guide).is_file():
+            raise DistillError(f"{guide} is not a file of {skill_dir}")
     base, delivered, history = _campaign_refs(workspace)
     copy = out / "skill"
     _fresh_copy(skill_dir, copy)
@@ -200,30 +255,52 @@ async def distill_campaign(
         delivered,
         history,
         tuple(str(Path(r).resolve()) for r in references),
+        tuple(str(copy / guide) for guide in guides),
     )
     reply = await distill_fn(brief=brief)
     _git(copy, "add", "-A")
     prefix = _skill_prefix(skill_dir)
     patch = _git(copy, "diff", "--cached", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}").stdout
     files = [path for path in _git(copy, "diff", "--cached", "--name-only").stdout.splitlines() if path]
+    repo = _git(skill_dir, "rev-parse", "--show-toplevel").stdout.strip() or str(skill_dir)
+    lint = _lint_patch(skill_dir, copy, lint_commands, repo)
     report = report_of(reply) if reply is not None else ""
     publish_report(out / PATCH_NAME, patch)
-    publish_report(out / REPORT_NAME, render_distill_md(skill_dir, report, patch))
+    publish_report(out / REPORT_NAME, render_distill_md(skill_dir, report, patch, lint_commands, lint))
     result = {
         "skill_dir": str(skill_dir),
         "patch": str(out / PATCH_NAME),
         "report": str(out / REPORT_NAME),
         "files": files,
+        "lint": lint,
         "failed": reply is None,
-        "apply_from": str(Path(_git(skill_dir, "rev-parse", "--show-toplevel").stdout.strip() or skill_dir)),
+        "apply_from": str(Path(repo)),
     }
     publish_report(out / RESULT_NAME, json.dumps(result, indent=2))
     return result
 
 
-def render_distill_md(skill_dir: Path, report: str, patch: str) -> str:
-    """What a maintainer reviews in one place: each edit's evidence, then the patch itself."""
+def _lint_md(commands: tuple[str, ...], lint: dict[str, dict]) -> str:
+    if not commands:
+        return ""
+    if not lint:
+        return "\n\n## Lint\n\nThe files the patch adds or changes pass every lint command."
+    parts = ["\n\n## Lint"]
+    for command, failure in lint.items():
+        before = " It already failed on those files in the skill." if failure["already_failing"] else ""
+        parts.append(
+            f"`{command}` fails on the files the patch adds or changes.{before}\n\n```text\n{failure['output']}\n```"
+        )
+    return "\n\n".join(parts)
+
+
+def render_distill_md(
+    skill_dir: Path, report: str, patch: str, lint_commands: tuple[str, ...], lint: dict[str, dict]
+) -> str:
+    """What a maintainer reviews in one place: each edit's evidence, the lint of the edited files, then the patch."""
     diff = f"```diff\n{patch.rstrip()}\n```" if patch.strip() else "No edit proposed."
+    checks = _lint_md(lint_commands, lint)
     return (
-        f"# Proposed skill patch\n\nFor {skill_dir}; not applied.\n\n{report or '(no report)'}\n\n## Patch\n\n{diff}\n"
+        f"# Proposed skill patch\n\nFor {skill_dir}; not applied.\n\n{report or '(no report)'}{checks}\n\n"
+        f"## Patch\n\n{diff}\n"
     )
