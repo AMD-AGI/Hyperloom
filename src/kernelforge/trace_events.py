@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,17 @@ CPU_ANNOTATION_CAT: str = "user_annotation"
 
 #: The same annotations projected onto the device timeline, which is the one kernel events are on.
 GPU_ANNOTATION_CAT: str = "gpu_user_annotation"
+
+#: A collective kernel's name, matched lowercased; one rank's time in it includes its wait for the other ranks.
+COLLECTIVE_KERNEL_PATTERN: str = (
+    r"all_?reduce|reduce_?scatter|all_?gather|all_?to_?all|cross_device_reduce|quick_?reduce|\bcustom_ar\b"
+    r"|nccl|rccl|local_device_load_rmsnorm"
+)
+
+
+def is_collective_kernel(name: str) -> bool:
+    """Whether a kernel name reads as a collective."""
+    return re.search(COLLECTIVE_KERNEL_PATTERN, (name or "").lower()) is not None
 
 
 def load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
@@ -51,9 +63,11 @@ def resolve_capture(trace: Any) -> str:
 
 
 __all__ = [
+    "COLLECTIVE_KERNEL_PATTERN",
     "CPU_ANNOTATION_CAT",
     "GPU_ANNOTATION_CAT",
     "KERNEL_CAT",
+    "is_collective_kernel",
     "load_trace_events",
     "resolve_capture",
 ]

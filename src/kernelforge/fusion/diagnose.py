@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.serving_windows import step_windows
+from kernelforge.trace_events import COLLECTIVE_KERNEL_PATTERN
 
 from .calibration import (
     DEFAULT_MIN_PREDICTED_GAIN,
@@ -45,11 +46,7 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 # Ordered (first-match-wins) kernel-name -> category rules.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     # Collectives before reduce/copy, which their names also match; a rank's collective time includes its wait.
-    (
-        "collective",
-        r"all_?reduce|reduce_?scatter|all_?gather|all_?to_?all|cross_device_reduce|quick_?reduce|\bcustom_ar\b"
-        r"|nccl|rccl|local_device_load_rmsnorm",
-    ),
+    ("collective", COLLECTIVE_KERNEL_PATTERN),
     # MoE first among compute: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
     ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.trace_events import GPU_ANNOTATION_CAT, KERNEL_CAT, load_trace_events
+from kernelforge.trace_events import GPU_ANNOTATION_CAT, KERNEL_CAT, is_collective_kernel, load_trace_events
 
 #: ``step[KIND bs=N ...]``. The tail carries per-step quantities (``toks=``, ``c_sq=``) that make every prefill
 #: step's name unique, which is why the class is built from the two leading fields rather than from the name.
@@ -179,9 +179,7 @@ COLLECTIVE_NOTE = (
 
 def _row(kernel: dict[str, Any]) -> str:
     """One ranking row, marking a collective."""
-    from kernelforge.fusion.diagnose import categorize_kernel_name
-
-    marker = " (collective)" if categorize_kernel_name(kernel["name"]) == "collective" else ""
+    marker = " (collective)" if is_collective_kernel(kernel["name"]) else ""
     return f"| {kernel['pct']:.1f}% | {kernel['ms']:.2f} | `{_short(kernel['name'])}`{marker} |"
 
 
