@@ -32,7 +32,11 @@ OP_FAMILIES: tuple[tuple[str, str], ...] = (
     ("linear attention", r"gdn|gated_delta|delta_rule|causal_conv1d|conv1d|mamba|linear[ _-]attention"),
     ("moe", r"moe|expert|router|gating|topk_?softmax|softmax_?topk"),
     ("attention", r"attn|attention|paged_attention|\bpa_|\bmla\b|\bmha\b|flash|ll4mi"),
-    ("gemm", r"gemm|matmul|blockscale|a8w8|a16w16|qkv_proj|o_proj|gate_up|down_proj|split-?k|\bck\b|hipblaslt"),
+    (
+        "gemm",
+        r"gemm|matmul|blockscale|a8w8|a16w16|qkv_proj|o_proj|gate_up|down_proj|split-?k|\bck\b|hipblaslt"
+        r"|aten::(?:addmm|bmm|mm)\b",
+    ),
     ("norm", r"rmsnorm|layernorm|qk-?norm|\bnorm\b"),
     ("rope", r"rope|rotary"),
     ("activation", r"silu|gelu|swiglu|_and_mul|activation"),
@@ -62,7 +66,10 @@ COMPONENTS: tuple[tuple[Component, str], ...] = (
         r"all-?reduce|all_reduce|all-?gather|nccl|rccl|custom[-_ ]?ar\b|cross_device|expert[-_]parallel"
         r"|dp[-_]attention|--tp\b|--dp\b|--ep\b|a2a",
     ),
-    (Component.KV_CACHE, r"kv[-_ ]?cache|kvcache|kv store|kv_layout|page[-_]size|radix|prefix[-_ ]cache"),
+    (
+        Component.KV_CACHE,
+        r"kv[-_ ]?cache|kvcache|kv store|kv_layout|page[-_]size|radix|prefix[-_ ]cache|req_to_token|page[-_ ]table",
+    ),
     (Component.SPECULATIVE, r"specul|eagle|\bmtp\b|draft|spec[ _-]verify"),
     (Component.GRAPH, r"cuda[-_ ]?graph|torch[-_]compile|compile|enforce[-_]eager|\bgraph\b"),
     (
@@ -70,9 +77,9 @@ COMPONENTS: tuple[tuple[Component, str], ...] = (
         r"chunked[-_]prefill|max[-_]running|max[-_]prefill|schedul|batch|mixed[-_]chunk"
         r"|stream[-_]interval|detokeniz|max[-_]num[-_]seqs|continuous[-_]decode",
     ),
-    (Component.MEMORY, r"mem[-_]fraction|gpu[-_]memory|memory|swap[-_]space|offload"),
+    (Component.MEMORY, r"mem[-_]fraction|gpu[-_]memory|memory|swap[-_]space|offload|aten::copy_|memcpy|\bsdma\b"),
     (Component.QUANTIZATION, r"--quantization|w8a8|w4a16|int4|awq|gptq|weight quant"),
-    (Component.RUNTIME, r"gpu_max_hw_queues|\bhip_|host|launch|runtime|overhead"),
+    (Component.RUNTIME, r"gpu_max_hw_queues|\bhip_|host|launch|runtime|overhead|tokeniz"),
 )
 
 

@@ -80,6 +80,16 @@ def _args(server_args: str = "", **envs: str) -> RecipeDelta:
             None,
             ("KV cache", Mechanism.LAYOUT),
         ),
+        ("aten::mm ragged m", "fuse the ragged mm into one launch", KERNEL, None, ("gemm", Mechanism.FUSION)),
+        (
+            "aten::_index_put_impl_ decode req_to_token write",
+            "skip the per-token write",
+            SOURCE,
+            None,
+            ("KV cache", Mechanism.OVERHEAD),
+        ),
+        ("aten::copy_ (sdma copies)", "remove the extra copy", SOURCE, None, ("memory", Mechanism.OVERHEAD)),
+        ("tokenizer worker count", "raise it to 4", CONFIG, None, ("other runtime settings", Mechanism.TUNING)),
         ("something new", "an idea", SOURCE, None, (OTHER_TARGET, Mechanism.OTHER)),
     ],
 )
