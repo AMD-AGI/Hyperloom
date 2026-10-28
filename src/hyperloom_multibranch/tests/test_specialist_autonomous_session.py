@@ -83,7 +83,11 @@ for step, seqs in enumerate(config["keeps"], start=1):
             ledger.write(json.dumps(entry) + "\\n")
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
     print(f"kept {seqs}", flush=True)
-time.sleep(config["tail"])
+end = time.time() + config["tail"]
+while time.time() < end:
+    time.sleep(0.1)
+    if config.get("busy"):
+        pathlib.Path("run/progress").write_text(str(time.time()))
 sys.exit(config["exit"])
 """
 KEEPS = {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}}
@@ -111,6 +115,7 @@ class Agent:
     resume: str = ""
     table: str = ""
     ledger: tuple[tuple[dict[str, str], ...], ...] = ()
+    busy: bool = False
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -227,7 +232,7 @@ def _agent_repo(tmp_path: Path) -> Path:
 
 
 def _manifest(workspace: str, agent: Agent) -> str:
-    plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit}
+    plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit, "busy": agent.busy}
     return json.dumps(
         {
             "source": "agent",
@@ -433,6 +438,19 @@ async def test_an_agent_that_goes_silent_is_a_lost_session_once_it_wrote_nothing
 
     assert crashed.value.lost
     assert time.monotonic() - started > 2.0
+
+
+async def test_an_agent_silent_on_its_console_while_it_writes_its_workspace_is_not_lost(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.1, tail=30.0, busy=True), stall=1.0)
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+
+    await asyncio.sleep(3.0)
+    alive = not running.done()
+    await rig.session.stop()
+    await asyncio.gather(running, return_exceptions=True)
+
+    assert alive, "the run ended while the agent kept writing its workspace"
 
 
 class _HungSpend(AgentSpend):

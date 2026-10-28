@@ -92,6 +92,10 @@ class AgentSpend:
         ledger.save(self.ledger)
         return sessions
 
+    def written_at(self) -> float | None:
+        """When the agent's CLI last wrote a transcript; ``None`` when it keeps none."""
+        return newest_write(self._transcripts())
+
     def _transcripts(self) -> Iterable[Path]:
         projects = self.config_dir / PROJECTS_DIR
         if not projects.is_dir():
@@ -100,6 +104,17 @@ class AgentSpend:
         for directory in sorted(projects.iterdir()):
             if any(directory.name == name or directory.name.startswith(f"{name}-") for name in names):
                 yield from sorted(directory.rglob(f"*{TRANSCRIPT_SUFFIX}"))
+
+
+def newest_write(paths: Iterable[Path]) -> float | None:
+    """The latest modification time among ``paths``; one removed while it is read counts as not there."""
+    times = []
+    for path in paths:
+        try:
+            times.append(path.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    return max(times, default=None)
 
 
 def _messages(transcript: Path, ledger: _Ledger) -> Iterable[tuple[str, str, str, TokenCounts]]:
@@ -139,4 +154,4 @@ def _row(line: str) -> Mapping[str, object]:
     return row if isinstance(row, dict) else {}
 
 
-__all__ = ["AgentSpend", "transcript_dir"]
+__all__ = ["AgentSpend", "newest_write", "transcript_dir"]

@@ -22,8 +22,8 @@ what the integration head holds does, through the notes (:mod:`agent_knowledge`)
 and the agent is given until its last import can still be judged in EXPLORE as its time budget. An agent
 that exits 0 finishes the run once what it kept last settled; one that exits otherwise is a crash the runtime restarts
 it from. A session never ends idle: what the agent keeps, or does not, is its own business, bounded by the session's
-stops. A watch beside the run's poll makes the run a lost session when the running agent writes no output, or the poll
-does not come round, for :data:`STALL_SECONDS`: the runtime then kills the agent and resumes it, and gives the branch
+stops. A watch beside the run's poll makes the run a lost session when the running agent writes nothing (no output,
+transcript or file), or the poll does not come round, for :data:`STALL_SECONDS`: the runtime then kills the agent and resumes it, and gives the branch
 up after a few such losses in a row, so a hung agent does not hold its cards and its branch's slot.
 """
 
@@ -74,7 +74,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     tail,
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
-from hyperloom_multibranch.specialist.agent_spend import AgentSpend
+from hyperloom_multibranch.specialist.agent_spend import AgentSpend, newest_write
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
@@ -94,8 +94,8 @@ SPEND_SECONDS = 60.0
 #: workload, after whatever test runs then (see :func:`collection_margin`).
 CUTOFF_SECONDS = 40 * 60.0
 SPEND_FILE = "agent-spend.json"
-#: How long the running agent may write no output, and the run's poll take to come round, before the run is lost. A
-#: working agent writes at each step of its CLI, and a Claude CLI ends a tool call or a model request within ten minutes.
+#: How long the running agent may write nothing (output, transcript or file), and the run's poll take to come round,
+#: before the run is lost. A Claude CLI ends a tool call or a model request within ten minutes and writes its transcript.
 STALL_SECONDS = 1800.0
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
@@ -247,7 +247,7 @@ class AutonomousSession:
         spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
         self._polled_at = self._heard_at = self._setup.clock()
         poll = asyncio.ensure_future(self._poll(manifest, process, sandbox, watch, spend))
-        stall = asyncio.ensure_future(self._stall(process))
+        stall = asyncio.ensure_future(self._stall(process, partial(self._written_at, spend)))
         stalled = False
         try:
             done, _ = await asyncio.wait((poll, stall), return_when=asyncio.FIRST_COMPLETED)
@@ -287,9 +287,11 @@ class AutonomousSession:
         if output != self._heard:
             self._heard, self._heard_at = output, self._setup.clock()
 
-    async def _stall(self, process: AgentProcess) -> None:
+    async def _stall(self, process: AgentProcess, written_at: Callable[[], float | None]) -> None:
         """Raise a lost :class:`SessionCrashed` once the poll has not come round, or the running agent has written
-        nothing, for :attr:`AutonomousSetup.stall_seconds`."""
+        nothing, for :attr:`AutonomousSetup.stall_seconds`. Writing is its console, its CLI's transcripts or its
+        files: an agent may print nothing for hours while it works (GEAK captures its workflow's output), so the
+        transcripts and files are read once the console has been quiet that long."""
 
         bound = self._setup.stall_seconds
         while True:
@@ -298,7 +300,20 @@ class AutonomousSession:
             if now - self._polled_at > bound:
                 raise SessionCrashed(f"the run has not polled the agent for {bound:g} s", lost=True)
             if process.returncode is None and now - self._heard_at > bound:
-                raise SessionCrashed(f"the agent wrote no output for {bound:g} s: {tail(self._heard)}", lost=True)
+                written = await asyncio.to_thread(written_at)
+                if written is not None and now - written <= bound:
+                    self._heard_at = max(self._heard_at, written)
+                    continue
+                raise SessionCrashed(
+                    f"the agent wrote no output, transcript or file for {bound:g} s: {tail(self._heard)}", lost=True
+                )
+
+    def _written_at(self, spend: AgentSpend) -> float | None:
+        """When the agent last wrote a transcript or a file under its checkout or its workspace."""
+        files = (
+            path for root in (self._agent_dir, self._place.worktree.path) for path in root.rglob("*") if path.is_file()
+        )
+        return max((at for at in (spend.written_at(), newest_write(files)) if at is not None), default=None)
 
     async def _collect_before_the_end(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Take, once, the workspace of an agent that signals no keep as its keep, :func:`collection_margin` before the
