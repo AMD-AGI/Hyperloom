@@ -89,10 +89,13 @@ def test_kernel_install_validates_ray_cli_and_serving_slot():
     text = install_sh.read_text(encoding="utf-8")
 
     assert 'RAY_VERSION="${RAY_VERSION:-2.44.1}"' in text
-    assert 'RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"' in text
     assert 'RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"' in text
-    assert 'CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"' in text
-    assert "click version incompatible with Ray CLI" in text
+    # The CLI is certified by what its parser accepts, not by the version of
+    # click it was built on, so no click release is pinned or downgraded here.
+    assert "RAY_START_OPTIONS=" in text
+    assert "ray start does not accept " in text
+    assert "RAY_CLI_CLICK_MAX_VERSION" not in text
+    assert "CLICK_INSTALL_SPEC" not in text
     assert "from ray.scripts.scripts import main" in text
 
     assert "ray_head_has_serving_slot() {" in text

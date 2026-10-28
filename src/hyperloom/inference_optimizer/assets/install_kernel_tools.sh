@@ -368,12 +368,13 @@ ensure_moreutils() {
 }
 
 _RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
-_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="${RAY_CLI_CLICK_MAX_VERSION+x}"
 RAY_VERSION="${RAY_VERSION:-2.44.1}"
-# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
-RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
+# The `ray start` options this script passes to the head below. ensure_ray
+# certifies the CLI by asking its own parser for them rather than by checking
+# the version of click it is built on, so a click release that leaves the CLI
+# working is never a reason to refuse or downgrade the install.
+RAY_START_OPTIONS="--head --disable-usage-stats --port --ray-client-server-port --num-gpus --include-dashboard --resources"
 
 # The default Ray pin predates newer CPython ABIs (no cp314 wheels before
 # 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
@@ -432,51 +433,38 @@ resolve_ray_version() {
   warn "ray ${RAY_VERSION} has no wheel for this interpreter ($(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)); using ray ${resolved} instead"
   RAY_VERSION="$resolved"
   RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-  # The click ceiling exists for 2.44.1's CLI import bug; past that version it
-  # would pin click below what the newer Ray itself ships against.
-  if [ -z "$_RAY_CLI_CLICK_MAX_VERSION_WAS_SET" ]; then
-    RAY_CLI_CLICK_MAX_VERSION=""
-    CLICK_INSTALL_SPEC=""
-  fi
 }
 
 ensure_ray() {
   resolve_ray_version
-  log "ensuring ${RAY_INSTALL_SPEC}${CLICK_INSTALL_SPEC:+ and ${CLICK_INSTALL_SPEC}}"
+  log "ensuring ${RAY_INSTALL_SPEC}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    if [ -n "$CLICK_INSTALL_SPEC" ]; then
-      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
-    else
-      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
-    fi
+    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
-import importlib.metadata as md
+    RAY_VERSION="$RAY_VERSION" RAY_START_OPTIONS="$RAY_START_OPTIONS" python3 - <<'PY'
 import os
-import re
-import sys
 
 import ray
 
 RAY_VERSION = os.environ["RAY_VERSION"]
-RAY_CLI_CLICK_MAX_VERSION = os.environ["RAY_CLI_CLICK_MAX_VERSION"]
-
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
+RAY_START_OPTIONS = os.environ["RAY_START_OPTIONS"].split()
 
 if ray.__version__ != RAY_VERSION:
     raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
-click_version = md.version("click")
-if RAY_CLI_CLICK_MAX_VERSION and _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
-    raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
 try:
-    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
+    from ray.scripts.scripts import main as _ray_cli_main
 except Exception as exc:
     raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
-print(f"[kernel-agent] ray version: {ray.__version__}, click version: {click_version}")
+try:
+    _ray_start = _ray_cli_main.commands["start"]
+    _accepted = {opt for param in _ray_start.params for opt in param.opts}
+except Exception as exc:
+    raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
+_missing = [opt for opt in RAY_START_OPTIONS if opt not in _accepted]
+if _missing:
+    raise SystemExit("ray start does not accept " + " ".join(_missing))
+print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_OPTIONS)}")
 PY
   fi
 }
