@@ -16,17 +16,16 @@ import time
 import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from kernelforge.agent_backends.base import (
-    AgentHook,
-    AgentHooks,
     AgentRunSpec,
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
 
+from .author_hooks import target_file_hooks
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
 from .llm_failure import (
     DEFAULT_BASE_DELAY_SEC,
@@ -41,6 +40,7 @@ from .llm_failure import (
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
 from kernelforge.tools.git import git_bytes
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 log = logging.getLogger("forge_fusion")
 
@@ -921,51 +921,6 @@ def _author_system_prompt(new_module_dirs: list[str]) -> str:
     return f"{_AUTHOR_SYSTEM_PROMPT}{clause}"
 
 
-def _target_file_hooks(
-    target_files: list[str],
-    workdir: str,
-    allows_new_path: Optional[Callable[[str], bool]] = None,
-) -> AgentHooks | None:
-    """Deny direct SDK edit tools outside the caller's writable path set."""
-    if not target_files:
-        return None
-    root = Path(workdir).resolve()
-    targets = {(Path(value) if Path(value).is_absolute() else root / value).resolve() for value in target_files}
-
-    async def _deny_non_target(input_data: dict, _tool_use_id: Any, _context: Any) -> dict:
-        tool_input = input_data.get("tool_input") or {}
-        raw_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path") or ""
-        if raw_path:
-            candidate = Path(str(raw_path)).expanduser()
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            if candidate.resolve() in targets:
-                return {}
-            if allows_new_path is not None and allows_new_path(str(candidate)):
-                return {}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": (
-                    "Authoring may edit only the exact target files supplied by "
-                    "forge-fuse, plus any new fused-kernel module the run "
-                    "explicitly permits; tests, harness oracles, and unrelated "
-                    "source are protected."
-                ),
-            }
-        }
-
-    return AgentHooks(
-        pre_tool_use=[
-            AgentHook(
-                matcher="Edit|Write|MultiEdit|NotebookEdit",
-                callback=_deny_non_target,
-            )
-        ]
-    )
-
-
 def _write_registered_author_log(
     log_path: str,
     progress: list[str],
@@ -1136,10 +1091,11 @@ def _run_author_session(
         # The author phase runs in a worktree a long campaign has already left dirty in ways it never touches, so the
         # backend has to judge this turn against the pre-run snapshot rather than against a clean HEAD.
         allow_dirty_baseline=True,
-        # Keep the backend's built-in measurement protections; the outer provider-neutral transaction enforces the
-        # exact target allowlist.
+        # Forge's measurement protections, and nothing beyond them; the outer provider-neutral transaction enforces
+        # the exact target allowlist.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=[],
-        hooks=_target_file_hooks(guard.target_files, workdir, allows_new_path=guard.permits_new_path),
+        hooks=target_file_hooks(guard.target_files, workdir, allows_new_path=guard.permits_new_path),
         progress_log=progress,
     )
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")

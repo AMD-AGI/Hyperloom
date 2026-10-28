@@ -21,7 +21,6 @@ from ._kernel_agent_tool import (
     _run_subprocess,
     _shape_tool_result,
 )
-from .._recorder_trace import trace_recording_skipped
 from hyperloom.common.coerce import first_text, optional_positive_int
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
@@ -227,7 +226,7 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
     # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
-    from ._grid_runner import server_args_env_name
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()
@@ -586,11 +585,12 @@ def _record_tool_version(session_dir: Path, tool: str) -> None:
     # kernels is in scope. Nothing downstream can recover it, so it is recorded here even
     # though the rest of the discovery run is already on the roofline event.
     from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
+    from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
 
     try:
         tool_versions.record_tool_version(session_dir, tool=tool)
     except recorder_warnings.RECORDING_ERRORS as exc:
-        trace_recording_skipped("versions", reason="caller raised before the recorder", entity=tool, error=exc)
+        trace_skip(reason="caller raised before the recorder", section="versions", entity=tool, error=exc)
 
 
 def _framework_for_analysis(payload: dict, state: Any) -> tuple[str, list[dict[str, Any]]]:

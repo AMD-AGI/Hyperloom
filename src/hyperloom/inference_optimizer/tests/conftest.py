@@ -663,8 +663,12 @@ def serving_lease_on_a_ray_double(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "ray", RayDouble())
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
-    with rs.ServingLease(num_gpus=1) as lease:
+    lease = rs.ServingLease(num_gpus=1)
+    lease.ensure()
+    try:
         yield lease
+    finally:
+        lease.close()
 
 
 def cli_call_sequence(entry: str) -> list[str]:

@@ -21,11 +21,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    apply_compatibility_filter,
-    GridRecipe,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridVariant
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -35,6 +32,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
 )
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import ServingStack
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
@@ -2399,11 +2397,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     output_dir = tmp_path / "explore-warm"
 
     bench_calls: list[str] = []
+    round_seeds: dict[bool, str | None] = {}
 
     def _fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        round_seeds["warmup_round" in str(slot)] = (kwargs.get("env") or {}).get(BENCH_SEED_ENV)
         if "warmup_round" in str(slot):
             (slot / "server.log").write_text(
                 "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
@@ -2444,6 +2444,8 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     # warmup (discarded) + decision == 2 Magpie runs.
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
+    # The decision round reuses the warmup's server, so the warmup must not send the decision round's prompts.
+    assert round_seeds == {True: "1", False: None}
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
     warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
     decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)

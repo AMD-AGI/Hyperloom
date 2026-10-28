@@ -13,7 +13,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE, REBENCH_VALIDATED
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FALLBACK_FAILED,
+    REBENCH_NO_PROMOTE,
+    REBENCH_VALIDATED,
+)
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -212,7 +216,7 @@ def _finish(coord: Any, review: dict[str, Any], *, status: str, error: str = "",
 
 def finish_invalid_source(coord: Any, error: str) -> None:
     """Settle an undeployable product without invoking GEAK's proxy harness."""
-    _finish(coord, {}, status="fallback_failed", error=error)
+    _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=error)
 
 
 def _record_canonical_adoption(coord: Any, params: dict[str, Any], measurement: dict[str, Any]) -> None:
@@ -244,7 +248,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
             return
         verify_source_artifacts(params)
     except (OSError, ValueError) as exc:
-        _finish(coord, {}, status="fallback_failed", error=str(exc))
+        _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=str(exc))
         return
     task = Task(
         task_id=review["task_id"],

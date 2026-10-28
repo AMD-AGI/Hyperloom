@@ -44,7 +44,9 @@ def _provider(shared_state, **readers):
 
 
 def test_qualified():
-    assert mct._qualified("foo") == "mcp__inference_optimizer_context__foo"
+    assert mct.qualified_context_tool_name("get_gaps") == "mcp__inference_optimizer_context__get_gaps"
+    with pytest.raises(KeyError):
+        mct.qualified_context_tool_name("foo")
 
 
 def test_provider_projections():

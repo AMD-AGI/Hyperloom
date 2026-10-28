@@ -152,8 +152,11 @@ def test_read_reference_in_context_tool_names():
 
 def test_read_reference_granted_to_orchestration():
     """PolicyGate must list read_reference in orchestration's allowed tools."""
+    from hyperloom.orchestrator.roles.mcp_context_tools import qualified_context_tool_name
+
     gate = PolicyGate(role_registry=default_role_registry())
-    assert "read_reference" in gate.allowed_tools_for_agent("orchestration")
+    # Under the registered name: that is what the SDK mounts and the prompt names.
+    assert qualified_context_tool_name("read_reference") in gate.allowed_tools_for_agent("orchestration")
 
 
 def test_read_reference_returns_doc(refs_dir, file_reader):

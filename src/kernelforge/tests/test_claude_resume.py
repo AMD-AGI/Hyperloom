@@ -19,6 +19,7 @@ from kernelforge.agent_backends.claude import (
 )
 from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 class _FakeOptions:
@@ -89,6 +90,7 @@ def _spec(**overrides) -> AgentRunSpec:
         model="fake-model",
         timeout_sec=60,
         tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
     base.update(overrides)
     return AgentRunSpec(**base)

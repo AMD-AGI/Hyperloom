@@ -17,7 +17,6 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     _extract_trace_path,
     _fail,
     _gpu_trace_unsupported_reason,
-    make_roofline_executor,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
@@ -772,16 +771,9 @@ def test_fail_helper_constructs_canonical_shape():
     assert "extra" not in f2["sub_result"]
 
 
-def test_make_roofline_executor_requires_shared_state():
+def test_roofline_executor_requires_shared_state():
     with pytest.raises(ValueError, match="requires a SharedState"):
         RooflineExecutor(shared_state=None)
-
-
-def test_make_roofline_executor_factory_signature():
-    state = SharedState()
-    exe = make_roofline_executor(shared_state=state)
-    assert isinstance(exe, RooflineExecutor)
-    assert exe.shared_state is state
 
 
 def test_wrap_profile_ctx_creates_child_task():
@@ -797,16 +789,6 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
     assert child.extra["session_dir"] == "/sess"
     assert child.lease is parent.lease
-
-
-def test_resolve_session_dir_handles_missing_extra():
-    state = SharedState()
-    exe = RooflineExecutor(shared_state=state)
-    ctx = _ctx()
-    assert exe._resolve_session_dir(ctx) == Path(".")
-
-    ctx.extra["session_dir"] = "/abc"
-    assert exe._resolve_session_dir(ctx) == Path("/abc")
 
 
 # N10: Coordinator persists roofline executor SharedState mutations to state.json.
@@ -1281,8 +1263,6 @@ async def test_auto_retry_succeeds_on_alternate_mode(tmp_path):
     assert calls["n"] == 2
     assert calls["payloads"][0].get("steady_state_mode") is None
     assert calls["payloads"][1]["steady_state_mode"] == "prefilldecode"
-    assert calls["payloads"][1].get("_n26_auto_retry") is True
-    assert calls["payloads"][1].get("_n26_retry_from_mode") == "mixed"
     assert state.last_profile_trace == "/tmp/t.gz"
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
@@ -1307,7 +1287,6 @@ async def test_auto_retry_succeeds_on_missing_chunk(tmp_path):
 
     assert result["status"] == "succeeded"
     assert calls["payloads"][1]["steady_state_mode"] == "mixed"
-    assert calls["payloads"][1]["_n26_retry_from_mode"] == "decode_only"
 
 
 @pytest.mark.asyncio
@@ -1435,7 +1414,7 @@ async def test_retry_success_stamps_n26_metadata(tmp_path):
         return _profile_ok()
 
     async def fake_ta(payload, *, session_dir):
-        return fail if not payload.get("_n26_auto_retry") else succ
+        return fail if payload.get("steady_state_mode") != "prefilldecode" else succ
 
     state = _state()
 
@@ -1486,7 +1465,6 @@ async def test_retry_works_when_operator_started_with_non_mixed(tmp_path):
 
     assert result["status"] == "succeeded"
     assert calls["payloads"][1]["steady_state_mode"] == "decode_only"
-    assert calls["payloads"][1]["_n26_retry_from_mode"] == "prefilldecode"
 
 
 # cuda-graph folding -> trace_analyze ok but 0 hot kernels

@@ -651,7 +651,7 @@ def _validate_trace_structure(
 
 # Fold the composite's base overrides into the caller's profile params.
 def _merge_profile_params(params: dict[str, Any]) -> None:
-    from ._grid_runner import merge_server_args
+    from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 
     merged_args = merge_server_args(
         _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip()),

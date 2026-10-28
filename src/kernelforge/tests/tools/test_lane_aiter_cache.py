@@ -25,6 +25,7 @@ from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.tools import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
 from kernelforge.tools.git import git
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)
@@ -93,6 +94,7 @@ def _implementer_through(backend):
                     user_prompt=plan,
                     cwd=str(Path(kernel_path).parent),
                     tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=8),
+                    protected_path_rules=FORGE_PROTECTED_PATHS,
                 )
             )
             return plan
@@ -245,6 +247,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
             # write ``__pycache__`` under the checkout while this one runs. The overlay comes from ``env`` alone.
             cwd=str(_lane_dir(tmp_path, "single-lane")),
             tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
+            protected_path_rules=FORGE_PROTECTED_PATHS,
         )
     )
 
@@ -272,6 +275,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
             user_prompt="tune it",
             cwd=str(workspace),
             env={"AITER_JIT_DIR": "/lane/1/jit"},
+            protected_path_rules=FORGE_PROTECTED_PATHS,
         )
     )
 

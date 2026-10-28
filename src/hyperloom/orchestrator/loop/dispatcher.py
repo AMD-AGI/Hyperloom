@@ -17,6 +17,7 @@ from hyperloom.common.deadline import Deadline
 from hyperloom.common.env import is_truthy
 from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.llm_attribution import current_action_scope
+from hyperloom.common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
     REQUEST_KIND_TO_OWNED_ACTION,
@@ -31,7 +32,6 @@ from ..actions.executors._ray_serving import (
 from ..actions.executors._subprocess_kill import (
     COOPERATIVE_REAP_BUDGET_SEC,
     STOP_GATE_POLL_SECONDS,
-    TERM_GRACE_SECONDS,
 )
 from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -78,7 +78,7 @@ log = _logging.getLogger(__name__)
 #   :data:`CANCEL_ROUND_GRACE_SEC`, and whichever path this action took, only the
 #   longer of the two bounds it;
 # * release what the round held -- the driver-side teardown of the server it left
-#   behind (:data:`TERM_GRACE_SECONDS`) and then the release of the Ray lease it
+#   behind (:data:`TERM_GRACE_SEC`) and then the release of the Ray lease it
 #   ran in (:data:`CLOSE_STOP_TIMEOUT_SEC`). A sequence, not alternatives: the
 #   server is reaped BEFORE the lease is dropped so that no GPU process outlives
 #   it (§4.2), and on the Ray path a single unwind pays both -- in the explore
@@ -108,7 +108,7 @@ log = _logging.getLogger(__name__)
 # from the moment it starts, and five seconds of overshoot is cheaper than the
 # attributed sentinel a hard cancel destroys.
 _COOPERATIVE_CANCEL_GRACE_SEC: float = (
-    max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + TERM_GRACE_SECONDS + CLOSE_STOP_TIMEOUT_SEC
+    max(COOPERATIVE_REAP_BUDGET_SEC, CANCEL_ROUND_GRACE_SEC) + TERM_GRACE_SEC + CLOSE_STOP_TIMEOUT_SEC
 )
 
 # How long a cancel waits for anything to start listening before deciding

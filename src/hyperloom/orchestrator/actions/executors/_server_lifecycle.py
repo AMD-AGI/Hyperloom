@@ -19,10 +19,10 @@ import yaml
 from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.proctree import group_members, running
+from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
-from ._subprocess_kill import TERM_GRACE_SECONDS, _signal_group
+from .bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 
 
 log = logging.getLogger(__name__)
@@ -115,36 +115,17 @@ def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     except (TypeError, ValueError):
         info["port"] = REUSE_PORT_DEFAULT
 
-    # Backend delegation: a non-Magpie backend (e.g. bypass) decides its own server_lifecycle eligibility.
     from .benchmark_backend import resolve_backend
 
-    backend_verdict = resolve_backend().lifecycle_eligibility(bench)
-    if backend_verdict is not None:
-        # Free-port assignment lives on this common path so a non-Magpie backend (e.g. bypass) gets the same
-        # stale/co-tenant collision protection instead of falling back to the fixed default port.
-        if backend_verdict.get("eligible"):
-            backend_verdict["port"] = _assign_free_port(int(backend_verdict.get("port", REUSE_PORT_DEFAULT)))
-        return backend_verdict
-
-    # Server-less (scriptable) frameworks — e.g. xDiT diffusion — never boot a persistent server, so the reuse
-    # protocol does not apply.
-    from hyperloom.inference_optimizer import framework_registry
-
-    if str(
-        bench.get("workload_kind") or ""
-    ).strip().lower() == framework_registry.SCRIPTABLE or framework_registry.is_scriptable(info["framework"]):
-        info["reason"] = "scriptable framework (server-less; no server_lifecycle)"
+    refusal = resolve_backend().lifecycle_refusal(bench, info["framework"])
+    if refusal is not None:
+        info["reason"] = refusal
         return info
 
     from ._multi_node_env import is_multi_node
 
     if is_multi_node():
         info["reason"] = "multi-node (server_lifecycle is local-only)"
-        return info
-
-    script_name = Path(str(bench.get("benchmark_script") or "")).name
-    if script_name not in MAGPIE_BUILTIN_SCRIPTS:
-        info["reason"] = f"benchmark_script={script_name!r} is not a Magpie built-in ({sorted(MAGPIE_BUILTIN_SCRIPTS)})"
         return info
 
     profiler_on = bool((bench.get("profiler") or {}).get("torch_profiler", {}).get("enabled"))
@@ -196,10 +177,8 @@ def teardown_lifecycle_server(
     port: int,
 ) -> None:
     """Best-effort teardown of a persistent server left by a lifecycle round."""
-    base = Path(pid_dir)
-    tag = f"{framework}_{port}"
-    pid_file = base / f"{tag}.pid"
-    meta_file = base / f"{tag}.json"
+    pid_file = lifecycle_pid_file(pid_dir, framework, port)
+    meta_file = lifecycle_meta_file(pid_dir, framework, port)
     server_pid: int | None = None
     server_pgid: int | None = None
     try:
@@ -239,10 +218,10 @@ def teardown_lifecycle_server(
 
 def _terminate_group(pgid: int) -> bool:
     """SIGTERM a process group, then SIGKILL it if any member outlives the grace; return whether it is gone."""
-    _signal_group(pgid, signal.SIGTERM)
-    if _group_gone_within(pgid, TERM_GRACE_SECONDS):
+    signal_group(pgid, signal.SIGTERM, what="_server_lifecycle")
+    if _group_gone_within(pgid, TERM_GRACE_SEC):
         return True
-    _signal_group(pgid, signal.SIGKILL)
+    signal_group(pgid, signal.SIGKILL, what="_server_lifecycle")
     return _group_gone_within(pgid, _KILL_CONFIRM_SECONDS)
 
 
@@ -284,24 +263,7 @@ def _looks_like_server_process(pid: int) -> bool:
 
 def _process_group_looks_like_server(pgid: int) -> bool:
     """Return whether any process in ``pgid`` still looks like a serving process."""
-    proc_root = Path("/proc")
-    try:
-        entries = list(proc_root.iterdir())
-    except OSError:
-        return False
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            pid = int(entry.name)
-            stat = (entry / "stat").read_text(encoding="utf-8")
-            after_comm = stat.rsplit(")", 1)[1].split()
-            entry_pgid = int(after_comm[2])
-        except (IndexError, OSError, ValueError):
-            continue
-        if entry_pgid == pgid and _looks_like_server_process(pid):
-            return True
-    return False
+    return any(_looks_like_server_process(pid) for pid, _start, _state in group_members(pgid))
 
 
 class ServerReap(NamedTuple):
@@ -428,19 +390,6 @@ def _read_pidfile(pid_file: Path) -> tuple[int, int] | None:
         _unlink_quietly(pid_file)
         return None
     return server_pid, recorded_pgid
-
-
-def _pid_alive_simple(pid: int) -> bool:
-    """Return whether ``pid`` currently exists (``kill(pid, 0)`` probe)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def _unlink_quietly(path: Path) -> None:
