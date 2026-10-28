@@ -27,6 +27,7 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
     load_runtime_findings,
 )
 
+from ...enablement.lane import takes_enablement_round
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ...specialists.patch_safety import patch_targets_missing
 
@@ -208,6 +209,13 @@ def _enforce_critic_gate(
             ),
         }
     return None
+
+
+def _enablement_lane_closed_skip(params: Mapping[str, Any], shared_state: Any) -> "dict[str, Any] | None":
+    """The skip for an enablement round the lane no longer takes; ``None`` for any other integrate."""
+    if not params.get("enablement") or shared_state is None or takes_enablement_round(shared_state):
+        return None
+    return {"status": "skipped", "reason": f"enablement lane takes no rounds in phase {shared_state.phase}"}
 
 
 def _gate_failure_reasons(

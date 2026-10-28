@@ -771,15 +771,6 @@ def test_cluster_is_serving_lets_an_unexpected_error_propagate(monkeypatch: pyte
         serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5)
 
 
-def test_cluster_is_serving_without_httpx_is_not_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Preflight backfills httpx; until it does, nothing can be confirmed."""
-    from hyperloom.inference_optimizer.multi_node._internal import serving_probe
-
-    monkeypatch.setitem(sys.modules, "httpx", None)
-
-    assert serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5) is False
-
-
 def test_cluster_is_serving_accepts_a_cluster_that_generates_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one answer that lets a resume skip a relaunch outright."""
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe

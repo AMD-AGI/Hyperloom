@@ -198,7 +198,6 @@ class SpecialistRound:
     residual_questions: Any = None
     notes: Any = None
     proposals_total: Any = None
-    empty: Any = None
     confidence: Any = None
     ensemble_scores: Mapping[str, Any] | None = None
 
@@ -229,8 +228,6 @@ class SpecialistRound:
                 row[name] = [str(item) for item in (items or []) if str(item or "")]
         if self.proposals_total is not None:
             row["proposals_total"] = _int_or_none(self.proposals_total)
-        if self.empty is not None:
-            row["empty"] = bool(self.empty)
         if self.confidence is not None:
             row["confidence"] = _float_or_none(self.confidence)
         if self.ensemble_scores:

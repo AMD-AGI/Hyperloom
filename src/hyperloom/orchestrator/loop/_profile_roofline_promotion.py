@@ -76,7 +76,6 @@ class ProfileRooflineMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
-        changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         # Defensive skipped arm: audit as skipped + drop the gate.
@@ -102,11 +101,9 @@ class ProfileRooflineMixin:
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             outcome.verdict = Verdict.FAILED
             self._record_failed_profile(trace_path)
-            changed = True
         elif trace_path:
             audit_extras["trace_path"] = str(trace_path)
             audit_extras["profile_args"] = self._adopt_profile_trace(result, task, trace_path)
-            changed = True
         # Host-side rewrite evidence is independent of the trace: it answers
         # "which host-side work is redundant", which no kernel timeline can, and
         # a run whose trace was unusable can still have produced good evidence.
@@ -117,17 +114,13 @@ class ProfileRooflineMixin:
         if evidence_path:
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
-            changed = True
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if measurement_status == "succeeded":
             anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
-                changed = True
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
-            changed = True
-        outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
@@ -179,7 +172,6 @@ class ProfileRooflineMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a roofline result: audit + failure streak + roofline anchor (reads last_trace_analyze)."""
-        changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
         # The composite roofline action runs profile + trace_analyze atomically;
@@ -195,16 +187,12 @@ class ProfileRooflineMixin:
         elif status in {"succeeded", "recovered"}:
             audit_decision = "promoted"
             audit_extras = self._anchor_watermark_on_roofline(result, task)
-            changed = True
         else:
             outcome.verdict = Verdict.FAILED
             audit_decision = "discarded"
             audit_extras = self._charge_roofline_failure(result, task)
-            changed = True
         # Clear the pending pointer (matched by task id).
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
-            changed = True
-        outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras

@@ -166,7 +166,6 @@ async def test_warm_specialist_params_respects_existing_evidence(tmp_path):
 
 def _make_inp(roofline_evidence: dict[str, Any]) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("serving_specialist"),
         gap_canonical_id="gap.x",
         roofline_evidence=roofline_evidence,

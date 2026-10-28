@@ -101,6 +101,7 @@ async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
     state = SharedState.load_or_init(session)
+    state.phase = "ENABLEMENT"
 
     bench_result = {
         "output_throughput": 50.0,
@@ -376,6 +377,7 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 def _established_state(session: Path, cfg: dict[str, Any]) -> SharedState:
     """Persist established enablement config on the state the executor owns."""
     state = SharedState.load_or_init(session)
+    state.phase = "ENABLEMENT"
     state.enablement.accepted_config = dict(cfg)
     state.save(session)
     return state
@@ -437,7 +439,7 @@ async def test_launch_probe_with_nothing_established_inherits_nothing(tmp_path):
     params = _params_base(session)
     params["_obs_path"] = _booted_observation(session)
 
-    _res, captured = await _capture_launch(ex, params, {"shared_state": SharedState()})
+    _res, captured = await _capture_launch(ex, params, {"shared_state": SharedState(phase="ENABLEMENT")})
     assert captured["extra_server_args_applied"] == ""
     assert captured["extra_envs_applied"] == {}
 

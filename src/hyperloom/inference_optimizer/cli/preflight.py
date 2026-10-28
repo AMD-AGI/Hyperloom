@@ -533,22 +533,23 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
-# Only 2.44.1's CLI requires the default Click ceiling. Explicit Ray/Click
-# overrides retain the installer's requested ceiling on other releases too.
-_RAY_CLICK_PINNED_VERSION = "2.44.1"
-_RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
+# A representative `ray start` argv of the orchestrator's Ray runtime: every option it passes to the head
+# this step provisions, with values of its kind. Ray's own parser reading this argv is the certification, so
+# a pair whose `ray start` parses what Hyperloom passes is never refused over a version number.
+_RAY_START_ARGV = (
+    *"--head --port=6379 --dashboard-host=127.0.0.1 --dashboard-port=8265".split(),
+    *"--ray-client-server-port=10001 --num-gpus=8 --resources".split(),
+    '{"serving_slot": 1}',
+)
 
 
 _RAY_SMOKE_TEMPLATE = r"""
-import importlib.metadata as md
 import re
 import sys
 
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
-RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
-RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
+RAY_START_ARGV = __RAY_START_ARGV__
 ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
-click_override = sys.argv[2] if len(sys.argv) > 2 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
     parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
@@ -569,35 +570,29 @@ elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
     print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray_version or click_override or ray.__version__ == RAY_CLICK_PINNED_VERSION:
-    click_max_version = click_override or RAY_CLI_CLICK_MAX_VERSION
-    try:
-        click_version = md.version("click")
-    except md.PackageNotFoundError:
-        print("click is not installed", file=sys.stderr)
-        raise SystemExit(1)
-
-    if _version_tuple(click_version) >= _version_tuple(click_max_version):
-        print(
-            f"click version incompatible with Ray CLI: {click_version} >= {click_max_version}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
 try:
-    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
+    import click
+    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
     print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    _ray_start = _ray_cli.commands["start"]
+    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
+except click.UsageError as exc:
+    print(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}", file=sys.stderr)
+    raise SystemExit(1)
+except Exception as exc:
+    print(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
 print(ray.__version__)
 """
 
 
-_RAY_SMOKE = (
-    _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
-    .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
-    .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
+_RAY_SMOKE = _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION).replace(
+    "__RAY_START_ARGV__", repr(_RAY_START_ARGV)
 )
 
 
@@ -614,68 +609,73 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
-def _ray_smoke(python_exe: str, ray_version: str = "", click_max_version: str = "") -> subprocess.CompletedProcess:
+def _ray_smoke(python_exe: str, ray_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE, ray_version, click_max_version],
+        [python_exe, "-c", _RAY_SMOKE, ray_version],
         capture_output=True,
         text=True,
         env=_ray_probe_env(),
     )
 
 
-def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
-    """Probe-then-install Ray using the interpreter that will import it."""
-    ray_version = os.environ.get("RAY_VERSION", "")
-    click_override = os.environ.get("RAY_CLI_CLICK_MAX_VERSION", "")
-    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
-    click_spec = f"click<{click_override or _RAY_CLI_CLICK_MAX_VERSION}"
-    check = _ray_smoke(python_exe, ray_version, click_override)
-    if check.returncode == 0:
-        print("Preflight: ray OK")
-        return {
-            "status": "already_present",
-            "skip_reason": None,
-            "target": "ray",
-            "interpreter": python_exe,
-            "spec": ray_spec,
-            "version_after": check.stdout.strip() or ray_version or _RAY_MIN_VERSION,
-            "message": None,
-        }
-    reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
-    print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
-    specs: tuple[str, ...] = (ray_spec, click_spec)
-    install = subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-        capture_output=True,
-        text=True,
-    )
-    if install.returncode != 0 and not ray_version:
-        # Preserve an explicit Click ceiling; the default only guards 2.44.1.
-        specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
-        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
-        install = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
-            capture_output=True,
-            text=True,
-        )
-    if install.returncode != 0:
-        detail = (install.stderr or install.stdout or "no pip output").strip()
-        raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe, ray_version, click_override)
-    if check.returncode != 0:
-        reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
-        raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
-    print(f"Preflight: ray installed OK ({version_after})")
+def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ...]) -> subprocess.CompletedProcess:
+    argv = [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs]
+    return subprocess.run(argv, capture_output=True, text=True)
+
+
+def _ray_result(status: str, python_exe: str, spec: str, version_after: str, message: str | None) -> dict[str, Any]:
+    """The record the Ray step reports, whether it found Ray or had to install it."""
     return {
-        "status": "applied",
+        "status": status,
         "skip_reason": None,
         "target": "ray",
         "interpreter": python_exe,
-        "spec": " ".join(specs),
+        "spec": spec,
         "version_after": version_after,
-        "message": reason,
+        "message": message,
     }
+
+
+def _install_ray(python_exe: str, pip_extra: list[str], ray_version: str, ray_spec: str, reason: str) -> dict[str, Any]:
+    """Install Ray for an interpreter whose smoke test refused the Ray it has."""
+    specs: tuple[str, ...] = (ray_spec,)
+    pinned_detail = ""
+    install = _pip_install_ray(python_exe, pip_extra, specs)
+    if install.returncode != 0 and not ray_version:
+        pinned_detail = (install.stderr or install.stdout or "no pip output").strip()
+        specs = (f"ray[default]>={_RAY_MIN_VERSION}",)
+        print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
+        install = _pip_install_ray(python_exe, pip_extra, specs)
+    if install.returncode != 0:
+        detail = (install.stderr or install.stdout or "no pip output").strip()
+        raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
+    check = _ray_smoke(python_exe, ray_version)
+    if check.returncode != 0:
+        detail = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
+        # The floor spec is satisfied by whatever Ray is already installed, so a
+        # zero exit from pip does not mean anything was installed: report what
+        # the repair really did rather than claiming it completed.
+        earlier = f" after {ray_spec} failed to install ({pinned_detail})" if pinned_detail else ""
+        raise RuntimeError(
+            f"pip install {' '.join(specs)} succeeded{earlier} but the Ray smoke test still failed: {detail}"
+        )
+    version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
+    print(f"Preflight: ray installed OK ({version_after})")
+    return _ray_result("applied", python_exe, " ".join(specs), version_after, reason)
+
+
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
+    """Probe-then-install Ray using the interpreter that will import it."""
+    ray_version = os.environ.get("RAY_VERSION", "")
+    ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
+    check = _ray_smoke(python_exe, ray_version)
+    if check.returncode == 0:
+        print("Preflight: ray OK")
+        version_after = check.stdout.strip() or ray_version or _RAY_MIN_VERSION
+        return _ray_result("already_present", python_exe, ray_spec, version_after, None)
+    reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
+    print(f"Preflight: ray unusable ({reason}), installing {ray_spec} ...")
+    return _install_ray(python_exe, pip_extra, ray_version, ray_spec, reason)
 
 
 # InferenceX benchmark_serving client-side deps.

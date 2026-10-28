@@ -141,14 +141,16 @@ def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) 
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "remove_args": to_str_list(result.get("remove_args_applied") or declared.get("remove_args")),
-        "unset_envs": to_str_list(result.get("unset_envs_applied") or declared.get("unset_envs")),
+        "remove_args": to_str_list(declared.get("remove_args")),
+        "unset_envs": to_str_list(declared.get("unset_envs")),
         "args_mode": str(result.get("args_mode") or declared.get("args_mode") or "append").strip().lower(),
     }
 
 
-def _integrate_keep_origin(result: Mapping[str, Any], task_params: Mapping[str, Any]) -> dict[str, Any]:
-    domain = str(task_params.get("domain") or task_params.get("source_domain") or result.get("domain") or "").strip()
+def _integrate_keep_origin(
+    result: Mapping[str, Any], task_params: Mapping[str, Any], source_phase: str
+) -> dict[str, Any]:
+    domain = str(task_params.get("domain") or result.get("domain") or "").strip()
     provenance = str(task_params.get("provenance") or result.get("provenance") or "").strip()
     if domain and not provenance.startswith("specialist:"):
         provenance = f"specialist:{domain}"
@@ -156,15 +158,17 @@ def _integrate_keep_origin(result: Mapping[str, Any], task_params: Mapping[str, 
     lever_kind = _lever_for_keep(task_params, result)
     if lever_kind:
         fields["lever_kind"] = lever_kind
-    source_phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip()
     if source_phase:
         fields["source_phase"] = source_phase
     if domain:
         fields["domain"] = domain
-    if task_params.get("gap_layer"):
-        fields["gap_layer"] = str(task_params.get("gap_layer"))
-    if task_params.get("framework_agent_authoring"):
+    gap_layer = str(task_params.get("gap_layer") or result.get("gap_layer") or "").strip()
+    if gap_layer:
+        fields["gap_layer"] = gap_layer
+    if task_params.get("framework_agent_authoring") or result.get("framework_agent_authoring"):
         fields["framework_agent_authoring"] = True
+    if result.get("enablement") or task_params.get("enablement"):
+        fields["recipe_publishable"] = False
     # A verified correctness fix was bounded by the integrate gate, not by a gain.
     if result.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX:
         fields["keep_reason"] = KEEP_REASON_CORRECTNESS_FIX
@@ -178,7 +182,9 @@ def _integrate_keep_variant(
     task: "Task | None",
     measurement: Mapping[str, Any],
     tput: float,
+    source_phase: str,
 ) -> dict[str, Any]:
+    """Build the stack variant an integrate_patch KEEP lifts, live (with its task) or on resume replay (``task=None``)."""
     task_params = (getattr(task, "params", None) or {}) if task is not None else {}
     specialist_task_id = str(result.get("specialist_task_id") or task_params.get("specialist_task_id") or "")
     return {
@@ -191,7 +197,7 @@ def _integrate_keep_variant(
         "tput": tput,
         **integrate_measurement_fields(measurement),
         **_source_layer_handles(result),
-        **_integrate_keep_origin(result, task_params),
+        **_integrate_keep_origin(result, task_params, source_phase),
     }
 
 
@@ -312,9 +318,7 @@ class IntegratePromotionMixin:
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
         changed = self._record_authored_levers(result)
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
-        enablement_landing = bool(
-            result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")
-        )
+        enablement_landing = bool(result.get("enablement") or task_params.get("enablement"))
         lifted = False
         if kept_flag:
             lifted = await self._lift_integrate_keep(result, task, measurement, enablement_landing=enablement_landing)
@@ -362,10 +366,9 @@ class IntegratePromotionMixin:
     ) -> bool:
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         new_tput = float(measurement.get("output_throughput", result.get("output_throughput")))
-        variant = _integrate_keep_variant(result, task, measurement, new_tput)
+        source_phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip()
+        variant = _integrate_keep_variant(result, task, measurement, new_tput, source_phase)
         prebaseline = enablement_landing and float(self.shared_state.baseline_tput or 0.0) <= 0.0
-        if enablement_landing:
-            variant["recipe_publishable"] = False
         if prebaseline:
             variant["baseline_enablement"] = True
             variant["attribution_eligible"] = False

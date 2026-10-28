@@ -363,15 +363,18 @@ confirmation that lets a refused resume proceed.
 
 ### Scenario E: Ray won't start (`--num-gpus` rejected)
 
-The Ray 2.44 CLI is incompatible with Click ≥ 8.3:
+Preflight refuses a Ray whose `ray start` does not parse the argv Hyperloom
+passes it, and reinstalls the pinned release:
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+pip install --quiet 'ray[default]==2.44.1'
 ray --version
 ```
 
-Where 2.44.1 has no wheel (cp314 postdates it), install `'ray[default]>=2.44.1'`
-without the `click` ceiling; see
+Where 2.44.1 has no wheel (cp314 postdates it), install `'ray[default]>=2.44.1'`;
+where the interpreter's `click` is newer than 2.44.1's CLI accepts, set
+`RAY_VERSION` to a Ray release built against it rather than downgrading
+`click`. See
 [Ray `--num-gpus` rejected](troubleshooting.md#ray---num-gpus-rejected).
 
 ---
