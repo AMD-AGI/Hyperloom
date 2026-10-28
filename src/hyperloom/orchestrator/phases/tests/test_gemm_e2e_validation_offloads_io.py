@@ -34,13 +34,16 @@ def test_the_blocker_helper_is_reached_from_the_validator():
     )
 
 
-def test_the_fused_moe_probe_runs_off_the_loop():
+def test_the_serving_log_is_read_off_the_loop():
     src = _validator_source()
-    assert "self._runtime_uses_aiter_fused_moe" in src
-    assert re.search(
-        r"await\s+asyncio\.to_thread\(\s*\n?\s*self\._runtime_uses_aiter_fused_moe",
-        src,
-    ), src
+    assert "self._serving_log_text" in src
+    assert re.search(r"await\s+asyncio\.to_thread\(\s*self\._serving_log_text\s*\)", src), src
+
+
+def test_the_reason_not_to_measure_is_read_off_the_loop():
+    """It reads every candidate's tuned CSVs."""
+    src = _validator_source()
+    assert re.search(r"await\s+asyncio\.to_thread\(\s*self\._reason_not_to_measure\s*,", src), src
 
 
 def test_the_coverage_replay_runs_off_the_loop():
@@ -55,7 +58,7 @@ def test_the_coverage_replay_runs_off_the_loop():
 def test_neither_is_also_called_bare():
     """A ``to_thread`` wrap elsewhere does not excuse a second inline call."""
     src = _validator_source()
-    for name in ("_runtime_uses_aiter_fused_moe", "_gemm_tuned_config_coverage"):
+    for name in ("_serving_log_text", "_reason_not_to_measure", "_gemm_tuned_config_coverage"):
         # A bare call is the attribute immediately followed by "(" -- the to_thread form passes the bound method as an
         # argument instead, so it is followed by "," or ")".
         assert not re.search(rf"self\.{name}\s*\(", src), f"{name} is called inline"

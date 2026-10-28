@@ -18,6 +18,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.common.timeutil import format_exc_brief
 from .verdicts import (
@@ -81,12 +82,75 @@ class DelegateRequest(NamedTuple):
     params: dict[str, Any]
 
 
+class _IdempotencyKey(NamedTuple):
+    """A delegate's idempotency key, and whether the executor will grow the explore grid it carries."""
+
+    key: str
+    grid_grown_by_executor: bool
+
+
 def _is_specialist_wave(action_name: str, params: Mapping[str, Any]) -> bool:
     """A specialist delegate carrying ``params.tasks`` fans out into one freeform specialist task per entry.
 
     Each goes out through the normal SpecialistRunner + TaskRegistry + lease + reap path.
     """
     return action_name == "specialist" and isinstance(params.get("tasks"), list) and bool(params["tasks"])
+
+
+def _explore_grid_key(action_name: str, params: Mapping[str, Any], *, macro_cycle: int) -> str:
+    """Idempotency key naming the configurations an explore grid would measure, or ``""``.
+
+    An explore round costs a whole benchmark window, so two grids asking for the
+    same configurations are the same task however they were worded or whenever
+    they were proposed. Keying on the tick, or on a key the proposer chose, lets
+    the same grid queue once per round of proposing -- and a configuration the
+    stack already carries is only dropped downstream once something else made it
+    a no-op, which never happens on the path where the first measurement
+    refused it. The stack the grid would run on is part of the key, read the way
+    ``measured_variants.stack_of`` reads it: the same grid on a moved anchor is a
+    different question, and the coverage rule this key pre-empts compares those
+    same fields. The macro cycle rides along because it names the bar the round
+    is graded against, which is not part of the stack.
+
+    A variant carrying a kernel overlay returns ``""``, handing the key back to
+    the proposer's own. The overlay changes the launch without appearing in the
+    args or envs this key reads, so two such variants are indistinguishable here
+    and folding them together would refuse one a round the other never measured.
+    ``measured_variants.grid_fingerprints`` reads a variant's identity the same
+    way for the same reason.
+    """
+    grid = params.get("grid") if action_name == "explore" else None
+    if not isinstance(grid, list) or not grid:
+        return ""
+    from ..actions.executors.measured_variants import stack_of
+
+    prints: list[str] = []
+    for variant in grid:
+        if not isinstance(variant, Mapping) or variant.get("overlay_pythonpath"):
+            return ""
+        prints.append(
+            canonical_fingerprint(
+                _args_text(variant.get("extra_args")),
+                dict(variant.get("extra_envs") or {}),
+                remove_args=variant.get("remove_args"),
+                unset_envs=variant.get("unset_envs"),
+                args_mode=str(variant.get("args_mode") or "append"),
+            )
+        )
+    body = json.dumps(
+        {"cycle": macro_cycle, "stack": stack_of(params), "variants": sorted(prints)},
+        sort_keys=True,
+        default=str,
+    )
+    digest = hashlib.sha1(body.encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"explore-grid-c{macro_cycle}-{digest}"
+
+
+def _args_text(extra_args: Any) -> str:
+    """``extra_args`` as the flat string the fingerprint reads, from either shape a proposer may send."""
+    if isinstance(extra_args, (list, tuple)):
+        return " ".join(str(part) for part in extra_args)
+    return str(extra_args or "")
 
 
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
@@ -555,7 +619,9 @@ class IntentRouter(CoordinatorCollaborator):
         # Pruned families are advisory: proposal still queues with an advisory note.
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await self._coord.dispatcher.admission_denial_for_action(
+            action_name, params=intent.payload.get("params")
+        )
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -935,12 +1001,115 @@ class IntentRouter(CoordinatorCollaborator):
         await self.record_policy_denied(source, intent, covered, action_name="explore")
         return True
 
+    async def _explore_key_in_flight(self, *keys: str | None) -> bool:
+        """Whether an explore task already queued or running carries any of ``keys``.
+
+        A re-send of a key the queue already holds is answered by the duplicate
+        rule at enqueue, which tells the model to wait. It must reach that rule
+        with its grid intact: narrowing the grid first would strip the variants
+        the queue already holds, and the round would end as a silent "nothing
+        new to measure" instead of an answer.
+        """
+        wanted = {str(k) for k in keys if k}
+        if not wanted:
+            return False
+        for task in (*await self.tasks.queued(), *await self.tasks.running()):
+            if task.kind == "explore" and task.idempotency_key in wanted:
+                return True
+        return False
+
+    async def _keep_unqueued_variants(self, source: str, params: dict[str, Any]) -> bool:
+        """Narrow ``params['grid']`` to what the queue is not already measuring; ``False`` when nothing is left.
+
+        Deduplicating a whole grid admits one configuration once per grouping
+        it is proposed in. The variant is what costs a serving lane for a
+        launch and a benchmark, so the variant is what has to be unique at
+        enqueue -- not the grid that happens to carry it.
+        """
+        before = list(params.get("grid") or ())
+        if not before:
+            # No grid supplied is not a deduplicated grid: the executor seeds its own.
+            return True
+        kept = await self._coord.dispatcher.variants_not_already_queued(before, params)
+        params["grid"] = kept
+        if len(kept) == len(before):
+            return True
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "explore_variants_deduped",
+                "from_agent": source,
+                "proposed": len(before),
+                "kept": len(kept),
+                "hint": (
+                    "the queue already holds these configurations; propose a direction it does not, "
+                    "or read the measured result first"
+                ),
+            },
+        )
+        return bool(kept)
+
+    def _delegate_idempotency_key(
+        self,
+        request: DelegateRequest,
+        nested_idempotency_key: str | None,
+    ) -> _IdempotencyKey:
+        """The task's idempotency key, and whether the executor will grow the explore grid it carries.
+
+        The chain is grid content for explore -> top-level -> nested compat alias -> content-fingerprint auto-key.
+        """
+        from ..actions.executors.explore import framework_lever_grid
+
+        # The executor appends its pending rewrite levers to an explore grid, so the grid as proposed is not all this
+        # round would measure: two identically-worded grids are two different rounds. Such a grid is neither keyed nor
+        # narrowed here; ``_explore_grid_covered`` holds the same exception for the same reason.
+        grown_by_executor = request.action_name == "explore" and framework_lever_grid(self.shared_state)
+        raw_key = (
+            ""
+            if grown_by_executor
+            else _explore_grid_key(
+                request.action_name, request.params, macro_cycle=int(self.shared_state.macro_cycle or 0)
+            )
+        )
+        if not raw_key:
+            raw_key = request.intent.payload.get("idempotency_key") or nested_idempotency_key
+        if not raw_key:
+            content_fp = hashlib.sha1(
+                json.dumps(request.params, sort_keys=True, default=str).encode(),
+                usedforsecurity=False,
+            ).hexdigest()[:10]
+            raw_key = f"{request.source}:{request.action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
+        return _IdempotencyKey(str(raw_key), grown_by_executor)
+
+    async def _narrow_explore_grid(
+        self,
+        request: DelegateRequest,
+        idempotency_key: str,
+        nested_idempotency_key: str | None,
+        grown_by_executor: bool,
+    ) -> bool:
+        """Drop the explore variants the queue already measures; ``False`` once nothing is left.
+
+        A re-send of a key already in flight is answered by the duplicate rule
+        at enqueue, which tells the model to wait. It must reach that rule with
+        its grid intact: narrowing first would strip the variants the queue
+        already holds and end the round as a silent "nothing new to measure".
+        """
+        if request.action_name != "explore" or grown_by_executor:
+            return True
+        if await self._explore_key_in_flight(idempotency_key, nested_idempotency_key):
+            return True
+        return await self._keep_unqueued_variants(request.source, request.params)
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await self._coord.dispatcher.admission_denial_for_action(
+            action_name, params=intent.payload.get("params")
+        )
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
             return
@@ -964,23 +1133,19 @@ class IntentRouter(CoordinatorCollaborator):
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
-        # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
-        raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
-        if not raw_key:
-            content_fp = hashlib.sha1(
-                json.dumps(params, sort_keys=True, default=str).encode(),
-                usedforsecurity=False,
-            ).hexdigest()[:10]
-            raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        idempotency_key = str(raw_key)
-        if await self._explore_grid_covered(action_name, source, intent, params, idempotency_key):
+        key_info = self._delegate_idempotency_key(request, nested_idempotency_key)
+        if not await self._narrow_explore_grid(
+            request, key_info.key, nested_idempotency_key, key_info.grid_grown_by_executor
+        ):
+            return
+        if await self._explore_grid_covered(action_name, source, intent, params, key_info.key):
             return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
             params["proposal_msg_id"] = proposal_id
-        task = await self._create_delegated_task(request, raw_key)
+        task = await self._create_delegated_task(request, key_info.key)
         if task is None:
             return
         self.shared_state.reset_policy_denial_streak(action_name)
@@ -1264,8 +1429,20 @@ class IntentRouter(CoordinatorCollaborator):
 
         phase = str(self.shared_state.phase or "").strip().upper()
         if hint == ESCALATE_HINT_SKIP_TO_KERNEL and phase != PHASE_FRAMEWORK_AGENT:
-            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival.
-            log.info("escalate_strategy_change: dropped %r emitted in phase %s", hint, phase or "<none>")
+            # Only the FRAMEWORK_AGENT exit reads it; left pending, it would end that phase on arrival. Refused in
+            # silence, an agent re-sends it every turn.
+            await self.record_policy_denied(
+                source,
+                intent,
+                PolicyDenied(
+                    f"next_action_hint={hint!r} advances FRAMEWORK_AGENT only; the session is in {phase or '<none>'}",
+                    rule="escalate_hint_phase",
+                    hint=(
+                        f"No hint advances {phase or 'this phase'}: the Coordinator exits it on the gate its phase "
+                        "goal names."
+                    ),
+                ),
+            )
             return
         # Deferred: the next compute_next_phase acts on the hint.
         self.shared_state.set_pending_escalate_hint(hint)

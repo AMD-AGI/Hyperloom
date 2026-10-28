@@ -1166,9 +1166,36 @@ class TestEveryTerminalReachesAWrittenReport:
         assert coord.shared_state.phase_history[-1]["reason"] == "max_ticks"
 
     @pytest.mark.asyncio
+    async def test_an_operator_stop_leaves_the_session_in_its_phase(self, tmp_path: Path, monkeypatch):
+        coord = self._coordinator(tmp_path / "session")
+        state = coord.shared_state
+        machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="phase_entered")
+        history_count = len(state.phase_history)
+
+        async def _idle_tick() -> bool:
+            return False
+
+        monkeypatch.setattr(coord, "_tick_once", _idle_tick)
+        coord._stop.set()
+        try:
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
+            kinds = [row[0] for row in coord.db.raw.execute("SELECT kind FROM tasks ORDER BY created_at")]
+        finally:
+            await coord.stop()
+
+        assert (
+            reason,
+            state.stop_reason,
+            state.phase,
+            state.close_sequence_done,
+            len(state.phase_history),
+            kinds,
+        ) == ("signal", "signal", "FRAMEWORK_AGENT", False, history_count, [])
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("phase", ["PRELUDE", "FRAMEWORK_AGENT", "KERNEL_AGENT"])
     async def test_terminal_close_records_the_phase_before_dispatch(self, tmp_path, phase):
-        transition_reason = "signal"
+        transition_reason = "emergency"
         coord = self._coordinator(tmp_path / "session")
         coord.sub.register_executor("session_breakdown", session_breakdown_executor)
         state = coord.shared_state
@@ -1182,10 +1209,10 @@ class TestEveryTerminalReachesAWrittenReport:
                 route="forge", route_reason="kernel_optimizer=forge", from_phase="PRELUDE"
             )
         state.pending_escalate_hint = "skip_to_kernel"
-        state.set_stop_reason("signal")
+        state.set_stop_reason(transition_reason)
         try:
-            assert await coord.phase_close.ensure_close_sequence(reason="signal") is True
-            assert state.stop_reason == "signal"
+            assert await coord.phase_close.ensure_close_sequence(reason=transition_reason) is True
+            assert state.stop_reason == transition_reason
             transition = state.phase_history[-1]
             assert (transition["from_phase"], transition["to_phase"], transition["reason"]) == (
                 phase,
@@ -1221,7 +1248,7 @@ class TestEveryTerminalReachesAWrittenReport:
                 assert task_dispatch_record(task)["phase"] == "CLOSE"
                 assert actions[task.task_id]["action"] == step
             history_count = len(state.phase_history)
-            assert await coord.phase_close.ensure_close_sequence(reason="signal") is False
+            assert await coord.phase_close.ensure_close_sequence(reason=transition_reason) is False
             assert len(state.phase_history) == history_count
         finally:
             await coord.stop()

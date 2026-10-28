@@ -9,7 +9,7 @@ import collections
 import math
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
 from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_int
@@ -60,6 +60,7 @@ from .time_budget import (
     lease_ttl_sec,
     measured_baseline_runtime_sec,
     phase_deadline,
+    explore_admission_minutes,
     specialist_admission_minutes,
     time_budget_denial,
 )
@@ -1027,11 +1028,18 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             except TaskNotFound:
                 continue
             error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
+            settles_specialist = task.kind == "specialist" and not self.owes_result(task_id)
+            # A death is a crash to the specialist retry, which re-dispatches the same gap within its cap; a
+            # discovery round carries no gap and is re-armed by its own pool check.
+            died = SubAgentResult(task_id, "failed", {"runner_status": "stale"}, error=error)
+            retry = settles_specialist and bool((task.params or {}).get("gap_canonical_id"))
+            if retry and await self._coord.specialist_dispatch.maybe_auto_retry_specialist(task, died):
+                continue
             await self._coord.writeback.handle_unpromotable_result(
                 task,
                 {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
-            if task.kind == "specialist" and not self.owes_result(task_id):
+            if settles_specialist:
                 await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
@@ -1100,8 +1108,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             self._coord.writeback.record_intervention_for_task(task, result.result, verdict)
         if promotion is None:
             return
-        if task.kind == "integrate_patch":
-            await self._coord.phase_framework.on_integrate_patch_settled(task, result, verdict)
+        if task.kind in ("explore", "integrate_patch"):
+            await self._coord.phase_framework.on_task_settled(task, result, verdict)
         # replay_warm_recipe is excluded from the fact-write: it is verification, not a fact.
         if task.kind != _REPLAY_WARM_RECIPE:
             try:
@@ -1249,6 +1257,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         *,
         fallback_cost_minutes: float | None = None,
         params: dict[str, Any] | None = None,
+        already_committed_minutes: float = 0.0,
     ) -> PolicyDenied | None:
         """Refuse an action whose expected cost cannot fit the remaining session budget or gated phase budget.
 
@@ -1291,9 +1300,109 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             )
         if action == "specialist":
             expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
-        return time_budget_denial(action, expected_min, self.shared_state)
+        elif action == "explore":
+            expected_min = explore_admission_minutes(expected_min, params)
+        # Work already queued has spoken for its minutes even though none have
+        # been spent: pricing against the raw clock calls a phase affordable
+        # while its queue is oversubscribed. Zero at dispatch, where the queue
+        # is what is being drained rather than added to.
+        return time_budget_denial(action, expected_min, self.shared_state, queued_minutes=already_committed_minutes)
 
-    def admission_denial_for_action(
+    def expected_cost_minutes_for(self, action_name: str, params: dict[str, Any] | None = None) -> float:
+        """What one round of ``action_name`` is expected to cost, in minutes.
+
+        ``params`` are what make a grid's size visible; without them an explore
+        prices as the single round the catalogue names rather than the one it
+        runs per variant.
+        """
+        action = str(action_name or "").strip()
+        meta = self.action_registry.get(action)
+        if meta is None:
+            return 0.0
+        minutes = expected_action_cost_minutes(
+            meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state)
+        )
+        return explore_admission_minutes(minutes, params) if action == "explore" else minutes
+
+    async def queued_cost_minutes(self, action_name: str = "") -> float:
+        """Minutes the queue has committed on the lanes ``action_name`` needs.
+
+        Only work that contends for the same lane delays it. A queue of
+        specialists holds ``research_lane`` while an explore round needs
+        ``server_lifecycle`` and ``benchmark_lane``: summing both would refuse
+        a round the phase can in fact run alongside them.
+        """
+        wanted = set(self._lanes_for_action(action_name))
+        total = 0.0
+        for task in await self.tasks.queued():
+            kind = str(getattr(task, "kind", "") or "")
+            if wanted and not wanted.intersection(self._lanes_for_action(kind)):
+                continue
+            total += self.expected_cost_minutes_for(kind, getattr(task, "params", None))
+        return total
+
+    async def queued_grid_variants(self, params: Mapping[str, Any] | None = None) -> set[str]:
+        """Content fingerprints of the variants a queued or running explore grid already holds on this stack.
+
+        Without ``params`` every queued variant counts, which is what the prompt
+        wants; with them the stack rule is ``measured_variants``', the owner of
+        variant identity, and a variant queued on another stack does not count.
+        """
+        from ..actions.executors.measured_variants import variants_queued_on_stack
+
+        active = [*await self.tasks.queued(), *await self.tasks.running()]
+        if params is None:
+            from ..actions.executors._proposal_identity import content_fingerprint
+
+            return {
+                content_fingerprint(variant)
+                for task in active
+                if task.kind == "explore"
+                for variant in (task.params or {}).get("grid") or ()
+                if isinstance(variant, dict)
+            }
+        return variants_queued_on_stack(params, active)
+
+    async def variants_not_already_queued(self, grid: Any, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """``grid`` without the variants the queue is already going to measure on this stack.
+
+        The explore idempotency key names a whole grid, so ``{A, B}`` and
+        ``{A, C}`` are two keys and A is measured twice. One observed
+        FRAMEWORK_AGENT queue held 34 variants under 21 distinct
+        configurations: five copies of one lever, and every copy a full server
+        launch and benchmark on the one serving lane the reviewed patches were
+        waiting for.
+
+        A variant carrying a kernel overlay is always kept: the overlay changes
+        the launch without appearing in the args or envs the fingerprint reads,
+        so two such variants are indistinguishable here and dropping the second
+        would lose a measurement the first never made.
+        """
+        from ..actions.executors._proposal_identity import content_fingerprint
+
+        if not isinstance(grid, list):
+            return []
+        already = await self.queued_grid_variants(params)
+        kept: list[dict[str, Any]] = []
+        for variant in grid:
+            if not isinstance(variant, dict):
+                continue
+            if variant.get("overlay_pythonpath"):
+                kept.append(variant)
+                continue
+            fingerprint = content_fingerprint(variant)
+            if fingerprint in already:
+                continue
+            already.add(fingerprint)
+            kept.append(variant)
+        return kept
+
+    def _lanes_for_action(self, action_name: str) -> tuple[str, ...]:
+        """The lanes one action holds while it runs."""
+        meta = self.action_registry.get(str(action_name or "").strip())
+        return tuple(getattr(meta, "requires_lanes", ()) or ()) if meta is not None else ()
+
+    async def admission_denial_for_action(
         self,
         action_name: str,
         *,
@@ -1304,6 +1413,22 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         The single entry point the intent handlers share, so a new gate
         reaches all paths at once.
 
+        A pending transition refuses first. ``admission_frozen`` is set for as
+        long as the phase machine is waiting on in-flight work before it can
+        commit the next phase, and it already stops the pump from dispatching;
+        until it stopped admission too, a round proposed in that window was
+        enqueued and then cancelled by the same tick's drain. One observed
+        FRAMEWORK_AGENT phase spent seventeen minutes that way: eleven rounds
+        reasoned about, reviewed, admitted and cancelled within half a second
+        each, under ``phase_transition:FRAMEWORK_AGENT->KERNEL_AGENT``.
+
+        The time gate is charged the queue's own minutes as well as this
+        action's. Priced on its own against the phase clock, every round in an
+        oversubscribed queue still fits: two observed FRAMEWORK_AGENT phases
+        admitted thirteen and fourteen explore rounds, measured two and one,
+        and cancelled the rest when the phase ended. Each had been reasoned
+        about, reviewed and recorded before it was dropped.
+
         Args:
             action_name: The proposed/delegated action name.
             params: The proposal's parameters, which price a specialist.
@@ -1311,11 +1436,25 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        return (
-            self._phase_denial_for_action(action_name)
-            or self._sequence_denial_for_action(action_name)
-            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
-            or self.time_budget_denial_for_action(action_name, params=params)
+        if self.admission_frozen:
+            return PolicyDenied(
+                f"action={action_name!r} denied: the phase is leaving and admits nothing new",
+                rule="phase_transition_pending",
+                hint="the next phase starts on quiet GPUs; propose again once it has been entered",
+            )
+        denied = self._phase_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        denied = self._sequence_denial_for_action(action_name)
+        if denied is not None:
+            return denied
+        denied = specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
+        if denied is not None:
+            return denied
+        return self.time_budget_denial_for_action(
+            action_name,
+            params=params,
+            already_committed_minutes=await self.queued_cost_minutes(action_name),
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:

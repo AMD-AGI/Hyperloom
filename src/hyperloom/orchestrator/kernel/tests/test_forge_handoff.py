@@ -118,6 +118,23 @@ def test_write_forge_handoff_records_context_and_absolute_evidence_paths(tmp_pat
     assert not (handoff_dir / raw_trace.name).exists()
 
 
+def test_an_agentic_workload_states_the_corpus_shape_not_the_placeholder_lengths() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_workload_md
+
+    shape = {
+        "corpus_loader": "semianalysis_cc_traces_weka_062126",
+        "isl": {"p50": 108000, "p90": 361000, "p99": 600000},
+        "osl": {"p50": 520, "p90": 1500, "p99": 4000},
+    }
+    workload = build_workload_md(_state(agentx_corpus_shape=shape))
+
+    assert "Input sequence length" not in workload
+    assert "Output sequence length" not in workload
+    assert "- input/req : p50 108,000   p90 361,000   p99 600,000" in workload
+    assert "- output/req: p50 520   p90 1,500   p99 4,000" in workload
+    assert "1024" not in workload
+
+
 def test_trace_evidence_resolution_filename_has_one_owner(tmp_path: Path) -> None:
     """The handoff derives the artifact name from the single contract constant, not a literal."""
     from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
@@ -148,7 +165,7 @@ def test_trace_evidence_ends_with_current_best_runtime_findings(tmp_path: Path) 
         f"runtime findings for {log} [sglang]\n"
         "- detected [perf_path] feature_disabled fuse_rope_kvcache x1: WARNING Disabling fuse_rope_kvcache.\n"
         "- not_detected: capability_disabled, comm.custom_ar_disabled, comm.multimem_allgather_disabled, "
-        "engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
+        "device.queue_exception, device.memory_fault, engine_adjusted, aiter.tuned_miss, runtime.traceback\n"
         "```\n"
     )
 
@@ -274,6 +291,46 @@ def test_trace_evidence_tuned_miss_states_without_a_join(tmp_path: Path) -> None
         "```text\nnone: the profiled server log reports no tuned-config miss\n```\n"
     )
     assert _section(blind, "Hot GEMMs Missing Tuned Config") == "```text\nunknown: no_server_log\n```\n"
+
+
+def test_trace_evidence_lists_the_decode_classes_the_capture_ran(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from kernelforge.serving_windows import observed_decode_batch_sizes
+    from kernelforge.tests.trace_fixtures import kernel, step, write_trace
+
+    trace = write_trace(
+        tmp_path / "rank0.trace.json.gz",
+        [
+            step("step[EXTEND bs=1 toks=900]", 0.0, 600.0),
+            kernel("attention_prefill", 10.0, 400.0),
+            step("step[VERIFY bs=2]", 1000.0, 14.0),
+            kernel("moe_gemm", 1001.0, 9.0),
+            step("step[VERIFY bs=3]", 1100.0, 14.0),
+            kernel("moe_gemm", 1101.0, 9.0),
+            step("step[VERIFY bs=3]", 1200.0, 14.0),
+            kernel("moe_gemm", 1201.0, 9.0),
+        ],
+    )
+
+    evidence = build_trace_evidence_md(_state(last_profile_trace=str(trace)))
+
+    assert _section(evidence, "Observed Decode Classes") == (
+        "- `VERIFY bs=3`: 2 step(s), 66.7% of decode steps\n- `VERIFY bs=2`: 1 step(s), 33.3% of decode steps\n"
+    )
+    assert observed_decode_batch_sizes(evidence) == frozenset({2, 3})
+
+
+def test_trace_evidence_without_a_capture_lists_no_decode_class() -> None:
+    from hyperloom.orchestrator.kernel.forge_handoff import build_trace_evidence_md
+    from kernelforge.serving_windows import observed_decode_batch_sizes
+
+    evidence = build_trace_evidence_md(_state())
+
+    assert _section(evidence, "Observed Decode Classes") == (
+        "- none: the raw capture carries no decode `step[...]` annotations, so decode shape cases are not "
+        "checked against it\n"
+    )
+    assert observed_decode_batch_sizes(evidence) == frozenset()
 
 
 def test_opportunity_rules_defer_fallback_paths_and_name_the_bound() -> None:

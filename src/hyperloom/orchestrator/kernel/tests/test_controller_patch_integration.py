@@ -165,11 +165,8 @@ def _silent_backends() -> dict[str, object]:
     }
 
 
-def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "cycle" / "result" / "patches"
-    alphabetical = tuple(root / name for name in ("first", "second", "third"))
-    priorities = {"first": 2, "second": 0, "third": 1}
-
+def _ordered(root: Path, monkeypatch, *, priorities: dict[str, int], speedups: dict[str, float]) -> list[str]:
+    alphabetical = tuple(root / name for name in sorted(priorities))
     monkeypatch.setattr(integration, "discover_controller_patch_dirs", lambda _root: alphabetical)
     monkeypatch.setattr(
         integration,
@@ -178,9 +175,43 @@ def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monke
             task=SimpleNamespace(priority=priorities[path.name], operator_id=path.name)
         ),
     )
+    monkeypatch.setattr(
+        integration,
+        "load_controller_publication",
+        lambda path: SimpleNamespace(manifest={"total_speedup": speedups[Path(path).name]}),
+    )
+    return [path.name for path in integration._measurement_ordered_patch_dirs(root)]
 
-    ordered = integration._priority_ordered_patch_dirs(root)
-    assert [path.name for path in ordered] == ["second", "third", "first"]
+
+def test_patch_directories_follow_controller_task_priority_among_equal_savings(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "cycle" / "result" / "patches"
+
+    ordered = _ordered(
+        root,
+        monkeypatch,
+        priorities={"first": 2, "second": 0, "third": 1},
+        speedups={"first": 1.5, "second": 1.5, "third": 1.5},
+    )
+
+    assert ordered == ["second", "third", "first"]
+
+
+def test_the_largest_measured_saving_takes_the_round_the_phase_reserves(tmp_path: Path, monkeypatch) -> None:
+    """Only the first publication is sure of an E2E round; the analyst's priority predates every search.
+
+    A GLM-5.3 KERNEL measured a 1.04x priority-0 rewrite in that round, and the 2.47x priority-1 one behind it found
+    too little of the phase left to be measured at all.
+    """
+    root = tmp_path / "cycle" / "result" / "patches"
+
+    ordered = _ordered(
+        root,
+        monkeypatch,
+        priorities={"gluon_fp8_mqa_logits": 0, "sparse_mla_fused": 1},
+        speedups={"gluon_fp8_mqa_logits": 1.0439, "sparse_mla_fused": 2.4694},
+    )
+
+    assert ordered == ["sparse_mla_fused", "gluon_fp8_mqa_logits"]
 
 
 def _coordinator(session_dir: Path, repo: Path) -> Coordinator:

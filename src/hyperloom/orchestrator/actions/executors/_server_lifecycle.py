@@ -19,6 +19,7 @@ import yaml
 from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.ports import pick_server_port
 from hyperloom.common.proctree import TERM_GRACE_SEC, group_members, running, signal_group
 from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
@@ -67,23 +68,10 @@ REUSE_PORT_DEFAULT = 8888
 SERVER_READY_TIMEOUT_SEC = 7200
 
 
-def _pick_free_port() -> int:
-    """Return an OS-assigned free TCP port."""
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", 0))
-        return int(s.getsockname()[1])
-    finally:
-        s.close()
-
-
 def _assign_free_port(current_port: int) -> int:
-    """Return a per-session free ephemeral port for the persistent server."""
+    """Return a per-session free port for the persistent server."""
     try:
-        return _pick_free_port()
+        return pick_server_port()
     except OSError as exc:
         log.warning(
             "server_lifecycle: free-port pick failed (%s); keeping port %d",

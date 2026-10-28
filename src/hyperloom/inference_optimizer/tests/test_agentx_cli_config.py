@@ -101,13 +101,13 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--disable-custom-all-reduce"]
-    assert launch["env"] == {"TEST_SERVER_KNOB": "2"}
+    assert launch["env"] == {"TEST_SERVER_KNOB": "2", "AITER_LOG_TUNED_CONFIG": "1"}
     enable_profile(candidate)
     profiled = load_benchmark(candidate)["profiler"]["torch_profiler"]
     assert profiled["enabled"] is True
     assert profiled["num_steps"] == 256
     assert profiled["num_profiles"] == 1
-    assert profiled["start_seconds"] == 300
+    assert profiled["start_seconds"] == 900
     assert profiled["interval_seconds"] == 900
     assert load_benchmark(source)["profiler"]["torch_profiler"] == {"enabled": False}
 
@@ -127,7 +127,7 @@ def test_cli_defaults_and_operator_workload_pins_use_existing_resolver(tmp_path,
     assert bench["envs"] == {"TP": 2, "EP_SIZE": 2, "CONC": 32}
     assert "docker_image" not in bench
     round_path = materialize_benchmark_config(source, tmp_path / "round")
-    assert load_benchmark(round_path)["agentx"]["launch_overrides"]["env"] == {}
+    assert load_benchmark(round_path)["agentx"]["launch_overrides"]["env"] == {"AITER_LOG_TUNED_CONFIG": "1"}
 
 
 def test_generated_yaml_pins_local_checkpoint(tmp_path, monkeypatch):

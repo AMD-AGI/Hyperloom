@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -703,6 +704,43 @@ def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
         specialist_workspace=link, explicit_patches=[str(link / "patches" / "ok.patch")], done_payload=None
     )
     assert [p.name for p in out] == ["ok.patch"]
+
+
+def _deliverable_round(tmp_path, params):
+    patch = tmp_path / "worktree" / "patches" / "nosync.patch"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("--- a/x.py\n+++ b/x.py\n", encoding="utf-8")
+    done = {
+        "deliverable": {
+            "patches": [str(patch)],
+            "envs": {"SGLANG_DSA_GRAPH_VARIANT_NO_SYNC": "1"},
+            "server_args": "--cuda-graph-backend-prefill breakable",
+        }
+    }
+    attempt = SimpleNamespace(specialist_workspace=tmp_path, done_payload=done, shared_state=None)
+    return integrate_results._Deliverable.resolve(attempt, params)
+
+
+def test_a_round_benches_the_switches_its_specialist_declared(tmp_path):
+    """A delegate that omits the deliverable's switches must not bench the patch with its code path off.
+
+    A GLM-5.3 orchestrator queued the DSA graph-variant no-sync and prompt segment-cache patches with no env, though
+    each specialist declared the default-off switch its code path needs.
+    """
+    deliverable = _deliverable_round(tmp_path, {})
+
+    assert deliverable.extra_envs == {"SGLANG_DSA_GRAPH_VARIANT_NO_SYNC": "1"}
+    assert deliverable.extra_server_args == "--cuda-graph-backend-prefill breakable"
+
+
+def test_what_the_task_names_overrides_the_declared_deliverable(tmp_path):
+    deliverable = _deliverable_round(
+        tmp_path,
+        {"extra_envs": {"SGLANG_DSA_GRAPH_VARIANT_NO_SYNC": "0"}, "extra_server_args": "--chunked-prefill-size 8192"},
+    )
+
+    assert deliverable.extra_envs == {"SGLANG_DSA_GRAPH_VARIANT_NO_SYNC": "0"}
+    assert deliverable.extra_server_args == "--chunked-prefill-size 8192"
 
 
 def test_read_done_payload(tmp_path):

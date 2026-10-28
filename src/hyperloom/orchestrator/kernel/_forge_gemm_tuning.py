@@ -225,7 +225,7 @@ async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) ->
     moe_untuned_csv = _requested_existing_file(payload, "moe_untuned_csv")
     moe_key_report: dict[str, Any] = {}
     if not moe_untuned_csv:
-        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, tokens, run.workspace)
+        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, run.workspace)
 
     shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
     untuned_csv = _requested_existing_file(payload, "untuned_csv")

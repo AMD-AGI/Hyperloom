@@ -2114,6 +2114,11 @@ class TestWritebackRequiredAxes:
             state.cumulative_gain_validated_stack_len,
         )
 
+    @staticmethod
+    def _promotion_state(state):
+        """State as a refusal must leave it: everything except the audit trail of the refusal itself."""
+        return {k: v for k, v in state.to_dict().items() if k != "unpromoted_keeps"}
+
     @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_lift_refuses_missing_required_axes_without_mutation(self, coord, missing_from, axis):
@@ -2130,14 +2135,15 @@ class TestWritebackRequiredAxes:
             state.gain_per_stack_entry = []
             state.cumulative_gain_validated_stack_len = 0
             state.baseline_perf.pop(axis)
-        before = state.to_dict()
+        before = self._promotion_state(state)
         original_candidate = deepcopy(candidate)
 
         lifted = coord.writeback.lift_to_current_best("explore", 150.0, candidate)
 
         assert lifted is False
-        assert state.to_dict() == before
+        assert self._promotion_state(state) == before
         assert candidate == original_candidate
+        assert [e["reason"] for e in state.unpromoted_keeps] == ["not_comparable"]
 
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])
     def test_prebaseline_markers_cannot_bypass_measured_baseline(self, coord, axis):
@@ -2145,14 +2151,15 @@ class TestWritebackRequiredAxes:
         candidate = self._candidate()
         candidate.pop(axis)
         candidate.update(baseline_enablement=True, attribution_eligible=False)
-        before = state.to_dict()
+        before = self._promotion_state(state)
         original_candidate = deepcopy(candidate)
 
         lifted = coord.writeback.lift_to_current_best("integrate_patch", 150.0, candidate)
 
         assert lifted is False
-        assert state.to_dict() == before
+        assert self._promotion_state(state) == before
         assert candidate == original_candidate
+        assert [e["reason"] for e in state.unpromoted_keeps] == ["not_comparable"]
 
     @pytest.mark.parametrize("missing_from", ["candidate", "baseline"])
     @pytest.mark.parametrize("axis", ["total_throughput", "e2e_norm_intvty_p90"])

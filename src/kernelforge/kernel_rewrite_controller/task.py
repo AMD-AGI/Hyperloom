@@ -74,6 +74,10 @@ _AGENT_IDENTITY_FIELDS = _IDENTITY_FIELDS - {"kernel_name"}
 #: unnameable operator would otherwise share one canonical id, and with it one
 #: task directory, one patch pointer and one knowledge-base page.
 _UNNAMEABLE_OPERATOR = normalize_operator_name("")
+#: Where a decode shape case states its batch size: its own ``batch_size``, these shape keys, else ``bs<N>``
+#: in its name.
+_SHAPE_BATCH_KEYS = ("batch_size", "bs")
+_NAME_BATCH_RE = re.compile(r"(?<![a-z0-9])bs[_=]?(\d+)(?!\d)", re.IGNORECASE)
 
 
 def _required_string(payload: dict[str, Any], field_name: str) -> str:
@@ -191,12 +195,43 @@ def _world_size(payload: dict[str, Any], operator_name: str, kernel_name: str) -
     return world_size
 
 
+def _case_batch_size(case: Any) -> int | None:
+    """The batch size a decode case states, or ``None`` when it is not a decode case or states none."""
+    if not isinstance(case, dict) or str(case.get("phase") or "").strip().lower() != "decode":
+        return None
+    shape = case.get("shape") if isinstance(case.get("shape"), dict) else {}
+    for value in (case.get("batch_size"), *(shape.get(key) for key in _SHAPE_BATCH_KEYS)):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    match = _NAME_BATCH_RE.search(str(case.get("name") or ""))
+    return int(match.group(1)) if match else None
+
+
+def _checked_shape_cases(shape_cases: Any, observed: frozenset[int]) -> Any:
+    """*shape_cases* as written, refusing decode cases at a batch size the trace never ran.
+
+    Nothing is checked when no decode batch size was observed.
+    """
+    if not observed or not isinstance(shape_cases, list):
+        return shape_cases
+    sized = ((case, _case_batch_size(case)) for case in shape_cases)
+    unobserved = [f"{case.get('name')!r} at bs={size}" for case, size in sized if size not in (None, *observed)]
+    if unobserved:
+        raise TaskContractError(
+            f"decode shape case(s) {', '.join(unobserved)} use a batch size the trace never ran: the observed "
+            f"decode batch sizes are {', '.join(map(str, sorted(observed)))} (Observed Decode Classes in "
+            "trace-evidence.md). Give every decode case one of those batch sizes, or drop the case."
+        )
+    return shape_cases
+
+
 def parse_task_payload(
     payload: Any,
     *,
     task_dir: str | Path,
     expected_base_commit: str | None = None,
     enforce_directory_identity: bool = True,
+    decode_batch_sizes: frozenset[int] = frozenset(),
 ) -> KernelRewriteTask:
     """Validate one decoded task payload and return its immutable contract."""
     if not isinstance(payload, dict):
@@ -237,10 +272,9 @@ def parse_task_payload(
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
         raise TaskContractError("priority must be a non-negative integer")
 
-    # Carried verbatim rather than validated: no code reads a case, so a shape
-    # the contract disagrees with is still worth more to the driver author than
-    # a refused task -- and by the same argument, not reshaped either.
-    shape_cases = payload.get("shape_cases", [])
+    # Carried verbatim and never reshaped; only a decode batch size the trace
+    # never ran is refused, because the driver would benchmark a shape serving never sees.
+    shape_cases = _checked_shape_cases(payload.get("shape_cases", []), decode_batch_sizes)
     evidence = payload.get("evidence", [])
     if not isinstance(evidence, list):
         raise TaskContractError("evidence must be a JSON list")

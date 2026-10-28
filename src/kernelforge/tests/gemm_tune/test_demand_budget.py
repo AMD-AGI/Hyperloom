@@ -302,3 +302,34 @@ def test_every_dispatch_group_keeps_its_rows_at_high_concurrency(tmp_path, conc)
     assert out is not None
     tuned = {tuple(int(v) for v in line.split(",")[1:3]) for line in _rows(out)[1:]}
     assert tuned == set(groups)
+
+
+def test_a_group_whose_decode_lookups_already_hit_pays_no_band(tmp_path, monkeypatch):
+    # S1 GLM-5.3 conc=10: N=7168 logged decode misses, so decode ran and was logged; N=128/2624 logged none.
+    monkeypatch.setenv(adc._DEMAND_MAX_SHAPES_ENV, "9")
+    keys = [
+        {"M": 16639, "N": 2624, "K": 6144, "requests": 71},
+        {"M": 16639, "N": 128, "K": 6144, "requests": 70},
+        {"M": 512, "N": 7168, "K": 512, "requests": 4},
+        {"M": 1024, "N": 7168, "K": 512, "requests": 3},
+        {"M": 2048, "N": 7168, "K": 512, "requests": 2},
+        {"M": 8, "N": 7168, "K": 512, "requests": 1},
+        {"M": 1, "N": 7168, "K": 512, "requests": 1},
+    ]
+    ctx = _Ctx(3_600, conc=10)
+    ctx.demand_json = _write_demand(tmp_path / "demand.json", keys)
+
+    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+    assert out is not None
+    assert sorted(_rows(out)[1:]) == sorted(
+        [
+            "32768,2624,6144",
+            "32768,128,6144",
+            "512,7168,512",
+            "1024,7168,512",
+            "2048,7168,512",
+            "16,7168,512",
+            "1,7168,512",
+        ]
+    )

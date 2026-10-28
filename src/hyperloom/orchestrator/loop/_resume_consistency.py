@@ -186,53 +186,45 @@ class ResumeConsistencyMixin:
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.
 
-        Phase-entry side effects (the GEAK delegation and its ``result.json``
-        crash-recovery) are bound
-        to a phase *transition* via ``_on_phase_entered``; a resume only restores
-        ``phase`` from state.json and never re-enters the current phase. Without
-        this, a session that crashed mid ``KERNEL_AGENT`` sits idle until the
-        phase budget cap fires, then hands SWEEP an empty result — the whole
-        delegation is silently lost.
+        Phase-entry side effects (the ``kernel_agent`` task that carries the
+        phase's work) are bound to a phase *transition* via
+        ``_on_phase_entered``; a resume only restores ``phase`` from state.json
+        and never re-enters the current phase. The resume reaps the task the
+        dead leg held, so the next tick sees no agent in flight and leaves
+        KERNEL as settled -- the whole round is silently lost.
 
-        General across every crash timing (not case-by-case): the decision is
-        driven purely by whether THIS KERNEL phase's history row already carries
-        a ``geak`` completion record, so it self-classifies:
+        The decision is driven purely by whether THIS phase's round finished:
 
-          * completed-this-phase -> the kernel work is done; the phase machine
-            exits KERNEL automatically on the next tick (agent settled, no pending work)
-            with no e2e re-run;
-          * not-completed -> re-enter ``on_enter_kernel``; its own entry guard
-            promotes an existing OK ``result.json`` (crash-before-handback) and
-            re-runs the e2e only when there is genuinely nothing to recover
-            (run_e2e itself then continues from the pinned eval_dir on disk).
+          * finished -> the phase machine exits KERNEL on the next tick with no
+            re-run (GEAK: a ``geak`` completion record on the current phase row;
+            Forge: this macro cycle's rewrite controller reported terminal);
+          * not finished -> re-enter ``on_enter_kernel``, which reuses a live
+            ``kernel_agent`` row or queues a replacement for the reaped one. A
+            GEAK re-entry promotes an existing OK ``result.json`` and re-runs the
+            e2e only when there is nothing to recover.
 
-        No-op unless resumed while parked in ``KERNEL_AGENT`` with the GEAK
-        backend selected.
+        No-op unless resumed while parked in ``KERNEL_AGENT``.
         """
-        from ..phases.machine_state import PHASE_KERNEL_AGENT
+        from ..phases.machine_state import PHASE_KERNEL_AGENT, kernel_controller_settled
 
         if not self._resumed_from.get("is_resume"):
             return
         state = self.shared_state
         if (state.phase or "").strip().upper() != PHASE_KERNEL_AGENT:
             return
-        if not (self._coord.phase_machine.kernel_enabled() and self._coord.phase_kernel.geak_enabled()):
+        if not self._coord.phase_machine.kernel_enabled():
             return
-        history = state.phase_history or []
-        row = history[-1] if history else {}
-        evidence = row.get("evidence") if isinstance(row, dict) else {}
-        completed_this_phase = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
-        if completed_this_phase:
-            # The delegation landed during this phase but the SWEEP transition
-            # never persisted (crash between hook and the next tick). The exit
-            # rule sees geak_result set (terminal) and no work pending, so the
-            # machine advances on the next tick without any hint.
-            log.info("resume: KERNEL GEAK already completed this phase; machine will exit on next tick.")
+        if self._coord.phase_kernel.geak_enabled():
+            history = state.phase_history or []
+            row = history[-1] if history else {}
+            evidence = row.get("evidence") if isinstance(row, dict) else {}
+            finished = isinstance(evidence, dict) and isinstance(evidence.get("geak"), dict)
+        else:
+            finished = kernel_controller_settled(state)
+        if finished:
+            log.info("resume: KERNEL round already finished this phase; machine will exit on next tick.")
             return
-        log.info(
-            "resume: re-entering KERNEL GEAK delegation (no completion "
-            "evidence on the current phase row); recover-from-disk or re-run."
-        )
+        log.info("resume: re-entering KERNEL (its round did not finish before the leg stopped).")
         from hyperloom.orchestrator.phases.machine import Transition
 
         await self._coord.phase_kernel.on_enter_kernel(

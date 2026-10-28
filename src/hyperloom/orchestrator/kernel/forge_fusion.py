@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -19,6 +22,8 @@ from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
+from kernelforge.agent_backends import watchdog_timeout_sec
+from kernelforge.fusion.shadow_repo import reclaim_killed_shadow
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -402,7 +407,10 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
             published = _published_best_patch(Path(best_manifest)) if best_manifest else None
             if published is None:
                 continue
-            patch_file = published
+            # Exported as ``on_keep`` would have: the published copy sits in the workspace's own
+            # forge_experiments, which the next Forge campaign in that repository archives away before
+            # the queued integrate reads it.
+            shutil.copyfile(published, patch_file)
         target_file = _patch_target_file(patch_file)
         if not target_file:
             continue
@@ -568,9 +576,17 @@ async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
     for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
         for stale in output_root.glob(stale_glob):
             stale.unlink(missing_ok=True)
-    timeout_sec = _timeout_sec(args)
+    # The lane's budget is when the work must end, and every recipe's forge-loop is told so. The kill waits a watchdog
+    # grace past it to backstop a run that hangs, not to race one finishing on time.
+    budget_sec = _timeout_sec(args)
+    cmd += ["--deadline-unix", str(time.time() + budget_sec)]
+    timeout_sec = int(watchdog_timeout_sec(budget_sec))
     try:
         rc, _stdout, _stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec, env=env, label="forge_fusion")
     except subprocess.TimeoutExpired as exc:
-        return _timeout_result(output_dir, timeout_sec, exc)
-    return _normalize_manifest(output_dir, rc)
+        result = _timeout_result(output_dir, timeout_sec, exc)
+    else:
+        result = _normalize_manifest(output_dir, rc)
+    # A run killed before its own reset left the candidate it was measuring live in the framework tree.
+    await asyncio.to_thread(reclaim_killed_shadow, output_dir)
+    return result

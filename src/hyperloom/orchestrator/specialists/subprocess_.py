@@ -120,10 +120,11 @@ class SpecialistSubprocessConfig:
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
 
     framework_source_roots: tuple[str, ...] = ()
-    """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
+    """Framework trees the task may read, and the seed for ``git worktree add``.
 
-    The first existing root becomes the worktree base; the rest are exposed
-    to the CLI as additional ``--add-dir`` entries.
+    The first root that is a checkout becomes the worktree base; every root
+    that exists is passed to the CLI as an ``--add-dir`` entry, which is the
+    only way either CLI can open it at all.
     """
 
     mcp_config_path: str | None = None
@@ -800,12 +801,20 @@ class SpecialistSubprocessDispatcher:
             )
         return backend
 
-    def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
-        """Return the dirs an agent CLI may write, in precedence order.
+    def _accessible_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
+        """Return the dirs an agent CLI may open, in precedence order.
 
         Worktree first (where patches are authored), then the workspace (where
-        ``specialist_done.json`` lands). The framework source trees are absent:
-        ``integrate_patch`` is their only writer. Reads are unaffected.
+        ``specialist_done.json`` lands), then the framework source trees the
+        task named. ``--add-dir`` is the only filesystem grant either CLI
+        takes and it does not separate reads from writes, so a tree left out
+        of it cannot be read at all -- and only one root can seed a worktree,
+        which leaves the rest invisible. A specialist pointed at a
+        pip-installed framework has no checkout to seed one from, so it could
+        see none of the source it was asked to change.
+
+        Authoring still belongs in the worktree, and the patch-safety gate,
+        not the filesystem, is what keeps a specialist's output grounded.
 
         Args:
             workspace (Path): Task workspace.
@@ -818,6 +827,10 @@ class SpecialistSubprocessDispatcher:
         if worktree is not None:
             dirs.append(str(worktree))
         dirs.append(str(workspace))
+        for root in self.config.framework_source_roots:
+            path = str(root or "").strip()
+            if path and path not in dirs and Path(path).is_dir():
+                dirs.append(path)
         return dirs
 
     def _build_codex_launch(
@@ -891,7 +904,7 @@ class SpecialistSubprocessDispatcher:
                 f"cannot prepare private Codex config under {codex_home}: {exc}"
             ) from exc
 
-        writable_dirs = self._writable_dirs(workspace, worktree)
+        accessible_dirs = self._accessible_dirs(workspace, worktree)
         cmd: list[str] = [
             executable,
             "exec",
@@ -905,7 +918,7 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(["--sandbox", sandbox_mode])
         # Primary working root; the reap loop spawns with the same cwd.
         cmd.extend(["-C", str(worktree or workspace)])
-        for extra_dir in writable_dirs[1:]:
+        for extra_dir in accessible_dirs[1:]:
             cmd.extend(["--add-dir", extra_dir])
         # ``features.memories=false`` matches the SDK session: a specialist must
         # not carry state between tasks.
@@ -972,7 +985,7 @@ class SpecialistSubprocessDispatcher:
         cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
         if cfg.mcp_config_path:
             cmd.extend(["--mcp-config", cfg.mcp_config_path])
-        for d in self._writable_dirs(workspace, worktree):
+        for d in self._accessible_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
         if cfg.extra_claude_args:
             cmd.extend(list(cfg.extra_claude_args))

@@ -95,6 +95,49 @@ def test_throughput_authoring_domains_carry_the_altitude_block(domain_key: str):
         assert marker.lower() in text.lower(), f"missing {marker!r} for {domain_key}"
 
 
+@pytest.mark.parametrize("domain_key", sorted({*_THROUGHPUT_AUTHORING_DOMAINS, "framework_rewrite_specialist"}))
+def test_every_patch_author_delivers_switched_rewrites_however_small(domain_key: str):
+    """Without the switch contract a below-threshold rewrite is reverted outright and never reaches a bundle.
+
+    It once reached only the framework-rewrite domain, so serving-framework specialists vetoed sub-threshold ideas
+    and the GLM-5.3 session ended with no dormant lever for the joint bench to combine.
+    """
+    _assert_switch_contract(_build(domain_key), domain_key)
+
+
+def _assert_switch_contract(text: str, who: str) -> None:
+    for marker in (
+        "every rewrite is a default-off switch",
+        "`framework_switches` manifest",
+        "below the KEEP threshold is no reason to withhold",
+    ):
+        assert marker in text, f"missing {marker!r} for {who}"
+    assert text.count("every rewrite is a default-off switch") == 1, who
+
+
+def test_a_freeform_patch_author_delivers_switched_rewrites_too():
+    """Freeform dispatches have no domain focus, and they author most patches: 28 of one session's 40."""
+    from hyperloom.orchestrator.specialists.domains import FREEFORM_DOMAIN
+
+    system, user = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id="task-freeform",
+            domain=FREEFORM_DOMAIN,
+            max_turns=4,
+            gap_canonical_id="",
+            framework="sglang",
+            scope="freeform",
+            workspace_path="/tmp/test/freeform",
+        )
+    )
+    _assert_switch_contract(system + "\n" + user, "freeform_specialist")
+
+
+def test_enablement_specialist_is_not_held_to_the_switch_contract():
+    """It climbs only as far as runnability needs and is never benched for a gain."""
+    assert "every rewrite is a default-off switch" not in _build("enablement_specialist")
+
+
 def test_enablement_specialist_is_not_pushed_toward_source_work():
     """Its ladder book says climb only as far as runnability needs; the altitude block argues the other way."""
     assert "enablement_specialist" not in _THROUGHPUT_AUTHORING_DOMAINS
@@ -114,6 +157,7 @@ def test_research_mode_gets_no_altitude_block():
     )
     system, _ = build_specialist_prompts(inp)
     assert "Altitude —" not in system
+    assert "every rewrite is a default-off switch" not in system
 
 
 def test_kernel_switch_specialist_mentions_aiter_and_attention_backends():

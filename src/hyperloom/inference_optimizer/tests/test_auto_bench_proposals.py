@@ -5,14 +5,26 @@
 
 from __future__ import annotations
 
+from hashlib import sha1
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 class _Tasks:
     def __init__(self, queued=(), running=()) -> None:
         self._queued, self._running = list(queued), list(running)
         self.created: list[dict[str, Any]] = []
+        self.ended: dict[str, str] = {}
+        self.results: dict[str, dict] = {}
+
+    async def find_by_idempotency_key(self, key):
+        if key in self.ended:
+            outcome = {"outcome": {"result": self.results.get(key, {"status": "ok"})}}
+            return SimpleNamespace(state=self.ended[key], history=[{"to": self.ended[key], "evidence": outcome}])
+        created = any(c["idempotency_key"] == key for c in self.created)
+        return SimpleNamespace(state="queued") if created else None
 
     async def queued(self):
         return self._queued
@@ -89,6 +101,44 @@ async def test_same_queue_head_maps_to_the_same_idempotency_key():
     assert len(keys) == 1
 
 
+async def test_dormant_levers_of_several_patches_get_one_bundle_round_per_set():
+    """A set is benched once, a grown set again, and one patch's set never: its integrate round measured it."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    fp = _phase()
+    state = fp._coord.shared_state
+
+    def dormant(switch: str, patch: str) -> None:
+        state.record_authored_framework_levers([{"switch": switch}], default_on=False, specialist_task_id=patch)
+
+    dormant("HL_ONE", "t-1")
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    dormant("HL_TWO", "t-2")
+    assert await fp.enqueue_dormant_lever_bundle() is True
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    dormant("HL_THREE", "t-3")
+    assert await fp.enqueue_dormant_lever_bundle() is True
+
+    rounds = _explores(fp)
+    assert {c["params"]["reason"] for c in rounds} == {LEVER_BUNDLE_REASON}
+    assert [c["params"]["grid"][0]["framework_lever_bundle"] for c in (rounds[0], rounds[-1])] == [
+        ["HL_ONE", "HL_TWO"],
+        ["HL_ONE", "HL_THREE", "HL_TWO"],
+    ]
+    assert rounds[0]["params"]["config_path"] == "/cfg.yaml"
+
+
+async def test_a_phase_on_its_way_out_gets_no_bundle_round():
+    """It would be cancelled by the transition the moment it was queued."""
+    fp = _phase(frozen=True)
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_ONE"}], default_on=False, specialist_task_id="t-1")
+    state.record_authored_framework_levers([{"switch": "HL_TWO"}], default_on=False, specialist_task_id="t-2")
+
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    assert not _explores(fp)
+
+
 async def test_already_benched_fingerprints_are_skipped():
     fp = _phase(rounds=[_round("enable-x")])
     fp._coord.shared_state.explore_search = {"tested": {"fp": {"extra_server_args": "--enable-x", "outcome": "KEEP"}}}
@@ -109,3 +159,253 @@ async def test_no_enqueue_when_it_must_not_run():
     for fp in blocked:
         await fp._maybe_bench_untested_proposals()
         assert not _explores(fp)
+
+
+def _awaiting_screen(state, switch: str, patch: str) -> None:
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+
+    state.record_authored_framework_levers([{"switch": switch}], default_on=False, specialist_task_id=patch)
+    state.record_framework_lever_attribution(switch, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+
+
+async def test_levers_awaiting_the_screen_are_batched_one_arm_per_patch():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_BATCH_REASON
+
+    fp = _phase()
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_SCREENED"}], default_on=False, specialist_task_id="t-0")
+    for switch, patch in (("HL_A", "t-1"), ("HL_B", "t-1"), ("HL_C", "t-2")):
+        _awaiting_screen(state, switch, patch)
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert batch["params"]["reason"] == CYCLE_BATCH_REASON
+    assert "band_pct" not in batch["params"]
+    assert batch["params"][CYCLE_ARMS_PARAM] == [
+        {"name": "t-1", "envs": {"HL_A": "1", "HL_B": "1"}},
+        {"name": "t-2", "envs": {"HL_C": "1"}},
+    ]
+
+
+async def test_a_lone_pending_patch_waits_only_while_the_serving_lanes_have_other_work():
+    busy = SimpleNamespace(kind="integrate_patch", params={}, requires_lanes=("server_lifecycle", "benchmark_lane"))
+    fp = _phase(queued=[busy])
+    _awaiting_screen(fp._coord.shared_state, "HL_A", "t-1")
+    assert await fp.enqueue_cycle_batch() is False
+
+    idle = _phase()
+    _awaiting_screen(idle._coord.shared_state, "HL_A", "t-1")
+    assert await idle.enqueue_cycle_batch() is True
+
+
+async def test_no_second_batch_while_one_is_queued_or_the_phase_is_leaving():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    queued = SimpleNamespace(
+        kind="explore", params={CYCLE_ARMS_PARAM: [{"name": "t-0", "envs": {}}]}, requires_lanes=()
+    )
+    for fp in (_phase(queued=[queued]), _phase(frozen=True)):
+        for switch, patch in (("HL_A", "t-1"), ("HL_C", "t-2")):
+            _awaiting_screen(fp._coord.shared_state, switch, patch)
+        assert await fp.enqueue_cycle_batch() is False
+        assert _explores(fp) == []
+
+
+def test_a_cycle_batch_is_priced_per_arm_and_its_two_bases():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES
+    from hyperloom.orchestrator.loop.time_budget import explore_admission_minutes
+
+    arms = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+    assert explore_admission_minutes(78.0, {"cycle_arms": arms}) == 5 * CYCLE_ARM_MINUTES
+    assert explore_admission_minutes(78.0, {"cycle_arms": []}) == 2 * CYCLE_ARM_MINUTES
+
+
+def _agentx_phase(**kwargs):
+    fp = _phase(**kwargs)
+    fp._coord.shared_state.benchmark_mode = "agentx"
+    return fp
+
+
+async def test_an_agentx_stack_without_a_reference_gets_a_batch_of_its_two_bases_alone(monkeypatch):
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _agentx_phase()
+    fp._coord.shared_state.optimization_stack = [{"kind": "config"}]
+    fp._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert (batch["params"][CYCLE_ARMS_PARAM], batch["idempotency_key"]) == ([], "cycle-reference-c0-s1")
+
+
+async def test_a_moved_stack_gets_its_reference_batch_before_the_next_dispatch(monkeypatch):
+    """GLM-5.3: after a KEEP the next screened integrate was dispatched a second before the new reference was queued."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    moved = _agentx_phase()
+    moved._coord.shared_state.optimization_stack = [{"kind": "code_patch"}]
+    moved._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 16.7}}
+    elsewhere = _agentx_phase(phase="KERNEL_AGENT")
+    elsewhere._coord.shared_state.optimization_stack = [{"kind": "code_patch"}]
+
+    await moved.on_stack_adopted()
+    await elsewhere.on_stack_adopted()
+
+    assert [b["idempotency_key"] for b in _explores(moved)] == ["cycle-reference-c0-s1"]
+    assert _explores(elsewhere) == []
+
+
+async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(monkeypatch):
+    """GLM-5.3: recover cancelled a preempted pod's reference batch, and its spent key kept the screen shut all cycle."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _agentx_phase()
+    fp._coord.tasks.ended = {"cycle-reference-c0-s0": "cancelled", "cycle-reference-c0-s0-a1": "failed"}
+
+    assert await fp.enqueue_cycle_batch() is True
+    fp._coord.tasks.ended["cycle-reference-c0-s0-a2"] = "cancelled"
+    assert await fp.enqueue_cycle_batch() is False
+
+    assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s0-a2"]
+
+
+async def test_a_reference_batch_whose_task_succeeded_on_a_failed_result_is_enqueued_again(monkeypatch):
+    """GLM-5.3: the executor returned cycle_bench_unavailable, the task settled succeeded, and the screen stayed shut."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _agentx_phase()
+    fp._coord.shared_state.optimization_stack = [{"kind": "code_patch"}, {"kind": "code_patch"}]
+    fp._coord.tasks.ended = {"cycle-reference-c0-s2": "succeeded"}
+    fp._coord.tasks.results = {"cycle-reference-c0-s2": {"status": "failed", "error_class": "cycle_bench_unavailable"}}
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s2-a1"]
+
+
+async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch):
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+
+    referenced = _agentx_phase()
+    referenced._coord.shared_state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}}
+    closed = _agentx_phase()
+    closed._coord.shared_state.cycle_screen_refused = "the switched-off tree moved"
+    queued = SimpleNamespace(kind="explore", params={CYCLE_ARMS_PARAM: []}, requires_lanes=())
+    for fp in (referenced, closed, _phase(), _agentx_phase(frozen=True), _agentx_phase(queued=[queued])):
+        assert await fp.enqueue_cycle_batch() is False
+        assert _explores(fp) == []
+
+
+async def test_a_phase_on_its_way_out_hands_unscreened_levers_back_to_replay_attribution():
+    fp = _phase(frozen=True)
+    state = fp._coord.shared_state
+    state.record_authored_framework_levers([{"switch": "HL_DONE"}], default_on=False, specialist_task_id="t-0")
+    for switch, patch in (("HL_A", "t-1"), ("HL_C", "t-2")):
+        _awaiting_screen(state, switch, patch)
+
+    assert await fp.enqueue_cycle_batch() is False
+
+    rows = [(r["switch"], r["attribution_source"]) for r in state.authored_framework_levers]
+    assert rows == [("HL_DONE", ""), ("HL_A", "cycle_bench_inconclusive"), ("HL_C", "cycle_bench_inconclusive")]
+    assert _explores(fp) == []
+
+
+async def test_a_batch_carries_at_most_its_arm_limit_oldest_patches_first():
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BATCH_MAX_ARMS
+
+    fp = _phase()
+    for i in range(CYCLE_BATCH_MAX_ARMS + 2):
+        _awaiting_screen(fp._coord.shared_state, f"HL_{i}", f"t-{i}")
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    (batch,) = _explores(fp)
+    assert [arm["name"] for arm in batch["params"][CYCLE_ARMS_PARAM]] == [f"t-{i}" for i in range(CYCLE_BATCH_MAX_ARMS)]
+
+
+async def test_no_reference_batch_while_the_cycle_bench_is_switched_off(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_CYCLE_BENCH", raising=False)
+    fp = _agentx_phase()
+
+    assert await fp.enqueue_cycle_batch() is False
+    assert _explores(fp) == []
+
+
+_BUNDLE_KEY = "lever-bundle-c0-" + sha1(b"HL_ONE,HL_TWO", usedforsecurity=False).hexdigest()[:12]
+
+
+def _two_dormant_patches(fp):
+    for switch, patch in (("HL_ONE", "t-1"), ("HL_TWO", "t-2")):
+        fp._coord.shared_state.record_authored_framework_levers(
+            [{"switch": switch}], default_on=False, specialist_task_id=patch
+        )
+    return fp
+
+
+async def test_a_bundle_runs_its_switches_on_together_on_the_cycle_bench_before_its_replay_round(monkeypatch):
+    """Levers that each passed alone may not boot, or may run slower, switched on together."""
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM, CYCLE_BATCH_REASON
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _two_dormant_patches(_agentx_phase())
+
+    assert await fp.enqueue_dormant_lever_bundle() is False
+    assert await fp.enqueue_dormant_lever_bundle() is False
+
+    assert [(c["idempotency_key"], c["params"]["reason"], c["params"][CYCLE_ARMS_PARAM]) for c in _explores(fp)] == [
+        (
+            f"{_BUNDLE_KEY}-cycle",
+            CYCLE_BATCH_REASON,
+            [{"name": "lever-bundle", "envs": {"HL_ONE": "1", "HL_TWO": "1"}, "lever_bundle": _BUNDLE_KEY}],
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verdict", "bundled"),
+    [("pass", True), ("neutral", True), ("inconclusive", True), ("broken", False), ("regress", False)],
+)
+async def test_only_a_bundle_whose_switches_neither_broke_nor_regressed_together_takes_its_replay_round(
+    monkeypatch, verdict, bundled
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _two_dormant_patches(_agentx_phase())
+    fp._coord.shared_state.cycle_bundle_screens = {_BUNDLE_KEY: verdict}
+
+    assert await fp.enqueue_dormant_lever_bundle() is bundled
+    assert [c["idempotency_key"] for c in _explores(fp)] == ([_BUNDLE_KEY] if bundled else [])
+
+
+async def test_a_bundle_screen_waits_for_the_batch_on_the_lanes_and_a_cancelled_one_leaves_the_replay_round(
+    monkeypatch,
+):
+    from hyperloom.orchestrator.actions.executors.cycle_bench_arm import CYCLE_ARMS_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    batch = SimpleNamespace(kind="explore", params={CYCLE_ARMS_PARAM: []}, requires_lanes=())
+    busy = _two_dormant_patches(_agentx_phase(running=[batch]))
+    cancelled = _two_dormant_patches(_agentx_phase())
+    cancelled._coord.tasks.ended = {f"{_BUNDLE_KEY}-cycle": "cancelled"}
+
+    assert (await busy.enqueue_dormant_lever_bundle(), await cancelled.enqueue_dormant_lever_bundle()) == (False, True)
+    assert ([c["idempotency_key"] for c in _explores(busy)], [c["idempotency_key"] for c in _explores(cancelled)]) == (
+        [],
+        [_BUNDLE_KEY],
+    )
+
+
+async def test_a_bundle_off_the_cycle_screen_takes_its_replay_round_at_once(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    closed = _two_dormant_patches(_agentx_phase())
+    closed._coord.shared_state.cycle_screen_refused = "the switched-off tree moved"
+    for fp in (closed, _two_dormant_patches(_phase())):
+        assert await fp.enqueue_dormant_lever_bundle() is True
+        assert [c["idempotency_key"] for c in _explores(fp)] == [_BUNDLE_KEY]
+
+    monkeypatch.delenv("HYPERLOOM_CYCLE_BENCH", raising=False)
+    off = _two_dormant_patches(_agentx_phase())
+    assert await off.enqueue_dormant_lever_bundle() is True
+    assert [c["idempotency_key"] for c in _explores(off)] == [_BUNDLE_KEY]

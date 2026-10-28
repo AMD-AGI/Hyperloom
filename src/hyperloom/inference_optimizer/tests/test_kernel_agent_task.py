@@ -196,6 +196,92 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
     assert requeued[0].params["from_phase"] == "resume"
 
 
+async def _next_leg(coord):
+    """Stop ``coord`` and reopen its session the way a restarted run does."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    coord.shared_state.save(coord.session_dir)
+    await coord.stop()
+    leg = Coordinator(
+        coord.session_dir,
+        backends={
+            "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+            "critic": MockCriticBackend(),
+        },
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    leg.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    leg.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    leg.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    return leg
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays_in_kernel(coord):
+    # The dead leg's kernel_agent is reaped on resume; without a replacement the next tick reads KERNEL as settled.
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    leg = await _next_leg(coord)
+    try:
+        assert leg.writeback.resumed_from["is_resume"] is True
+        await leg.writeback.replay_resume_if_needed()
+        assert [t.kind for t in await leg.tasks.queued() if t.kind == "kernel_agent"] == ["kernel_agent"]
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_while_its_kernel_agent_ran_replaces_the_dead_legs_task(coord, monkeypatch):
+    """The stopped leg's kernel_agent row still reads running when the next leg starts; it is not a live round.
+
+    Reused as live, it was failed by the first tick's reconcile pass and the GLM-5.3 session left KERNEL as
+    ``kernel_settled`` the second it resumed, its Forge round never having started.
+    """
+    from hyperloom.orchestrator.bus import resource_lock
+
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    dead_legs = await _create_kernel_agent(coord, key=f"kernel_agent_c{int(coord.shared_state.macro_cycle or 0)}")
+    await coord.tasks.transition(dead_legs.task_id, "running")
+    await coord.locks.acquire_many(
+        list(_KERNEL_AGENT_LANES),
+        holder_id=dead_legs.task_id,
+        task_id=dead_legs.task_id,
+        action="kernel_agent",
+        ttl_sec=3600,
+    )
+    leg = await _next_leg(coord)
+    monkeypatch.setattr(resource_lock.SqliteLeaseBackend, "_pid_alive", staticmethod(lambda _pid: False))
+    try:
+        await leg.writeback.replay_resume_if_needed()
+
+        assert (await leg.tasks.get(dead_legs.task_id)).state == "failed"
+        replacement = [t for t in await leg.tasks.queued() if t.kind == "kernel_agent"]
+        assert len(replacement) == 1 and replacement[0].task_id != dead_legs.task_id
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_after_the_forge_round_settled_queues_no_new_round(coord):
+    _arm_kernel_phase(coord.shared_state)
+    _arm_terminal_controller(coord.shared_state)
+    leg = await _next_leg(coord)
+    try:
+        await leg.writeback.replay_resume_if_needed()
+        assert not [t for t in await leg.tasks.queued() if t.kind == "kernel_agent"]
+    finally:
+        await leg.stop()
+
+
 @pytest.mark.asyncio
 async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     """A pump that joined the phase's whole pipeline would freeze every tick until it returned."""
@@ -263,21 +349,17 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     )
 
 
+def _arm_terminal_controller(st):
+    st.kernel_optimizer = "forge"
+    st.kernel_rewrite_controller_result = {
+        "status": sorted(ps.CONTROLLER_TERMINAL_STATUSES)[0],
+        "macro_cycle": 0,
+    }
+
+
 @pytest.mark.parametrize(
     ("label", "arm", "reason"),
     [
-        (
-            "controller finished",
-            lambda st: (
-                setattr(st, "kernel_optimizer", "forge"),
-                setattr(
-                    st,
-                    "kernel_rewrite_controller_result",
-                    {"status": sorted(ps.CONTROLLER_TERMINAL_STATUSES)[0], "macro_cycle": 0},
-                ),
-            ),
-            "kernel_controller_done",
-        ),
         (
             "idle streak",
             lambda st: (
@@ -288,7 +370,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
         ),
     ],
 )
-def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
+def test_kernel_agent_in_flight_blocks_an_idle_queue_exit(label, arm, reason):
     st = SharedState(session_id="s")
     _arm_kernel_phase(st)
     arm(st)
@@ -297,10 +379,27 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     out_without_flag = ps.compute_next_phase(st)
     assert out_without_flag is not None and out_without_flag[1] == reason, label
 
-    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    inputs = ps.workflow_predicate_inputs(st, live=ps.LiveFacts(kernel_work_in_flight=True))
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
-    assert ps.compute_next_phase(st, kernel_work_in_flight=True) is None, label
+    assert ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True)) is None, label
     assert ps.replay_next_phase(inputs) is None, label
+
+
+def test_a_terminal_controller_exits_even_while_the_agent_is_in_flight():
+    """``kernel_agent`` holds every serving lane to the phase budget, so a reported controller must not be waited out."""
+    st = SharedState(session_id="s")
+    _arm_kernel_phase(st)
+    _arm_terminal_controller(st)
+
+    transition = ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True))
+
+    assert transition is not None
+    assert transition[1] == "kernel_controller_done"
+    assert transition[2]["agent_in_flight"] is True
+    inputs = ps.workflow_predicate_inputs(st, live=ps.LiveFacts(kernel_work_in_flight=True))
+    replayed = ps.replay_next_phase(inputs)
+    assert replayed is not None
+    assert (replayed[0], replayed[1]) == (transition[0], "kernel_controller_done")
 
 
 def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
@@ -308,7 +407,7 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     _arm_kernel_phase(st)
     _spend_the_phase_budget(st)
 
-    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
+    transition = ps.compute_next_phase(st, live=ps.LiveFacts(kernel_work_in_flight=True))
 
     assert transition is not None
     assert transition[1] == "kernel_phase_budget_exhausted"

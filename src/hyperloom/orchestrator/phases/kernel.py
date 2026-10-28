@@ -312,6 +312,33 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
+def _tuned_rows_reach_a_logged_lookup(tuner_name: str, envs: Mapping[str, str], log_text: str) -> bool:
+    """Whether a candidate's tuned rows serve any lookup the serving log shows missing; ``True`` when it cannot tell.
+
+    The workload is fixed, so a measured round repeats the lookups the baseline logged. Hit lines need
+    AITER_LOG_TUNED_CONFIG and are absent there, but the tuners build their tables from the misses. On GLM-5.3 an a8w8
+    and a bf16 table, written at an M aiter never looks up, each spent an AgentX round to read ``zero_hit`` afterwards.
+    """
+    from ..kernel.gemm_shape_coverage import (
+        fmoe_dispatch_lookup_key,
+        parse_aiter_fused_moe_dispatches,
+        parse_aiter_shape_lookups_for_tables,
+        tuned_config_coverage,
+        tuned_csv_shapes,
+        tuned_fmoe_csv_rows,
+    )
+
+    csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
+    if tuner_name == "fmoe_ck":
+        rows = {fmoe_dispatch_lookup_key(row) for path in csv_paths for row in tuned_fmoe_csv_rows(path)}
+        logged = {fmoe_dispatch_lookup_key(record) for record in parse_aiter_fused_moe_dispatches(log_text)}
+        return not rows or not logged or bool(rows & logged)
+    tables = [_AITER_ENV_TO_TABLE[key] for key in envs if key in _AITER_ENV_TO_TABLE]
+    missed, _hit = parse_aiter_shape_lookups_for_tables(log_text, tables)
+    tuned = {shape for path in csv_paths for shape in tuned_csv_shapes(path)}
+    return not tuned or not missed or bool(tuned_config_coverage(tuned, missed)["covered"])
+
+
 def _integrate_run_name(tuner_name: str) -> str:
     """Name of the integrate run that serves a tuner's candidate."""
     return f"integrate-gemm_tune_{tuner_name}"
@@ -564,6 +591,21 @@ class KernelPhase(CoordinatorCollaborator):
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
+    def last_trace_profiles_the_live_stack(self) -> bool:
+        """Whether the latest trace was taken on the validated stack, config and workload being served now.
+
+        Compares the projection with the anchor the watermark keeps in it, never with a snapshot's measured tok/s:
+        under AgentX the validated gain is the latency objective's, and the two never meet.
+        """
+        before = float(self.shared_state.last_roofline_tput or 0.0)
+        cur = self.current_tput_from_validated_gain()
+        return (
+            before > 0
+            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
+            and not self._profile_config_changed(self._current_profile_config_signature())
+            and not self._profile_workload_changed()
+        )
+
     def _reprofile_idempotency_reason(self, profile_signature: Any, target_tput: float) -> str:
         identity = json.dumps(
             {
@@ -577,20 +619,17 @@ class KernelPhase(CoordinatorCollaborator):
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
-    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int, snapshots_before: int) -> bool:
+    def _adopt_reprofile_snapshot(self, *, anchor_tput: float, snapshot_id_before: int, snapshots_before: int) -> bool:
         state = self.shared_state
-        after = self._last_measured_roofline_tput()
-        # A reprofile that reproduces the same tput under the same snapshot id still landed: the third signal is
-        # that the run appended a snapshot at all, and without it a same-tput reprofile never adopts its workload.
         landed = (
-            after != before
-            or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+            int(state.roofline_snapshot_id or 0) != snapshot_id_before
             or len(state.roofline_snapshots or []) != snapshots_before
         )
-        if after <= 0 or not landed:
+        if not landed:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
             return landed
-        state.last_roofline_tput = after
+        # The anchor is the projection the trace was taken at, the same quantity the watermark compares it with.
+        state.last_roofline_tput = anchor_tput
         # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
         # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
         state.last_profile_workload = state.profile_workload_context()
@@ -598,8 +637,7 @@ class KernelPhase(CoordinatorCollaborator):
         return landed
 
     async def _maybe_reprofile_for_kernel(self) -> None:
-        """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
-        before = self._last_measured_roofline_tput()
+        """Reprofile inline when the validated stack moved since the last trace, so the phase targets the live bottleneck."""
         cur = self.current_tput_from_validated_gain()
         profile_signature = self._current_profile_config_signature()
         config_changed = self._profile_config_changed(profile_signature)
@@ -614,13 +652,7 @@ class KernelPhase(CoordinatorCollaborator):
         if cur <= 0:
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="no_projected_tput"))
             return
-        # With a measured trace, reprofile only on a material gain or a change in what is being measured.
-        if (
-            before > 0
-            and abs(cur - before) / before < self._REPROFILE_CHANGE_TOL
-            and not config_changed
-            and not workload_changed
-        ):
+        if self.last_trace_profiles_the_live_stack():
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
@@ -663,7 +695,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
         snapshot_landed = self._adopt_reprofile_snapshot(
-            before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
+            anchor_tput=cur, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
         )
         _note_reprofile(
             KernelReprofile(
@@ -2575,18 +2607,36 @@ class KernelPhase(CoordinatorCollaborator):
             rejection_reason=rejection_reason,
         )
 
-    def _runtime_uses_aiter_fused_moe(self) -> bool:
-        """Return whether the served model dispatches MoE through aiter."""
+    def _serving_log_text(self) -> str:
+        """The serving log Forge derived its tuning demand from, or ``""`` when there is none."""
         from ..kernel.serving_log_evidence import resolve_forge_server_log
 
         log_path = resolve_forge_server_log(self.shared_state, self.session_dir)
         if not log_path:
-            return False
+            return ""
         try:
-            text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            return Path(log_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return False
-        return "[aiter] [fused_moe]" in text or "Mxfp4 MoE backend" in text
+            return ""
+
+    def _reason_not_to_measure(self, cand: Mapping[str, Any], serving_log: str) -> str:
+        """Why a tuning candidate cannot take effect, read before its round is spent; ``""`` when it may."""
+        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
+
+        from ..kernel.gemm_shape_coverage import log_has_fused_moe_activity
+
+        tuner_name = cand["tuner"]
+        if tuner_name == "vllm_moe_triton" and log_has_fused_moe_activity(serving_log):
+            # aiter serves the MoE and never reads VLLM_TUNED_CONFIG_FOLDER.
+            return "aiter_moe_runtime_triton_config_inert"
+        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
+            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
+        ):
+            # aiter's CK fused-MoE rejects a non-128-aligned intermediate_size_per_partition.
+            return "aiter_ck_moe_shape_unsupported"
+        if not _tuned_rows_reach_a_logged_lookup(tuner_name, cand["envs"], serving_log):
+            return "tuned_rows_unreachable"
+        return ""
 
     def _gemm_tuned_config_coverage(
         self,
@@ -2612,6 +2662,7 @@ class KernelPhase(CoordinatorCollaborator):
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
             parse_aiter_shape_lookups_for_tables,
+            server_hit_logging,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -2650,13 +2701,12 @@ class KernelPhase(CoordinatorCollaborator):
             # against this candidate's table.
             missed, hit = all_missed, set()
             requested = all_requested
-        tuned: set[tuple[int, int, int]] = set()
-        for path in csv_paths:
-            tuned |= tuned_csv_shapes(path)
+        tuned = {shape for path in csv_paths for shape in tuned_csv_shapes(path)}
         if not tuned:
             _unreadable("dense")
             return None
         report = tuned_config_coverage(tuned, requested, known_covered=hit)
+        report["conclusive"] = server_hit_logging(logs[-1]) or bool(report.get("covered"))
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
@@ -2811,7 +2861,7 @@ class KernelPhase(CoordinatorCollaborator):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths or tuner_name == "fmoe_ck":
             return None
-        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+        from ..kernel.gemm_shape_coverage import server_hit_logging
         from ..measurement.apply_verification import verify_applied
 
         logs = _integrate_server_logs(self.session_dir, tuner_name)
@@ -2828,14 +2878,10 @@ class KernelPhase(CoordinatorCollaborator):
         # arrival check compares merged_tuned_dense_bf16.csv against bf16_tuned_gemm.csv and concludes the artifact
         # never landed.
         table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
-        # aiter prints a hit line only under this flag; every serving run now sets it by default, but an operator
-        # value in the candidate env wins, and then a zero-hit result means nothing.
-        hit_logging = aiter_log_tuned_config_enabled(envs)
-
         return verify_applied(
             logs[-1],
             csv_paths,
-            hit_logging=hit_logging,
+            hit_logging=server_hit_logging(logs[-1]),
             runtime_table_names=table_names,
         ).to_dict()
 
@@ -3137,31 +3183,6 @@ class KernelPhase(CoordinatorCollaborator):
         # produced, and the eligibility checks downstream already read them as "must be empty".
         self._replace_latest_gemm_tuning_attempt(result)
 
-    def _gemm_candidate_skip_reason(self, tuner_name: str, *, triton_moe_inert: bool) -> str:
-        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
-
-        if tuner_name == "vllm_moe_triton" and triton_moe_inert:
-            log.warning(
-                "gemm E2E: skipping %s -- the server dispatches MoE through "
-                "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
-                "Triton config cannot take effect",
-                tuner_name,
-            )
-            return "aiter_moe_runtime_triton_config_inert"
-        # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
-        # non-128-aligned intermediate_size_per_partition.
-        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
-        ):
-            log.info(
-                "gemm E2E: skipping %s -- aiter CK fused-MoE cannot serve "
-                "this model at tp=%s (intermediate size is not 128-aligned)",
-                tuner_name,
-                self.shared_state.tp or 0,
-            )
-            return "aiter_ck_moe_shape_unsupported"
-        return ""
-
     def _merged_candidate_envs(self, cand: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
         # Each aiter table merged into the runtime one, plus the refusal row if one of them is unusable.
         env = dict(cand["envs"])
@@ -3445,16 +3466,15 @@ class KernelPhase(CoordinatorCollaborator):
         reverted: list[dict[str, Any]] = []
         faults: list[dict[str, Any]] = []
         accepted_measurement: dict[str, Any] = {}
-        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
-        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
-        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
-            self._runtime_uses_aiter_fused_moe
-        )
+        # Resolving the serving log byte-scans the whole runs/ tree for aiter evidence, then reads it whole, ~17MB on
+        # the fleet.
+        serving_log = await asyncio.to_thread(self._serving_log_text)
         for cand in candidates:
             tuner_name = cand["tuner"]
-            skip_reason = self._gemm_candidate_skip_reason(tuner_name, triton_moe_inert=triton_moe_inert)
-            if skip_reason:
-                reverted.append({**cand, "reason": skip_reason})
+            not_measured = await asyncio.to_thread(self._reason_not_to_measure, cand, serving_log)
+            if not_measured:
+                log.warning("gemm E2E: skipping %s before measuring it: %s", tuner_name, not_measured)
+                reverted.append({**cand, "reason": not_measured})
                 continue
             # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
             # tuned entries.
@@ -3843,20 +3863,6 @@ class KernelPhase(CoordinatorCollaborator):
             gain = 0.0
         return base * (1.0 + gain / 100.0)
 
-    def _last_measured_roofline_tput(self) -> float:
-        """Measured tok/s of the most recent roofline snapshot; 0.0 when none."""
-        snaps = self.shared_state.roofline_snapshots or []
-        for snap in reversed(snaps):
-            if not isinstance(snap, dict):
-                continue
-            try:
-                tput = float(snap.get("achieved_tok_per_sec") or 0.0)
-            except (TypeError, ValueError):
-                tput = 0.0
-            if tput > 0:
-                return tput
-        return 0.0
-
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
@@ -3888,22 +3894,23 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         return cur / last_rl >= ROOFLINE_WATERMARK_RATIO
 
-    async def release_finished_roofline_gate(self) -> None:
-        """Drop an in-flight marker that names a roofline which already finished."""
+    async def release_finished_roofline_gate(self) -> str:
+        """Drop an in-flight marker that names a roofline which already finished; the state it ended in, or ``""``."""
         pending = (self.shared_state.auto_roofline_pending_task_id or "").strip()
         if not pending:
-            return
+            return ""
         try:
             task = await self.tasks.get(pending)
         except TaskNotFound:
             task = None
         if task is not None and str(getattr(task, "state", "")) not in TERMINAL_STATES:
-            return
+            return ""
         self.shared_state.auto_roofline_pending_task_id = ""
         log.info(
             "watermark-roofline: released in-flight gate held by finished task=%s",
             pending,
         )
+        return str(getattr(task, "state", "") or "")
 
     async def maybe_enqueue_watermark_roofline(
         self,

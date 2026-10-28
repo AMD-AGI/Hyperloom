@@ -19,6 +19,11 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 
 log = logging.getLogger(__name__)
 
+#: How a variant's args combine with the stack: a new assignment after the
+#: inherited removals, or a complete snapshot that replaces them.
+ARGS_MODE_APPEND: str = "append"
+ARGS_MODE_REPLACE: str = "replace"
+
 _UNSAFE_SERVER_ARG_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
 #: What the 2nd..nth value of a not-yet-whitelisted multi-value flag may look
 #: like: a batch size, a length, a ratio. Deliberately not a general token.
@@ -185,15 +190,15 @@ def compose_server_args(
     base_extra_args: str | None = "",
     variant_extra_args: str | None = "",
     remove_args: Any = None,
-    args_mode: str = "append",
+    args_mode: str = ARGS_MODE_APPEND,
 ) -> str:
     """Compose a delta or a complete snapshot with its final removals.
 
     In append mode the variant is a new assignment, after inherited removals.
     In replace mode both inputs are snapshots, so removals apply to both.
     """
-    mode = str(args_mode or "append").strip().lower()
-    if mode == "replace":
+    mode = str(args_mode or ARGS_MODE_APPEND).strip().lower()
+    if mode == ARGS_MODE_REPLACE:
         raw = merge_server_args(base_extra_args, variant_extra_args)
         pruned_base = remove_server_args(base_extra_args, remove_args)
         pruned_variant = remove_server_args(variant_extra_args, remove_args)

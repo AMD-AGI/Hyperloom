@@ -29,6 +29,7 @@ __all__ = [
     "measured_verdict",
     "stack_of",
     "stack_of_measured",
+    "variants_queued_on_stack",
 ]
 
 # ``reason`` of a REVERT the throughput gate ruled: the variant's gain missed the KEEP bar. Only the throughput gate
@@ -176,3 +177,21 @@ def _launch_keys(params: Mapping[str, Any]) -> list[tuple[str, str]]:
     """
     grid = list(params.get("grid") or ())
     return [(fp, content_fingerprint(raw) if fp else "") for fp, raw in zip(grid_fingerprints(params), grid)]
+
+
+def variants_queued_on_stack(params: Mapping[str, Any], active: Iterable[Any]) -> set[str]:
+    """Content fingerprints of the variants ``active`` already holds on ``params``'s stack.
+
+    A queued grid only covers a proposed one when the two would launch on the
+    same stack: the same configuration on a moved anchor is a measurement the
+    queued grid never made. The stack comparison is :func:`stack_of`, so both
+    sides normalise alike.
+    """
+    stack = stack_of(params)
+    return {
+        content_fingerprint(variant)
+        for task in active
+        if task.kind == "explore" and stack_of(task.params or {}) == stack
+        for variant in (task.params or {}).get("grid") or ()
+        if isinstance(variant, Mapping)
+    }

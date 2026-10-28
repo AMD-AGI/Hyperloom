@@ -383,6 +383,8 @@ class BaselinePromotionMixin:
         state = self.shared_state
         state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
         state.baseline_perf = perf_snapshot_from_mapping(result) or {}
+        # Kept beside the snapshot so a later comparison can reach the requests this anchor was a percentile of.
+        state.baseline_workspace = str(result.get("workspace") or "").strip()
         changed = False
         accuracy = result.get("accuracy")
         if isinstance(accuracy, (int, float)):

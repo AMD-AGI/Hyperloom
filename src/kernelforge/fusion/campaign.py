@@ -221,13 +221,16 @@ def _safe_artifact_id(value: str, max_length: int = 80) -> str:
 
 @dataclass(frozen=True)
 class CampaignRuntime:
-    """The device a campaign runs on, the arch it writes for, and the agent runtime its loop is told to use."""
+    """The device a campaign runs on, the arch it writes for, the agent runtime its loop uses, and when it must end."""
 
     gpu: str = "0"
     gpu_target: str = ""
     model: str = ""
     agent_backend: str = ""
     agent_sandbox_mode: str = ""
+    # The caller's own deadline, 0 for none. A loop sized on DEFAULT_MAX_HOURS alone outlives a caller whose budget is
+    # shorter and is killed before it exports its keeper.
+    deadline_unix: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -320,6 +323,8 @@ def build_forge_loop_command(
         "--lanes",
         "1",
     ]
+    if runtime.deadline_unix > 0:
+        cmd += ["--deadline-unix", str(runtime.deadline_unix)]
     if runtime.gpu_target:
         cmd += ["--gpu-target", runtime.gpu_target]
     if runtime.model:

@@ -12,7 +12,12 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
-from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
+from ..actions.executors._integrate_vocabulary import (
+    ATTRIBUTION_CYCLE_PENDING,
+    KEEP_STATUSES,
+    SCREEN_CYCLE,
+    SCREEN_PARAM,
+)
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..state.task_registry import Task
@@ -310,7 +315,7 @@ class IntegratePromotionMixin:
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
-        changed = self._record_authored_levers(result)
+        changed = await self._record_authored_levers(result)
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(
             result.get("enablement") or task_params.get("enablement") or task_params.get("enablement_landing")
@@ -340,17 +345,28 @@ class IntegratePromotionMixin:
             )
         outcome.changed = changed
 
-    def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
+    async def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
         levers = result.get("framework_levers")
         if not (isinstance(levers, list) and levers):
             return False
         lever_outcome = str(result.get("framework_lever_outcome") or "")
-        return bool(
+        recorded = bool(
             self.shared_state.record_authored_framework_levers(
                 levers,
                 default_on=(lever_outcome == "default_on"),
+                specialist_task_id=str(result.get("specialist_task_id") or ""),
             )
         )
+        if result.get(SCREEN_PARAM) == SCREEN_CYCLE:
+            # Admitted unmeasured: the cycle bench, not a replay bundle, decides what these levers are worth.
+            for entry in levers:
+                self.shared_state.record_framework_lever_attribution(
+                    str((entry or {}).get("switch") or ""), gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING
+                )
+            return recorded
+        if recorded:
+            await self._coord.phase_framework.enqueue_dormant_lever_bundle()
+        return recorded
 
     async def _lift_integrate_keep(
         self,

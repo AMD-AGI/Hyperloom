@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.jsonio import read_json
 from kernelforge.gemm_tune.evidence import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
@@ -454,6 +455,28 @@ def log_has_fused_moe_activity(log_text: str) -> bool:
 def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
     """Mirror dense apply verification: dispatch attribution needs the flag."""
     return is_truthy(envs.get("AITER_LOG_TUNED_CONFIG"), default=True)
+
+
+def server_hit_logging(server_log: Path) -> bool:
+    """Whether the server that wrote *server_log* ran with aiter's hit logging on, as its own launch record shows.
+
+    No record reads as off: an unlogged hit must not pass for no hit.
+    """
+    env = _launched_server_env(Path(server_log))
+    return is_truthy(env.get("AITER_LOG_TUNED_CONFIG"), default=False) if env is not None else False
+
+
+def _launched_server_env(server_log: Path) -> dict[str, Any] | None:
+    """The env Magpie launched the server with, else the env the round's launch evidence recorded."""
+    native = server_log.parent / "agentx_server_launch.json"
+    if native.is_file():
+        launch = read_json(native, {}, require_dict=True)
+        return {**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})}
+    for folder in server_log.parents[:3]:
+        evidence = folder / "launch_evidence.json"
+        if evidence.is_file():
+            return dict(read_json(evidence, {}, require_dict=True).get("observed_server_env") or {})
+    return None
 
 
 def _safe_mtime(path: Path) -> float:

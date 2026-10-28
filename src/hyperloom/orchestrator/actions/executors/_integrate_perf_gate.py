@@ -6,16 +6,18 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import first_text
 from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
-from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
+from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, agentx_enabled
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
+from ...state.failure_evidence import FAILURE_ATTRIBUTION_CANDIDATE, classify_failure_attribution
 from ...state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ..stop_attribution import stopped_by_the_run_class
 from ._accuracy_gate import accuracy_keep_block, eval_probe_summary
@@ -38,10 +40,90 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS, SCREEN_CYCLE, SCREEN_PARAM
 from ._patch_git import _uncommitted_revert
 from ._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
+
+#: Why an agentic replay keeps a switched patch without a switches-off bench. That leg is a whole replay hour, the
+#: replay's own run-to-run drift (6-8.5% on GLM-5.3) is wider than the band it would be judged in, so it would cost
+#: every switched patch a round and then revert most of them on noise; an off path that cannot even import already
+#: fails the switches-on bench before any of this runs.
+_AGENTIC_PARITY_NOT_BENCHED = (
+    "switch-off parity not benched under an agentic replay: one leg is a full replay hour and the replay's run-to-run "
+    "drift is wider than the parity band, so the leg could only revert on noise"
+)
+
+
+_PARITY_DEFERRED_TO_CYCLE_BASE = "switch-off parity deferred to the next cycle batch, whose base runs this tree"
+
+#: A quoted identifier in a server error, e.g. ``'Indexer' object has no attribute '_indexer_cos_sin_cache'``.
+_QUOTED_NAME = re.compile(r"'([A-Za-z_][A-Za-z0-9_.]{3,})'")
+
+
+def _error_names_added_code(error: str, patches: list[Path]) -> bool:
+    """Whether the bench error quotes a name an applied patch adds: the server crashed in the patch's own code."""
+    names = set(_QUOTED_NAME.findall(error))
+    for patch in patches if names else ():
+        try:
+            lines = patch.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        added = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
+        if any(name in line for line in added for name in names):
+            return True
+    return False
+
+
+def _unmeasured_attribution(bench_result: dict[str, Any], patches: list[Path]) -> str:
+    """Why a bench produced no throughput, when the candidate is not to blame; empty when it measured or broke."""
+    tput = bench_result.get("output_throughput")
+    if isinstance(tput, (int, float)) and tput > 0:
+        return ""
+    error = str(bench_result.get("error") or "")
+    attribution = classify_failure_attribution(
+        error_class=bench_result.get("error_class"),
+        error_excerpt=error[-600:],
+        explicit=FAILURE_ATTRIBUTION_CANDIDATE if _error_names_added_code(error, patches) else "",
+    )
+    return "" if attribution == FAILURE_ATTRIBUTION_CANDIDATE else attribution
+
+
+def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The failed verdict of a bench the run stopped or that measured nothing through no fault of the patch."""
+    bench_class = str(bench_result.get("error_class") or "")
+    stopped = stopped_by_the_run_class(bench_class)
+    attribution = "" if stopped is not None else _unmeasured_attribution(bench_result, attempt.applied)
+    if stopped is not None:
+        fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
+    elif attribution:
+        fields = {
+            "error_class": BENCH_UNMEASURED_CLASS,
+            "bench_error_class": bench_class,
+            "failure_attribution": attribution,
+            "error": str(bench_result.get("error") or "")[-600:],
+            "reason": f"bench produced no measurement ({attribution}): {bench_class or 'no error class'}",
+        }
+    else:
+        return None
+    return {
+        "status": "failed",
+        **fields,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        "bench_result": bench_result,
+        "workspace": str(attempt.output_root),
+    }
+
+
+def _graded_change(graded: Any, delta_pct: float | None) -> float | None:
+    """The change on the graded objective; an interactivity pair reports it even when the gate leaves ``delta_pct``."""
+    if graded.comparable and graded.graded_on_intvty:
+        return gain_pct(graded.candidate, graded.reference)
+    return delta_pct
 
 
 class PerfGateMixin:
@@ -64,19 +146,9 @@ class PerfGateMixin:
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
 
-        stopped = stopped_by_the_run_class(bench_result.get("error_class"))
-        if stopped is not None:
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "bench_result": bench_result,
-                "workspace": str(attempt.output_root),
-            }
+        unrated = _unrated_verdict(attempt, bench_result)
+        if unrated is not None:
+            return unrated
 
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
         delta_pct = _graded_delta_pct(graded, bench_result, base_tput)
@@ -117,6 +189,7 @@ class PerfGateMixin:
             acc_delta_pct=acc_delta_pct,
             cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
             measured_against=_measured_against(params, base_tput=base_tput),
+            graded_delta_pct=_graded_change(graded, delta_pct),
         )
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
@@ -381,14 +454,16 @@ class PerfGateMixin:
 
         Returns:
             ``{"ran", "ok", "tput", "delta_pct", "band_pct", "accuracy_pass",
-            "reason"}``. ``ran`` is False when the check was skipped: disabled
-            passes and says so; no usable base to compare against is
-            inconclusive and reverts.
+            "reason"}``. ``ran`` is False when the check was skipped: disabled,
+            or an agentic replay, passes and says why; no usable base to
+            compare against is inconclusive and reverts.
         """
         params = bench.params
         band_pct = float(params.get("switch_off_parity_band_pct", DEFAULT_SWITCH_OFF_PARITY_BAND_PCT))
         if not bool(params.get("enable_switch_off_parity", True)):
             return {"ran": False, "ok": True, "reason": "switch-off parity check disabled"}
+        if agentx_enabled():
+            return {"ran": False, "ok": True, "reason": _AGENTIC_PARITY_NOT_BENCHED}
         if base_tput <= 0:
             return {
                 "ran": False,
@@ -467,6 +542,26 @@ class PerfGateMixin:
             "reason": f"switch-off parity within +/-{band_pct:.2f}% ({delta_pct:+.2f}%)",
         }
 
+    async def _admit_dormant(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> dict:
+        """Commit an applied switched patch dormant without a bench, for the cycle bench to screen its levers.
+
+        Inertness with every switch unset is shown by the next cycle batch, whose base runs this tree.
+        """
+        measured = _PatchMeasurement(
+            bench_result={},
+            new_tput=None,
+            delta_pct=None,
+            base_tput=float(params.get("base_tput") or 0.0),
+            keep_threshold_pct=float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
+            accuracy_pass=None,
+            acc_delta_pct=None,
+            cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+            measured_against={},
+        )
+        parity = {"ran": False, "ok": True, "reason": _PARITY_DEFERRED_TO_CYCLE_BASE}
+        result = await self._keep_inert_switches(attempt, measured, params=params, parity=parity)
+        return {**result, SCREEN_PARAM: SCREEN_CYCLE}
+
     async def _keep_inert_switches(
         self,
         attempt: IntegrateAttempt,
@@ -515,10 +610,13 @@ class PerfGateMixin:
                 delta_pct=delta_pct,
                 bench_result=measured.bench_result,
             )
+        from ...knowledge import kb_writeback as _kb
+
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
-        await self._maybe_write_framework_kb_record(
-            measured.lesson("kept_inert_levers_registered"), attempt=attempt, params=params
-        )
+        if parity.get("reason") != _PARITY_DEFERRED_TO_CYCLE_BASE:
+            await self._maybe_write_framework_kb_record(
+                measured.lesson(_kb.OUTCOME_KEPT_INERT), attempt=attempt, params=params
+            )
         log.info(
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,

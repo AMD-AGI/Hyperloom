@@ -252,39 +252,41 @@ class CurrentBestLiftMixin:
         self._write_current_best(request, launch, cand_source, previous)
         return True
 
+    def _hold_current_best(self, task_kind: str, reason: str, detail: str) -> bool:
+        """Record and log a measured winner refused promotion; returns ``True``, the refusal outcome.
+
+        Warning, not info: a refusal here is the whole measured round being
+        discarded, and the lane that measured it has already filed its KEEP
+        elsewhere, so a quiet log leaves the session reporting 0% for work it
+        did do.
+        """
+        log.warning("current_best held: %s winner %s (%s)", task_kind, reason, detail)
+        self.shared_state.record_unpromoted_keep(action=task_kind, reason=reason, detail=detail)
+        return True
+
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:
         from hyperloom.common.perf_metric import VERDICT_KEEP
 
         if not graded.comparable:
-            log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
-            return True
+            return self._hold_current_best(task_kind, "not_comparable", str(graded.degrade_reason))
         if graded.veto_reason:
-            log.warning(
-                "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
-            )
-            _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
-            return True
+            refusal = f"refused by {graded.vetoed_by}: {graded.veto_reason}"
+            _progress.warn("winner_vetoed", f"{task_kind} winner {refusal}")
+            return self._hold_current_best(task_kind, "latency_veto", refusal)
         correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
-            log.info(
-                "current_best held: %s winner refused by %s, intvty %.1f->%.1f tput %.1f->%.1f",
+            return self._hold_current_best(
                 task_kind,
-                graded.refused_by,
-                graded.reference,
-                graded.candidate,
-                graded.tput_reference,
-                graded.tput_candidate,
+                "guard_refused",
+                f"refused by {graded.refused_by}, intvty {graded.reference:.1f}->{graded.candidate:.1f} "
+                f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}",
             )
-            return True
         if graded.reference > 0 and graded.candidate <= graded.reference and not correctness_fix:
-            log.info(
-                "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
-                graded.reference,
-                graded.objective,
+            return self._hold_current_best(
                 task_kind,
-                graded.candidate,
+                "no_lift",
+                f"measured {graded.candidate:.1f} against {graded.reference:.1f} {graded.objective}",
             )
-            return True
         return False
 
     def _append_stack_entry(

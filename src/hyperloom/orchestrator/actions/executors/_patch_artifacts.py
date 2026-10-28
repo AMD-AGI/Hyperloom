@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_float
+from hyperloom.common.gpu_identity import row_dispatches_on
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
@@ -244,18 +245,7 @@ def _validate_aiter_gemm_artifacts(
             errors.append({**base_error, "error": "invalid_aiter_gemm_csv"})
             continue
 
-        def _cu_num_matches(row: dict[str, Any]) -> bool:
-            raw = str(row.get("cu_num") or "").strip()
-            if not raw:
-                return False
-            try:
-                return int(float(raw)) == expected_cu_num
-            except ValueError:
-                return False
-
-        target_rows = [
-            row for row in rows if str(row.get("gfx") or "").strip().lower() == expected_gfx and _cu_num_matches(row)
-        ]
+        target_rows = [row for row in rows if row_dispatches_on(row, (expected_gfx, expected_cu_num))]
         if not target_rows:
             errors.append({**base_error, "error": "no_target_gpu_rows"})
             continue

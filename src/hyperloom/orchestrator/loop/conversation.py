@@ -14,7 +14,8 @@ from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
-from ..specialists.in_flight import in_flight_domains
+from ..measurement.cycle_bench import cycle_bench_enabled
+from ..specialists.in_flight import MODULE_GROUPS, in_flight_domains, in_flight_module_groups
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
@@ -390,7 +391,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
-        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
+        backlog = "\n".join(
+            line
+            for line in (self._queued_backlog_line(), self._queued_specialists_line(), self._module_groups_line())
+            if line
+        )
         if not tasks:
             return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
@@ -462,6 +467,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
             f"{domain} task_id={task.task_id}" for domain, task in held.items()
         )
 
+    def _module_groups_line(self) -> str:
+        """With the cycle bench on, the decode module groups a specialist may own and the live specialists' ones."""
+        if not cycle_bench_enabled() or self.shared_state.phase != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return ""
+        held = in_flight_module_groups([*self.tasks.queued_context_sync(), *self.tasks.running_context_sync()])
+        holders = ", ".join(f"{group} task_id={task.task_id}" for group, task in held.items()) or "none"
+        return (
+            "specialist module groups (set params.module_group to own one; one queued or running specialist each): "
+            f"{', '.join(MODULE_GROUPS)}; held: {holders}"
+        )
+
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness signal, read from the same paths the reaper polls."""
         if (task.kind or "").strip() != "specialist":
@@ -516,16 +532,48 @@ class ConversationCollaborator(CoordinatorCollaborator):
         append_conversation(session_dir=self.session_dir, record=record)
 
     async def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid."""
-        from ..actions.executors._proposal_identity import content_fingerprint
+        """Content fingerprints of the variants in every queued or running explore grid.
 
-        return {
-            content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
+        The dispatcher owns this reading: it is the same set the enqueue gate
+        narrows a proposed grid against, and two copies would drift into the
+        prompt promising one thing while admission did another.
+        """
+        return await self._coord.dispatcher.queued_grid_variants()
+
+    async def _affordable_actions_line(self) -> str:
+        """Which of this phase's actions the budget can still pay for, after what is already queued.
+
+        The phase block reports how much budget is left but not what a round
+        costs, and the admission gate prices one action against the phase clock
+        without subtracting the work already committed to it. Both readings say
+        "affordable" while the queue is oversubscribed.
+
+        A FRAMEWORK_AGENT phase observed on 2026-10-15 proposed thirteen explore
+        rounds over 39 minutes and measured four. By the fifth proposal the
+        queue already held more minutes of work than the phase had left; the
+        remaining nine waited, then were dropped in one batch when the budget
+        ran out --- each already reasoned about and reviewed.
+
+        Priced through the dispatcher's own gate so the prompt and admission
+        cannot disagree, minus what the queue has already spoken for.
+        """
+        dispatcher = getattr(self._coord, "dispatcher", None)
+        if dispatcher is None:
+            return ""
+        phase = str(getattr(self.shared_state, "phase", "") or "")
+        actions = _phase_state.allowed_actions_for(phase)
+        if not actions:
+            return ""
+        committed_min = await dispatcher.queued_cost_minutes()
+        rows: list[str] = []
+        for action in actions:
+            denial = dispatcher.time_budget_denial_for_action(
+                action,
+                already_committed_minutes=committed_min,
+            )
+            rows.append(action if denial is None else f"{action}(unaffordable)")
+        queued_note = f" (queue already holds ~{committed_min:.0f} min)" if committed_min > 0 else ""
+        return f"=== Affordable now{queued_note} ===\n" + ", ".join(rows)
 
     def trajectory_digest(self) -> str:
         """The deterministic trajectory digest, or "" when building it fails."""
@@ -612,6 +660,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
             turn.append(phase_block)
 
         if agent_name == "orchestration":
+            affordable = await self._affordable_actions_line()
+            if affordable:
+                turn.append(affordable)
             turn.append("=== Mission progress ===")
             turn.append(self.shared_state.to_mission_summary())
             deadline = self._coord.run_deadline

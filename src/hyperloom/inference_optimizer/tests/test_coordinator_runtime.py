@@ -2114,6 +2114,44 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ended", "attempts", "requeued"),
+    [("cancelled", [], 1), ("succeeded", [], 0), ("cancelled", [{"status": "ok"}], 0)],
+)
+async def test_a_prelude_roofline_cancelled_outside_the_run_is_enqueued_again(session_dir, ended, attempts, requeued):
+    """GLM-5.3: recover cancelled the preempted pod's initial roofline and PRELUDE moved on with no profile at all."""
+    from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.phase = "PRELUDE"
+        c.shared_state.baseline_tput = 303.4
+        c.shared_state.roofline_attempts = attempts
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="roofline", params={}, idempotency_key="internal-analysis-prelude_initial")
+        )
+        if ended == "cancelled":
+            await c.tasks.cancel_if_queued(task.task_id, kind="roofline", reason="owner scope gone")
+        else:
+            await c.tasks.transition(task.task_id, "running")
+            await c.tasks.transition(task.task_id, "succeeded")
+        c.shared_state.auto_roofline_pending_task_id = task.task_id
+        calls: list[str] = []
+
+        async def _initial_analysis(**_kwargs):
+            calls.append("initial")
+
+        c.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline = _initial_analysis
+
+        await c.phase_machine._release_holds_no_task_will_settle()
+
+        assert (c.shared_state.auto_roofline_pending_task_id, len(calls)) == ("", requeued)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(session_dir):
     """With enable_roofline off the initial analysis is a profile; a failed one must release PRELUDE."""
     from hyperloom.orchestrator.phases import machine_state as phase_state
@@ -2148,11 +2186,11 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
 @pytest.mark.parametrize("ending", ["cancelled", "succeeded"])
 @pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
 async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_unbooked(session_dir, ending, phase):
-    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase.
+    """A cancelled initial analysis, or one that ended before a restart booked it, must not hold the phase on itself.
 
     Neither path reaches the writeback that clears the marker: the dispatcher returns early for a
     cancelled result, and a restart between the runner's terminal write and booking loses the outcome.
-    Both phases that hold for the marker have to release it.
+    Both phases that hold for the marker release it; PRELUDE then asks again for the analysis a cancel left unrun.
     """
     from hyperloom.orchestrator.phases import machine_state as phase_state
 
@@ -2173,7 +2211,10 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         await c.tasks.transition(task.task_id, ending)
         assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.auto_roofline_pending_task_id == ""
+        fresh = [t.task_id for t in await c.tasks.queued() if t.kind in ("roofline", "profile")]
+        expected = fresh if (phase, ending) == ("PRELUDE", "cancelled") else []
+        assert (fresh, c.shared_state.auto_roofline_pending_task_id) == (expected, "".join(expected))
+        assert len(fresh) == int((phase, ending) == ("PRELUDE", "cancelled"))
     finally:
         await c.stop()
 

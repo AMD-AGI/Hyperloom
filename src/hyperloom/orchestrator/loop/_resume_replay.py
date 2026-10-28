@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Mapping
 
 from hyperloom.orchestrator.lever import patch_lever_kind, patch_owner_phase
@@ -228,6 +229,9 @@ class ResumeReplayMixin:
             return
         await self.replay_for_resume()
         await self._resume_consistency_pass()
+        # The stopped leg's rows still read running until a reconcile pass fails them; the re-entry below would reuse
+        # one as live, and the first tick's reconcile would then leave KERNEL with nothing in flight.
+        await self._coord.reconciler.run(time.time())
         # Re-fire the KERNEL delegation hook when resuming parked in KERNEL_AGENT
         # (phase-entry side effects are bound to transitions, not resume). Runs
         # after the consistency pass so current_best/stack are already rebuilt.

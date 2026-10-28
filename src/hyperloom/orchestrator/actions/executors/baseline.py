@@ -67,6 +67,7 @@ from ..stop_attribution import (
 )
 from . import _server_lifecycle as _lifecycle
 from ._aiter_jit import is_aiter_jit_registry_mismatch
+from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -760,12 +761,13 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
 
 
 def _benchmark_process_env(
-    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str, session_dir: Path
 ) -> dict[str, str]:
     """Build the client environment without overriding Magpie's native checkout selection."""
     from .magpie_agentx import native_config
 
     env = scrub_benchmark_process_env(os.environ.copy())
+    apply_session_jit_cache(env, framework=benchmark_framework(config_path), session_dir=session_dir)
     env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
     if inferencex_path and not native_config(config_path):
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
@@ -3194,7 +3196,7 @@ class BenchmarkRunExecutor:
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
         result_dir = _resolve_result_dir(output_dir, attempt.override_result_dir)
-        env = _benchmark_process_env(config_path, output_dir, result_dir, attempt.inferencex_path)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, attempt.inferencex_path, self.session_dir)
         # Multi-node (--nodes >= 2): inject MAGPIE_RUN_PHASE=client + BENCHMARK_BASE_URL so Magpie skips its server
         # launch and targets the RayJob head.
         env.update(magpie_remote_env())

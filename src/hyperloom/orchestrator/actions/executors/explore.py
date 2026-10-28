@@ -6,10 +6,13 @@
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import is_magpie_agentx
+import asyncio
+import contextlib
 import functools
 import logging
 import os
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,7 +21,7 @@ import yaml
 
 from hyperloom.common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -62,6 +65,9 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
+from . import cycle_bench_arm as _cycle_bench
+from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+from ._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH, ATTRIBUTION_CYCLE_BROKEN, ATTRIBUTION_CYCLE_PENDING
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import BaseControls, controls_of, effective_fingerprint, normalize_proposal
 from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
@@ -155,6 +161,55 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
+def _flag_still_in_effect(flag: str, argv_flags: set[str], resolved: dict[str, Any], framework: str) -> bool | None:
+    """Whether one ablated flag still reached the server, or ``None`` when the evidence cannot say.
+
+    An argv record settles any flag shape. Without one -- SGLang prints no argv
+    line, so its runs never have one -- the engine's own resolved settings
+    answer for a flag whose setting it reports as a boolean, since such a flag
+    carries no value and the engine reports false once it is dropped. A setting
+    holding anything else falls back to an engine default that no record names,
+    so that case stays unanswered rather than guessed.
+    """
+    name = flag.split("=", 1)[0]
+    if argv_flags:
+        return name in argv_flags
+    setting = launch_flag_setting_name(name, framework)
+    value = resolved.get(setting)
+    return value if isinstance(value, bool) else None
+
+
+def _ablation_realized(remove_args: Any, launch_evidence: Any) -> dict[str, Any] | None:
+    """Whether the flags a variant asked to drop are gone from the server it actually measured.
+
+    A variant that ablates a flag and then measures nothing has two readings --
+    the flag never came off, or it came off and the hypothesis was wrong -- and
+    they lead opposite ways. The agentic GLM-5.3 session had no way to tell them
+    apart: its radix-cache variant ran against a server that still carried
+    ``--disable-radix-cache``, because the benchmark harness re-injects its own
+    default for any flag the request does not itself mention, and removal only
+    ever pruned the request. It read the resulting null as the hypothesis
+    failing and moved on, leaving the direction untested.
+
+    Returns:
+        ``None`` unless every requested flag could be judged, so a caller cannot
+        mistake "unknown" for "confirmed".
+    """
+    wanted = [text for text in (str(arg).strip() for arg in (remove_args or [])) if text]
+    if not wanted:
+        return None
+    evidence = launch_evidence if isinstance(launch_evidence, Mapping) else {}
+    argv_flags = {token.split("=", 1)[0] for token in str(evidence.get("observed_server_launch_flags") or "").split()}
+    observed_config = evidence.get("observed_server_config")
+    resolved = dict(observed_config) if isinstance(observed_config, Mapping) else {}
+    framework = str(evidence.get("framework") or "")
+    verdicts = [(flag, _flag_still_in_effect(flag, argv_flags, resolved, framework)) for flag in wanted]
+    if any(state is None for _, state in verdicts):
+        return None
+    still = [flag for flag, state in verdicts if state]
+    return {"requested": wanted, "still_present": still, "took_effect": not still}
+
+
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
@@ -246,25 +301,61 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
 
 
 def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
-    """Build explore variants that attribute each registered rewrite lever."""
-    if shared_state is None:
-        return []
-    rows = list(getattr(shared_state, "authored_framework_levers", None) or [])
-    if not rows:
-        return []
-    pending = [row for row in rows if isinstance(row, dict) and row.get("attributed_gain_pct") is None]
-    if not pending:
-        return []
+    """Build explore variants that attribute each registered rewrite lever.
+
+    A dormant lever's patch was benched with all its switches on when it was integrated, below the KEEP threshold, so
+    that set benched again repeats the round: a switch on its own is new only out of a patch that carried several.
+    The dormant levers of several patches together are new as well, and get their own round
+    (:func:`dormant_lever_bundle`) rather than a seat in every grid.
+    """
+    rows = _lever_rows(shared_state)
+    pending = [row for row in rows if row.get("attributed_gain_pct") is None]
     dormant = [row for row in pending if not row.get("default_on")]
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
-    if dormant:
-        for variant in _switch_manifest.additive_variants(dormant):
+    decomposable = [row for patch in _by_patch(dormant) if len(patch) > 1 for row in patch]
+    for variant in _switch_manifest.additive_variants(decomposable):
+        if variant["framework_lever"]:
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
         for variant in _switch_manifest.leave_one_out_variants(active):
             payload.append({**variant, "framework_lever_source": "leave_one_out"})
     return payload
+
+
+def dormant_lever_bundle(shared_state: Any) -> dict[str, Any] | None:
+    """The variant that switches every dormant lever on together, once they come from more than one patch.
+
+    Each was kept dormant for missing the KEEP threshold alone; together is the only way several of them clear it,
+    which is how the hand-tuned GLM-5.3 stack landed most of its 44 patches.
+    """
+    dormant = [row for row in _lever_rows(shared_state) if not row.get("default_on") and not _screened_out(row)]
+    if len(_by_patch(dormant)) < 2:
+        return None
+    return _switch_manifest.bundle_variant(dormant, name="fwlever_bundle")
+
+
+def _screened_out(row: dict[str, Any]) -> bool:
+    """Whether the cycle bench screened the lever and found no gain, or no server, in it."""
+    source = row.get("attribution_source")
+    if source == ATTRIBUTION_CYCLE_BROKEN:
+        return True
+    gain = row.get("attributed_gain_pct")
+    return source == ATTRIBUTION_CYCLE_BENCH and not (isinstance(gain, (int, float)) and gain > 0)
+
+
+def _lever_rows(shared_state: Any) -> list[dict[str, Any]]:
+    """The session's registered rewrite levers, less those the cycle bench has yet to screen."""
+    rows = getattr(shared_state, "authored_framework_levers", None) or []
+    return [r for r in rows if isinstance(r, dict) and r.get("attribution_source") != ATTRIBUTION_CYCLE_PENDING]
+
+
+def _by_patch(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Lever rows grouped by the registration that recorded them together: one integrated patch's switches."""
+    patches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        patches.setdefault((str(row.get("specialist_task_id") or ""), str(row.get("ts") or "")), []).append(row)
+    return list(patches.values())
 
 
 def _framework_lever_attributions(
@@ -764,6 +855,9 @@ def _outcome_row(te: dict[str, Any], fingerprint: str, reason: str, task_id: str
         )
         if outcome in UNMEASURED_OUTCOMES
         else "",
+        # Whether the ablation this variant asked for reached the server, so a null
+        # result is not read as the ablation having been blocked.
+        "ablation_realized": te.get("ablation_realized"),
         "server_log_path": te.get("server_log_path"),
         "workspace": te.get("workspace"),
         "raw_result_path": te.get("raw_result_path"),
@@ -1381,6 +1475,7 @@ class _ExploreRound:
             "workspace": r.workspace,
             "error_class": r.error_class or "",
             "server_log_path": r.server_log_path,
+            "ablation_realized": _ablation_realized(gv.remove_args, r.launch_evidence),
             "launch_evidence": dict(r.launch_evidence or {}),
             "launch_evidence_path": r.launch_evidence_path,
             "stage": FAILURE_STAGE_DECISION,
@@ -1723,10 +1818,43 @@ class ExploreExecutor:
             or runs_dir(self.session_dir, "explore", ctx.task.task_id)
         )
         output_root.mkdir(parents=True, exist_ok=True)
+        if _cycle_bench.CYCLE_ARMS_PARAM in params:
+            return await _run_cycle_batch(params, extra.get("shared_state") or extra.get("state"), output_root)
         try:
             return await _ExploreRound(ctx, params, output_root).run()
         except _RoundRefused as refusal:
             return refusal.result
+
+
+async def _run_cycle_batch(params: dict[str, Any], state: Any, output_root: Path) -> dict[str, Any]:
+    """Run the batch off the event loop; cancelled, it stops booting and returns once the arm on the GPUs is down.
+
+    The task's lanes are released when it ends, so a server the thread still holds would share the GPUs.
+    """
+    stop = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_screen_cycle_batch, params, state, output_root, stop))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        stop.set()
+        with contextlib.suppress(Exception):
+            await work
+        raise
+
+
+def _screen_cycle_batch(
+    params: dict[str, Any], state: Any, output_root: Path, stop: threading.Event | None = None
+) -> dict[str, Any]:
+    """Run one cycle-bench batch of the task's arms on the session baseline's launch; no replay, no grading round."""
+    from hyperloom.common.ports import pick_server_port
+
+    arms = list(params[_cycle_bench.CYCLE_ARMS_PARAM])
+    candidates = [(str(arm["name"]), {str(k): str(v) for k, v in (arm.get("envs") or {}).items()}) for arm in arms]
+    try:
+        spec = _cycle_bench.session_batch(state, candidates, out_dir=output_root, port=pick_server_port())
+    except (OSError, KeyError, ValueError) as exc:
+        return {"status": "failed", "error_class": "cycle_bench_unavailable", "error": str(exc)}
+    return {"status": STATUS_SCREENED, _cycle_bench.CYCLE_ARMS_PARAM: arms, **_cycle_bench.run_batch(spec, stop=stop)}
 
 
 explore_executor = ExploreExecutor()

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import (
@@ -80,6 +81,15 @@ class _AcceptedSwitches(NamedTuple):
     problems: list[str]
 
 
+#: A value no credential can be: a flag or a count. A token-cache switch reads credential-shaped by name alone.
+_LITERAL_VALUE = re.compile(r"(?i)true|false|on|off|yes|no|-?\d{1,9}")
+
+
+def _declared_value(entry: dict[str, Any]) -> str:
+    value = entry.get("value")
+    return str(value).strip() if value not in (None, "") else DEFAULT_SWITCH_VALUE
+
+
 def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _AcceptedSwitches:
     """Keep the entries that name a usable rewrite switch, reporting why the rest were dropped."""
     problems: list[str] = []
@@ -96,7 +106,7 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
         if upper in FORBIDDEN_SWITCHES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
-        if is_secret_shaped_env_name(upper):
+        if is_secret_shaped_env_name(upper) and not _LITERAL_VALUE.fullmatch(_declared_value(entry)):
             problems.append(f"dropped {name!r}: credential-shaped name, not a rewrite switch")
             continue
         if upper in reserved:
@@ -281,20 +291,21 @@ def additive_variants(
     variants.sort(key=lambda v: (len(v["framework_lever_bundle"]), v["name"]))
 
     # The full stack, when it is not already one of the bundles above.
-    if len(switches) > 1:
-        full = frozenset(entry["switch"] for entry in switches)
-        if full not in seen:
-            variants.append(
-                {
-                    "name": f"{name_prefix}_all",
-                    "extra_envs": switch_env(switches),
-                    "note": f"all {len(switches)} framework rewrite levers together",
-                    "provenance": "framework_rewrite_lever",
-                    "framework_lever": "",
-                    "framework_lever_bundle": sorted(full),
-                }
-            )
+    if len(switches) > 1 and frozenset(entry["switch"] for entry in switches) not in seen:
+        variants.append(bundle_variant(switches, name=f"{name_prefix}_all"))
     return variants
+
+
+def bundle_variant(switches: list[dict[str, Any]], *, name: str) -> dict[str, Any]:
+    """Build the explore variant that switches every given lever ON together."""
+    return {
+        "name": name,
+        "extra_envs": switch_env(switches),
+        "note": f"all {len(switches)} framework rewrite levers together",
+        "provenance": "framework_rewrite_lever",
+        "framework_lever": "",
+        "framework_lever_bundle": sorted(entry["switch"] for entry in switches),
+    }
 
 
 def leave_one_out_variants(
@@ -365,6 +376,7 @@ __all__ = [
     "MANIFEST_KEY",
     "MAX_SWITCHES",
     "additive_variants",
+    "bundle_variant",
     "dependency_closure",
     "dependents_closure",
     "leave_one_out_variants",

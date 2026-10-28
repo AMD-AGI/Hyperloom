@@ -36,6 +36,7 @@ from .speculative_decoding_focus import speculative_decoding_focus
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
+    CUSTOM_SPECIALIST_KEY,
     DEFAULT_SPECIALIST_MAX_TURNS,
     SpecialistDomain,
     domain_for_tag,
@@ -698,6 +699,53 @@ def _focus_enablement_specialist(
     ]
 
 
+def _switch_contract_lines() -> list[str]:
+    """The default-off switch contract a source rewrite is delivered under, whichever domain authors it.
+
+    It is also what lets a rewrite below the KEEP threshold count at all: kept dormant behind its switch, it is
+    benchmarked with every other dormant lever, where the hand-tuned GLM-5.3 stack found most of its 44 patches.
+    """
+    return [
+        "**Deliverable contract — every rewrite is a default-off switch**",
+        "Each rewrite MUST be gated by its own environment switch that defaults",
+        "OFF, so that with no switches set the code path is byte-for-byte the",
+        "original. This is not a style preference; it is what makes each rewrite",
+        "independently measurable and composable, and it is checked:",
+        "- with every switch unset the patch must be inert, and a rewrite that",
+        "  changes behaviour when disabled is rejected;",
+        "- accepted switches become search levers, so the orchestrator measures",
+        "  each one's own contribution and searches combinations rather than",
+        "  taking your bundle as given.",
+        "",
+        "**The manifest is not optional and not documentation — it is what makes",
+        "the guarantees above run.** With a gate the manifest does not declare,",
+        "nothing is turned on for the measurement, no inertness check runs and no",
+        "lever is registered: the patch is benched as an ordinary diff and whatever",
+        "it does when 'off' is never checked. Integration now refuses a deliverable",
+        "whose patch reads an `os.environ` switch the manifest omits, so an",
+        "undeclared gate costs you the whole attempt.",
+        "",
+        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
+        "switch, each with: `switch` (the env var name), `category` (the kind of",
+        "rewrite, e.g. `eliminate_host_sync`, `fuse_collectives`, `drop_noop_glue`),",
+        "`target` (file and symbol), `evidence` (which measured candidate it",
+        "addresses), `depends_on` (switches that must also be on for this one to",
+        "pay), and `enables` (switches that only pay once this one is on).",
+        "",
+        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
+        "An enabler measured alone shows no gain. If you do not declare the",
+        "relationship, it is judged on its standalone number, rejected, and every",
+        "rewrite that depended on it is silently devalued along with it. Declared,",
+        "the whole bundle is benchmarked together and survives on its joint gain.",
+        "",
+        "**A gain you expect below the KEEP threshold is no reason to withhold the",
+        "rewrite.** Below the threshold a switched rewrite stays in the tree, off,",
+        "as a registered lever, and every dormant lever is benchmarked together, so",
+        "rewrites no single round could credit clear the bar jointly. A small but",
+        "real rewrite you decline to write is a gain no later round can recover.",
+    ]
+
+
 def _focus_framework_rewrite_specialist(
     inp: SpecialistPromptInputs,
 ) -> list[str]:
@@ -777,37 +825,7 @@ def _focus_framework_rewrite_specialist(
         "  classifier-free guidance the positive and negative branches alternate,",
         "  so a single-entry cache thrashes to a 0% hit rate.",
         "",
-        "**Deliverable contract — every rewrite is a default-off switch**",
-        "Each rewrite MUST be gated by its own environment switch that defaults",
-        "OFF, so that with no switches set the code path is byte-for-byte the",
-        "original. This is not a style preference; it is what makes each rewrite",
-        "independently measurable and composable, and it is checked:",
-        "- a parity leg runs with every switch unset and must reproduce the",
-        "  baseline within its noise band, so a rewrite that changes behaviour",
-        "  when disabled is rejected;",
-        "- accepted switches become search levers, so the orchestrator measures",
-        "  each one's own contribution and searches combinations rather than",
-        "  taking your bundle as given.",
-        "",
-        "**The manifest is not optional and not documentation — it is what makes",
-        "the guarantees above run.** With a gate the manifest does not declare,",
-        "nothing is turned on for the measurement, no parity leg runs and no lever",
-        "is registered: the patch is benched as an ordinary diff and whatever it",
-        "does when 'off' is never checked. Integration now refuses a deliverable",
-        "whose patch reads an `os.environ` switch the manifest omits, so an",
-        "undeclared gate costs you the whole attempt.",
-        "",
-        "Alongside the patch, emit a `framework_switches` manifest — one entry per",
-        "switch, each with: `switch` (the env var name), `category` (a taxonomy id",
-        "above), `target` (file and symbol), `evidence` (which measured candidate",
-        "it addresses), `depends_on` (switches that must also be on for this one",
-        "to pay), and `enables` (switches that only pay once this one is on).",
-        "",
-        "**Declare `depends_on` / `enables` honestly — this is load-bearing.**",
-        "An enabler measured alone shows no gain. If you do not declare the",
-        "relationship, it is judged on its standalone number, rejected, and every",
-        "rewrite that depended on it is silently devalued along with it. Declared,",
-        "the whole bundle is benchmarked together and survives on its joint gain.",
+        *_switch_contract_lines(),
         "",
         "**Always keep a fallback path.** Guard the fast path on the shapes and",
         "dtypes it actually requires and fall through to the original code",
@@ -1046,8 +1064,27 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+#: Patch authors that do not take the switch contract from the shared block: enablement climbs only as far as
+#: runnability needs and is never benched for a gain, the framework-rewrite focus carries the contract itself, and the
+#: operator writes the custom specialist's whole mandate.
+_OWN_SWITCH_CONTRACT_DOMAINS = frozenset(
+    {"enablement_specialist", "framework_rewrite_specialist", CUSTOM_SPECIALIST_KEY}
+)
+
+
+def _switch_contract_block(inp: SpecialistPromptInputs) -> list[str]:
+    """The switch contract for every patch author whose patch is benched for a gain.
+
+    Freeform dispatches have no domain focus of their own, and they author most of the patches: 28 of the GLM-5.3
+    session's 40 and 5 of the next session's first 8.
+    """
+    if not _authors_patches(inp) or inp.domain.key in _OWN_SWITCH_CONTRACT_DOMAINS:
+        return []
+    return ["", "### Deliver every rewrite behind a switch", "", *_switch_contract_lines()]
+
+
 def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
-    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude and switch-contract codas that span them."""
     body: list[str] = []
     rendered: set[str] = set()
     for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
@@ -1058,6 +1095,7 @@ def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
         body.extend(["", f"### Domain focus — {key}", "", *lines])
         rendered.add(key)
     body.extend(_source_patch_altitude_block(inp))
+    body.extend(_switch_contract_block(inp))
     return body
 
 
@@ -1329,7 +1367,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-    rows.extend(_mandate_run_status(inp))
+    rows.extend([*_owned_module_rows(inp), *_mandate_run_status(inp)])
 
     rows.extend(
         [
@@ -1375,6 +1413,17 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
     return rows
+
+
+def _owned_module_rows(inp: SpecialistPromptInputs) -> list[str]:
+    """§0's module group the dispatch owns, with its row of the module table when one was read."""
+    owned = inp.roofline_evidence.get("owned_module") or {}
+    if not owned.get("group"):
+        return []
+    line = f"- module group: `{owned['group']}` (no other specialist works it while you run)"
+    if not owned.get("rows"):
+        return [line]
+    return [f"{line}; its decode time per step:", "", *map(str, owned["rows"])]
 
 
 def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
@@ -1738,6 +1787,20 @@ def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
+def _decode_module_rows(table: Any) -> list[str]:
+    """The decode steps' time by module, ahead of the TraceLens kernels, or nothing without a table."""
+    if not table:
+        return []
+    return [
+        "**Decode step time by module** (summed per step off the raw profile capture's step windows, so it covers "
+        "the graph-replayed VERIFY step TraceLens cannot split; profiling inflates every figure by about a tenth, "
+        "the shares hold):",
+        "",
+        *(str(line) for line in table),
+        "",
+    ]
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1749,7 +1812,8 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         The rendered roofline-evidence section lines.
     """
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
-    ev = inp.roofline_evidence
+    # The owned module group is rendered with the mandate.
+    ev = {key: value for key, value in inp.roofline_evidence.items() if key != "owned_module"}
     if not ev:
         rows.append(
             "(none — no fresh roofline snapshot has been recorded yet. "
@@ -1759,10 +1823,10 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
         )
         return rows
 
+    rows.extend(_decode_module_rows(ev.get("decode_modules")))
     snap_id = ev.get("roofline_snapshot_id")
     if snap_id is not None:
-        rows.append(f"**TraceLens snapshot #{snap_id}**")
-        rows.append("")
+        rows.extend([f"**TraceLens snapshot #{snap_id}**", ""])
 
     summary = ev.get("executive_summary")
     if summary:

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from hyperloom.orchestrator.roles import (
@@ -134,8 +136,8 @@ def test_a_specialist_is_admitted_when_its_shortest_run_fits_the_phase(
     """Admission asks for a mode's base budget, not the full wall budget the dispatch then tightens."""
     _phase_with_minutes_left(coord, monkeypatch, "FRAMEWORK_AGENT", 30)
 
-    assert coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "research"}) is None
-    denied = coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "patch"})
+    assert asyncio.run(coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "research"})) is None
+    denied = asyncio.run(coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "patch"}))
     assert denied is not None and denied.rule == "phase_time_budget"
 
 
@@ -646,7 +648,7 @@ def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordi
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"
     assert coord.dispatcher.time_budget_denial_for_action("baseline") is None
-    assert coord.dispatcher.admission_denial_for_action("baseline") is not None
+    assert asyncio.run(coord.dispatcher.admission_denial_for_action("baseline")) is not None
 
 
 # -- sequence denial gates -------------------------------------------------

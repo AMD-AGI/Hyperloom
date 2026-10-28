@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
+_HIT_LOGGING_ENV = "AITER_LOG_TUNED_CONFIG"
 
 
 class ServerArgvInvalidError(ValueError):
@@ -168,6 +169,7 @@ def materialize_agentx(
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
     bench = config["benchmark"]
+    _log_tuned_config_hits(bench)
     envs = bench.setdefault("envs", {})
     if model_path and Path(model_path).is_dir():
         envs["MODEL_PATH"] = model_path
@@ -178,6 +180,16 @@ def materialize_agentx(
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
     return output
+
+
+def _log_tuned_config_hits(bench: dict[str, Any]) -> None:
+    """Have the server log aiter's tuned-config hits; without them a served key reads as an unserved one."""
+    agentx = bench.get("agentx")
+    if not isinstance(agentx, dict):
+        return
+    launch = agentx.setdefault("launch_overrides", {"version": 1})
+    if _HIT_LOGGING_ENV not in (launch.get("unset_env") or []):
+        launch.setdefault("env", {}).setdefault(_HIT_LOGGING_ENV, "1")
 
 
 def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> None:
@@ -228,7 +240,10 @@ def enable_profile(config_path: Path) -> None:
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     bench = config["benchmark"]
     framework = str(bench["framework"]).lower()
-    _, sitecustomize = patch_for_profile(bench.setdefault("envs", {}), framework)
+    envs = bench.setdefault("envs", {})
+    _, sitecustomize = patch_for_profile(envs, framework)
+    # In sitecustomize mode annotations also profile SGLang's graph capture, which crashes without TraceLens's patch.
+    capture_patched = not sitecustomize or envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] != "unavailable"
     apply_launch_changes(bench, LaunchChanges())
     launch = bench["agentx"]["launch_overrides"]
     server_env = launch["env"]
@@ -238,7 +253,7 @@ def enable_profile(config_path: Path) -> None:
             profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
         if "PYTHONPATH" in launch["unset_env"]:
             profile_env["PYTHONPATH"] = ""
-        apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
+        apply_sglang_shape_tool(profile_env, shape_discovery=capture_patched and shape_discovery_enabled(bench))
     if framework == "vllm":
         name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
         inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")
@@ -248,9 +263,10 @@ def enable_profile(config_path: Path) -> None:
     torch_profiler["enabled"] = True
     torch_profiler.setdefault("num_steps", 256)
     torch_profiler.setdefault("num_profiles", 1)
-    torch_profiler.setdefault("start_seconds", 300)
+    # The replay's opening burst runs past 300 s; a capture started there missed the steady-state batch mix.
+    torch_profiler.setdefault("start_seconds", 900)
     torch_profiler.setdefault("interval_seconds", 900)
-    torch_profiler.setdefault("detailed_annotations", annotations_supported(bench["envs"]))
+    torch_profiler.setdefault("detailed_annotations", capture_patched and annotations_supported(envs))
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

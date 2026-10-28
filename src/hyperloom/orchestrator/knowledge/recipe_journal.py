@@ -19,6 +19,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
 )
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, detect_framework_version
+from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     OUTCOME_REVERT,
@@ -427,6 +428,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         landed; a per-variant KEEP outside it did not adopt anything.
         """
         result_dict = _result_payload(result)
+        if result_dict.get("status") == STATUS_SCREENED:
+            # A cycle-bench batch measured no replay, so there is no fact for the recipe KB.
+            return
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
         if task.kind == "explore":

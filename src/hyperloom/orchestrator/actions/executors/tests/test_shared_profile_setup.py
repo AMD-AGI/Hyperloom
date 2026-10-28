@@ -78,7 +78,7 @@ def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, m
         "enabled": True,
         "num_steps": 256,
         "num_profiles": 1,
-        "start_seconds": 300,
+        "start_seconds": 900,
         "interval_seconds": 900,
         "detailed_annotations": True,
     }
@@ -193,6 +193,23 @@ def test_shape_tool_does_not_reintroduce_an_explicitly_unset_pythonpath(tmp_path
     assert actual["unset_env"] == []
 
 
+def test_sitecustomize_profile_stays_shapeless_when_graph_capture_is_unpatched(tmp_path, monkeypatch):
+    """Annotations profile SGLang's graph capture, which raises IndexError on an unpatched DSA decode graph."""
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    tool_dir = tmp_path / "kernel_shape_tool"
+    tool_dir.mkdir()
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: False)
+    launch = {"version": 1, "env": {"PYTHONPATH": "/candidate/overlay"}}
+    path = _native_config(tmp_path, "sglang", agentx={"enabled": True, "launch_overrides": launch})
+    enable_profile(path)
+    native = load_benchmark(path)
+    assert native["profiler"]["torch_profiler"]["detailed_annotations"] is False
+    environment = native["agentx"]["launch_overrides"]["env"]
+    assert environment["PYTHONPATH"] == "/candidate/overlay"
+    assert environment["TRACELENS_SHAPE_DISCOVERY"] == "0"
+
+
 @pytest.mark.parametrize("timeout,expected", [("600", "1200"), ("2400", "2400")])
 def test_native_vllm_timeout_preserves_a_longer_server_timeout(tmp_path, timeout, expected):
     launch = {
@@ -227,7 +244,7 @@ def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(
         **requested,
         "enabled": True,
         "num_profiles": 1,
-        "start_seconds": 300,
+        "start_seconds": 900,
         "interval_seconds": 900,
     }
     assert native["envs"]["PROFILE_EXTRA_BODY"] == client_body

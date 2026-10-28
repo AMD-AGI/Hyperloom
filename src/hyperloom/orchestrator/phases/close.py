@@ -17,7 +17,10 @@ from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
 import logging as _logging
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
-from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import (
+    ABORTED_STOP_REASONS,
+    PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
+)
 from hyperloom.inference_optimizer.breakdown.workflow_contract import workflow_contract
 
 from . import machine_state as _phase_state
@@ -858,8 +861,10 @@ class ClosePhase(CoordinatorCollaborator):
         now = time.time()
         decision = _phase_state.compute_next_phase(
             state,
-            enablement_in_flight=enablement_in_flight,
-            kernel_work_in_flight=kernel_facts.agent_in_flight,
+            live=_phase_state.LiveFacts(
+                enablement_in_flight=enablement_in_flight,
+                kernel_work_in_flight=kernel_facts.agent_in_flight,
+            ),
             now_unix=now,
             flags=_phase_state.PhaseFlags(
                 kernel_enabled=machine.kernel_enabled(),
@@ -960,16 +965,23 @@ class ClosePhase(CoordinatorCollaborator):
 
         The sequencer is otherwise reached only when the phase machine
         transitions into CLOSE, so a run that ends without advancing a phase --
-        a signal, an exception, an objective met at the deadline -- would write
-        no report at all. Idempotent via ``close_sequence_done``.
+        an exception, an objective met at the deadline -- would write no report
+        at all. An operator stop ends the leg, not the session: the session
+        stays in its phase for a resume and no close-time work is dispatched.
+        Idempotent via ``close_sequence_done``.
 
         Args:
-            reason: What terminated the run, used for logging.
+            reason: What terminated the run.
 
         Returns:
             bool: ``True`` when this call ran the sequence.
         """
         if self.shared_state.close_sequence_done:
+            return False
+        if reason in ABORTED_STOP_REASONS:
+            log.info(
+                "CLOSE: not closing on an operator stop (reason=%s); phase stays %s", reason, self.shared_state.phase
+            )
             return False
         log.info("CLOSE: no close sequence has run (reason=%s); running it now", reason)
         prior = await self._record_terminal_close_transition()

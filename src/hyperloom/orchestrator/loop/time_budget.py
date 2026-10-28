@@ -125,41 +125,96 @@ def specialist_admission_minutes(shared_state: SharedState, params: dict[str, An
     return floor_min
 
 
-def time_budget_denial(action: str, expected_cost_minutes: float, shared_state: SharedState) -> PolicyDenied | None:
+def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] | None) -> float:
+    """What an explore round costs: one measured round for each variant its grid carries.
+
+    The catalogue prices an action, and an explore is priced as one round --
+    but the task is a whole grid and every variant in it is a server launch and
+    a benchmark on the same serving lane. A measured FRAMEWORK_AGENT explore
+    carrying four variants ran 39.9 minutes against the ~12 it was admitted
+    at, so a queue charged per task reads as a third of what it will take: that
+    phase queued 23 rounds in 52 minutes and still had every one of them
+    waiting 95 minutes later, when the exit cancelled them unmeasured.
+    """
+    from ..actions.executors.cycle_bench_arm import CYCLE_ARM_MINUTES, CYCLE_ARMS_PARAM
+
+    if CYCLE_ARMS_PARAM in (params or {}):
+        # A cycle batch boots once per candidate and once per bracketing base, each far shorter than a replay round.
+        return CYCLE_ARM_MINUTES * (len(params[CYCLE_ARMS_PARAM] or ()) + 2)
+    variants = len(((params or {}).get("grid") or ()))
+    return per_round_minutes * variants if variants > 1 else per_round_minutes
+
+
+def time_budget_denial(
+    action: str,
+    expected_cost_minutes: float,
+    shared_state: SharedState,
+    *,
+    queued_minutes: float = 0.0,
+) -> PolicyDenied | None:
     """Refuse an action that the session's usable time, or the gated phase's remaining time, cannot fit.
 
     Args:
         action: The action being admitted.
         expected_cost_minutes: What the action is expected to cost.
         shared_state: The live session state both budgets are read from.
+        queued_minutes: What work already queued on the action's lanes has spoken for; it is charged first.
 
     Returns:
         A :class:`PolicyDenied` naming the budget that cannot fit the action, else ``None``.
     """
+    needed = expected_cost_minutes + queued_minutes
     session_sec = shared_state.session_budget_usable_sec()
-    if not action_fits_time_budget(usable_sec=session_sec, expected_cost_minutes=expected_cost_minutes):
+    if not action_fits_time_budget(usable_sec=session_sec, expected_cost_minutes=needed):
         return PolicyDenied(
-            _cost_exceeds(action, expected_cost_minutes, session_sec, "the session budget"),
+            _cost_exceeds(action, expected_cost_minutes, queued_minutes, session_sec, "the session budget"),
             rule="time_budget",
-            hint=(
+            hint=_denial_hint(
+                queued_minutes,
+                session_sec,
                 "the wall-clock budget cannot fit this action; pick an action that fits "
-                "the time left, the Coordinator closes the session once none does"
+                "the time left, the Coordinator closes the session once none does",
             ),
         )
     phase_sec = gated_phase_remaining_sec(shared_state)
-    if not action_fits_time_budget(usable_sec=phase_sec, expected_cost_minutes=expected_cost_minutes):
+    if not action_fits_time_budget(usable_sec=phase_sec, expected_cost_minutes=needed):
         return PolicyDenied(
-            _cost_exceeds(action, expected_cost_minutes, phase_sec, f"the {shared_state.phase} phase budget"),
+            _cost_exceeds(
+                action, expected_cost_minutes, queued_minutes, phase_sec, f"the {shared_state.phase} phase budget"
+            ),
             rule="phase_time_budget",
-            hint="the phase's wall-clock budget cannot fit this action; pick one that fits the time left in the phase",
+            hint=_denial_hint(
+                queued_minutes,
+                phase_sec,
+                "the phase's wall-clock budget cannot fit this action; pick one that fits the time left in the phase",
+            ),
         )
     return None
 
 
-def _cost_exceeds(action: str, expected_cost_minutes: float, usable_sec: float | None, budget: str) -> str:
-    """The denial reason: what the action needs against what ``budget`` has left."""
+def _denial_hint(queued_minutes: float, usable_sec: float | None, short_hint: str) -> str:
+    """What to do about a refusal: wait for the queue when it is what fills a budget that can fund it, else ``short_hint``.
+
+    A GLM-5.3 FRAMEWORK_AGENT phase with 410 minutes left had about 390 of them queued. Read as a phase too short to
+    fund an explore, the refusal sent the orchestrator to ``skip_to_kernel``, and the exit cancelled the four queued
+    rounds it had been waiting on, unmeasured, with six hours of the phase unspent.
+    """
+    if queued_minutes > 0 and action_fits_time_budget(usable_sec=usable_sec, expected_cost_minutes=queued_minutes):
+        return (
+            "the budget is booked, not spent: the work already queued on this action's lanes fits it and runs first. "
+            "Propose again once that queue has drained, or something small enough to fit after it; leaving the phase "
+            "now cancels the queue unmeasured"
+        )
+    return short_hint
+
+
+def _cost_exceeds(
+    action: str, expected_cost_minutes: float, queued_minutes: float, usable_sec: float | None, budget: str
+) -> str:
+    """The denial reason: what the action needs, after the queue, against what ``budget`` has left."""
     remaining_min = (usable_sec or 0.0) / _SECONDS_PER_MINUTE
+    after_queue = f" after the ~{queued_minutes:.0f} min already queued on its lanes" if queued_minutes > 0 else ""
     return (
-        f"action={action!r} denied: needs ~{expected_cost_minutes:.0f} min but only "
+        f"action={action!r} denied: needs ~{expected_cost_minutes:.0f} min{after_queue} but only "
         f"{remaining_min:.0f} min of {budget} is left"
     )

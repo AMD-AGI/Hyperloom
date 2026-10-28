@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.serving_windows import step_windows
+from kernelforge.trace_events import COLLECTIVE_KERNEL_PATTERN
+
 from .calibration import (
     DEFAULT_MIN_PREDICTED_GAIN,
     predict_cuda_graph_on_gain,
@@ -42,7 +45,9 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 
 # Ordered (first-match-wins) kernel-name -> category rules.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
-    # MoE first: its kernels are GEMMs too, and the table reports them separately.
+    # Collectives before reduce/copy, which their names also match; a rank's collective time includes its wait.
+    ("collective", COLLECTIVE_KERNEL_PATTERN),
+    # MoE first among compute: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
     ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),
     ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped|mla_|_mla"),
@@ -103,39 +108,56 @@ def _load_trace_events(path: str | Path) -> list[dict[str, Any]]:
     return [ev for ev in events if isinstance(ev, dict)]
 
 
+def _kernel_span(ev: dict[str, Any]) -> tuple[float, float | None] | None:
+    """A kernel event's duration and start (``None`` when unparseable); ``None`` for anything not a timed kernel."""
+    if ev.get("cat") != "kernel":
+        return None
+    try:
+        dur = float(ev.get("dur"))
+    except (TypeError, ValueError):
+        return None
+    if dur <= 0:
+        return None
+    try:
+        return dur, float(ev.get("ts"))
+    except (TypeError, ValueError):
+        return dur, None
+
+
 def load_op_busy_from_kineto_trace(
     path: str | Path,
 ) -> tuple[dict[str, float], float | None, float]:
-    """Extract per-category busy shares from a kineto/torch-profiler trace."""
+    """Extract per-category busy shares from a kineto/torch-profiler trace.
+
+    The shares cover the decode steps when the trace annotates them, the whole trace otherwise.
+    """
+    events = _load_trace_events(path)
+    decode = [(w.start_us, w.end_us) for w in step_windows(events) if w.is_decode]
     busy_by_cat: dict[str, float] = {}
+    decode_by_cat: dict[str, float] = {}
     total = 0.0
     n_kernels = 0
     first_ts: float | None = None
     last_end: float | None = None
-    for ev in _load_trace_events(path):
-        if ev.get("cat") != "kernel":
+    for ev in events:
+        span = _kernel_span(ev)
+        if span is None:
             continue
-        try:
-            dur_f = float(ev.get("dur"))
-        except (TypeError, ValueError):
-            continue
-        if dur_f <= 0:
-            continue
+        dur_f, ts_f = span
         cat = categorize_kernel_name(str(ev.get("name") or ""))
         busy_by_cat[cat] = busy_by_cat.get(cat, 0.0) + dur_f
         total += dur_f
         n_kernels += 1
-        try:
-            ts_f = float(ev.get("ts"))
-        except (TypeError, ValueError):
-            ts_f = None
         if ts_f is not None:
             first_ts = ts_f if first_ts is None else min(first_ts, ts_f)
             last_end = ts_f + dur_f if last_end is None else max(last_end, ts_f + dur_f)
+            if any(lo <= ts_f < hi for lo, hi in decode):
+                decode_by_cat[cat] = decode_by_cat.get(cat, 0.0) + dur_f
 
     if total <= 0:
         return {}, None, 0.0
-    shares = {k: v / total for k, v in busy_by_cat.items()}
+    ranked = decode_by_cat or busy_by_cat
+    shares = {k: v / sum(ranked.values()) for k, v in ranked.items()}
     busy_of_wall: float | None = None
     if first_ts is not None and last_end is not None and last_end > first_ts:
         # Clamp to [0, 1]: summing per-kernel durations overcounts busy time when kernels overlap across concurrent

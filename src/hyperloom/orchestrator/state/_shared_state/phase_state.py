@@ -137,7 +137,7 @@ def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int
     }
 
 
-def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
+def _lever_row(entry: dict[str, Any], default_on: bool, *, specialist_task_id: str, ts: str) -> dict[str, Any]:
     """The ``authored_framework_levers`` row for one accepted framework-rewrite switch."""
     return {
         "switch": str(entry.get("switch") or "").strip().upper(),
@@ -146,14 +146,23 @@ def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
         "depends_on": list(entry.get("depends_on") or []),
         "enables": list(entry.get("enables") or []),
         "default_on": default_on,
+        # The cycle bench groups one patch's levers by this pair.
+        "specialist_task_id": specialist_task_id,
+        "ts": ts,
         # Filled in by the explore phase once the lever has been measured on its own; ``None`` means
         # "registered, not yet attributed".
         "attributed_gain_pct": None,
+        "attribution_source": "",
     }
 
 
+# The gap ``severity`` vocabulary, named here because this is where its order lives.
+GAP_SEVERITY_HIGH: str = "high"
+GAP_SEVERITY_MEDIUM: str = "medium"
+GAP_SEVERITY_LOW: str = "low"
+
 # Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
-GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+GAP_SEVERITY_RANK: dict[str, int] = {GAP_SEVERITY_HIGH: 3, GAP_SEVERITY_MEDIUM: 2, GAP_SEVERITY_LOW: 1}
 
 
 def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
@@ -407,17 +416,19 @@ class _PhaseStateMixin:
         switches: list[dict[str, Any]],
         *,
         default_on: bool,
+        specialist_task_id: str = "",
     ) -> bool:
         """Register accepted framework-rewrite switches as search levers."""
         if not isinstance(switches, list) or not switches:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
+        now = now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):
                 continue
-            row = _lever_row(entry, bool(default_on))
+            row = _lever_row(entry, bool(default_on), specialist_task_id=str(specialist_task_id or ""), ts=now)
             name = row["switch"]
             if not name:
                 continue
@@ -431,6 +442,7 @@ class _PhaseStateMixin:
             # Preserve an attribution already measured for this lever; the measurement is more informative than this
             # registration.
             row["attributed_gain_pct"] = prior.get("attributed_gain_pct")
+            row["attribution_source"] = str(prior.get("attribution_source") or "")
             if prior != row:
                 rows[index] = row
                 changed = True
@@ -443,6 +455,7 @@ class _PhaseStateMixin:
         switch: str,
         *,
         gain_pct: float | None,
+        source: str = "",
     ) -> bool:
         """Record a lever's individually measured contribution."""
         name = str(switch or "").strip().upper()
@@ -454,6 +467,7 @@ class _PhaseStateMixin:
                 continue
             updated = dict(row)
             updated["attributed_gain_pct"] = float(gain_pct) if isinstance(gain_pct, (int, float)) else None
+            updated["attribution_source"] = str(source or "")
             if updated != row:
                 rows[index] = updated
                 self.authored_framework_levers = rows

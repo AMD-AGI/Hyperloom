@@ -65,6 +65,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import apply_benchmark_round_seed, prepare_benchmark_runtime
+from ._jit_cache_env import apply_session_jit_cache, benchmark_framework
 from ._launch_evidence import RequestedLaunch, build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
@@ -442,6 +443,11 @@ def _run_magpie(
     sync_benchmark_timeout(config_path, bench_round.timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
     env = scrub_benchmark_process_env(os.environ.copy())
+    apply_session_jit_cache(
+        env,
+        framework=benchmark_framework(config_path),
+        session_dir=_resolve_session_dir(),
+    )
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
 

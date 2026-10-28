@@ -553,7 +553,10 @@ async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custo
 
 async def test_dispatch_enqueues_one_task_per_cycle_through_the_real_router(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
-    state.max_minutes = 30
+    # Enough budget for both rounds: admission charges the queue's committed
+    # minutes as well as the new round's, and what this pins is the one-per-cycle
+    # key, not what the phase can afford.
+    state.max_minutes = 600
     state.framework = "sglang"
     coord = _coordinator(tmp_path, state)
     dispatch = coord.specialist_dispatch
@@ -656,6 +659,59 @@ def test_operator_work_dispatches_first_in_every_phase(phase, expected):
         _task("patch", "integrate_patch"),
         _task("custom", "specialist", domain="custom_specialist"),
         _task("operator-explore", "explore", grid=[], operator_priority=True),
+    ]
+
+    assert [t.task_id for t in in_dispatch_order(queued, phase)] == expected
+
+
+def test_the_dormant_lever_bundle_goes_ahead_of_queued_integrates():
+    """Behind the integrates it never ran: they filled the phase, and every explore after them was refused."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    queued = [
+        _task("patch-1", "integrate_patch"),
+        _task("patch-2", "integrate_patch"),
+        _task("explore", "explore", grid=[]),
+        _task("bundle", "explore", grid=[], reason=LEVER_BUNDLE_REASON),
+    ]
+
+    order = [t.task_id for t in in_dispatch_order(queued, "FRAMEWORK_AGENT")]
+
+    assert order == ["bundle", "patch-1", "patch-2", "explore"]
+
+
+def test_a_cycle_batch_goes_ahead_of_queued_integrates():
+    """GLM-5.3: 17 integrates queued behind the reference batch would each take a full replay before the screen opened."""
+    queued = [
+        _task("patch-1", "integrate_patch"),
+        _task("patch-2", "integrate_patch"),
+        _task("explore", "explore", grid=[]),
+        _task("reference", "explore", reason="cycle_bench_batch", cycle_arms=[]),
+        _task("screen", "explore", reason="cycle_bench_batch", cycle_arms=[{"name": "HL_ONE"}]),
+    ]
+
+    order = [t.task_id for t in in_dispatch_order(queued, "FRAMEWORK_AGENT")]
+
+    assert order == ["reference", "screen", "patch-1", "patch-2", "explore"]
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("FRAMEWORK_AGENT", ["host", "bundle", "patch-1", "patch-2", "explore"]),
+        ("SWEEP", ["bundle", "patch-1", "explore", "patch-2", "host"]),
+    ],
+)
+def test_a_host_side_patch_goes_ahead_of_the_other_integrates(phase, expected):
+    """An earlier run cancelled a +5.5% tokenizer cache patch after 13 h queued behind integrates the screen could hold."""
+    from hyperloom.orchestrator.phases.dispatch_order import LEVER_BUNDLE_REASON
+
+    queued = [
+        _task("patch-1", "integrate_patch", screen="cycle"),
+        _task("explore", "explore", grid=[]),
+        _task("patch-2", "integrate_patch"),
+        _task("host", "integrate_patch", screen="host"),
+        _task("bundle", "explore", grid=[], reason=LEVER_BUNDLE_REASON),
     ]
 
     assert [t.task_id for t in in_dispatch_order(queued, phase)] == expected
@@ -1112,6 +1168,37 @@ async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path,
     await coord._tick_once()
 
     assert turns == expected
+
+
+async def test_a_tick_queues_the_cycle_batch_it_owes_before_the_dispatcher_pass(tmp_path, monkeypatch):
+    """GLM-5.3: after a resume the first pass dispatched a switched integrate a second before the reference was queued."""
+    import time
+
+    coord = _coordinator(tmp_path, SharedState())
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    calls: list[str] = []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _cycle():
+        calls.append("cycle")
+
+    async def _dispatch():
+        calls.append("dispatch")
+
+    monkeypatch.setattr(coord, "reactor_pass", _noop)
+    monkeypatch.setattr(coord.reconciler, "run", _noop)
+    monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(coord.phase_framework, "on_stack_adopted", _cycle)
+    monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _dispatch)
+    monkeypatch.setattr(coord.enablement_lane, "pump_enablement_safely", _noop)
+    coord.phase_machine.pump_table = {"FRAMEWORK_AGENT": _noop}
+    coord._last_maintenance_ts = time.monotonic()
+
+    await coord._tick_once()
+
+    assert calls == ["cycle", "dispatch"]
 
 
 @pytest.mark.parametrize(("only", "expected"), [(True, 240 * 60), (False, 10 * 60)])

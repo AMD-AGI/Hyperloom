@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_bool
+from hyperloom.common.ports import pick_server_port
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment as _shared_is_capture_fragment
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
@@ -417,23 +418,10 @@ def _vllm_dense_shape_capture_required(
     return hidden_size > 0 and intermediate_size > 0
 
 
-def _pick_shape_capture_port() -> int:
-    """Pick a free local port distinct from the production serving port."""
-    import socket
-
-    for _ in range(5):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
-            port = int(sock.getsockname()[1])
-        if port != 8888:
-            return port
-    return 18888
-
-
 def _resolve_shape_capture_port(value: Any) -> int:
     """Resolve an isolated capture port and reject the production port."""
     if value in (None, ""):
-        return _pick_shape_capture_port()
+        return pick_server_port()
     try:
         port = int(value)
     except (TypeError, ValueError) as exc:

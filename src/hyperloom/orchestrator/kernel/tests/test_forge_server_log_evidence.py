@@ -243,19 +243,18 @@ class _StopHere(Exception):
     """Raised from the MoE CSV writer to end the run at the point under test."""
 
 
-class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
-    """Both lanes must see the observed M sweep, not just the dense one."""
+class TestTheDenseLaneTokens:
+    """Forge's ``--tokens`` is the M sweep the serving log observed, unless the caller names one."""
 
-    @pytest.mark.asyncio
-    async def test_the_moe_writer_receives_the_serving_log_sweep(self, tmp_path, monkeypatch):
+    @staticmethod
+    async def _forge_tokens(tmp_path, monkeypatch, log_text: str, **payload_extra: str) -> str:
         model_dir = tmp_path / "model"
         model_dir.mkdir()
-        log_path = _log(tmp_path / "server.log", "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384)))
-
+        log_path = _log(tmp_path / "server.log", log_text)
         seen: dict[str, str] = {}
 
-        def _writer(_log_path, tokens, _workspace):
-            seen["tokens"] = tokens
+        def _build(args):
+            seen.update(args)
             raise _StopHere
 
         from hyperloom.common import model_paths, visible_devices
@@ -267,50 +266,23 @@ class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
         monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
         monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_write_fmoe_untuned_csv_from_log", _writer)
+        monkeypatch.setattr(forge_gemm_tuning.forge_gemm_tuning, "build_command", _build)
 
-        payload = {
-            "model_path": str(model_dir),
-            "framework": "sglang",
-            "kernel_signature_log": str(log_path),
-        }
+        payload = {"model_path": str(model_dir), "framework": "sglang", "kernel_signature_log": str(log_path)}
         with pytest.raises(_StopHere):
-            await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+            await forge_gemm_tuning._run_forge_gemm_tuning({**payload, **payload_extra}, session_dir=tmp_path)
+        return str(seen["tokens"])
 
-        assert seen["tokens"] == serving_log_evidence._tokens_from_serving_log(log_path)
-        # Not the ``[1]`` fallback, and not a single value of any kind.
-        assert len(seen["tokens"].split(",")) > 1
+    @pytest.mark.asyncio
+    async def test_the_observed_sweep_is_forges_tokens(self, tmp_path, monkeypatch):
+        text = "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384))
+
+        tokens = await self._forge_tokens(tmp_path, monkeypatch, text)
+
+        assert tokens == serving_log_evidence._tokens_from_serving_log(tmp_path / "server.log")
+        # Not forge's ``conc``-derived guess, and not a single value of any kind.
+        assert len(tokens.split(",")) > 1
 
     @pytest.mark.asyncio
     async def test_an_explicit_payload_tokens_value_still_wins(self, tmp_path, monkeypatch):
-        model_dir = tmp_path / "model"
-        model_dir.mkdir()
-        log_path = _log(tmp_path / "server.log", HIT.format(m=999))
-
-        seen: dict[str, str] = {}
-
-        def _writer(_log_path, tokens, _workspace):
-            seen["tokens"] = tokens
-            raise _StopHere
-
-        from hyperloom.common import model_paths, visible_devices
-
-        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
-        monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
-        monkeypatch.setattr(model_paths, "resolve_local_model_dir", lambda _p: model_dir)
-        monkeypatch.setattr(visible_devices, "detect_gpu_count", lambda: 8)
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_shapes", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
-        monkeypatch.setattr(forge_gemm_tuning, "_write_fmoe_untuned_csv_from_log", _writer)
-
-        payload = {
-            "model_path": str(model_dir),
-            "framework": "sglang",
-            "kernel_signature_log": str(log_path),
-            "tokens": "1,2,4",
-        }
-        with pytest.raises(_StopHere):
-            await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
-
-        assert seen["tokens"] == "1,2,4"
+        assert await self._forge_tokens(tmp_path, monkeypatch, HIT.format(m=999), tokens="1,2,4") == "1,2,4"

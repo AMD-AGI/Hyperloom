@@ -11,13 +11,14 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 
-from hyperloom.common.proctree import TERM_GRACE_SEC
+from hyperloom.common.proctree import TERM_GRACE_SEC, collect_tree, kill_tree, marked_pids
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 
-from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
+from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC, REAP_MARK_ENV
 
 if TYPE_CHECKING:
     from ._ray_backend import SessionKillRound
@@ -212,6 +213,21 @@ def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
         f"(ceiling {ceiling:.0f}s, raise it with {ROUND_WAIT_TIMEOUT_ENV}); its task was most likely never "
         "schedulable -- check for held GPU/serving_slot resources with no live process behind them"
     )
+
+
+def _marked_round(bench_round: SessionKillRound) -> SessionKillRound:
+    """The round carrying a reap mark in its env; a mark the caller already set is kept."""
+    env = dict(bench_round.env or {})
+    env.setdefault(REAP_MARK_ENV, uuid.uuid4().hex)
+    return replace(bench_round, env=env)
+
+
+def _reap_marked_round(mark: str) -> int:
+    """Stop every process on this host that inherited ``mark``; return how many were found."""
+    pids = marked_pids(REAP_MARK_ENV, mark)
+    if pids:
+        kill_tree(collect_tree(pids))
+    return len(pids)
 
 
 def _pdeathsig_preexec() -> None:
@@ -504,34 +520,31 @@ class ServingLease:
         except (RayInfeasibleError, RuntimeError) as exc:
             log.warning("ServingLease.run_session_kill: cluster ensure failed: %r", exc)
             return 1, "", f"ray_ensure_error: {exc}"[:2000]
+        bench_round = _marked_round(bench_round)
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
             ref = self._actor.run_blocking.remote(bench_round)
-            return self._collect_round(
-                ref,
-                acquire_ref=acquire_ref,
-                cmd=bench_round.cmd,
-                timeout=bench_round.timeout,
-                cancel_scope=cancel_scope,
-            )
+            return self._collect_round(ref, acquire_ref=acquire_ref, bench_round=bench_round, cancel_scope=cancel_scope)
 
     def _collect_round(
         self,
         ref: Any,
         *,
         acquire_ref: Any,
-        cmd: list[str],
-        timeout: int | float | None,
+        bench_round: SessionKillRound,
         cancel_scope: Any,
     ) -> tuple[int, str, str]:
         """Wait for a submitted round, forwarding a cancel to the actor if one comes."""
+        cmd, timeout = bench_round.cmd, bench_round.timeout
         import subprocess as _sp
 
         import ray
 
-        _actor_err, _task_err = ray.exceptions.RayActorError, ray.exceptions.RayTaskError
+        # Ray's memory monitor kills an actor with OutOfMemoryError, which is no RayActorError.
+        _actor_err = (ray.exceptions.RayActorError, ray.exceptions.OutOfMemoryError)
+        _task_err = ray.exceptions.RayTaskError
         try:
             # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
             # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
@@ -545,13 +558,10 @@ class ServingLease:
         except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
-            # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
-            # here can still reach the server tree the dead actor spawned; the shutdown pidfile reap frees those GPUs.
-            log.warning(
-                "ServingLease.run_session_kill: ray actor died: %r; its server tree (if any) "
-                "is left to the pidfile reaper",
-                exc,
-            )
+            # benchmark failure instead of cascading. The round it ran sits in its own session and outlives a SIGKILLed
+            # actor, so it is reaped here by its mark before the GPUs and the port are handed to the next round.
+            reaped = _reap_marked_round((bench_round.env or {})[REAP_MARK_ENV])
+            log.warning("ServingLease.run_session_kill: ray actor died: %r; reaped %d leftover pids", exc, reaped)
             self._actor = None
             from ._ray_backend import mark_ray_backend_unhealthy
 

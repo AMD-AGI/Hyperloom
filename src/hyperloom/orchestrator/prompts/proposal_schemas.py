@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.inference_optimizer import framework_registry
+
 EXPLORE_VARIANT_EXAMPLE: dict[str, Any] = {
     "name": "<unique-in-round>",
     "extra_args": "--example-flag value",
@@ -45,6 +47,9 @@ EXPLORE_VARIANT_CONTRACT: tuple[str, ...] = (
         "coupling across several proposals."
     ),
 )
+# FrameworkPhase._candidates_from_discovery_proposals drops a candidate whose framework is not one of these exactly.
+_REGISTERED_FRAMEWORKS = ", ".join(framework_registry.names())
+
 # The keys FrameworkPhase._candidates_from_discovery_proposals reads.
 UPSTREAM_CANDIDATE_EXAMPLE: dict[str, Any] = {
     "pr_url": "https://github.com/<owner>/<repo>/pull/<number>",
@@ -53,7 +58,7 @@ UPSTREAM_CANDIDATE_EXAMPLE: dict[str, Any] = {
     "pr_number": 0,
     "title": "<PR title>",
     "diff_url": "<unified diff URL>",
-    "framework": "<framework the PR targets>",
+    "framework": f"<one of: {_REGISTERED_FRAMEWORKS}>",
     "changed_files": [],
     "verdict": "worth_a_bench",
     "route": "author_via_specialist",
@@ -66,5 +71,10 @@ UPSTREAM_CANDIDATE_CONTRACT: tuple[str, ...] = (
         "dropped. ``verdict`` is ``already_present``, ``not_applicable`` or "
         "``worth_a_bench``; ``route`` is ``direct_framework`` or "
         "``author_via_specialist``."
+    ),
+    (
+        f"- ``framework`` is the registered name exactly ({_REGISTERED_FRAMEWORKS}); "
+        "a candidate whose ``framework`` carries anything else -- a backend, "
+        "platform or version note -- is dropped."
     ),
 )

@@ -83,11 +83,26 @@ def test_a_gpu_mask_switch_is_dropped(mask):
     assert any("reserved benchmark variable" in p for p in problems)
 
 
-def test_a_credential_shaped_switch_is_dropped():
-    """A manifest is held to the same boundary as a reference recipe."""
-    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN")])
+def test_a_credential_shaped_switch_carrying_a_string_value_is_dropped():
+    """A manifest is held to the same boundary as a reference recipe: no secret is persisted under a switch."""
+    switches, problems = manifest.parse_manifest([_entry("MY_TOKEN", value="sk-live-4f9a")])
     assert switches == []
-    assert any("credential-shaped name" in p for p in problems)
+    assert problems == ["dropped 'MY_TOKEN': credential-shaped name, not a rewrite switch"]
+
+
+def test_a_token_cache_switch_set_to_a_flag_or_a_count_is_kept():
+    """GLM-5.3's chat segment token cache was dropped for the word TOKEN, though a 1 or a size can hold no secret."""
+    switches, problems = manifest.parse_manifest(
+        [
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE"),
+            _entry("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", value="65536"),
+        ]
+    )
+    assert [(s["switch"], s["value"]) for s in switches] == [
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE", "1"),
+        ("SGLANG_CHAT_SEGMENT_TOKEN_CACHE_MAX_TOKENS", "65536"),
+    ]
+    assert problems == []
 
 
 def test_a_switch_colliding_with_benchmark_config_is_dropped():
@@ -387,6 +402,38 @@ def test_dormant_levers_seed_additive_variants():
     assert all("extra_envs" in v for v in payload)
 
 
+def test_a_dormant_patch_is_not_benched_whole_again():
+    """Its integrate round benched every switch on together; only one switch of several is new."""
+    from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
+
+    state = _state()
+    state.record_authored_framework_levers(_chain(), default_on=False, specialist_task_id="t-chain")
+    state.record_authored_framework_levers([_entry_parsed("HL_SOLO")], default_on=False, specialist_task_id="t-solo")
+
+    payload = framework_lever_grid(state)
+
+    benched = {v["framework_lever"] for v in payload}
+    assert benched and "" not in benched, "the all-switches set repeats what the integrate rounds measured"
+    assert "HL_SOLO" not in benched, "a one-switch patch alone is exactly what its integrate round measured"
+
+
+def test_dormant_levers_of_several_patches_are_bundled_together():
+    """Each missed the bar alone; together is the only way they clear it."""
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    state.record_authored_framework_levers([_entry_parsed("HL_ONE")], default_on=False, specialist_task_id="t-1")
+    assert dormant_lever_bundle(state) is None, "one patch's set is its own integrate round"
+
+    state.record_authored_framework_levers([_entry_parsed("HL_TWO")], default_on=False, specialist_task_id="t-2")
+    state.record_authored_framework_levers([_entry_parsed("HL_LIVE")], default_on=True, specialist_task_id="t-3")
+    bundle = dormant_lever_bundle(state)
+
+    assert bundle is not None
+    assert bundle["framework_lever_bundle"] == ["HL_ONE", "HL_TWO"]
+    assert set(bundle["extra_envs"]) == {"HL_ONE", "HL_TWO"}
+
+
 def test_active_levers_seed_leave_one_out_variants():
     """A stack that already won is attributed by removing one lever at a time."""
     from hyperloom.orchestrator.actions.executors.explore import framework_lever_grid
@@ -545,6 +592,8 @@ async def _run_rewrite_integrate(
     parity_tput_missing: bool = False,
     patch_body: str | None = None,
     extra_params: "dict[str, Any] | None" = None,
+    kb_lessons: "list[Any] | None" = None,
+    shared_state: Any = None,
 ):
     """Run integrate_patch on a switch-gated rewrite patch with a faked bench."""
     import json as _json
@@ -601,8 +650,9 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(*_args, **_kwargs):
-        return None
+    async def _noop_kb(lesson, **_kwargs):
+        if kb_lessons is not None:
+            kb_lessons.append(lesson)
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
     monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
@@ -623,8 +673,18 @@ async def _run_rewrite_integrate(
         idempotency_key="t-int-rw",
         requires_lanes=tuple(),
     )
-    result = await executor(RunnerContext(task=task, lease=None, extra={}))
+    extra = {} if shared_state is None else {"shared_state": shared_state}
+    result = await executor(RunnerContext(task=task, lease=None, extra=extra))
     return result, repo, benched_envs, legs
+
+
+def _screen_state(*, reference: bool = True, refused: str = "") -> Any:
+    """A session whose cycle screen admits dormant patches: a reference on the current stack, nothing refused."""
+    state = _state()
+    state.record_specialist_patch_verdict("t-spec-rw", "approve")
+    state.cycle_reference = {"stack_len": 0, "cycle_ms": {"1": 10.0}} if reference else {}
+    state.cycle_screen_refused = refused
+    return state
 
 
 @pytest.mark.asyncio
@@ -909,6 +969,20 @@ async def test_parity_guards_the_inert_keep_too(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_agentic_replay_keeps_a_switched_patch_dormant_without_a_parity_hour(tmp_path, monkeypatch):
+    """There the parity leg is a whole replay hour, judged in a band narrower than the replay's own drift."""
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate
+
+    monkeypatch.setattr(_integrate_perf_gate, "agentx_enabled", lambda: True)
+    result, _, _, legs = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2, parity_delta_pct=-5.0)
+
+    assert [leg for leg in legs if leg.get("unset_envs")] == []
+    assert result["status"] == "kept_inert"
+    assert result["switch_off_parity"]["ran"] is False
+    assert "agentic replay" in result["switch_off_parity"]["reason"]
+
+
+@pytest.mark.asyncio
 async def test_a_correctness_failure_still_spends_a_parity_leg_on_a_switched_bundle(tmp_path, monkeypatch):
     """A quality regression condemns one switch, not the whole bundle."""
     result, repo, _, legs = await _run_rewrite_integrate(
@@ -1012,3 +1086,451 @@ async def test_parity_can_be_switched_off_explicitly(tmp_path):
     )
     assert verdict["ran"] is False
     assert verdict["ok"] is True
+
+
+def _interactivity_revert(candidate: float, reference: float):
+    """A pair graded on the AgentX P50 objective that missed KEEP, as an inert-keep round reads it."""
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, VERDICT_REVERT, GradedComparison
+
+    return GradedComparison(
+        objective=GRADED_INTVTY_P50,
+        candidate=candidate,
+        reference=reference,
+        verdict=VERDICT_REVERT,
+        tput_candidate=301.4,
+        tput_reference=321.1,
+        refused_by="intvty_p50",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_interactivity_graded_inert_keep_reports_the_change_it_measured(tmp_path, monkeypatch):
+    """Off KEEP the gate leaves ``delta_pct`` empty; the measured P50 change still travels with the result."""
+    from hyperloom.common.gain_math import gain_pct
+    from hyperloom.orchestrator.actions.executors import _integrate_perf_gate as gate
+
+    graded = _interactivity_revert(106.65, 108.97)
+    monkeypatch.setattr(gate, "resolve_graded_comparison", lambda *_a, **_k: graded)
+
+    result, _, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+
+    assert result["status"] == "kept_inert"
+    assert result["delta_pct"] is None
+    assert result["graded_delta_pct"] == gain_pct(106.65, 108.97)
+
+
+@pytest.mark.asyncio
+async def test_a_switched_patch_marked_for_the_cycle_screen_is_committed_dormant_without_a_bench(tmp_path, monkeypatch):
+    """The cycle bench screens its levers later, so admission spends no replay and writes no lesson."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    import subprocess
+
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}, shared_state=_screen_state()
+    )
+
+    assert legs == []
+    assert result["status"] == "kept_inert"
+    assert result[SCREEN_PARAM] == SCREEN_CYCLE
+    assert result["framework_lever_outcome"] == "registered_off"
+    assert [row["switch"] for row in result["framework_levers"]] == ["HL_HOIST", "HL_CACHE"]
+    assert result["extra_envs_applied"] == {}
+    assert result["switch_off_parity"]["ran"] is False
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.parametrize(
+    ("switch", "screen"),
+    [("1", {"reference": False}), ("1", {"refused": "the switched-off tree moved"}), ("", {})],
+)
+@pytest.mark.asyncio
+async def test_a_switched_patch_is_benched_while_the_screen_cannot_hold_it_to_a_reference(
+    tmp_path, monkeypatch, switch, screen
+):
+    """No reference, a screen a moved tree closed, or the cycle bench switched off since the patch was marked."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
+
+    kb: list[Any] = []
+    result, _, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+        shared_state=_screen_state(**screen),
+        kb_lessons=kb,
+    )
+
+    assert [bool(leg.get("unset_envs")) for leg in legs] == [False, True]
+    assert (result["status"], SCREEN_PARAM in result, len(kb)) == ("kept_inert", False, 1)
+
+
+@pytest.mark.asyncio
+async def test_an_unswitched_patch_marked_for_the_cycle_screen_is_still_benched(tmp_path, monkeypatch):
+    """Without switches there is no dormant state to admit, so the round benches and grades as before."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, switches=[], extra_params={SCREEN_PARAM: SCREEN_CYCLE}
+    )
+
+    assert len(legs) == 1
+    assert result["status"] == "reverted"
+    assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+def test_levers_awaiting_the_cycle_screen_are_neither_bundled_nor_attributed_by_replay():
+    """An admitted lever has no measurement yet; the cycle bench decides whether it enters a bundle."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle, framework_lever_grid
+
+    state = _state()
+    for i, name in enumerate(("HL_ONE", "HL_TWO", "HL_THREE")):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+    state.record_authored_framework_levers(
+        [_entry_parsed("HL_A"), _entry_parsed("HL_B")], default_on=False, specialist_task_id="t-pair"
+    )
+    for name in ("HL_TWO", "HL_THREE", "HL_A", "HL_B"):
+        state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+
+    assert dormant_lever_bundle(state) is None
+    assert framework_lever_grid(state) == []
+
+
+def test_a_bundle_takes_the_levers_the_cycle_bench_passed_and_those_it_never_screened():
+    """A screened lever joins only on a positive estimate; one the screen gave back joins as it did before it."""
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import (
+        ATTRIBUTION_CYCLE_BENCH,
+        ATTRIBUTION_CYCLE_BROKEN,
+        ATTRIBUTION_CYCLE_INCONCLUSIVE,
+    )
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    screened = [
+        ("HL_PASS", 0.8, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_NEUTRAL", -0.2, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_REGRESS", -3.1, ATTRIBUTION_CYCLE_BENCH),
+        ("HL_BROKEN", None, ATTRIBUTION_CYCLE_BROKEN),
+        ("HL_GIVEN_BACK", None, ATTRIBUTION_CYCLE_INCONCLUSIVE),
+        ("HL_UNSCREENED", None, None),
+    ]
+    for i, (name, gain, source) in enumerate(screened):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+        if source:
+            state.record_framework_lever_attribution(name, gain_pct=gain, source=source)
+
+    variant = dormant_lever_bundle(state)
+
+    assert variant is not None
+    assert variant["framework_lever_bundle"] == ["HL_GIVEN_BACK", "HL_PASS", "HL_UNSCREENED"]
+
+
+def test_no_bundle_forms_when_the_screen_leaves_one_patch_eligible():
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_BENCH
+    from hyperloom.orchestrator.actions.executors.explore import dormant_lever_bundle
+
+    state = _state()
+    for i, (name, gain) in enumerate((("HL_PASS", 0.8), ("HL_REGRESS", -3.1))):
+        state.record_authored_framework_levers([_entry_parsed(name)], default_on=False, specialist_task_id=f"t-{i}")
+        state.record_framework_lever_attribution(name, gain_pct=gain, source=ATTRIBUTION_CYCLE_BENCH)
+
+    assert dormant_lever_bundle(state) is None
+
+
+@pytest.mark.asyncio
+async def test_a_screened_admission_registers_its_levers_pending_and_enqueues_no_bundle(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import (
+        ATTRIBUTION_CYCLE_PENDING,
+        SCREEN_CYCLE,
+        SCREEN_PARAM,
+    )
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+
+    from .conftest import make_coordinator
+
+    result, _, _, _ = await _run_rewrite_integrate(
+        tmp_path, monkeypatch, delta_pct=0.2, extra_params={SCREEN_PARAM: SCREEN_CYCLE}, shared_state=_screen_state()
+    )
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    bundles: list[str] = []
+
+    async def _bundle() -> None:
+        bundles.append("enqueued")
+
+    monkeypatch.setattr(coord.phase_framework, "enqueue_dormant_lever_bundle", _bundle)
+
+    await coord.writeback._promote_integrate_patch(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    rows = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in rows] == [
+        ("HL_HOIST", None, ATTRIBUTION_CYCLE_PENDING),
+        ("HL_CACHE", None, ATTRIBUTION_CYCLE_PENDING),
+    ]
+    assert bundles == []
+
+
+@pytest.mark.parametrize(
+    ("valid", "verdicts", "rows"),
+    [
+        (
+            True,
+            {"a": {"verdict": "pass", "gain_pct": 0.8}, "b": {"verdict": "regress", "gain_pct": -3.1}},
+            [("HL_A", 0.8, "cycle_bench"), ("HL_B", -3.1, "cycle_bench"), ("HL_C", None, "cycle_bench_pending")],
+        ),
+        (
+            True,
+            {
+                "a": {"verdict": "broken", "error": "server did not become ready"},
+                "b": {"verdict": "neutral", "gain_pct": -0.2},
+            },
+            [
+                ("HL_A", None, "cycle_bench_broken"),
+                ("HL_B", -0.2, "cycle_bench"),
+                ("HL_C", None, "cycle_bench_pending"),
+            ],
+        ),
+        (
+            False,
+            {},
+            [
+                ("HL_A", None, "cycle_bench_inconclusive"),
+                ("HL_B", None, "cycle_bench_inconclusive"),
+                ("HL_C", None, "cycle_bench_pending"),
+            ],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_cycle_batch_writes_its_verdicts_onto_the_levers_its_arms_switched_on(tmp_path, valid, verdicts, rows):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, name in enumerate(("HL_A", "HL_B", "HL_C")):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    result = {
+        "status": STATUS_SCREENED,
+        "cycle_arms": [{"name": "a", "envs": {"HL_A": "1"}}, {"name": "b", "envs": {"HL_B": "1"}}],
+        "valid": valid,
+        "verdicts": verdicts,
+    }
+    outcome = _PromoteOutcome(verdict=Verdict.RECORDED)
+
+    await coord.writeback._promote_explore(result, None, outcome)
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == rows
+    assert (outcome.verdict, outcome.audit_decision) == (Verdict.RECORDED, None)
+    assert coord.shared_state.gain_gated_action_count == 0
+
+
+async def _promote_cycle_batch(tmp_path, result: dict, *, held: dict | None = None):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    coord.shared_state.optimization_stack = [{"kind": "config"}]
+    coord.shared_state.cycle_reference = {"stack_len": 1, "cycle_ms": {"1": 9.0}}
+    coord.shared_state.last_attribution_trace = dict(held or {})
+    coord.shared_state.record_authored_framework_levers(
+        [_entry_parsed("HL_A")], default_on=False, specialist_task_id="t"
+    )
+    coord.shared_state.record_framework_lever_attribution("HL_A", gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    arms = [{"name": "a", "envs": {"HL_A": "1"}}]
+    await coord.writeback._promote_explore(
+        {"status": STATUS_SCREENED, "cycle_arms": arms, **result}, None, _PromoteOutcome(verdict=Verdict.RECORDED)
+    )
+    return coord.shared_state
+
+
+@pytest.mark.asyncio
+async def test_a_valid_cycle_batch_leaves_its_base2_as_the_next_batchs_reference(tmp_path):
+    arms = {"base": {"cycle_ms": {1: 10.1, 2: 20.1}}, "base2": {"cycle_ms": {1: 10.0, 2: 20.0}}}
+    result = {"valid": True, "parity_broken": False, "verdicts": {"a": {"verdict": "pass", "gain_pct": 0.8}}}
+
+    state = await _promote_cycle_batch(tmp_path, {**result, "arms": arms})
+
+    assert state.cycle_reference == {"stack_len": 1, "cycle_ms": {"1": 10.0, "2": 20.0}}
+    assert state.cycle_screen_refused == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("base", "held"),
+    [
+        (
+            {"cycle_ms": {1: 10.1}, "attribution_trace": "/o/base/attribution/p-TP-0.trace.json.gz"},
+            {"stack_len": 1, "trace": "/o/base/attribution/p-TP-0.trace.json.gz"},
+        ),
+        ({"cycle_ms": {1: 10.1}, "attribution_trace": ""}, {"stack_len": 0, "trace": "/o/old.trace.json.gz"}),
+    ],
+)
+async def test_a_cycle_batch_keeps_its_base_capture_as_the_current_stacks_module_source(tmp_path, base, held):
+    """Bases that disagree void the timing, not the capture of the stack the base ran."""
+    result = {
+        "valid": False,
+        "parity_broken": False,
+        "reason": "bases disagree",
+        "verdicts": {},
+        "arms": {"base": base},
+    }
+
+    state = await _promote_cycle_batch(tmp_path, result, held={"stack_len": 0, "trace": "/o/old.trace.json.gz"})
+
+    assert state.last_attribution_trace == held
+
+
+@pytest.mark.asyncio
+async def test_a_batch_whose_switched_off_tree_moved_closes_the_screen_and_hands_its_levers_back(tmp_path):
+    reason = "the switched-off tree runs -3.00% against the previous batch's base2"
+    result = {"valid": False, "parity_broken": True, "reason": reason, "verdicts": {}, "arms": {}}
+
+    state = await _promote_cycle_batch(tmp_path, result)
+
+    assert state.cycle_screen_refused == reason
+    assert state.cycle_reference == {"stack_len": 1, "cycle_ms": {"1": 9.0}}
+    rows = [(r["switch"], r["attribution_source"]) for r in state.authored_framework_levers]
+    assert rows == [("HL_A", "cycle_bench_inconclusive")]
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_batch_that_failed_hands_its_levers_back_to_replay_attribution(tmp_path):
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, name in enumerate(("HL_A", "HL_B", "HL_C")):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=None, source=ATTRIBUTION_CYCLE_PENDING)
+    arms = [{"name": "t0", "envs": {"HL_A": "1"}}, {"name": "t1", "envs": {"HL_B": "1"}}]
+    task = Task(task_id="cb", kind="explore", state="failed", params={"cycle_arms": arms}, idempotency_key="cb")
+
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "cycle_bench_unavailable"}
+    )
+
+    rows = [(r["switch"], r["attribution_source"]) for r in coord.shared_state.authored_framework_levers]
+    assert rows == [
+        ("HL_A", "cycle_bench_inconclusive"),
+        ("HL_B", "cycle_bench_inconclusive"),
+        ("HL_C", "cycle_bench_pending"),
+    ]
+
+
+def _screened_bundle(tmp_path):
+    from .conftest import make_coordinator
+
+    state = _state()
+    state.baseline_tput = 100.0
+    state.save(tmp_path)
+    coord = make_coordinator(tmp_path)
+    for i, (name, gain) in enumerate((("HL_A", 0.8), ("HL_B", 0.4))):
+        coord.shared_state.record_authored_framework_levers(
+            [_entry_parsed(name)], default_on=False, specialist_task_id=f"t{i}"
+        )
+        coord.shared_state.record_framework_lever_attribution(name, gain_pct=gain, source="cycle_bench")
+    arms = [{"name": "lever-bundle", "envs": {"HL_A": "1", "HL_B": "1"}, "lever_bundle": "lever-bundle-c0-k"}]
+    return coord, arms
+
+
+_SCREENED_ROWS = [("HL_A", 0.8, "cycle_bench"), ("HL_B", 0.4, "cycle_bench")]
+
+
+@pytest.mark.parametrize(
+    ("valid", "verdicts", "screen"),
+    [
+        (True, {"lever-bundle": {"verdict": "regress", "gain_pct": -2.1}}, "regress"),
+        (True, {"lever-bundle": {"verdict": "broken", "error": "server did not become ready"}}, "broken"),
+        (True, {"lever-bundle": {"verdict": "pass", "gain_pct": 1.2}}, "pass"),
+        (False, {}, "inconclusive"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_bundle_arm_records_its_verdict_on_the_bundle_and_leaves_its_levers_alone(
+    tmp_path, valid, verdicts, screen
+):
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
+    from hyperloom.orchestrator.measurement.cycle_bench import STATUS_SCREENED
+
+    coord, arms = _screened_bundle(tmp_path)
+    result = {"status": STATUS_SCREENED, "cycle_arms": arms, "valid": valid, "verdicts": verdicts, "arms": {}}
+
+    await coord.writeback._promote_explore(result, None, _PromoteOutcome(verdict=Verdict.RECORDED))
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
+    assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": screen}
+
+
+@pytest.mark.asyncio
+async def test_a_bundle_screen_that_failed_is_recorded_inconclusive(tmp_path):
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord, arms = _screened_bundle(tmp_path)
+    task = Task(task_id="cb", kind="explore", state="failed", params={"cycle_arms": arms}, idempotency_key="cb")
+
+    await coord.writeback.handle_unpromotable_result(
+        task, {"status": "failed", "error_class": "cycle_bench_unavailable"}
+    )
+
+    levers = coord.shared_state.authored_framework_levers
+    assert [(r["switch"], r["attributed_gain_pct"], r["attribution_source"]) for r in levers] == _SCREENED_ROWS
+    assert coord.shared_state.cycle_bundle_screens == {"lever-bundle-c0-k": "inconclusive"}
+
+
+@pytest.mark.asyncio
+async def test_only_a_screened_admission_skips_the_kept_inert_lesson(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    from hyperloom.orchestrator.actions.executors._integrate_vocabulary import SCREEN_CYCLE, SCREEN_PARAM
+
+    for sub in ("benched", "screened"):
+        (tmp_path / sub).mkdir()
+    benched: list[Any] = []
+    await _run_rewrite_integrate(tmp_path / "benched", monkeypatch, delta_pct=0.2, kb_lessons=benched)
+    screened: list[Any] = []
+    await _run_rewrite_integrate(
+        tmp_path / "screened",
+        monkeypatch,
+        delta_pct=0.2,
+        kb_lessons=screened,
+        extra_params={SCREEN_PARAM: SCREEN_CYCLE},
+        shared_state=_screen_state(),
+    )
+
+    assert (len(benched), screened) == (1, [])

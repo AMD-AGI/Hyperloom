@@ -154,7 +154,7 @@ def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     src = tmp_path / "cfg.yaml"
     _write_yaml(src, "vllm")
     out = materialize_config_with_envs(

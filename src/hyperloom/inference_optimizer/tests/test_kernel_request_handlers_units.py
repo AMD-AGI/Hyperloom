@@ -34,7 +34,6 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS
-from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
 from hyperloom.orchestrator.kernel import _forge_fusion_run as forge_fusion_run
 from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
 from hyperloom.orchestrator.kernel import _forge_gemm_tuning as forge_gemm_tuning
@@ -1132,6 +1131,15 @@ class TestForgeGemmHelperCoverage:
 
     async def _fusion_input_payload(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
         """Run the fusion lane against a faked forge runner and return the payload it was handed."""
+        calls, _result = await self._run_fusion_lane(tmp_path, monkeypatch, max_minutes=max_minutes, payload=payload)
+        return calls[-1]
+
+    async def _fusion_result(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
+        """Run the fusion lane and return what the handler reported, run or declined."""
+        _calls, result = await self._run_fusion_lane(tmp_path, monkeypatch, max_minutes=max_minutes, payload=payload)
+        return result
+
+    async def _run_fusion_lane(self, tmp_path, monkeypatch, *, max_minutes, payload=None):
         trace_dir = tmp_path / "trace"
         trace_dir.mkdir()
         (trace_dir / "decode.trace.json.gz").write_text("{}", encoding="utf-8")
@@ -1151,14 +1159,24 @@ class TestForgeGemmHelperCoverage:
             return {"status": "ok", "decision": "REVERT", "kept": False}
 
         monkeypatch.setattr(forge_fusion_run.forge_fusion, "run_forge_fusion", _fake_run_forge_fusion)
-        await forge_fusion_run._run_forge_fusion({"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path)
-        return calls[-1]
+        result = await forge_fusion_run._run_forge_fusion(
+            {"task_id": "fusion_task", **(payload or {})}, session_dir=tmp_path
+        )
+        return calls, result
 
     async def test_fusion_recipe_ceiling_comes_from_the_lane_share(self, tmp_path, monkeypatch):
-        """A bounded session funds the lane, so its target count is handed down."""
-        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=120)
+        """A bounded session hands down the recipes its share pays for, not the cap."""
+        payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=600)
 
         assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
+
+    async def test_a_session_too_short_for_one_recipe_declines_instead_of_running(self, tmp_path, monkeypatch):
+        """The share a GLM-5.3 session started forge-fuse on bought nothing but a reaped run."""
+        result = await self._fusion_result(tmp_path, monkeypatch, max_minutes=20)
+
+        assert result["status"] == "skipped"
+        assert result["error_class"] == lane_budget.INSUFFICIENT_BUDGET
+        assert "decision" not in result
 
     async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
         """No share can be derived, and a zero ceiling would silence the lane."""
@@ -1172,7 +1190,7 @@ class TestForgeGemmHelperCoverage:
         payload = await self._fusion_input_payload(
             tmp_path,
             monkeypatch,
-            max_minutes=120,
+            max_minutes=600,
             payload={"max_recipes": 1},
         )
 
@@ -1872,25 +1890,42 @@ class TestForgeGemmHelperCoverage:
         assert values["q_dtype_w"] == "torch.float4_e2m1fn_x2"
         assert values["q_type"] == "QuantType.per_1x32"
 
-    def test_the_token_column_comes_from_the_workload(self, tmp_path):
-        """``tokens`` arrives as forge's comma-separated string, not a list."""
-        log = tmp_path / "server.log"
-        log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
+    @pytest.mark.asyncio
+    async def test_the_token_column_is_what_the_moe_lookups_missed_not_the_dense_m(self, tmp_path, monkeypatch):
+        """aiter pads the token count before the MoE lookup, so a raw dense M keys a row no lookup reads.
 
-        for tokens, expected in (
-            ("1,32,64", ["1", "32", "64"]),
-            ("64", ["64"]),
-            ([1, 32, 64], ["1", "32", "64"]),
-            ("", ["1"]),
-            ("  16 , 16 ,bad,-8, 0 ", ["16"]),
-        ):
-            csv_path, _report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
-                str(log), tokens, tmp_path / f"ws_{str(tokens)[:12].strip()}"
+        On GLM-5.3 the rows came from the dense GEMMs' sixteen prefill M values between 16639 and 32768, which all
+        pad to one key, while every decode lookup ran the untuned default.
+        """
+        self._moe_state(tmp_path)
+        monkeypatch.setattr(forge_gemm_tuning, "_forge_gemm_tune_available", lambda: True)
+
+        def moe_miss(token: int) -> str:
+            return self._REAL_MOE_DISPATCH.replace("using 2stage default", "no tuned FlyDSL config").replace(
+                "256, 256, 4096", f"256, {token}, 4096"
             )
-            assert csv_path, f"no CSV for tokens={tokens!r}"
-            rows = Path(csv_path).read_text(encoding="utf-8").strip().splitlines()
-            got = [r.split(",")[0] for r in rows[1:]]
-            assert got == expected, f"tokens={tokens!r} -> {got}"
+
+        log = tmp_path / "server.log"
+        log.write_text(
+            "\n".join(["[aiter] shape is M:16639, N:4096, K:4096, not found tuned config in bf16_tuned_gemm.csv"])
+            + "\n"
+            + "\n".join(moe_miss(token) for token in (8, 32768))
+            + "\n",
+            encoding="utf-8",
+        )
+
+        async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
+            return 0, self._sentinel(), ""
+
+        monkeypatch.setattr(forge_gemm_tuning, "_run_subprocess", _fake_subprocess)
+        payload = {"task_id": "moe-tokens", "kernel_signature_log": str(log)}
+
+        await forge_gemm_tuning._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        written = _FORGE_GEMM_PAYLOADS[-1]
+        assert "16639" in str(written.get("tokens"))
+        rows = Path(written["moe_untuned_csv"]).read_text(encoding="utf-8").strip().splitlines()
+        assert [row.split(",")[0] for row in rows[1:]] == ["8", "32768"]
 
     @pytest.mark.asyncio
     async def test_the_moe_csv_reaches_the_forge_argv(self, tmp_path, monkeypatch):
@@ -2428,7 +2463,7 @@ class TestRunGemmTuningHandler:
                 return {"status": "succeeded"}
 
         monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
-        monkeypatch.setattr(shape_capture, "_pick_shape_capture_port", lambda: 19001)
+        monkeypatch.setattr(shape_capture, "pick_server_port", lambda: 19001)
 
         result = asyncio.run(
             shape_capture._capture_vllm_tunableop_shapes(

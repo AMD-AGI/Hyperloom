@@ -604,7 +604,7 @@ CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
 )
 
 
-def _controller_phase_terminal(state: Any) -> bool:
+def kernel_controller_settled(state: Any) -> bool:
     """Return true when this macro cycle's rewrite controller has stopped."""
     if str(state.kernel_optimizer or "").strip().lower() != "forge":
         return False
@@ -656,7 +656,8 @@ def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
     if kernel_decisions.has_keep_pending_integrate(state):
         return True
-    if _controller_phase_terminal(state) or _geak_phase_terminal(state):
+
+    if kernel_controller_settled(state) or _geak_phase_terminal(state):
         return False
 
     return bool(kernel_decisions.untried_hot_reusable_kernels(state))
@@ -921,6 +922,15 @@ class PhaseFlags:
     enablement_enabled: bool = False
 
 
+@dataclass(frozen=True)
+class LiveFacts:
+    """What the running Coordinator knows of its own work when a phase decision is taken."""
+
+    enablement_in_flight: bool = False
+    kernel_work_in_flight: bool = False
+    framework_round_fits: bool = True
+
+
 def _base_workflow_predicate_inputs(
     state: Any,
     *,
@@ -1094,8 +1104,7 @@ def workflow_predicate_inputs(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    live: LiveFacts = LiveFacts(),
 ) -> dict[str, Any]:
     """Freeze primitive, normalized facts consumed by one phase decision."""
     current = (state.phase or "").strip().upper() or PHASE_PRELUDE
@@ -1105,7 +1114,7 @@ def workflow_predicate_inputs(
         current=current,
         now_unix=frozen_now,
         flags=flags,
-        enablement_in_flight=enablement_in_flight,
+        enablement_in_flight=live.enablement_in_flight,
     )
     if current == PHASE_PRELUDE:
         inputs["baseline"] = _prelude_predicate_inputs(state, now_unix=frozen_now)
@@ -1114,15 +1123,16 @@ def workflow_predicate_inputs(
         inputs["baseline"] = {"tput": to_float(state.baseline_tput) or 0.0, **_initial_analysis_inputs(state)}
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
-            "enablement_in_flight": bool(enablement_in_flight),
+            "enablement_in_flight": bool(live.enablement_in_flight),
         }
     elif current == PHASE_FRAMEWORK_AGENT:
         inputs["plateau"], inputs["budget"] = _framework_predicate_inputs(state, now_unix=frozen_now)
+        inputs["budget"]["round_fits"] = bool(live.framework_round_fits)
     elif current == PHASE_KERNEL_AGENT:
         inputs["pending_work"], inputs["plateau"], inputs["budget"] = _kernel_predicate_inputs(
             state,
             now_unix=frozen_now,
-            kernel_work_in_flight=kernel_work_in_flight,
+            kernel_work_in_flight=live.kernel_work_in_flight,
         )
     elif current == PHASE_SWEEP:
         inputs["sweep_result"], inputs["budget"] = _sweep_predicate_inputs(state, now_unix=frozen_now)
@@ -1234,8 +1244,16 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
         return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
     if plateau.config_dry and plateau.source_dry:
         return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
+    budget = dict(inputs.get("budget") or {})
+    # A record frozen before this fact existed carries no value and replays as it was decided.
+    if budget.get("round_fits") is False:
+        return "optimize_phase_budget_exhausted", {
+            **arms,
+            "evidence": "no_round_fits",
+            "remaining_seconds": to_float(budget.get("remaining_sec")),
+        }
     return _budget_exit(
-        dict(inputs.get("budget") or {}),
+        budget,
         exhausted_reason="optimize_phase_budget_exhausted",
         evidence=arms,
     )
@@ -1273,16 +1291,21 @@ def _kernel_idle_exit(plateau: dict[str, Any], now_unix: Any) -> tuple[str, dict
 def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     pending = dict(inputs.get("pending_work") or {})
     plateau = dict(inputs.get("plateau") or {})
+    agent_in_flight = bool(pending.get("kernel_agent_in_flight"))
     work_pending = bool(pending.get("kernel_work_pending"))
-    if not bool(pending.get("kernel_agent_in_flight")):
-        controller_settled = _controller_round_settled(pending, inputs.get("macro_cycle"))
-        if controller_settled and not work_pending:
-            return "kernel_controller_done", {
-                "controller_status": pending.get("controller_status"),
-                "patch_count": int(pending.get("controller_patch_count") or 0),
-                "task_count": int(pending.get("controller_task_count") or 0),
-                "reason": str(pending.get("controller_reason") or ""),
-            }
+    # The one exit that does not wait for an idle queue. ``kernel_agent`` holds every serving lane until the phase
+    # budget ends it, so a controller that has already reported terminal with nothing pending would otherwise spend
+    # the rest of the phase on work that cannot produce a KEEP. The transition barrier stops the in-flight task, so
+    # the next phase still starts on quiet GPUs.
+    if _controller_round_settled(pending, inputs.get("macro_cycle")) and not work_pending:
+        return "kernel_controller_done", {
+            "controller_status": pending.get("controller_status"),
+            "patch_count": int(pending.get("controller_patch_count") or 0),
+            "task_count": int(pending.get("controller_task_count") or 0),
+            "reason": str(pending.get("controller_reason") or ""),
+            "agent_in_flight": agent_in_flight,
+        }
+    if not agent_in_flight:
         if not work_pending:
             return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle = _kernel_idle_exit(plateau, inputs.get("now_unix"))
@@ -1384,17 +1407,10 @@ def compute_next_phase(
     *,
     flags: PhaseFlags = PhaseFlags(),
     now_unix: float | None = None,
-    enablement_in_flight: bool = False,
-    kernel_work_in_flight: bool = False,
+    live: LiveFacts = LiveFacts(),
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return the next transition with the primitive inputs it consumed."""
-    inputs = workflow_predicate_inputs(
-        state,
-        flags=flags,
-        now_unix=now_unix,
-        enablement_in_flight=enablement_in_flight,
-        kernel_work_in_flight=kernel_work_in_flight,
-    )
+    inputs = workflow_predicate_inputs(state, flags=flags, now_unix=now_unix, live=live)
     return replay_next_phase(inputs)
 
 
@@ -1901,6 +1917,7 @@ __all__ = [
     "session_usable_seconds",
     "render_phase_action_bullets",
     "compute_kernel_progress_fingerprint",
+    "kernel_controller_settled",
     "kernel_work_pending",
     "make_history_row",
     "normalize_budget_pct",

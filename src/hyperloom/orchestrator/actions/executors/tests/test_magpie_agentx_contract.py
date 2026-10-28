@@ -87,7 +87,7 @@ def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_p
     assert bench["envs"] == {"TP": "1", "EP_SIZE": "1", "CONC": "8", "RUN_EVAL": "false"}
     launch = bench["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--disable-cuda-graph"]
-    assert launch["env"] == {"SGLANG_TEST": "1"}
+    assert launch["env"] == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
 
 
 def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
@@ -100,9 +100,19 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--chunked-prefill-size", "2048"]
-    assert launch["env"] == {"SGLANG_NEXT": "1"}
+    assert launch["env"] == {"AITER_LOG_TUNED_CONFIG": "1", "SGLANG_NEXT": "1"}
     assert launch["unset_env"] == ["SGLANG_TEST"]
-    assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
+    base_env = load_benchmark(base)["agentx"]["launch_overrides"]["env"]
+    assert base_env == {"SGLANG_TEST": "1", "AITER_LOG_TUNED_CONFIG": "1"}
+
+
+def test_a_candidate_that_unsets_hit_logging_runs_without_it(source, tmp_path):
+    """Every round logs aiter's tuned-config hits unless a candidate removes the flag itself."""
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    variant = GridVariant("quiet", "", {}, unset_envs=["AITER_LOG_TUNED_CONFIG"])
+    candidate = _build_variant_yaml(GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "candidate")
+    launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert (launch["env"], launch["unset_env"]) == ({}, ["AITER_LOG_TUNED_CONFIG"])
 
 
 @pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])
@@ -224,6 +234,30 @@ def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts,
         assert measurement["gpu_power_by_gpu_w"] == {"0": watts}
 
 
+def test_the_rounds_aiperf_export_gives_the_corpus_shape_its_sequence_lengths(report, tmp_path):
+    """Magpie's report carries no sequence lengths; aiperf's own summary in the round's artifacts does."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    artifacts = tmp_path / "benchmark_sglang_round" / "aiperf_artifacts"
+    artifacts.mkdir(parents=True)
+    isl = {"unit": "tokens", "avg": 153732.5, "p50": 108140.0, "p75": 180420.5, "p90": 362330.6, "p99": 557494.0}
+    osl = {"unit": "tokens", "avg": 773.4, "p50": 378.5, "p75": 775.25, "p90": 1404.2, "p99": 7313.2}
+    export = {"input_sequence_length": isl, "output_sequence_length": osl}
+    (artifacts / "profile_export_aiperf.json").write_text(json.dumps(export))
+
+    measured = extract_benchmark_measurement(report, workspace=artifacts.parent)
+
+    shape = map_corpus_shape(measured)
+    assert shape["isl"] == {"avg": 153732, "p50": 108140, "p75": 180420, "p90": 362330, "p99": 557494}
+    assert shape["osl"] == {"avg": 773, "p50": 378, "p75": 775, "p90": 1404, "p99": 7313}
+
+
+def test_a_round_without_an_aiperf_export_reports_no_sequence_lengths(report, tmp_path):
+    measured = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert ("isl_distribution" in measured, "osl_distribution" in measured) == (False, False)
+
+
 def test_public_metrics_and_identity_reach_keep_guards(report):
     measured = extract_benchmark_measurement(report)
     assert measured["e2e_norm_intvty_p50"] == 25
@@ -257,7 +291,7 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert torch_profiler["enabled"] is True
     assert torch_profiler["num_profiles"] == 3
     assert torch_profiler["num_steps"] == 5
-    assert torch_profiler["start_seconds"] == 300
+    assert torch_profiler["start_seconds"] == 900
     assert torch_profiler["interval_seconds"] == 900
     assert "PROFILE_EXTRA_BODY" not in bench["envs"]
     assert bench["model"] == "Qwen/Qwen3-0.6B"
@@ -273,6 +307,20 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert measured["round_succeeded"] is True
     assert not is_valid_measurement(measured)
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
+
+
+def test_a_profile_with_no_window_of_its_own_captures_the_steady_state(source, tmp_path, monkeypatch):
+    """Magpie's default is the replay's first 20 steps: the opening prefills alone, at bs=1."""
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["profiler"] = {"torch_profiler": {"enabled": False}}
+    source.write_text(yaml.safe_dump(config))
+    rendered = materialize_benchmark_config(source, tmp_path / "profile")
+
+    enable_profile(rendered)
+
+    torch_profiler = load_benchmark(rendered)["profiler"]["torch_profiler"]
+    assert (torch_profiler["start_seconds"], torch_profiler["num_steps"]) == (900, 256)
 
 
 @pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])

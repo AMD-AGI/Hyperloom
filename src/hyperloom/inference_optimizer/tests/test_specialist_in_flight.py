@@ -14,9 +14,12 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
+from hyperloom.orchestrator.policy.specialist_in_flight import (
+    SPECIALIST_DOMAIN_IN_FLIGHT,
+    SPECIALIST_MODULE_IN_FLIGHT,
+)
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
+from hyperloom.orchestrator.specialists.in_flight import held_domain, held_module_group, in_flight_domains
 from hyperloom.orchestrator.specialists.profile import SCOPE_DOMAIN, resolve_specialist_profile
 
 _SYSTEM = "system_specialist"
@@ -218,3 +221,93 @@ def test_a_dispatch_holds_its_domain_exactly_when_its_profile_scope_is_domain(pa
 
 def test_the_coordinator_owned_custom_specialist_holds_no_domain():
     assert held_domain({"domain": "custom_specialist", "scope": "domain"}) == ""
+
+
+async def _queued_mandates(c: Coordinator) -> list[str]:
+    return [str(t.params.get("task_description")) for t in await c.tasks.by_state("queued")]
+
+
+async def _module_denials(c: Coordinator) -> int:
+    observed = await c.bus.tail(topic="observation")
+    return sum(
+        m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == SPECIALIST_MODULE_IN_FLIGHT
+        for m in observed
+    )
+
+
+async def _freeform(c: Coordinator, mandate: str, **params: Any) -> None:
+    await _delegate(c, scope="freeform", task_description=mandate, **params)
+
+
+async def test_a_module_group_holds_at_most_one_queued_or_running_specialist(coord, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    await _freeform(coord, "fuse the MoE sort", module_group="moe")
+    (holder,) = await coord.tasks.by_state("queued")
+    await coord.tasks.transition(holder.task_id, "running", evidence={})
+
+    await _freeform(coord, "retune the MoE GEMMs", module_group="MoE")
+    await _freeform(coord, "shrink the allreduce", module_group="allreduce/comm")
+    await _freeform(coord, "trace the decode host gap")
+
+    assert await _queued_mandates(coord) == ["shrink the allreduce", "trace the decode host gap"]
+    assert await _module_denials(coord) == 1
+
+
+@pytest.mark.parametrize(("switch", "group"), [("0", "moe"), ("1", "draft")])
+async def test_a_dispatch_without_a_known_group_or_with_the_bench_off_is_never_refused_for_one(
+    coord, monkeypatch, switch, group
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
+    await _freeform(coord, "first", module_group=group)
+    await _freeform(coord, "second", module_group=group)
+
+    assert await _queued_mandates(coord) == ["first", "second"]
+    assert await _module_denials(coord) == 0
+
+
+async def test_each_task_of_a_freeform_wave_holds_the_module_group_it_names(coord, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    tasks = [
+        {"task_description": "fuse the MoE sort", "module_group": "moe"},
+        {"task_description": "retune the MoE GEMMs", "module_group": "moe"},
+        {"task_description": "shrink the allreduce", "module_group": "allreduce/comm"},
+    ]
+    await _delegate(coord, scope="freeform", tasks=tasks)
+
+    assert await _queued_mandates(coord) == ["fuse the MoE sort", "shrink the allreduce"]
+    assert await _module_denials(coord) == 1
+
+
+@pytest.mark.parametrize(("switch", "shown"), [("1", True), ("0", False)])
+async def test_orchestration_sees_the_module_groups_and_which_ones_live_specialists_hold(
+    coord, monkeypatch, switch, shown
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
+    await _freeform(coord, "fuse the MoE sort", module_group="moe")
+    (holder,) = await coord.tasks.by_state("queued")
+
+    in_flight = coord.conversation._context_running_tasks_reader()
+
+    expected = (
+        "specialist module groups (set params.module_group to own one; one queued or running specialist each): "
+        "allreduce/comm, moe, indexer/topk, attention/mla, norm, gemm, quant, sampling/spec, elementwise/copy; "
+        f"held: moe task_id={holder.task_id}"
+    )
+    lines = [line for line in in_flight.splitlines() if line.startswith("specialist module groups")]
+    assert lines == ([expected] if shown else [])
+
+
+@pytest.mark.parametrize(
+    ("params", "group"),
+    [
+        ({"module_group": " MoE "}, "moe"),
+        ({"module_group": "indexer/topk", "domain": _SYSTEM}, "indexer/topk"),
+        ({"module_group": "draft"}, ""),
+        ({}, ""),
+        ({"module_group": "moe", "domain": "custom_specialist"}, ""),
+    ],
+)
+def test_a_dispatch_holds_the_module_group_it_names(monkeypatch, params, group):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+
+    assert held_module_group(params) == group

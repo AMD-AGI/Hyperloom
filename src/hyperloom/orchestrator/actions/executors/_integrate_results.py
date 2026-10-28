@@ -14,6 +14,7 @@ from typing import Any
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.timeutil import now_iso
 
+from ...delivery import parse_deliverable
 from . import _framework_switch_manifest as _switch_manifest
 from ._apply_feedback import ApplyFeedback
 from ._enablement_config import _parse_framework_switches
@@ -80,16 +81,22 @@ class _PatchMeasurement:
     acc_delta_pct: float | None
     cfg_fingerprint: str
     measured_against: dict[str, Any]
+    #: The change on the graded objective, reported even where the gate leaves ``delta_pct`` empty.
+    graded_delta_pct: float | None = None
+
+    def _measured_pct(self) -> float | None:
+        return self.delta_pct if self.delta_pct is not None else self.graded_delta_pct
 
     def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
-        return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
+        return _KbLesson(outcome, float(self._measured_pct() or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
 
     def envelope(self) -> dict[str, Any]:
         """How every perf verdict reports the measurement behind it."""
         return {
             "output_throughput": self.new_tput,
             "delta_pct": self.delta_pct,
+            "graded_delta_pct": self.graded_delta_pct,
             "accuracy_pass": self.accuracy_pass,
             "base_tput": self.base_tput,
             "measured_against": self.measured_against,
@@ -128,9 +135,12 @@ class _Deliverable:
         recorded = (done_payload or {}).get("config_changes")
         if not config_changes and isinstance(recorded, dict):
             config_changes = {str(key): str(value) for key, value in recorded.items()}
+        # The switches and args a patch needs are the specialist's declared deliverable; a delegate that leaves them
+        # out would bench the patch with its code path switched off.
+        declared = parse_deliverable(done_payload or {}, default_tree_id="")
         raw_envs = params.get("extra_envs")
         extra_envs, unsafe = filter_untrusted_env_mapping(
-            {**config_changes, **(raw_envs if isinstance(raw_envs, dict) else {})},
+            {**config_changes, **declared.envs, **(raw_envs if isinstance(raw_envs, dict) else {})},
             allow_predicate=is_allowed_variant_env_key,
         )
         dropped = sorted(unsafe)
@@ -154,7 +164,7 @@ class _Deliverable:
         return cls(
             patch_paths=patch_paths,
             config_changes=config_changes,
-            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else ""),
+            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else declared.server_args),
             extra_envs=extra_envs,
             dropped_env_overrides=dropped,
             switch_manifest=switch_manifest,

@@ -648,14 +648,27 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT", "KERNEL_AGENT", "SWEEP"])
-async def test_escalate_skip_to_kernel_outside_framework_agent_is_dropped(coord: Coordinator, phase: str) -> None:
-    """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival."""
+async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its_sender(
+    coord: Coordinator, phase: str
+) -> None:
+    """Only the FRAMEWORK_AGENT exit reads skip_to_kernel; left pending elsewhere it would end that phase on arrival.
+
+    The sender is told, so it stops re-sending the hint.
+    """
     coord.shared_state.phase = phase
     await coord.router._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_kernel"),
     )
     assert coord.shared_state.pending_escalate_hint == ""
+    denials = [
+        m.payload
+        for m in coord.bus.inbox_context_sync("orchestration")
+        if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "escalate_hint_phase"
+    ]
+    assert len(denials) == 1
+    assert phase in denials[0]["reason"]
+    assert denials[0]["hint"] == f"No hint advances {phase}: the Coordinator exits it on the gate its phase goal names."
 
 
 # -- maybe_autosubmit_specialist_patches ----------------------------------

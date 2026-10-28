@@ -106,7 +106,6 @@ duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integra
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 52
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
-duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 46
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 37
 duplicated-lines src/kernelforge/tests/evaluation/benchmark/test_measurement_guards.py 38
@@ -234,7 +233,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_integrate_bench.py:
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._enablement_keep_records 86
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._gate_enablement 136
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._capture_source_layer 65
-function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._gate_perf 119
+function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._gate_perf 110
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._switch_off_parity 79
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_resolve.py::ResolveStageMixin._stage_provision_attempt_runtime 77
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_resolve.py::ResolveStageMixin._stage_resolve 70
@@ -247,14 +246,12 @@ function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_l
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 99
 function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 104
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 99
-function-lines src/hyperloom/orchestrator/actions/executors/_patch_artifacts.py::_validate_aiter_gemm_artifacts 51
 function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 76
 function-lines src/hyperloom/orchestrator/actions/executors/_server_lifecycle.py::reap_recorded_servers 61
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_apply_atomic 133
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_gc_plan 56
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 74
 function-lines src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::kill_my_spawned_server 63
-function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::apply_agentx_switch 51
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 78
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._measured_round_result 56
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._mn_warmup_pass 67
@@ -277,7 +274,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileE
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::_check_capture_input_dims 51
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::_probe_check_rows 60
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::ReportExecutor.__call__ 76
-function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 61
+function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 51
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_md 55
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_format_roofline_comparison_section 52
 function-lines src/hyperloom/orchestrator/actions/executors/targeted_build_executor.py::TargetedBuildExecutor.__call__ 55
@@ -337,7 +334,7 @@ function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollabor
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._create_delegated_task 59
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 57
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 75
-function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 55
+function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 54
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 63
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner._execute 58
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 61
@@ -358,10 +355,10 @@ function-lines src/hyperloom/orchestrator/phases/framework.py::_record_source_at
 function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::prepare_source_revalidation 57
 function-lines src/hyperloom/orchestrator/phases/geak_native_revalidation.py::revalidate_source 55
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_tuned_config_coverage 61
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 71
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 65
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 57
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._settle_gemm_e2e_verdict 52
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 64
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 63
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.record_geak_adopted_kernels 51
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.run_agent 59
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._apply_warm_kernel_patch 61
@@ -375,7 +372,7 @@ function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_i
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 57
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 62
 function-lines src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_decision_framework 84
-function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 105
+function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_framework_rewrite_specialist 75
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_kernel_switch_specialist 67
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_research_scout_specialist 53
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_focus_serving_specialist 70
@@ -393,7 +390,6 @@ function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBack
 function-lines src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 63
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_auto_retry_specialist 101
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 56
-function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 51
 function-lines src/hyperloom/orchestrator/specialists/patch_safety.py::vet_patches 75
 function-lines src/hyperloom/orchestrator/specialists/rebench.py::run_specialist_rebench 72
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._finalize 51
@@ -497,7 +493,6 @@ function-lines src/kernelforge/gemm_tune/tier3/runner.py::attempt_generated_tune
 function-lines src/kernelforge/gemm_tune/tier3/sandbox.py::run_generated_tuner 59
 function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 59
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 64
-function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_ensure_decode_m_coverage 64
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_parse_tuner_stdout 52
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 118
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner._untuned_csv_from_demand 53
@@ -526,7 +521,7 @@ function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::_
 function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_task_result 87
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 82
 function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 55
-function-lines src/kernelforge/kernel_rewrite_controller/task_publisher.py::publish_staged_task 68
+function-lines src/kernelforge/kernel_rewrite_controller/task_publisher.py::publish_staged_task 66
 function-lines src/kernelforge/knowledge/kb_store/identity/warmstart_rank.py::rank_fallback_identities 53
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 95
 function-lines src/kernelforge/knowledge/kb_store/record_store.py::KBStoreRewriteRecords.materialize 67

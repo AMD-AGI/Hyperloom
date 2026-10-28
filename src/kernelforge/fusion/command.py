@@ -50,7 +50,7 @@ from .llm_failure import LlmUnavailableError
 from .locate import FrameworkInstall, build_recipes, resolve_framework_source_file
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
-from .shadow_repo import ensure_git_workspace
+from .shadow_repo import SHADOW_GIT_DIRNAME, ensure_git_workspace
 from .report import (
     ANCHOR_REPORT_NAME,
     ANCHOR_RESOLVED_VERDICT,
@@ -393,7 +393,7 @@ def _log_located_recipes(discovery: _Discovery, *, dry_run: bool) -> None:
 
 @dataclass(frozen=True)
 class _FusionRun:
-    """The run-wide context the authoring paths share: where it writes, what it serves, who authors, the bar."""
+    """The run-wide context the authoring paths share: where it writes, what it serves, who authors, the bar, the end."""
 
     out: Path
     repo_root: str
@@ -404,6 +404,7 @@ class _FusionRun:
     author: AuthorAgent
     gpu_arch: str
     target_speedup: float
+    deadline_unix: float = 0.0
 
     def claim_serving(self) -> ClaimServing:
         """Where this run's compile-pass claims serve their A/B arms."""
@@ -631,6 +632,7 @@ class FuseRequest:
     gpu: str
     agent: FuseAgentOptions
     max_recipes: int
+    deadline_unix: float
     smoke: SmokeOptions
     gpu_arch: str
     layout: ServingLayout
@@ -783,6 +785,12 @@ class FuseRequest:
         default=0,
         type=int,
         help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
+    ),
+    click.option(
+        "--deadline-unix",
+        default=0.0,
+        type=float,
+        help="Absolute time every recipe's forge-loop must finish by. 0 leaves each loop its own default budget.",
     ),
     option_group(
         "smoke",
@@ -994,6 +1002,7 @@ def _run_fusion_stages(
         author=author,
         gpu_arch=_run_target_arch(request.gpu_arch),
         target_speedup=DEFAULT_TARGET_SPEEDUP,
+        deadline_unix=request.deadline_unix,
     )
     if not (split.multi_patch and stages.validate):
         return _run_single_patch(request, fusion_run, recipes, split)
@@ -1090,6 +1099,7 @@ def _campaign_runtime(run: _FusionRun, agent: FuseAgentOptions, llm_model: Optio
         model=llm_model or "",
         agent_backend=_campaign_agent_provider(agent.agent_backend, llm_model),
         agent_sandbox_mode=agent.agent_sandbox_mode,
+        deadline_unix=run.deadline_unix,
     )
 
 
@@ -1317,7 +1327,7 @@ def _open_shadow_workspace(repo_root: str, loop_recipes: list, out: Path, campai
     shadow = ensure_git_workspace(
         repo_root,
         loop_recipes[0].source_file,
-        git_dir=str(out / "shadow.git"),
+        git_dir=str(out / SHADOW_GIT_DIRNAME),
         extra_paths=tuple(fused_module_path(r) for r in loop_recipes),
         # A fusion whose call sites span packages is keepable only if every one of
         # those packages is in the index.

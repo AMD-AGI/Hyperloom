@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.orchestrator.kernel import forge_fusion
 from hyperloom.orchestrator.kernel.nomination_result import parse_outcome
+from kernelforge.fusion.shadow_repo import SHADOW_GIT_DIRNAME, ensure_git_workspace
 
 
 @pytest.fixture(autouse=True)
@@ -231,9 +234,13 @@ def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypat
         captured.update(cmd=cmd, timeout=timeout_sec, env=env, label=label)
         return 0, "OUT\n", "ERR\n"
 
+    before = time.time()
     result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    assert captured["timeout"] == 9
+    cmd = captured["cmd"]
+    deadline = float(cmd[cmd.index("--deadline-unix") + 1])
+    assert before + 9 <= deadline <= time.time() + 9
+    assert captured["timeout"] > 9, "the kill backstops the deadline instead of racing it"
     assert captured["label"] == "forge_fusion"
     assert captured["cmd"][3] == "forge-fuse"
     assert captured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
@@ -289,6 +296,28 @@ def test_run_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch):
     assert result["salvaged"] is True
     assert result["patch"] == str(patch)
     assert result["kernel_speedup"] == 2.69
+
+
+def test_a_killed_run_hands_the_framework_tree_back_as_it_found_it(tmp_path, monkeypatch):
+    """The kill skips forge-fuse's own reset, and the next server and rewrite seal read this tree."""
+    framework = tmp_path / "sglang"
+    model = framework / "python" / "sglang" / "glm4_moe.py"
+    model.parent.mkdir(parents=True)
+    model.write_text("def gate(x):\n    return x\n", encoding="utf-8")
+    hook_module = model.parent / "glm4_moe_fused_gate.py"
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def killed_mid_candidate(cmd, *, timeout_sec, env, label):
+        ensure_git_workspace(str(framework), str(model), git_dir=str(output_dir / SHADOW_GIT_DIRNAME))
+        model.write_text("from .glm4_moe_fused_gate import gate\n", encoding="utf-8")
+        hook_module.write_text("def gate(x):\n    return x\n", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output="", stderr="")
+
+    _run(monkeypatch, _payload(output_dir), killed_mid_candidate)
+
+    assert model.read_text(encoding="utf-8") == "def gate(x):\n    return x\n"
+    assert not hook_module.exists()
 
 
 def test_run_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch):
@@ -1352,10 +1381,34 @@ def test_salvage_reads_the_published_best_when_the_campaign_never_returned(tmp_p
     assert result["kernel_repo"] == str(repo_root)
     outcome = parse_outcome(result)
     assert outcome.schema_error == ""
-    assert [p.patch_path for p in outcome.patches] == [
-        str(repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch")
-    ]
+    exported = output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch"
+    assert [p.patch_path for p in outcome.patches] == [str(exported)]
+    assert exported.read_text(encoding="utf-8") == (
+        repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch"
+    ).read_text(encoding="utf-8")
     assert [p.target_file for p in outcome.patches] == ["python/sglang/srt/models/qwen3_next.py"]
+
+
+def test_a_salvaged_patch_outlives_the_campaign_directory_it_was_published_in(tmp_path):
+    """The repository's forge_experiments is the next Forge campaign's to archive; the queued patch must not live there.
+
+    A GLM-5.3 fusion of the MoE gate cast and GEMM, 2.13x, was salvaged after its wrapper timed out and queued for
+    the e2e integrate with the published copy's path -- in the repository the rewrite controller borrowed next.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    repo_root = tmp_path / "sgl-workspace" / "sglang"
+    manifest = _published_best_manifest(repo_root, speedup=2.125, patch_body="diff --git a/glm4_moe.py b/glm4_moe.py\n")
+    loop = _campaign_loop_result(total_speedup=2.125)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_moe_gate_cast_linear.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_moe_gate_cast_linear")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+    shutil.rmtree(repo_root / "forge_experiments")
+
+    (queued,) = parse_outcome(result).patches
+    assert Path(queued.patch_path).read_text(encoding="utf-8") == "diff --git a/glm4_moe.py b/glm4_moe.py\n"
 
 
 def test_salvage_prefers_the_exported_patch_over_the_published_best(tmp_path):

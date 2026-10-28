@@ -343,10 +343,41 @@ def _aiter_lookup_bucket(m: int, gl0: int, pow2: int) -> int:
     return gl0 if m <= 256 else min(pow2, 8192)
 
 
+#: ``(M, N, gl=1)`` read off the installed aiter. ``gl=1`` is not a pure power
+#: of two: past M=8192 a wide N collapses the bucket to 8192, so the mirror
+#: needs N to answer at all. Sampled on both sides of the N>4096 branch.
+_PADDED_M_GL1_OBSERVED: tuple[tuple[int, int, int], ...] = (
+    (1025, 8704, 2048),
+    (1025, 2048, 2048),
+    (2049, 8704, 4096),
+    (2049, 2048, 4096),
+    (4097, 8704, 8192),
+    (4097, 2048, 8192),
+    (8192, 8704, 8192),
+    (8192, 2048, 8192),
+    (8193, 8704, 8192),
+    (8193, 2048, 16384),
+    (10000, 8704, 8192),
+    (10000, 2048, 16384),
+    (16384, 8704, 8192),
+    (16384, 2048, 16384),
+    # GLM-5.3's prefill GEMMs, read off aiter on gfx950 on 2026-10-26.
+    (16639, 2624, 32768),
+    (32400, 2624, 32768),
+    (16639, 7168, 8192),
+    (32400, 7168, 8192),
+)
+
+
 @pytest.mark.parametrize(("m", "gl0", "pow2"), _PADDED_M_OBSERVED)
 def test_demand_bucket_is_one_of_aiters_recorded_lookups(m, gl0, pow2):
     """Runs everywhere, including the lane that has no aiter installed."""
-    assert padded_m(m) == _aiter_lookup_bucket(m, gl0, pow2)
+    assert padded_m(m, 8704) == _aiter_lookup_bucket(m, gl0, pow2)
+
+
+@pytest.mark.parametrize(("m", "n", "gl1"), _PADDED_M_GL1_OBSERVED)
+def test_padded_m_gl1_mirror_matches_recorded_aiter_behaviour(m, n, gl1):
+    assert padded_m(m, n) == gl1
 
 
 def test_the_recorded_buckets_capture_the_granularity_change():
@@ -363,7 +394,9 @@ def test_demand_bucket_matches_installed_aiter():
     n, k = 8704, 3072
     for m, _gl0, _pow2 in _PADDED_M_OBSERVED:
         if 1 < m <= 8192:
-            assert padded_m(m) == gemm_op_common.get_padded_m(m, n, k, 0 if m <= 256 else 1), f"mismatch at M={m}"
+            assert padded_m(m, n) == gemm_op_common.get_padded_m(m, n, k, 0 if m <= 256 else 1), f"mismatch at M={m}"
+    for m, n_i, _gl1 in _PADDED_M_GL1_OBSERVED:
+        assert padded_m(m, n_i) == gemm_op_common.get_padded_m(m, n_i, k, 1), f"gl=1 mismatch at M={m} N={n_i}"
 
 
 def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):

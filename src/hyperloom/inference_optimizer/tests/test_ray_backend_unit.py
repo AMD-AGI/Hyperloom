@@ -635,6 +635,9 @@ class _LeaseFakeRay:
         class RayActorError(RayError):
             pass
 
+        class OutOfMemoryError(RayError):
+            pass
+
         class GetTimeoutError(RayError):
             pass
 
@@ -647,10 +650,7 @@ class _LeaseFakeRay:
         return {"CPU": 64.0, "GPU": 8.0, "serving_slot": 1.0}
 
     def get(self, ref, **_kw):
-        if isinstance(
-            ref,
-            (_LeaseFakeRay.exceptions.RayTaskError, _LeaseFakeRay.exceptions.RayActorError),
-        ):
+        if isinstance(ref, _LeaseFakeRay.exceptions.RayError):
             raise ref
         return ref
 
@@ -707,6 +707,40 @@ def test_serving_lease_run_session_kill_actor_death_self_heals(monkeypatch: pyte
     assert rc == 1
     assert "ray_actor_error" in err
     # Handle dropped so the next run re-creates the actor.
+    assert lease._actor is None
+
+
+class _OrphaningRound(_FakeMethod):
+    """A round whose actor dies while the benchmark it started keeps running in its own session."""
+
+    def __init__(self, ret):
+        super().__init__(ret)
+        self.spawned: subprocess.Popen | None = None
+
+    def remote(self, *a, **kw):
+        bench_round = a[0]
+        env = {**os.environ, **(bench_round.env or {})}
+        self.spawned = subprocess.Popen(["sleep", "60"], env=env, start_new_session=True)
+        return super().remote(*a, **kw)
+
+
+@pytest.mark.parametrize("error_name", ["RayActorError", "OutOfMemoryError"])
+def test_a_round_left_running_by_a_dead_actor_is_stopped_before_the_lease_reports(
+    monkeypatch: pytest.MonkeyPatch, error_name: str
+):
+    """Ray's memory monitor SIGKILLs the actor; the benchmark it ran kept the GPUs and port 8888 for 21 minutes."""
+    fake = _LeaseFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    lease = ServingLease(num_gpus=1)
+    lease._actor = _FakeActor(getattr(fake.exceptions, error_name)("Task was killed due to low memory"))
+    orphaning = _OrphaningRound(lease._actor.run_blocking._ret)
+    lease._actor.run_blocking = orphaning
+
+    rc, _out, err = lease.run_session_kill(rb.SessionKillRound(["x"], timeout=5))
+
+    assert (rc, err.split(":")[0]) == (1, "ray_actor_error")
+    assert orphaning.spawned is not None
+    assert orphaning.spawned.wait(timeout=30) is not None
     assert lease._actor is None
 
 
@@ -1153,6 +1187,9 @@ class _FakeRayP2:
         class RayActorError(RayError):
             pass
 
+        class OutOfMemoryError(RayError):
+            pass
+
     def __init__(self):
         self.killed: list = []
 
@@ -1470,6 +1507,9 @@ class _RaisingRay:
             pass
 
         class RayActorError(Exception):
+            pass
+
+        class OutOfMemoryError(Exception):
             pass
 
         class GetTimeoutError(Exception):
@@ -1811,6 +1851,9 @@ class _InfeasibleFakeRay:
         class RayActorError(Exception):
             pass
 
+        class OutOfMemoryError(Exception):
+            pass
+
         class GetTimeoutError(Exception):
             pass
 
@@ -1901,6 +1944,9 @@ class _PendingAcquireFakeRay:
             pass
 
         class RayActorError(Exception):
+            pass
+
+        class OutOfMemoryError(Exception):
             pass
 
     def __init__(self, result=(0, "ok", "")):

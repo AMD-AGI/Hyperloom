@@ -1013,6 +1013,18 @@ def test_kb_writeback_default_root_uses_user_data_path(monkeypatch: pytest.Monke
     assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
+async def test_kb_writeback_records_a_patch_kept_dormant(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The dormant-lever verdict is a lesson too; it was refused and lost the first time a session reached it."""
+    from hyperloom.orchestrator.knowledge import kb_writeback
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
+    path = await kb_writeback.write_framework_record(
+        kb_writeback.FrameworkOutcome("u", "s", "p", kb_writeback.OUTCOME_KEPT_INERT, -2.1, "sess")
+    )
+
+    assert kb_writeback.OUTCOME_KEPT_INERT in path.read_text(encoding="utf-8")
+
+
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
     from hyperloom.orchestrator.knowledge import kb_writeback
 

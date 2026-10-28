@@ -362,6 +362,62 @@ def build_agentx_workload_spec(
     raise ValueError("Only the MLPerf client uses a Hyperloom workload spec")
 
 
+def _pin_mlperf_endpoint(
+    envs: dict[str, Any],
+    framework: str,
+    *,
+    conc: Any,
+    agentx_env: Mapping[str, str],
+) -> None:
+    """Pin the socket, model name and round concurrency the MLPerf client dials."""
+    from hyperloom.common.agentx_workload import (
+        BACKEND_ENV,
+        MLPERF_PORT,
+        MLPERF_SERVED_MODEL,
+        is_mlperf_backend,
+        mlperf_flow,
+        mlperf_trajectories,
+    )
+
+    if not is_mlperf_backend(agentx_env):
+        return
+    envs[BACKEND_ENV] = "mlperf"
+    # The harness dials a fixed port and model name. Pinning both here is the
+    # one place they are enforced, so a recipe PORT cannot leave the server
+    # and the client on different sockets.
+    envs["PORT"] = str(MLPERF_PORT)
+    envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+    # Settled once here; the client and the published spec read these back.
+    envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+    envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+    envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+    envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+    # The round's CONC is what the measurement is recorded under. A baseline
+    # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+    envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+    pin_mlperf_round_concurrency(envs)
+    from ._server_argv import add_server_arg_unless_pinned
+
+    add_server_arg_unless_pinned(
+        envs,
+        framework,
+        f"--served-model-name {MLPERF_SERVED_MODEL}",
+        pinned_by=("served-model-name", "served_model_name"),
+    )
+
+
+def _declare_agentic_run(envs: dict[str, Any]) -> None:
+    """Tell the harness the run is a replay, not a fixed-sequence throughput sweep.
+
+    The harness decides several things by run type -- whether a context cap applies, and whether the server keeps its
+    prefix cache -- and reads this, its own signal, to tell them apart. Naming the client script is not that signal,
+    so without these an AgentX replay was served as a fixed-sequence sweep. Offloading is the one setting the harness
+    then demands; AgentX keeps its reuse in the GPU KV pool.
+    """
+    envs["IS_AGENTIC"] = "1"
+    envs["KV_OFFLOADING"] = "none"
+
+
 def apply_agentx_switch(
     bench: dict[str, Any],
     model_path: str | None = None,
@@ -394,13 +450,8 @@ def apply_agentx_switch(
         return
     envs = bench.setdefault("envs", {})
     from hyperloom.common.agentx_workload import (
-        BACKEND_ENV,
-        MLPERF_PORT,
-        MLPERF_SERVED_MODEL,
         agentx_client_script,
         is_mlperf_backend,
-        mlperf_flow,
-        mlperf_trajectories,
     )
 
     _agentx_env = agentx_env_for_conc(conc)
@@ -408,33 +459,17 @@ def apply_agentx_switch(
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
+    _declare_agentic_run(envs)
+    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
+    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
+    # documents it as a supported knob; without forwarding it only works when
+    # the benchmark process happens to inherit the full parent environment,
+    # which is exactly the kind of silent difference this path exists to remove.
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
     if is_mlperf_backend(_agentx_env):
-        envs[BACKEND_ENV] = "mlperf"
-        # The harness dials a fixed port and model name. Pinning both here is the
-        # one place they are enforced, so a recipe PORT cannot leave the server
-        # and the client on different sockets.
-        envs["PORT"] = str(MLPERF_PORT)
-        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
-        # Settled once here; the client and the published spec read these back.
-        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
-        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
-        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
-        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
-        # The round's CONC is what the measurement is recorded under. A baseline
-        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
-        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
-        pin_mlperf_round_concurrency(envs)
-        from ._server_argv import add_server_arg_unless_pinned
-
-        add_server_arg_unless_pinned(
-            envs,
-            framework,
-            f"--served-model-name {MLPERF_SERVED_MODEL}",
-            pinned_by=("served-model-name", "served_model_name"),
-        )
+        _pin_mlperf_endpoint(envs, framework, conc=conc, agentx_env=_agentx_env)
     bench["workload_spec"] = build_agentx_workload_spec(
         bench,
         envs,
@@ -475,6 +510,14 @@ def prepare_agentx_runtime(
         return None
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return None
+    # The generic SGLang scripts inject ``--disable-radix-cache``, which an
+    # agentic replay must not carry. This is the one AgentX preparation step
+    # every launch path reaches -- baseline and profile shell out without going
+    # through the grid runner -- so it is where the scripts can be kept honest
+    # for all of them.
+    from ._magpie_patcher import ensure_agentic_prefix_cache
+
+    ensure_agentic_prefix_cache(runtime_env.get("MAGPIE_PATH") or None, inferencex_path or None)
     try:
         from hyperloom.inference_optimizer.agentx.preflight import AgentXPreflightError
         from hyperloom.inference_optimizer.agentx.runtime import maybe_prepare_agentx
