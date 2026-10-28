@@ -37,6 +37,9 @@ def phase_index(phase: str) -> int:
     return PHASE_INDEX.get((phase or "").strip().upper(), -1)
 
 
+# What ENABLEMENT runs only for its lane: the round's specialist and integrate, and the KEEP's revalidation.
+_ENABLEMENT_LANE_ACTIONS = frozenset({"baseline", "specialist", "integrate_patch"})
+
 # Phase transition survival filter: actions that survive across phase boundaries.
 # LLM-proposable set is allowed_actions_for(phase); Coordinator-auto actions
 # stay out of PROPOSABLE so the prompt does not invite LLM proposals for them.
@@ -51,19 +54,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "replay_warm_recipe",
         }
     ),
-    # ``baseline`` is carried so the Coordinator's revalidation survives the
-    # phase-transition sweep, but it is reserved: see PHASE_COORDINATOR_RESERVED.
-    PHASE_ENABLEMENT: frozenset(
-        {
-            "target_analysis",
-            "baseline",
-            "roofline",
-            "profile",
-            "specialist",
-            "integrate_patch",
-            "targeted_build",
-        }
-    ),
+    PHASE_ENABLEMENT: frozenset({"target_analysis", "roofline", "profile", "targeted_build"})
+    | _ENABLEMENT_LANE_ACTIONS,
     # Three levers: configuration grids (``explore``), investigation and authoring (``specialist``), and landing a
     # patch from any source (``integrate_patch``).
     PHASE_FRAMEWORK_AGENT: frozenset(
@@ -104,10 +96,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 
 
 # Actions a single phase reserves for the Coordinator. COORDINATOR_INTERNAL_ACTIONS
-# cannot say this: ``baseline`` is what PRELUDE exists to propose, while
-# ENABLEMENT runs it only as the revalidation that closes a KEEP.
+# cannot say this: other phases let the agent propose them.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
-    PHASE_ENABLEMENT: frozenset({"baseline"}),
+    PHASE_ENABLEMENT: _ENABLEMENT_LANE_ACTIONS,
 }
 
 

@@ -27,7 +27,6 @@ from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUST
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
-from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
@@ -965,30 +964,6 @@ async def test_a_late_failure_from_an_ended_round_does_not_charge_the_next_one(t
     assert held is not None and held.round_id == "enablement-spec-new"
 
 
-def _bind(fake, **params):
-    bind_integrate_to_lane(params, fake.shared_state, session_dir=Path(fake.session_dir))
-    return params
-
-
-def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
-    """An integrate the lane did not dispatch still carries the round's context.
-
-    Without it the executor grades the patch on a throughput ENABLEMENT never
-    measured and reverts a boot that advanced.
-    """
-    fake = _enqueue_self(tmp_path)
-    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
-    fake.shared_state.enablement.setup_commands = ["pip install deep_gemm==2.1"]
-
-    params = _bind(fake, specialist_task_id="spec-llm", extra_envs={"SGLANG_X": "1"})
-
-    assert params["enablement"] is True
-    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
-    assert params["enablement_setup_commands"] == ["pip install deep_gemm==2.1"]
-    assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
-    assert params["extra_envs"] == {"SGLANG_X": "1"}
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("origin", "ends_lane"), [("", True), ("eval", False)], ids=["boot", "eval"])
 async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, tmp_path, origin, ends_lane):
@@ -1009,41 +984,6 @@ async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, 
     assert fake.shared_state.baseline_tput == 2245.0
     assert fake.shared_state.enablement.succeeded is ends_lane
     assert (await fake.rounds.held() is None) is ends_lane
-    assert ("enablement" in _bind(fake, specialist_task_id="spec-perf")) is not ends_lane
-
-
-def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):
-    fake = _enqueue_self(tmp_path)
-    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-new.json"
-
-    params = _bind(fake, enablement=True, enablement_before_observation_path="/s/reports/bringup/round-old.json")
-
-    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-old.json"
-    assert "enablement_failure_signature" not in params
-
-
-def test_an_integrate_outside_enablement_is_not_an_enablement_round(tmp_path):
-    fake = _enqueue_self(tmp_path, phase="FRAMEWORK_AGENT", baseline_tput=100.0)
-
-    assert "enablement" not in _bind(fake, specialist_task_id="spec-llm")
-
-
-@pytest.mark.parametrize("closed", ["enablement_succeeded", "enablement_validation_pending"])
-def test_a_closed_lane_takes_no_round_from_an_integrate_that_was_tagged_earlier(tmp_path, closed):
-    """The round was admitted when the lane was open; it executes after the lane moved on."""
-    fake = _enqueue_self(tmp_path, **{closed: True})
-
-    params = _bind(
-        fake,
-        specialist_task_id="spec-late",
-        enablement=True,
-        enablement_failure_signature={"kind": "missing_model_arch"},
-        enablement_before_observation_path="/s/reports/bringup/round-old.json",
-        enablement_setup_commands=["pip install x"],
-        extra_envs={"A": "1"},
-    )
-
-    assert params == {"specialist_task_id": "spec-late", "extra_envs": {"A": "1"}}
 
 
 @pytest.mark.asyncio
