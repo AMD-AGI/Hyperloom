@@ -132,8 +132,7 @@ def main() -> int:
     out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     print(
-        f"[example] workers={workers} chunk={chunk} "
-        f"-> {throughput:.2f} kitems/s, gate={'PASS' if passed else 'FAIL'}"
+        f"[example] workers={workers} chunk={chunk} -> {throughput:.2f} kitems/s, gate={'PASS' if passed else 'FAIL'}"
     )
     print(f"[example] wrote {out}")
     return 0 if passed else 1

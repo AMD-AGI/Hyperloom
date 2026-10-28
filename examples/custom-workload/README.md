@@ -89,7 +89,7 @@ Your numbers will differ; the ranking is machine-dependent, which is the point.
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$PWD"
 
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --framework custom \
     --framework-path "$PWD" \
     --benchmark-scripts-dir "$PWD" \

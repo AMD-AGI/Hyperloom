@@ -57,7 +57,7 @@ Then under Hyperloom:
 export HYPERLOOM_BENCHMARK_BACKEND=bypass
 export HYPERLOOM_BYPASS_SCRIPTS_DIR="$PWD"
 
-python3 -m hyperloom.inference_optimizer.cli optimize \
+python3 -m hyperloom optimize \
     --framework custom --framework-path "$PWD" --benchmark-scripts-dir "$PWD" \
     --model minimap2 --gpu-type mi355x --max-hours 1
 ```

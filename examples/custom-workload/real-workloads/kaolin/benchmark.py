@@ -5,6 +5,7 @@ Objective is the geometric mean of forward and backward latency, reported as
 kops/s = 1000 / geomean_ms, matching the adapter contract. Correctness is
 checked against a pure-PyTorch implementation of the same reduction.
 """
+
 from __future__ import annotations
 
 import os
@@ -34,9 +35,11 @@ _bsrc.write_text(_BIND)
 
 mod = load(
     name="kaolin_sg",
-    sources=[str(SG / "unbatched_reduced_sg_inner_product.cpp"),
-             str(SG / "unbatched_reduced_sg_inner_product_gpu.cu"),
-             str(_bsrc)],
+    sources=[
+        str(SG / "unbatched_reduced_sg_inner_product.cpp"),
+        str(SG / "unbatched_reduced_sg_inner_product_gpu.cu"),
+        str(_bsrc),
+    ],
     extra_include_paths=[str(KAOLIN / "kaolin" / "csrc")],
     extra_cflags=["-O3", "-DWITH_CUDA"],
     extra_cuda_cflags=["-O3", "-DWITH_CUDA"],
@@ -55,8 +58,7 @@ def gate_against_baseline(out, key, store):
     ref_path = Path(store) / f"ref_{key}.pt"
     if ref_path.exists():
         ref = torch.load(ref_path, map_location=out.device)
-        return ((out.double() - ref.double()).abs().max()
-                / ref.double().abs().max().clamp_min(1e-30)).item()
+        return ((out.double() - ref.double()).abs().max() / ref.double().abs().max().clamp_min(1e-30)).item()
     ref_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out.detach().cpu(), ref_path)
     return 0.0
@@ -67,17 +69,17 @@ def bench(n_sg, n_other, iters=50):
     g = torch.Generator(device=dev).manual_seed(7)
     ii = torch.rand(n_sg, 3, device=dev, generator=g, requires_grad=True)
     di = torch.nn.functional.normalize(torch.randn(n_sg, 3, device=dev, generator=g), dim=-1)
-    si = (torch.rand(n_sg, device=dev, generator=g) * 10 + 1)
+    si = torch.rand(n_sg, device=dev, generator=g) * 10 + 1
     oi = torch.rand(n_other, 3, device=dev, generator=g)
     od = torch.nn.functional.normalize(torch.randn(n_other, 3, device=dev, generator=g), dim=-1)
-    os_ = (torch.rand(n_other, device=dev, generator=g) * 10 + 1)
+    os_ = torch.rand(n_other, device=dev, generator=g) * 10 + 1
 
     out = mod.forward(ii, di, si, oi, od, os_)
     store = os.environ.get("KAOLIN_REF_STORE", "/tmp/kaolin_refs")
     rel = gate_against_baseline(out, f"{n_sg}x{n_other}", store)
     out2 = mod.forward(ii, di, si, oi, od, os_)
     if not torch.equal(out, out2):
-        rel = max(rel, 1.0)   # non-deterministic kernel: refuse to trust a speedup
+        rel = max(rel, 1.0)  # non-deterministic kernel: refuse to trust a speedup
 
     def timed(fn, n):
         torch.cuda.synchronize()
@@ -98,7 +100,7 @@ if __name__ == "__main__":
     prod, rels = 1.0, []
     for a, b in shapes:
         f, bw, rel = bench(a, b)
-        prod *= (f + bw)
+        prod *= f + bw
         rels.append(rel)
         print(f"  sg={a:4d} other={b:5d}  fwd={f:7.4f}ms bwd={bw:7.4f}ms  rel={rel:.3e}")
     geo = prod ** (1.0 / len(shapes))
