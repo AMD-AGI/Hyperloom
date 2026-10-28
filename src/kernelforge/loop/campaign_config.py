@@ -27,6 +27,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     implementation_signature,
 )
 from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
+from kernelforge.loop.experiments_layout import ExperimentsLayout
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.agent_relay import AgentRelayPolicy
@@ -214,8 +215,9 @@ class CampaignConfigStore:
 
     def __init__(self, workspace_dir: str):
         self.workspace = Path(workspace_dir).resolve()
-        self.root = self.workspace / "forge_experiments"
-        self.path = self.root / "campaign_config.json"
+        layout = ExperimentsLayout.of(self.workspace)
+        self.root = layout.root
+        self.path = layout.campaign_config
         self.program_path = self.root / "program.md"
 
     def exists(self) -> bool:

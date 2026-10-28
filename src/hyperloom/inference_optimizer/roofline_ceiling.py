@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.checkpoint_quant import WeightDeclaration, weight_declarations
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
@@ -20,54 +21,26 @@ from hyperloom.inference_optimizer.model_config_utils import load_model_config_d
 log = logging.getLogger(__name__)
 
 
+#: Precision tags this module reads, by the precision ``GpuBoard.vendor_peak_tflops`` is keyed on.
+_PRECISION_TAGS: dict[str, tuple[str, ...]] = {
+    "bf16": ("bf16", "bfloat16"),
+    "fp16": ("fp16", "float16"),
+    "fp8": ("fp8", "float8_e4m3fn", "float8_e5m2"),
+    "fp4": ("mxfp4", "fp4", "float4"),
+    "fp32": ("fp32", "float32"),
+}
+
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
 #: ``hbm_bw_gbps`` is vendor peak; ``peak_tflops`` is DENSE peak (missing key
 #: ⇒ 0.0 falls back to T_mem).
-_MI300X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 1307.4,
-    "bfloat16": 1307.4,
-    "fp16": 1307.4,
-    "float16": 1307.4,
-    "fp8": 2614.9,
-    "float8_e4m3fn": 2614.9,
-    "float8_e5m2": 2614.9,
-    "fp32": 163.4,
-    "float32": 163.4,
-}
-_MI355X_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": 2516.6,
-    "bfloat16": 2516.6,
-    "fp16": 2516.6,
-    "float16": 2516.6,
-    "fp8": 5033.2,
-    "float8_e4m3fn": 5033.2,
-    "float8_e5m2": 5033.2,
-    "mxfp4": 10066.4,
-    "fp4": 10066.4,
-    "float4": 10066.4,
-    "fp32": 157.3,
-    "float32": 157.3,
-}
-#: https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
-_R9700_FP16_MATRIX_TFLOPS = 191.0
-_R9700_FP8_MATRIX_TFLOPS = 383.0
-_R9700_PEAK_TFLOPS: dict[str, float] = {
-    "bf16": _R9700_FP16_MATRIX_TFLOPS,
-    "bfloat16": _R9700_FP16_MATRIX_TFLOPS,
-    "fp16": _R9700_FP16_MATRIX_TFLOPS,
-    "float16": _R9700_FP16_MATRIX_TFLOPS,
-    "fp8": _R9700_FP8_MATRIX_TFLOPS,
-    "float8_e4m3fn": _R9700_FP8_MATRIX_TFLOPS,
-    "float8_e5m2": _R9700_FP8_MATRIX_TFLOPS,
-    "fp32": 47.8,
-    "float32": 47.8,
-}
 HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi308x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi325x": {"hbm_gb": 256.0, "hbm_bw_gbps": 6000.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
-    "mi355x": {"hbm_gb": 288.0, "hbm_bw_gbps": 8000.0, "peak_tflops": _MI355X_PEAK_TFLOPS},
-    "r9700": {"hbm_gb": 32.0, "hbm_bw_gbps": 640.0, "peak_tflops": _R9700_PEAK_TFLOPS},
+    product: {
+        "hbm_gb": board.hbm_gb,
+        "hbm_bw_gbps": board.hbm_bw_gbps,
+        "peak_tflops": board.vendor_peaks_by_tag(_PRECISION_TAGS),
+    }
+    for product, board in AMD_GPU_BOARDS.items()
+    if board.hbm_bw_gbps is not None
 }
 
 

@@ -276,6 +276,7 @@ forbidden_modules =
     kernelforge.orchestrator.**
     kernelforge.rewrite_by_flydsl.**
     kernelforge.roofline_ceiling.**
+    kernelforge.run_export.**
     kernelforge.tools.**
     kernelforge.tracker.**
     kernelforge.workspace.**

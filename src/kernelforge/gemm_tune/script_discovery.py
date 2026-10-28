@@ -20,7 +20,6 @@ __all__ = [
     "TUNER_SCRIPT_PATTERNS",
     "discover_tuner_script",
     "inventory",
-    "unwired_scripts",
 ]
 
 
@@ -83,10 +82,3 @@ def inventory(csrc: Path | None = None, *, use_cache: bool = True) -> dict[str, 
     if use_cache:
         _INVENTORY_CACHE[key] = found
     return dict(found)
-
-
-def unwired_scripts(csrc: Path | None = None) -> dict[str, Path]:
-    """Official scripts present on disk that no forge tuner currently drives."""
-    all_scripts = inventory(csrc)
-    wired = {script.stem for name in TUNER_SCRIPT_HINTS if (script := discover_tuner_script(name, csrc)) is not None}
-    return {stem: path for stem, path in all_scripts.items() if stem not in wired}

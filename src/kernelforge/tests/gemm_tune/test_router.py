@@ -362,6 +362,29 @@ class TestGpuTypeAutoDetect:
         assert router._resolve_gfx_arch("gfx942") == "gfx942"
 
     @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("gfx942:sramecc+:xnack-", "gfx942:sramecc+:xnack-"),
+            ("mi300x_vf", ""),
+            ("AMD Instinct MI300X", ""),
+        ],
+    )
+    def test_resolve_gfx_arch_maps_only_exact_names(self, monkeypatch, raw, expected):
+        monkeypatch.setattr(router, "detect_arch", lambda: pytest.fail("an explicit value must not probe"))
+
+        assert router._resolve_gfx_arch(raw) == expected
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("mi300x_vf", "mi300x_vf"),
+            ("gfx942:sramecc+:xnack-", "gfx942:sramecc+:xnack_"),
+        ],
+    )
+    def test_public_resolver_keeps_the_kb_identity_of_an_unlisted_spelling(self, raw, expected):
+        assert router.resolve_gpu_type(raw) == expected
+
+    @pytest.mark.parametrize(
         ("detected", "expected"),
         [("gfx942", "mi300x"), ("gfx950", "mi355x")],
     )

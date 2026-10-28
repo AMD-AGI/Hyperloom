@@ -30,6 +30,7 @@ from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
 from kernelforge.loop.handoffs import HandoffStore
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.run_state import LoopStateStore
+from kernelforge.workspace.edit_policy import hide_forge_loop_output
 from kernelforge.loop.search_policy import SearchPolicyDecision, SearchPolicyEngine
 from kernelforge.tracker import Experiment, ExperimentTracker
 from typing import Any
@@ -199,6 +200,7 @@ class IterationLoop(
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
+        hide_forge_loop_output(self.ic.workspace_dir)
         if workspace_lock_held:
             return await self._run_locked(agents, callbacks=callbacks, usage=usage)
         store = LoopStateStore(self.ic.workspace_dir)

@@ -33,7 +33,7 @@ import yaml
 from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
     GRADED_INTVTY,
@@ -85,10 +85,12 @@ from hyperloom.inference_optimizer.model_config_utils import (
 
 log = logging.getLogger(__name__)
 
+_XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
+
 # The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
 # has no such kernel. The gate is the arch, so the board list is read off the
-# identity table rather than typed out beside it.
-_GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
+# board table rather than typed out beside it.
+_GFX942_GPU_TYPES = frozenset(product for product, board in AMD_GPU_BOARDS.items() if board.gfx == "gfx942")
 
 
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
@@ -970,6 +972,7 @@ class _RequestWindow(NamedTuple):
     #: limit) a surviving ``max_iterations`` is rejected rather than trusted.
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
+    xdit_profiler_args: tuple[str, ...] = ()
 
 
 def _pin_benchmark_target(bench: dict[str, Any], target: BenchmarkTarget) -> None:
@@ -1064,6 +1067,24 @@ def _pin_workload_shape_envs(envs: dict[str, Any]) -> None:
         envs["ROCR_VISIBLE_DEVICES"] = derived
 
 
+def _apply_xdit_profile(envs: dict[str, Any]) -> tuple[str, ...]:
+    """Set xDiT profiler flags and write patch status; return the flags for restore."""
+    from ._server_patcher import ensure_xdit_patched_for_tracelens
+    from ._profile_setup import _tracelens_patch_enabled, write_tracelens_patch_status
+
+    xdit_patch_attempted = _tracelens_patch_enabled()
+    xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+    needed = ["--profile_wait 1"]
+    if xdit_patched:
+        needed += ["--profile_capture_phase", "--profile_with_stack"]
+    existing = str(envs.get(_XDIT_EXTRA_ARGS_ENV, "")).strip()
+    missing = [f for f in needed if f not in existing]
+    if missing:
+        envs[_XDIT_EXTRA_ARGS_ENV] = f"{existing} {' '.join(missing)}".strip()
+    write_tracelens_patch_status(envs, attempted=xdit_patch_attempted, patched=xdit_patched, fw="xdit")
+    return tuple(needed)
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -1090,6 +1111,8 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # Scriptable image frameworks (xDiT diffusion) have no LLM decode steady-state
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
+    _is_xdit_profile = is_profile and framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV
+    xdit_saved_args = _apply_xdit_profile(envs) if _is_xdit_profile else ()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1124,7 +1147,9 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
                 envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
-    return _RequestWindow(isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps)
+    return _RequestWindow(
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+    )
 
 
 def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1267,13 +1292,10 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
-    if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+    if framework_registry.extra_args_env(bench.get("framework")) == _XDIT_EXTRA_ARGS_ENV:
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1485,6 +1507,16 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if window.xdit_profiler_args and framework_env == _XDIT_EXTRA_ARGS_ENV:
+        current = str(envs.get(framework_env, "")).strip()
+        missing = [f for f in window.xdit_profiler_args if f not in current]
+        if missing:
+            log.warning(
+                "profile server args lost xDiT profiler flags %r (replace_args=%s); restoring.",
+                missing,
+                bool(replace_args),
+            )
+            envs[framework_env] = merge_server_args(current, " ".join(missing))
     # After the restore, so a vLLM delay it re-added is divided like any other.
     if window.profiling and window.serves_requests:
         fit_capture_to_speculative(envs, framework_env)
