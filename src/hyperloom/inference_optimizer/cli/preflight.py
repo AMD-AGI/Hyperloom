@@ -533,12 +533,13 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
-# Every `ray start` option the orchestrator's Ray runtime passes to the head this
-# step provisions; the kernel-tool installer certifies the wider set it passes
-# with its own probe. Asking the CLI's own parser for these certifies it, so a
-# Ray/Click pair whose CLI works is never refused over a version number.
-_RAY_START_OPTIONS = tuple(
-    "--head --port --num-gpus --dashboard-host --dashboard-port --ray-client-server-port --resources".split()
+# A representative `ray start` argv of the orchestrator's Ray runtime: every option it passes to the head
+# this step provisions, with values of its kind. Ray's own parser reading this argv is the certification, so
+# a pair whose `ray start` parses what Hyperloom passes is never refused over a version number.
+_RAY_START_ARGV = (
+    *"--head --port=6379 --dashboard-host=127.0.0.1 --dashboard-port=8265".split(),
+    *"--ray-client-server-port=10001 --num-gpus=8 --resources".split(),
+    '{"serving_slot": 1}',
 )
 
 
@@ -547,7 +548,7 @@ import re
 import sys
 
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
-RAY_START_OPTIONS = __RAY_START_OPTIONS__
+RAY_START_ARGV = __RAY_START_ARGV__
 ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
@@ -570,21 +571,20 @@ elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
     raise SystemExit(1)
 
 try:
-    from ray.scripts.scripts import main as _ray_cli_main
+    import click
+    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
     print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
 try:
-    _ray_start = _ray_cli_main.commands["start"]
-    _accepted = {opt for param in _ray_start.params for opt in param.opts}
+    _ray_start = _ray_cli.commands["start"]
+    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
+except click.UsageError as exc:
+    print(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}", file=sys.stderr)
+    raise SystemExit(1)
 except Exception as exc:
     print(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-_missing = [opt for opt in RAY_START_OPTIONS if opt not in _accepted]
-if _missing:
-    print(f"ray start does not accept {' '.join(_missing)}", file=sys.stderr)
     raise SystemExit(1)
 
 print(ray.__version__)
@@ -592,7 +592,7 @@ print(ray.__version__)
 
 
 _RAY_SMOKE = _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION).replace(
-    "__RAY_START_OPTIONS__", repr(_RAY_START_OPTIONS)
+    "__RAY_START_ARGV__", repr(_RAY_START_ARGV)
 )
 
 

@@ -30,27 +30,48 @@ def ray_defaults(monkeypatch):
     monkeypatch.delenv("RAY_VERSION", raising=False)
 
 
-def _fake_site(tmp_path: Path, *, ray_version: str, start_options: tuple[str, ...] | None = None) -> Path:
-    """A site dir with an importable ray shim whose CLI is a real click group."""
-    options = cli_preflight._RAY_START_OPTIONS if start_options is None else start_options
-    site = tmp_path / "site"
-    ray_pkg = site / "ray"
-    (ray_pkg / "scripts").mkdir(parents=True)
+# How Ray declares the `ray start` options Hyperloom passes: a type each, so the
+# shim refuses a wrong value the way Ray's own parser does.
+_RAY_START_OPTION_DECLS: dict[str, str] = {
+    "--head": "is_flag=True, default=False",
+    "--port": "type=int, default=None",
+    "--dashboard-host": "type=str, default='127.0.0.1'",
+    "--dashboard-port": "type=int, default=8265",
+    "--ray-client-server-port": "type=int, default=None",
+    "--num-gpus": "type=int, default=None",
+    "--resources": "type=str, default='{}'",
+}
+
+
+def write_ray_cli_shim(ray_pkg: Path, *, ray_version: str, start_options: dict[str, str] | None = None) -> None:
+    """Write a ray shim shaped like ray/scripts/scripts.py: the commands on a `cli` group, `main` wrapping it."""
+    options = _RAY_START_OPTION_DECLS if start_options is None else start_options
     (ray_pkg / "__init__.py").write_text(f'__version__ = "{ray_version}"\n')
-    (ray_pkg / "scripts" / "__init__.py").write_text("")
-    decorators = "".join(f"@click.option({opt!r})\n" for opt in options)
+    decorators = "".join(f"@click.option({opt!r}, {decl})\n" for opt, decl in options.items())
     (ray_pkg / "scripts" / "scripts.py").write_text(
         "import click\n"
         "\n\n"
         "@click.group()\n"
-        "def main():\n"
+        "def cli():\n"
         "    pass\n"
         "\n\n"
-        "@main.command()\n"
+        "@cli.command()\n"
         f"{decorators}"
         "def start(**kwargs):\n"
         "    pass\n"
+        "\n\n"
+        "def main():\n"
+        "    return cli()\n"
     )
+
+
+def _fake_site(tmp_path: Path, *, ray_version: str, start_options: dict[str, str] | None = None) -> Path:
+    """A site dir holding that shim and the dist-info of the matching release."""
+    site = tmp_path / "site"
+    ray_pkg = site / "ray"
+    (ray_pkg / "scripts").mkdir(parents=True)
+    (ray_pkg / "scripts" / "__init__.py").write_text("")
+    write_ray_cli_shim(ray_pkg, ray_version=ray_version, start_options=start_options)
     dist = site / f"ray-{ray_version}.dist-info"
     dist.mkdir()
     (dist / "METADATA").write_text(f"Metadata-Version: 2.1\nName: ray\nVersion: {ray_version}\n")
@@ -87,14 +108,45 @@ def test_smoke_accepts_the_pinned_ray_whose_cli_works(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_shim_mirrors_ray_s_wrapper_main(tmp_path: Path) -> None:
+    """Ray's `main` is a plain wrapper: reading `.commands` off it finds nothing."""
+    site = _fake_site(tmp_path, ray_version="2.44.1")
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from ray.scripts.scripts import main;print(hasattr(main, 'commands'))"],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": str(site), "PATH": "/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
+
+
 def test_smoke_rejects_a_cli_that_lost_an_option(tmp_path: Path) -> None:
-    options = tuple(opt for opt in cli_preflight._RAY_START_OPTIONS if opt != "--resources")
+    options = {opt: decl for opt, decl in _RAY_START_OPTION_DECLS.items() if opt != "--resources"}
     site = _fake_site(tmp_path, ray_version="2.44.1", start_options=options)
 
     result = _run_smoke(site)
 
     assert result.returncode == 1
-    assert "ray start does not accept --resources" in result.stderr
+    assert "ray start does not accept" in result.stderr
+    # click words this differently across releases; what has to reach the log is
+    # which option the installed CLI no longer knows.
+    assert re.search(r"No such option.*--resources", result.stderr), result.stderr
+
+
+def test_smoke_rejects_a_cli_that_refuses_the_value_hyperloom_passes(tmp_path: Path) -> None:
+    # The option is still there, but a release narrowed what it takes: enumerating
+    # names would pass this CLI and `ray start` would then fail on the head.
+    options = dict(_RAY_START_OPTION_DECLS, **{"--num-gpus": "type=click.IntRange(0, 4), default=None"})
+    site = _fake_site(tmp_path, ray_version="2.44.1", start_options=options)
+
+    result = _run_smoke(site)
+
+    assert result.returncode == 1
+    assert "ray start does not accept" in result.stderr
+    assert "--num-gpus" in result.stderr
 
 
 def test_smoke_rejects_a_cli_that_fails_to_import(tmp_path: Path) -> None:
@@ -126,12 +178,11 @@ def test_certified_start_options_are_the_ones_the_head_is_started_with() -> None
         if isinstance(node, ast.FunctionDef) and node.name in _HEAD_ARGV_BUILDERS
     }
 
+    certified = {token.split("=", 1)[0] for token in cli_preflight._RAY_START_ARGV if token.startswith("--")}
     assert set(bodies) == set(_HEAD_ARGV_BUILDERS), f"ray start argv builders moved: {sorted(bodies)}"
     for name, body in bodies.items():
         for option in re.findall(r"--[a-z][a-z-]+", body):
-            assert option in cli_preflight._RAY_START_OPTIONS, (
-                f"{name} passes {option}, which preflight never certifies"
-            )
+            assert option in certified, f"{name} passes {option}, which preflight never certifies"
 
 
 def test_probe_env_reindexes_hip_devices_from_rocr(monkeypatch) -> None:

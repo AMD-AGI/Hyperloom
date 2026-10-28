@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -122,7 +125,7 @@ CHECK_ONLY=0
 DRY_RUN=1
 RAY_VERSION="2.55.0"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-RAY_START_OPTIONS="--head"
+RAY_START_ARGV="--head"
 """
     script = f"set -uo pipefail\n{stub}\n{fn_src}\nensure_ray\n"
     result = subprocess.run(["bash", "-lc", script], check=False, capture_output=True, text=True)
@@ -141,14 +144,50 @@ def test_pip_installs_ray_alone() -> None:
     assert "click" not in out
 
 
-def test_certified_start_options_are_the_ones_the_head_is_started_with() -> None:
-    """The options ensure_ray asks the CLI parser for are the ones it later passes."""
+def _declared_start_argv() -> list[str]:
+    """RAY_START_ARGV as the shell expands it, hence as ensure_ray's probe sees it."""
     source = INSTALL_SH.read_text(encoding="utf-8")
-    declared = next(
-        line.split("=", 1)[1].strip('"') for line in source.splitlines() if line.startswith("RAY_START_OPTIONS=")
-    ).split()
-    started = _extract_shell_function("ensure_ray_started")
+    assignment = next((line for line in source.splitlines() if line.startswith("RAY_START_ARGV=")), "")
+    assert assignment, "RAY_START_ARGV not found in install.sh"
+    return shlex.split(shlex.split(assignment)[0].split("=", 1)[1])
 
-    assert declared, "RAY_START_OPTIONS not found in install.sh"
-    for option in declared:
-        assert option in started, f"{option} is certified but never passed to ray start"
+
+def _head_start_options(body: str) -> set[str]:
+    """The options ensure_ray_started hands ray start, the probed ports included."""
+    invocation = re.search(r"_ray_start_detached (?:.*\\\n)*.*\n", body)
+    assert invocation, "ensure_ray_started no longer starts the head through _ray_start_detached"
+    ports = "\n".join(line for line in body.splitlines() if "ray_port_args+=(" in line)
+    return set(re.findall(r"--[a-z][a-z-]*", invocation.group(0) + "\n" + ports))
+
+
+def test_certified_start_argv_carries_the_options_the_head_is_started_with() -> None:
+    """The argv ensure_ray parses holds exactly the options it later passes to ray start."""
+    declared = _declared_start_argv()
+    passed = _head_start_options(_extract_shell_function("ensure_ray_started"))
+
+    assert declared, "RAY_START_ARGV is empty"
+    certified = {argument.split("=", 1)[0] for argument in declared}
+    assert certified == passed, f"certified {sorted(certified)} but starts the head with {sorted(passed)}"
+
+
+def test_certified_start_argv_carries_a_value_of_each_option_s_kind() -> None:
+    """Names alone never reach Ray's parser: the probe has to hand it real values."""
+    declared = dict(
+        argument.split("=", 1) if "=" in argument else (argument, "") for argument in _declared_start_argv()
+    )
+
+    assert declared["--port"].isdigit()
+    assert declared["--ray-client-server-port"].isdigit()
+    assert declared["--num-gpus"].isdigit()
+    assert declared["--include-dashboard"] in ("true", "false")
+    assert json.loads(declared["--resources"]) == {"serving_slot": 1}
+
+
+def test_ensure_ray_certifies_the_cli_through_ray_s_own_parser() -> None:
+    """Resolve the click group Ray publishes and let it parse, rather than read option names."""
+    probe = _extract_shell_function("ensure_ray")
+
+    assert "from ray.scripts.scripts import cli" in probe
+    assert "make_context(" in probe
+    assert "click.UsageError" in probe
+    assert "param.opts" not in probe

@@ -370,11 +370,13 @@ ensure_moreutils() {
 _RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
 RAY_VERSION="${RAY_VERSION:-2.44.1}"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
-# The `ray start` options this script passes to the head below. ensure_ray
-# certifies the CLI by asking its own parser for them rather than by checking
-# the version of click it is built on, so a click release that leaves the CLI
-# working is never a reason to refuse or downgrade the install.
-RAY_START_OPTIONS="--head --disable-usage-stats --port --ray-client-server-port --num-gpus --include-dashboard --resources"
+# A representative `ray start` argv of the one this script runs on the head below:
+# every option, with values of its kind (probed ports, the node's GPU count, the
+# head's custom resources). ensure_ray certifies the CLI by handing this argv to
+# Ray's own parser rather than by checking the version of click it is built on, so
+# a click release that leaves the CLI working is never a reason to refuse or
+# downgrade the install. Quoted the way a shell quotes it: the probe uses shlex.
+RAY_START_ARGV="--head --disable-usage-stats --port=6379 --ray-client-server-port=10001 --num-gpus=1 --include-dashboard=false --resources='{\"serving_slot\": 1}'"
 
 # The default Ray pin predates newer CPython ABIs (no cp314 wheels before
 # 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
@@ -442,29 +444,30 @@ ensure_ray() {
     run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
-    RAY_VERSION="$RAY_VERSION" RAY_START_OPTIONS="$RAY_START_OPTIONS" python3 - <<'PY'
+    RAY_VERSION="$RAY_VERSION" RAY_START_ARGV="$RAY_START_ARGV" python3 - <<'PY'
 import os
+import shlex
 
 import ray
 
 RAY_VERSION = os.environ["RAY_VERSION"]
-RAY_START_OPTIONS = os.environ["RAY_START_OPTIONS"].split()
+RAY_START_ARGV = shlex.split(os.environ["RAY_START_ARGV"])
 
 if ray.__version__ != RAY_VERSION:
     raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
 try:
-    from ray.scripts.scripts import main as _ray_cli_main
+    import click
+    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
     raise SystemExit(f"ray CLI import failed: {type(exc).__name__}: {exc}") from exc
 try:
-    _ray_start = _ray_cli_main.commands["start"]
-    _accepted = {opt for param in _ray_start.params for opt in param.opts}
+    _ray_start = _ray_cli.commands["start"]
+    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
+except click.UsageError as exc:
+    raise SystemExit(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}") from exc
 except Exception as exc:
     raise SystemExit(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}") from exc
-_missing = [opt for opt in RAY_START_OPTIONS if opt not in _accepted]
-if _missing:
-    raise SystemExit("ray start does not accept " + " ".join(_missing))
-print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_OPTIONS)}")
+print(f"[kernel-agent] ray version: {ray.__version__}, ray start accepts {' '.join(RAY_START_ARGV)}")
 PY
   fi
 }

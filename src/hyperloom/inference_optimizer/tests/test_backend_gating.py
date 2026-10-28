@@ -92,11 +92,12 @@ def test_kernel_install_validates_ray_cli_and_serving_slot():
     assert 'RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"' in text
     # The CLI is certified by what its parser accepts, not by the version of
     # click it was built on, so no click release is pinned or downgraded here.
-    assert "RAY_START_OPTIONS=" in text
+    assert "RAY_START_ARGV=" in text
     assert "ray start does not accept " in text
     assert "RAY_CLI_CLICK_MAX_VERSION" not in text
     assert "CLICK_INSTALL_SPEC" not in text
-    assert "from ray.scripts.scripts import main" in text
+    # `main` is a plain wrapper; the commands live on the `cli` group Ray publishes.
+    assert "from ray.scripts.scripts import cli" in text
 
     assert "ray_head_has_serving_slot() {" in text
     assert '"serving_slot" in resources' in text

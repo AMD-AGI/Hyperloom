@@ -12,6 +12,8 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import preflight
 
+from .test_preflight_ray_version_floor import _RAY_START_OPTION_DECLS, write_ray_cli_shim
+
 
 @pytest.fixture
 def ray_packages(tmp_path, monkeypatch):
@@ -21,21 +23,8 @@ def ray_packages(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     monkeypatch.delenv("RAY_VERSION", raising=False)
 
-    def configure(ray_version, start_options=preflight._RAY_START_OPTIONS):
-        (ray / "__init__.py").write_text(f"__version__ = {ray_version!r}\n")
-        options = "".join(f"@click.option({opt!r})\n" for opt in start_options)
-        (ray / "scripts/scripts.py").write_text(
-            "import click\n"
-            "\n\n"
-            "@click.group()\n"
-            "def main():\n"
-            "    pass\n"
-            "\n\n"
-            "@main.command()\n"
-            f"{options}"
-            "def start(**kwargs):\n"
-            "    pass\n"
-        )
+    def configure(ray_version, start_options=None):
+        write_ray_cli_shim(ray, ray_version=ray_version, start_options=start_options)
 
     return configure
 
@@ -84,15 +73,14 @@ def test_override_keeps_cli_import_check(ray_packages, tmp_path):
     assert "ray CLI import failed" in result.stderr
 
 
-def test_override_keeps_the_cli_option_check(ray_packages):
+def test_override_keeps_the_cli_parse_check(ray_packages):
     # Whatever click the override's Ray is built on, the smoke passes exactly
-    # when that CLI parses the options the orchestrator hands `ray start`.
-    offered = ("--head", "--port")
+    # when that CLI parses the argv the orchestrator hands `ray start`.
+    offered = {opt: _RAY_START_OPTION_DECLS[opt] for opt in ("--head", "--port")}
     ray_packages("2.58.0", start_options=offered)
     result = preflight._ray_smoke(sys.executable, "2.58.0")
     assert result.returncode != 0
-    missing = " ".join(opt for opt in preflight._RAY_START_OPTIONS if opt not in offered)
-    assert f"ray start does not accept {missing}" in result.stderr
+    assert f"ray start does not accept {' '.join(preflight._RAY_START_ARGV)}" in result.stderr
 
     ray_packages("2.58.0")
     assert preflight._ray_smoke(sys.executable, "2.58.0").returncode == 0
