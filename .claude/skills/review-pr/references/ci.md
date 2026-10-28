@@ -6,11 +6,13 @@
 `raw_vocabulary_problems`, `global_write_problems`, `forwarder_problems` and
 `single_implementation_problems` on every PR, reporting them as A1, A9, A10, A11 and A12. Those
 five are not review rules: a finding on one of them belongs to the `code-metrics` job, and a card
-that re-derives it is re-flagging a gated rule. Two of A8's shapes are gated too, each with a
-limit: `flag_argument_problems` reports a flag argument only on a function new at this head,
-because it walks `change.new_functions()`, and vulture reports a parameter no body reads. Neither
-sees a flag added to a function that already existed, and nothing here sees a parameter only tests
-vary -- `pyproject.toml` selects no `ARG` rule. Those two are A8's, which is why it survives. The
+that re-derives it is re-flagging a gated rule. A8 is the partial case. `flag_argument_problems`
+reports a flag argument, but only on a function absent from the base tree, so the flag added to a
+function that already existed stays A8's. `vulture` reports a parameter no body reads, which is
+also the gate's. Nothing here measures a parameter only tests vary, on any function --
+`pyproject.toml` selects no `ARG` rule, and `_selecting_flag` matches only a body opening with
+`if <flag>:` and ending that branch in `return` or `raise`. That shape is A8's wherever it
+appears, new function or not, which is why the rule survives with two differently-scoped halves. The
 same job measures the complexity and parameter ceilings; D12 and D14 only ask the question it
 cannot, which is whether a PR carrying the `baseline-raise` label gives its reason.
 
