@@ -252,6 +252,8 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         """Close the iteration: publish the round's best candidate that cleared the bar, or record why none did."""
         clearing = [(node, result) for node, result in candidates if result.kept]
         frame = _IterationFrame(turn.iteration, {"plan": _round_summary(outcomes)}, StagedMerge(None, ""))
+        # The relay switches profile only between iterations, so every slot of this round ran on the active one.
+        self._bind_session_producer(frame.session_sink, self.run_state.agent_relay.active_profile_id)
         if clearing:
             node, _ = max(clearing, key=lambda item: item[0].score)
             await self._publish_node(node, frame, callbacks)
@@ -259,6 +261,7 @@ class TreeSearchLoop(TreePlanningMixin, TreeAdmissionMixin, IterationLoop):
         measured = [o.result for o in outcomes if o.result is not None]
         if not measured:
             summary = IterationResult(turn.iteration, 0.0, False, "no slot produced a candidate to measure")
+            self._stamp_result_profile(summary, frame.session_sink)
             await self._abandon_iteration(
                 summary,
                 frame,

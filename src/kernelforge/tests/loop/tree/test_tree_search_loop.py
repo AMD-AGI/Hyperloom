@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,15 @@ import pytest
 
 from kernelforge.loop import candidate_measurement as measurement_module
 from kernelforge.loop import runner as runner_module
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentProfile,
+    AgentRelayConfig,
+    ProfileAvailability,
+    ProviderAvailability,
+)
 from kernelforge.loop.runner import IterationConfig, LoopAgents
+from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.loop.tree.model import AttemptOutcome, NodeSource, Round, Slot, SlotType
 from kernelforge.loop.tree.refs import pinned_nodes
 from kernelforge.loop.tree.search_loop import TreeSearchLoop
@@ -146,7 +155,54 @@ class _Selector:
         return SelectorAnswer(text=json.dumps({"slots": slots}), payload={"slots": slots})
 
 
-def _run_campaign(tmp_path, monkeypatch, *, rounds: int, workspace: Path | None = None, resume: bool = False):
+class _SlowerPlanning(_Planning):
+    """Every route it plans is slower than the root."""
+
+    async def run(self, context, *, usage=None, lanes=1):
+        plans = ("set VALUE = 12", "set VALUE = 15")
+        return SimpleNamespace(
+            optimization_plans=plans[:lanes], structured_output_diagnostics={"lanes": {"planned": lanes}}
+        )
+
+
+def _relay_of(agents: LoopAgents) -> LoopAgents:
+    """The same agents served as the one profile of a relay."""
+    profile = AgentProfile("claude_opus", "claude", "claude-opus-5")
+    availability = AgentAvailabilitySnapshot(
+        checked_at="2026-10-28T00:00:00Z",
+        session_index=1,
+        providers={"claude": ProviderAvailability(available=True)},
+        profiles={
+            "claude_opus": ProfileAvailability(
+                provider="claude", model="claude-opus-5", provider_available=True, model_available=True, available=True
+            )
+        },
+    )
+    bundle = SearchActorBundle(
+        profile=profile,
+        agent_fn=lambda *_args, **_kwargs: None,
+        agent_factory=agents.agent_factory,
+        orchestration_factory=agents.orchestration_factory,
+        slot_selector=agents.slot_selector,
+    )
+    pool = SearchActorPool(
+        config=AgentRelayConfig(primary_profile_id="claude_opus", profiles=(profile,)),
+        availability=availability,
+        bundles={"claude_opus": bundle},
+    )
+    return replace(agents, search_actors=pool)
+
+
+def _run_campaign(
+    tmp_path,
+    monkeypatch,
+    *,
+    rounds: int,
+    workspace: Path | None = None,
+    resume: bool = False,
+    planning=_Planning,
+    relay: bool = False,
+):
     workspace = workspace or _workspace(tmp_path)
     measured: list[int] = []
     _stub_device(monkeypatch, measured)
@@ -171,10 +227,10 @@ def _run_campaign(tmp_path, monkeypatch, *, rounds: int, workspace: Path | None 
     selector.loop = loop
     agents = LoopAgents(
         agent_factory=_lane_factory,
-        orchestration_factory=_Planning,
+        orchestration_factory=planning,
         slot_selector=selector,
     )
-    asyncio.run(loop.run(agents))
+    asyncio.run(loop.run(_relay_of(agents) if relay else agents))
     return loop, workspace, selector, measured
 
 
@@ -243,6 +299,17 @@ def test_a_resume_records_the_round_a_killed_session_left_open_and_carries_on(tm
     assert [item.outcome for item in second if item.outcome is not AttemptOutcome.ERROR] == [AttemptOutcome.NODE] * 2
     assert resumed.round is None
     assert len(resumed.nodes) == 5
+
+
+def test_a_round_that_publishes_nothing_counts_against_the_profile_that_ran_it(tmp_path, monkeypatch):
+    loop, workspace, _selector, _measured = _run_campaign(
+        tmp_path, monkeypatch, rounds=1, planning=_SlowerPlanning, relay=True
+    )
+    handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
+
+    assert SearchTreeStore(workspace / "forge_experiments").load().published_best == loop._tree.root.commit
+    assert loop.run_state.agent_relay.active_no_improvement_streak == 1
+    assert (handoff["agent_profile_id"], handoff["agent_model"]) == ("claude_opus", "claude-opus-5")
 
 
 def test_a_workspace_with_untracked_sources_is_refused(tmp_path, monkeypatch):
