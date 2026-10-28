@@ -158,3 +158,19 @@ def test_a_collective_row_says_its_time_includes_the_wait_for_other_ranks(tmp_pa
         "| 40.0% | 0.01 | `void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>` (collective) |",
     ]
     assert sw.COLLECTIVE_NOTE in body
+
+
+def test_an_idle_step_is_not_an_observed_decode_class(tmp_path):
+    """sglang labels a DP-attention rank's empty forward ``step[IDLE bs=0]``; no decode case runs at bs=0."""
+    events = [
+        step("step[VERIFY bs=3]", 0.0, 14.0),
+        kernel("moe_gemm", 1.0, 9.0),
+        step("step[IDLE bs=0]", 100.0, 14.0),
+        kernel("cross_device_reduce", 101.0, 9.0),
+        step("step[IDLE bs=0]", 200.0, 14.0),
+        kernel("cross_device_reduce", 201.0, 9.0),
+    ]
+
+    rows = sw.render_observed_decode_classes(sw.hot_kernels_by_class(write_trace(tmp_path / "t.json.gz", events)))
+
+    assert rows == ["- `VERIFY bs=3`: 1 step(s), 100.0% of decode steps"]

@@ -213,8 +213,13 @@ _OBSERVED_ROW_RE = re.compile(r"^- `[A-Z_]+ bs=(?P<bs>\d+)`:", re.MULTILINE)
 
 def render_observed_decode_classes(by_class: dict[str, dict[str, Any]] | None) -> list[str]:
     """One row per decode class, most steps first, with its share of all decode steps."""
+    # IDLE is a DP-attention rank's empty forward (bs=0): it bounds no decode case.
     decode = sorted(
-        ((window_class, data["steps"]) for window_class, data in (by_class or {}).items() if data["is_decode"]),
+        (
+            (window_class, data["steps"])
+            for window_class, data in (by_class or {}).items()
+            if data["is_decode"] and step_kind(window_class) != "IDLE"
+        ),
         key=lambda kv: (-kv[1], kv[0]),
     )
     total = sum(steps for _class, steps in decode)
