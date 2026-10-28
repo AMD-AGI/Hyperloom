@@ -71,7 +71,7 @@ class ExplorePromotionMixin:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
         if result.get("status") == STATUS_SCREENED:
             # A cycle batch grades levers for a later bundle; it measured no replay and lifts nothing.
-            await self._record_cycle_batch(result)
+            self._record_cycle_batch(result)
             outcome.changed = True
             return
         changed = False
@@ -130,10 +130,10 @@ class ExplorePromotionMixin:
         outcome.changed = changed
         outcome.audit_extras = _explore_audit_extras(result)
 
-    async def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
+    def _record_cycle_batch(self, result: Mapping[str, Any]) -> None:
         """Write a cycle batch's verdict onto every lever its arms switched on, and keep its base2 as the reference."""
         if result.get("parity_broken"):
-            await self._close_cycle_screen(str(result.get("reason") or "the switched-off tree moved"))
+            self._close_cycle_screen(str(result.get("reason") or "the switched-off tree moved"))
         # The base's capture describes the stack whether or not the batch's timing holds.
         capture = ((result.get("arms") or {}).get("base") or {}).get("attribution_trace")
         if capture:
@@ -147,13 +147,13 @@ class ExplorePromotionMixin:
         for arm in result.get(CYCLE_ARMS_PARAM) or []:
             verdict = verdicts.get(str(arm.get("name") or "")) or {}
             if arm.get(BUNDLE_ARM_KEY):
-                await self._record_bundle_screen(arm, str(verdict.get("verdict") or VERDICT_BROKEN))
+                self._record_bundle_screen(arm, str(verdict.get("verdict") or VERDICT_BROKEN))
                 continue
             gain, source = _cycle_attribution(verdict)
             for switch in arm.get("envs") or {}:
                 self.shared_state.record_framework_lever_attribution(str(switch), gain_pct=gain, source=source)
 
-    async def _record_bundle_screen(self, arm: Mapping[str, Any], verdict: str) -> None:
+    def _record_bundle_screen(self, arm: Mapping[str, Any], verdict: str) -> None:
         """Keep a bundle arm's verdict on its bundle; its levers keep the verdicts they earned alone."""
         key = str(arm[BUNDLE_ARM_KEY])
         self.shared_state.cycle_bundle_screens = {**(self.shared_state.cycle_bundle_screens or {}), key: verdict}
@@ -161,11 +161,6 @@ class ExplorePromotionMixin:
             switches = sorted(arm.get("envs") or {})
             log.warning(
                 "cycle bench: lever bundle %s is %s with %s on together; it stays dormant", key, verdict, switches
-            )
-            await self.bus.record_observation(
-                _OBSERVER,
-                _OBSERVATION,
-                {"kind": "lever_bundle_screened_out", "bundle": key, "verdict": verdict, "switches": switches},
             )
 
     def _keep_cycle_reference(self, result: Mapping[str, Any]) -> None:
@@ -176,11 +171,10 @@ class ExplorePromotionMixin:
                 "cycle_ms": {str(bs): float(ms) for bs, ms in base2.items()},
             }
 
-    async def _close_cycle_screen(self, reason: str) -> None:
+    def _close_cycle_screen(self, reason: str) -> None:
         """Stop admitting patches dormant: one already admitted moved the tree with its switches off."""
         self.shared_state.cycle_screen_refused = reason
         log.warning("cycle bench: dormant admission closed for the session: %s", reason)
-        await self.bus.record_observation(_OBSERVER, _OBSERVATION, {"kind": "cycle_screen_closed", "reason": reason})
 
     def _release_unscreened_levers(self, params: Mapping[str, Any] | None) -> None:
         """Hand a cycle batch's levers back to replay attribution, and its bundle to its replay round, when the batch
