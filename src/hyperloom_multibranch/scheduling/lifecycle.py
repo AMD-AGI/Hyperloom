@@ -221,9 +221,10 @@ class Session:
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         warm_start = None if services.recipe_kb is None else WarmStartSource(services.recipe_kb, self._blobs)
-        self._prelude = Prelude(
-            context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
+        prelude_services = PreludeServices(
+            peers.repo, peers.gate, tests, peers.toolbox, peers.on_this_machine, self._open_integration
         )
+        self._prelude = Prelude(context, prelude_services, warm_start=warm_start)
         self._integrator = self._build_integrator(peers.repo, checks, services)
         self._open_llm_roles(services)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
@@ -407,7 +408,6 @@ class Session:
         )
         try:
             prelude = await self._root_session(budget, hard_stop)
-            longest_root_test = await self._prelude.measure_baseline(prelude.root_commit)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         start_commit = await self._replay_champion(prelude)
@@ -423,7 +423,7 @@ class Session:
                 policy_versions=self._policy_versions(),
             )
         )
-        explore_end = budget.explore_end(self._clock.now(), longest_root_test)
+        explore_end = budget.explore_end(self._clock.now(), prelude.longest_root_test)
         self._phase("explore", explore_end=explore_end)
         window = ExploreWindow(
             prelude.root_commit,
@@ -534,8 +534,8 @@ class Session:
         return Closer(self._layout, self._stopper, closing, self._clock)
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """PRELUDE's first step: the root commit and the warm-start leads every specialist is briefed on, and the
-        integration branch with its K that the baseline is then measured under. A reused PRELUDE starts no child."""
+        """PRELUDE but for the champion's replay: the root commit with its baseline, and the warm-start leads every
+        specialist is briefed on. A reused PRELUDE starts no child."""
 
         workload, reused = self._settings.workload, self._settings.reuse_prelude
         if reused is None:
@@ -544,9 +544,13 @@ class Session:
             prelude = await self._prelude.reuse(reused, workload, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
         self._briefs.references = await asyncio.to_thread(self._reference_leads, prelude.profile)
-        self._roster.add_integration(prelude.root_commit, k=1)
-        await self._branches.push_quota()
         return prelude
+
+    async def _open_integration(self, root: str) -> None:
+        """Put the integration branch at ``root`` on the roster with its K, which the toolbox is then given."""
+
+        self._roster.add_integration(root, k=1)
+        await self._branches.push_quota()
 
     def _reference_dirs(self) -> dict[str, Path]:
         """Where the session keeps each reference the run was given, by name."""

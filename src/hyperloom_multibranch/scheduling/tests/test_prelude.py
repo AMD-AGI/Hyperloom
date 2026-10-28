@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,11 @@ import hyperloom
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.codec import encode
@@ -51,6 +53,8 @@ from hyperloom_multibranch.rulegate.rules import AgentXRule, Rule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
+    CHILD_CARDS_ENV,
+    CHILD_FIRST,
     PREFLIGHT_OUT_OF_TIME,
     Prelude,
     PreludeFailed,
@@ -60,6 +64,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     prelude_argv,
     reused_prelude,
 )
+from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, ReusedPrelude, Workload
@@ -67,9 +72,9 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASE_IMAGE_DIGEST,
     OneChampionKB,
     LAUNCH_FLAG,
+    LeasingToolbox,
     MbFakeChildRegistry,
     RecordedReservations,
-    RecordingToolbox,
     measure_no_throughput,
     session_gate,
 )
@@ -86,6 +91,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     TRACE_FILE,
     child_with_patch,
     failed_child,
+    framework_checkout,
     head_of,
     with_agentx_baseline_run,
     with_roofline_profile,
@@ -96,6 +102,8 @@ NOW = 1_000_000.0
 #: The image the fake toolbox measures on, which the root recipe must carry.
 IMAGE = BASE_IMAGE_DIGEST
 STUBBORN_CHILD = ("sh", "-c", "trap '' TERM; sleep 60")
+#: Real seconds a child that outlives its root tests runs; one that holds PRELUDE up runs for :data:`LONG_CHILD`.
+SHORT_CHILD, LONG_CHILD = 2.0, 600.0
 #: Clock seconds left before the hard stop when the stubborn child's PRELUDE is cancelled.
 NEAR_HARD_STOP_SECONDS = 0.4
 WORKLOAD = Workload(
@@ -111,22 +119,34 @@ WORKLOAD = Workload(
 AGENTX = replace(WORKLOAD, inferencex=None)
 
 
+@pytest.fixture(autouse=True)
+def child_framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduler, and so the child, is launched on the framework checkout the child sessions are built on."""
+
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / "framework"))
+
+
 class StubbornRegistry(ProcessRegistry):
     """Runs a main-flow child that ignores SIGTERM; a failure double, not a placeholder."""
 
-    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
-        return await super().spawn(STUBBORN_CHILD, branch=branch, log=log)
+    async def spawn(
+        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
+    ) -> RegisteredProcess:
+        return await super().spawn(STUBBORN_CHILD, branch=branch, log=log, env=env)
 
 
 @dataclass
 class PreludePeers:
     """The repository, toolbox and rule gate PRELUDE works with, on the session's blackboard; ``tests`` waits for the
-    toolbox's outcomes without real sleeps."""
+    toolbox's outcomes without real sleeps. ``opened`` holds each commit the integration branch was opened on, with
+    whether the child had been started then; ``on_this_machine`` says whether the toolbox leases the child its cards."""
 
     repo: GitExperimentRepo
-    toolbox: RecordingToolbox
+    toolbox: LeasingToolbox
     tests: SessionTests
     gate: GateService
+    opened: list[tuple[str, bool]] = field(default_factory=list)
+    on_this_machine: bool = False
 
 
 async def _instant(seconds: float) -> None:
@@ -140,7 +160,8 @@ def _peers(layout: SessionLayout, accuracy: float | None = None, rule: Rule | No
     scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
     toolbox_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
     repo = GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs))
-    toolbox = RecordingToolbox(toolbox_blackboard, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
+    toolbox = LeasingToolbox(toolbox_blackboard, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
+    toolbox.clock = _clock().now
     tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
     gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, "gate"), clock=_clock().now)
     gate = session_gate(gate_blackboard, toolbox, rule)
@@ -175,7 +196,13 @@ def _prelude(
         layout, roster, _blackboard(layout), decisions, processes, clock, desk, RecordedReservations()
     )
     warm_start = None if recipe_kb is None else WarmStartSource(recipe_kb, LocalBlobStore(layout.blobs))
-    services = PreludeServices(peers.repo, peers.gate, peers.tests, peers.toolbox)
+
+    async def open_integration(root: str) -> None:
+        peers.opened.append((root, isinstance(processes, MbFakeChildRegistry) and processes.child is not None))
+
+    services = PreludeServices(
+        peers.repo, peers.gate, peers.tests, peers.toolbox, peers.on_this_machine, open_integration
+    )
     return Prelude(context, services, warm_start=warm_start)
 
 
@@ -184,12 +211,8 @@ def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
     return next(entry["detail"] for entry in logged if entry["reason"] == "warm start read")
 
 
-async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
-    """Both PRELUDE steps, as the session runs them once the integration branch has its K."""
-
-    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
-    await prelude.measure_baseline(result.root_commit)
-    return result
+async def _run(prelude: Prelude, budget: SessionBudget, workload: Workload = WORKLOAD) -> PreludeResult:
+    return await prelude.root(workload, budget, HardStop(budget, _clock()), IMAGE)
 
 
 def _registry(
@@ -242,10 +265,11 @@ def test_an_agentx_child_is_given_no_sequence_lengths(tmp_path: Path) -> None:
 
 async def test_an_agentx_session_profile_has_no_sequence_lengths_and_no_throughput_ceiling(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    processes, peers = _registry(layout, child_with_patch(tmp_path)), _peers(layout)
+    child = child_with_patch(tmp_path)
+    with_agentx_baseline_run(child)
+    processes, peers = _registry(layout, child), _peers(layout, rule=AgentXRule())
 
-    budget = SessionBudget.from_hours(2.0, NOW)
-    result = await _prelude(layout, processes, peers).root(AGENTX, budget, HardStop(budget, _clock()), IMAGE)
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW), AGENTX)
 
     profile = await _blackboard(layout).session_profile()
     assert profile == result.profile
@@ -253,13 +277,12 @@ async def test_an_agentx_session_profile_has_no_sequence_lengths_and_no_throughp
     assert not {"--isl", "--osl"} & set(processes.argv)
 
 
-async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_path: Path) -> None:
+async def test_the_root_is_the_checkout_the_child_runs_on_committed_before_the_child_starts(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     child = child_with_patch(tmp_path)
     processes, peers = _registry(layout, child), _peers(layout)
 
-    budget = SessionBudget.from_hours(2.0, NOW)
-    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
 
     assert float(processes.argv[processes.argv.index("--max-hours") + 1]) == pytest.approx(2.0)
     assert result.root_commit == await peers.repo.head(INTEGRATION_BRANCH)
@@ -280,7 +303,7 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert (profile.isl, profile.osl) == (1024, 1024)
     assert profile.kernel_optimizer == "geak"
     assert (profile.model_type, profile.architectures) == ("", ())
-    assert peers.toolbox.requests == {}
+    assert peers.opened == [(result.root_commit, False)]
 
 
 async def test_the_root_profile_of_the_childs_trace_is_started_right_after_the_root_is_committed(
@@ -301,7 +324,7 @@ async def test_the_root_profile_of_the_childs_trace_is_started_right_after_the_r
     assert (call.trace_dir / TRACE_FILE).read_bytes() == (trace_dir / TRACE_FILE).read_bytes()
     assert (call.trace_dir / "capture_traces" / "bs_8_rank0.json.gz").is_file()
     reasons = [entry["reason"] for entry in _logged(layout)]
-    assert reasons.index("root committed") + 1 == reasons.index("root profile started")
+    assert reasons.index("root committed") < reasons.index("root profile started")
     [started] = [entry for entry in _logged(layout) if entry["reason"] == "root profile started"]
     assert started["detail"] == {
         "source_id": ROOFLINE_RUN_ID,
@@ -361,8 +384,10 @@ class MbFakeSlowChildRegistry(MbFakeChildRegistry):
         self._times = times
         self._seconds = seconds
 
-    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
-        spawned = await super().spawn(argv, branch=branch, log=log)
+    async def spawn(
+        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
+    ) -> RegisteredProcess:
+        spawned = await super().spawn(argv, branch=branch, log=log, env=env)
         if LAUNCH_FLAG in argv:
             self._times[0] += self._seconds
         return spawned
@@ -382,6 +407,31 @@ async def test_the_child_gpu_time_is_bounded_by_its_wall_time_times_tp_and_recor
     logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
     [rooted] = [entry["detail"] for entry in logged if entry["reason"] == "root committed"]
     assert rooted["child_gpu_seconds_upper_bound"] == 1800.0 * 4
+
+
+async def test_a_child_on_leased_cards_is_charged_once_by_its_lease_to_the_integration_branch(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    times = [NOW]
+    processes = MbFakeSlowChildRegistry(layout, child_with_patch(tmp_path), times, 1800.0)
+    peers = _peers(layout)
+    peers.on_this_machine, peers.toolbox.clock = True, _clock(times).now
+
+    budget = SessionBudget.from_hours(2.0, NOW)
+    prelude = _prelude(layout, processes, peers, clock=_clock(times))
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock(times)), IMAGE)
+
+    reader = LocalBlackboard(layout.blackboard, Writer(Role.SCHEDULER, "scheduler"), clock=_clock(times).now)
+    [hold] = await reader.card_holds()
+    assert (hold.start.kind, hold.start.holder, hold.start.branch_id) == (
+        LeaseKind.PRELUDE_CHILD,
+        "prelude",
+        INTEGRATION_BRANCH,
+    )
+    [integration] = [row for row in await reader.progress() if row.branch == INTEGRATION_BRANCH]
+    assert hold.closed and integration.held_card_seconds == 1800.0 * WORKLOAD.tp
+    assert result.child_gpu_seconds_upper_bound == 0.0
+    [rooted] = [entry["detail"] for entry in _logged(layout) if entry["reason"] == "root committed"]
+    assert rooted["child_gpu_seconds_upper_bound"] == 0.0
 
 
 async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_prepared_for_replay(
@@ -568,10 +618,8 @@ async def test_measuring_the_baseline_reports_its_longest_root_test(tmp_path: Pa
     layout = _layout(tmp_path)
     peers = _peers(layout)
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
-    budget = SessionBudget.from_hours(2.0, NOW)
-    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
-    longest = await prelude.measure_baseline(result.root_commit)
+    longest = (await _run(prelude, SessionBudget.from_hours(2.0, NOW))).longest_root_test
 
     assert longest == FakeToolboxConfig().attempt_seconds
     logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
@@ -585,10 +633,10 @@ async def test_child_failing_before_its_launch_info_fails_prelude(tmp_path: Path
     with pytest.raises(PreludeFailed, match="exited with 3"):
         await _run(_prelude(layout, _registry(layout, None, exit_code=3), peers), SessionBudget.from_hours(2.0, NOW))
     assert json.loads(layout.prelude_child.read_text())["session_dir"] is None
-    assert not layout.repo.exists()
+    assert "root committed" not in [entry["reason"] for entry in _logged(layout)]
 
 
-async def test_a_child_whose_baseline_failed_fails_prelude_with_its_reason_and_commits_nothing(tmp_path: Path) -> None:
+async def test_a_child_whose_baseline_failed_fails_prelude_with_its_reason(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     child = failed_child(tmp_path)
     peers = _peers(layout)
@@ -601,9 +649,9 @@ async def test_a_child_whose_baseline_failed_fails_prelude_with_its_reason_and_c
         f"stop_reason='baseline_failed' and baseline_tput=0.0; its last baseline attempt failed with "
         f"{BASELINE_ERROR_CLASS!r}"
     )
-    assert not layout.repo.exists() and not layout.root_recipe.exists()
-    assert [entry["reason"] for entry in _logged(layout)] == ["child started"]
-    assert peers.toolbox.requests == {} and peers.toolbox.root_profiles == []
+    reasons = [entry["reason"] for entry in _logged(layout)]
+    assert "child started" in reasons and "root committed" not in reasons
+    assert peers.toolbox.root_profiles == []
 
 
 async def test_baseline_tests_that_fail_to_measure_fail_prelude(tmp_path: Path) -> None:
@@ -696,6 +744,78 @@ async def test_a_prelude_cancelled_near_the_hard_stop_leaves_close_its_share(tmp
     assert await processes.leftovers() == ()
 
 
+def _submitted_after_the_child(peers: PreludePeers, processes: MbFakeChildRegistry) -> list[bool]:
+    """Whether the child had exited as each root test was submitted, filled in as they are."""
+
+    exited: list[bool] = []
+
+    def note(request: TestRequest) -> None:
+        if request.purpose is Purpose.BASELINE:
+            exited.append(processes.child_exited())
+
+    peers.toolbox.reject_if(note)
+    return exited
+
+
+async def test_the_root_tests_run_while_the_child_runs_on_the_cards_leased_for_it(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
+    peers.on_this_machine = True
+    exited = _submitted_after_the_child(peers, processes)
+
+    result = await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert exited == [False] * BASELINE_TESTS
+    assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
+    assert peers.toolbox.leased == [("prelude", WORKLOAD.tp)] and peers.toolbox.released == ["lease-1"]
+    assert processes.env is not None and processes.env[CHILD_CARDS_ENV] == "6"
+    assert processes.env.get("HIP_VISIBLE_DEVICES") == os.environ.get("HIP_VISIBLE_DEVICES")
+
+
+async def test_a_child_whose_lease_would_leave_no_test_its_cards_runs_before_the_root_tests(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path), linger=SHORT_CHILD), _peers(layout)
+    peers.on_this_machine = True
+    peers.toolbox.lease_refusal = RequestRejected("one test needs both cards", "lease_leaves_no_measurement")
+    exited = _submitted_after_the_child(peers, processes)
+
+    await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert exited == [True] * BASELINE_TESTS
+    assert processes.env is None and peers.toolbox.released == []
+    [first] = [entry for entry in _logged(layout) if entry["reason"] == CHILD_FIRST]
+    assert first["detail"] == {"refusal": "one test needs both cards"}
+
+
+async def test_a_failing_root_test_ends_prelude_without_waiting_for_the_child(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path), linger=LONG_CHILD), _peers(layout)
+    peers.on_this_machine = True
+    refusal = RequestRejected("the base image moved", code="base_image_mismatch")
+    peers.toolbox.reject_if(lambda request: refusal if request.purpose is Purpose.BASELINE else None)
+
+    with pytest.raises(PreludeFailed, match="refused the baseline test"):
+        await asyncio.wait_for(_run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW)), 60)
+
+    assert await processes.leftovers() == () and peers.toolbox.released == ["lease-1"]
+    assert "root committed" not in [entry["reason"] for entry in _logged(layout)]
+
+
+async def test_a_child_that_ran_on_another_checkout_than_the_root_fails_prelude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path)), _peers(layout)
+    monkeypatch.setenv(
+        MB_FRAMEWORK_REPO_ENV, str(framework_checkout(tmp_path / "elsewhere", "https://example.invalid/fork"))
+    )
+
+    with pytest.raises(PreludeFailed, match="that the session committed before it started"):
+        await _run(_prelude(layout, processes, peers), SessionBudget.from_hours(2.0, NOW))
+
+    assert "root committed" not in [entry["reason"] for entry in _logged(layout)]
+
+
 def _logged(layout: SessionLayout) -> list[dict[str, Any]]:
     return [json.loads(line) for line in layout.decisions.read_text().splitlines()]
 
@@ -771,25 +891,24 @@ async def test_a_reused_prelude_starts_the_root_profile_from_the_earlier_childs_
     assert reasons[:3] == ["child reused", "root committed", "root profile started"]
 
 
-async def _agentx_baseline(tmp_path: Path, child: Path) -> tuple[SessionLayout, PreludePeers, Prelude, PreludeResult]:
-    """PRELUDE of an AgentX session on ``child``, rooted and ready to anchor the baseline."""
+def _agentx_prelude(tmp_path: Path, child: Path) -> tuple[SessionLayout, PreludePeers, Prelude]:
+    """PRELUDE of an AgentX session on ``child``, on a toolbox that leases cards."""
 
     layout = _layout(tmp_path)
     peers = _peers(layout, rule=AgentXRule())
-    prelude = _prelude(layout, _registry(layout, child), peers)
-    budget = SessionBudget.from_hours(2.0, NOW)
-    result = await prelude.root(AGENTX, budget, HardStop(budget, _clock()), IMAGE)
-    return layout, peers, prelude, result
+    peers.on_this_machine = True
+    return layout, peers, _prelude(layout, _registry(layout, child), peers)
 
 
 async def test_an_agentx_baseline_is_the_childs_own_run_and_no_root_test_is_submitted(tmp_path: Path) -> None:
     child = child_with_patch(tmp_path)
     run = with_agentx_baseline_run(child)
-    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+    layout, peers, prelude = _agentx_prelude(tmp_path, child)
 
-    reserve = await prelude.measure_baseline(result.root_commit)
+    result = await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
 
-    assert peers.toolbox.requests == {}
+    reserve = result.longest_root_test
+    assert peers.toolbox.requests == {} and peers.toolbox.leased == []
     assert reserve == AGENTX_RUN_SECONDS
     copy = layout.prelude / "baseline" / AGENTX_RUN_ID
     assert peers.toolbox.prelude_baselines == [copy]
@@ -819,10 +938,10 @@ async def test_an_agentx_baseline_the_childs_run_cannot_stand_for_fails_prelude(
     with_agentx_baseline_run(child, **anchor)
     document = json.loads((child / "state.json").read_text())
     write_child_session(child, {**document, **state})
-    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+    layout, peers, prelude = _agentx_prelude(tmp_path, child)
 
     with pytest.raises(PreludeFailed, match=refusal):
-        await prelude.measure_baseline(result.root_commit)
+        await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
 
     assert peers.toolbox.requests == {}
     assert not [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
@@ -831,11 +950,11 @@ async def test_an_agentx_baseline_the_childs_run_cannot_stand_for_fails_prelude(
 async def test_an_agentx_baseline_whose_run_is_gone_fails_prelude(tmp_path: Path) -> None:
     child = child_with_patch(tmp_path)
     run = with_agentx_baseline_run(child)
-    layout, peers, prelude, result = await _agentx_baseline(tmp_path, child)
+    _, _, prelude = _agentx_prelude(tmp_path, child)
     shutil.rmtree(run)
 
     with pytest.raises(PreludeFailed, match="cannot copy the child's baseline run"):
-        await prelude.measure_baseline(result.root_commit)
+        await _run(prelude, SessionBudget.from_hours(2.0, NOW), AGENTX)
 
 
 async def test_a_reused_prelude_anchors_an_agentx_baseline_on_the_earlier_childs_run(tmp_path: Path) -> None:
@@ -847,7 +966,7 @@ async def test_a_reused_prelude_anchors_an_agentx_baseline_on_the_earlier_childs
     prelude = _prelude(layout, _registry(layout, None), peers)
     result = await prelude.reuse(reused_prelude(earlier.root, WORKLOAD, IMAGE), WORKLOAD, IMAGE)
 
-    assert await prelude.measure_baseline(result.root_commit) == AGENTX_RUN_SECONDS
+    assert result.longest_root_test == AGENTX_RUN_SECONDS
 
     assert peers.toolbox.requests == {}
     assert (await _blackboard(layout).baseline()).source.startswith(f"prelude-child:{run} ")

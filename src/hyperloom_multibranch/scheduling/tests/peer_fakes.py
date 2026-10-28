@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -32,7 +33,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import TestRequest, TestResult
+from hyperloom.contracts.measurement import Purpose, TestRequest, TestResult
 from hyperloom.contracts.recipe import ComponentPatches, ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
@@ -51,9 +52,11 @@ from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
+from hyperloom_multibranch.contracts.blackboard.records import LeaseEnd, LeaseStart
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind
 from hyperloom_multibranch.contracts.blackboard.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
-from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import BranchLease, CancelOutcome, LeaseCharge, QueueState, RequestRejected
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
 from hyperloom_multibranch.rulegate import baseline as rulegate_baseline
 from hyperloom_multibranch.rulegate import rules as rulegate_rules
@@ -293,14 +296,24 @@ class MbFakeChildRegistry(ProcessRegistry):
         super().__init__(pids_file, clock)
         self._script_args = (session, str(exit_code), str(linger))
         self.argv: tuple[str, ...] = ()
+        self.env: Mapping[str, str] | None = None
+        self.child: RegisteredProcess | None = None
 
-    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
+    async def spawn(
+        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
+    ) -> RegisteredProcess:
         if LAUNCH_FLAG not in argv:
-            return await super().spawn(argv, branch=branch, log=log)
-        self.argv = tuple(argv)
+            return await super().spawn(argv, branch=branch, log=log, env=env)
+        self.argv, self.env = tuple(argv), env
         launch = argv[argv.index(LAUNCH_FLAG) + 1]
         script = (sys.executable, "-c", CHILD_SCRIPT, launch, *self._script_args)
-        return await super().spawn(script, branch=branch, log=log)
+        self.child = await super().spawn(script, branch=branch, log=log, env=env)
+        return self.child
+
+    def child_exited(self) -> bool:
+        """Whether the PRELUDE child was started and has exited."""
+
+        return self.child is not None and self.child.process.returncode is not None
 
 
 class MbFakeHeldRegistry(MbFakeChildRegistry):
@@ -310,14 +323,18 @@ class MbFakeHeldRegistry(MbFakeChildRegistry):
     Deleted together with :class:`MbFakeChildRegistry`.
     """
 
-    def __init__(self, pids_file: Path, time: VirtualClock, *, session: str, exit_code: int) -> None:
-        super().__init__(pids_file, time.clock, session=session, exit_code=exit_code, linger=0.0)
+    def __init__(
+        self, pids_file: Path, time: VirtualClock, *, session: str, exit_code: int, linger: float = 0.0
+    ) -> None:
+        super().__init__(pids_file, time.clock, session=session, exit_code=exit_code, linger=linger)
         self._time = time
         self._watchers: list[asyncio.Task[None]] = []
 
-    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
+    async def spawn(
+        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
+    ) -> RegisteredProcess:
         async with self._time.held():
-            spawned = await super().spawn(argv, branch=branch, log=log)
+            spawned = await super().spawn(argv, branch=branch, log=log, env=env)
         if LAUNCH_FLAG in argv:
             self._time.hold()
             self._watchers.append(asyncio.ensure_future(self._release_on_exit(spawned)))
@@ -644,6 +661,50 @@ class RecordingToolbox(FakeToolbox):
     async def close(self) -> None:
         self.closed += 1
         await super().close()
+
+
+#: The cards :class:`LeasingToolbox` leases, first ones first.
+FREE_CARDS = (6, 7)
+
+
+class LeasingToolbox(RecordingToolbox):
+    """The recording toolbox with :data:`FREE_CARDS` to lease, or ``lease_refusal`` in their place. ``leased`` holds
+    every lease asked for, ``released`` every lease given back, and ``beside_a_lease`` whether a lease was held as each
+    baseline test was submitted. As the toolbox does, it records each grant and return in the blackboard, as the
+    lease's charge says, timed by ``clock``, the session's. Not a placeholder: the fake is the toolbox owner's own,
+    which leases nothing."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.leased: list[tuple[str, int]] = []
+        self.released: list[str] = []
+        self.beside_a_lease: list[bool] = []
+        self.lease_refusal: RequestRejected | None = None
+        self.clock: Callable[[], float] = time.time
+
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+    ) -> BranchLease:
+        if self.lease_refusal is not None:
+            raise self.lease_refusal
+        self.leased.append((branch_id, cards))
+        lease_id, gpu_ids = f"lease-{len(self.leased)}", FREE_CARDS[:cards]
+        charge = charge or LeaseCharge(LeaseKind.DEV, branch_id)
+        start = LeaseStart(
+            lease_id, branch_id, charge.branch, charge.kind, len(gpu_ids), self.clock(), charge.tool, gpu_ids
+        )
+        await self.blackboard.record_lease_start(start)
+        env = {"HIP_VISIBLE_DEVICES": ",".join(str(card) for card in range(cards))}
+        return BranchLease(lease_id, branch_id, gpu_ids, Path("/lease"), env, 1)
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        self.released.append(lease_id)
+        await self.blackboard.record_lease_end(LeaseEnd(lease_id, self.clock(), LeaseEndReason.RELEASED))
+
+    async def submit_test(self, request: TestRequest) -> str:
+        if request.purpose is Purpose.BASELINE:
+            self.beside_a_lease.append(len(self.leased) > len(self.released))
+        return await super().submit_test(request)
 
 
 class DownToolbox(RecordingToolbox):

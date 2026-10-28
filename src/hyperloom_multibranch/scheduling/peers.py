@@ -42,7 +42,8 @@ class Peers:
     is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
     ``reserved`` is the rule gate that asks for the forks and repairs: it lands each fork the fork desk admits before
     the scheduler starts it, and records each fork and repair the scheduler voids. ``regression`` runs the
-    regression set the integrator asks for before a merge and FINAL for every candidate.
+    regression set the integrator asks for before a merge and FINAL for every candidate. ``on_this_machine`` says
+    whether the toolbox measures on this machine's cards, which the PRELUDE child runs on too.
     """
 
     lifecycle: SpecialistLifecycle
@@ -54,6 +55,7 @@ class Peers:
     base_image_digest: str
     reserved: ReservedBranches
     regression: RegressionCheck
+    on_this_machine: bool
 
 
 @dataclass(frozen=True)

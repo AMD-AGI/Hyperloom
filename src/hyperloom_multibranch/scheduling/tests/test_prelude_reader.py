@@ -92,7 +92,7 @@ def test_a_child_that_named_no_framework_checkout_is_read(tmp_path: Path) -> Non
     assert artifacts.framework_root is None
     assert artifacts.roofline_ceiling == {}
     assert artifacts.profile is None
-    assert framework_pin(artifacts) is None
+    assert framework_pin(artifacts.framework_root) is None
 
 
 def test_the_childs_latest_roofline_profile_is_located_beside_the_point_config_its_run_measured(
@@ -177,13 +177,13 @@ def test_other_schema_version_or_missing_state_is_refused(tmp_path: Path) -> Non
 
 def test_the_framework_is_pinned_at_the_head_of_its_checkout(tmp_path: Path) -> None:
     artifacts = read_prelude(child_with_patch(tmp_path))
-    assert framework_pin(artifacts) == UpstreamPin(REMOTE_URL, head_of(tmp_path / "framework"))
+    assert framework_pin(artifacts.framework_root) == UpstreamPin(REMOTE_URL, head_of(tmp_path / "framework"))
 
 
 def test_framework_without_remote_cannot_be_pinned(tmp_path: Path) -> None:
     session = write_child_session(tmp_path / "child", state_document(framework_checkout(tmp_path, remote="")))
     with pytest.raises(PreludeReadError, match="no git remote"):
-        framework_pin(read_prelude(session))
+        framework_pin(read_prelude(session).framework_root)
 
 
 def test_a_framework_path_that_is_no_git_checkout_pins_nothing(tmp_path: Path) -> None:
@@ -191,7 +191,7 @@ def test_a_framework_path_that_is_no_git_checkout_pins_nothing(tmp_path: Path) -
     site_packages.mkdir()
     artifacts = read_prelude(write_child_session(tmp_path / "child", state_document(site_packages)))
 
-    assert artifacts.framework_root is None and framework_pin(artifacts) is None
+    assert artifacts.framework_root is None and framework_pin(artifacts.framework_root) is None
 
 
 def test_root_recipe_pins_the_framework_without_a_patch_on_the_main_flows_launch() -> None:

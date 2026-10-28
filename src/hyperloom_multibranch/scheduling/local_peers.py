@@ -46,7 +46,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import cache, partial
 from types import ModuleType
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
@@ -151,7 +151,10 @@ class InferenceXCheckout:
 
 class ToolboxBackend(Protocol):
     """Where a session's tests run: it builds the session's toolbox on the blackboard handle, the acceptance setup and
-    the instruction sheet's context that every backend shares."""
+    the instruction sheet's context that every backend shares; ``on_this_machine`` says whether they run on this
+    machine's cards."""
+
+    on_this_machine: ClassVar[bool]
 
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
@@ -164,6 +167,7 @@ class LocalCards:
     ``MB-toolbox``."""
 
     cards: tuple[int, ...]
+    on_this_machine: ClassVar[bool] = True
 
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
@@ -337,7 +341,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     mcp.start()
     gate_service = GateService(gate_blackboard, toolbox, rule, toolbox)
     regression = RegressionSet(gate_blackboard, runner, repo)
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, host.image.digest, gate, regression)
+    image, on_this_machine = host.image.digest, host.backend.on_this_machine
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image, gate, regression, on_this_machine)
 
 
 def _toolbox(

@@ -28,7 +28,7 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -117,8 +117,11 @@ class ProcessRegistry:
         self._clock = clock
         self._registered: list[_Tracked] = []
 
-    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
-        """Start ``argv`` with stdout and stderr appended to ``log``, and record it before returning."""
+    async def spawn(
+        self, argv: Sequence[str], *, branch: str, log: Path, env: Mapping[str, str] | None = None
+    ) -> RegisteredProcess:
+        """Start ``argv`` with stdout and stderr appended to ``log``, in ``env`` or this process's environment, and
+        record it before returning."""
 
         with log.open("ab") as out:
             process = await asyncio.create_subprocess_exec(
@@ -127,6 +130,7 @@ class ProcessRegistry:
                 stdout=out,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
+                env=None if env is None else dict(env),
             )
         return RegisteredProcess(self._register(process.pid, branch, argv, process), process)
 

@@ -22,6 +22,7 @@ from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.prelude import reused_prelude
+from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
 from hyperloom_multibranch.scheduling.settings import ReusedPrelude, RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
@@ -47,10 +48,12 @@ OTHER_IMAGE = "sha256:" + "c" * 64
 
 
 @pytest.fixture(autouse=True)
-def command_line_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Eight cards, no AgentX switch or benchmark YAML, and no knowledge targets for CLOSE."""
+def command_line_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eight cards, the framework checkout the child sessions are built on, no AgentX switch or benchmark YAML, and no
+    knowledge targets for CLOSE."""
 
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / "framework"))
     for name in (AGENTX_ENV, BENCHMARK_CONFIG_ENV, ARCHIVE_ENV):
         monkeypatch.delenv(name, raising=False)
 

@@ -27,7 +27,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -61,6 +61,7 @@ class HostedSandboxes:
     ``MB-toolbox`` directory and the workload's TP."""
 
     inputs: ToolboxInputsFor
+    on_this_machine: ClassVar[bool] = False
 
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext

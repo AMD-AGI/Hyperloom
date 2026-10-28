@@ -139,6 +139,8 @@ from hyperloom_multibranch.scheduling.lifecycle import (
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
+from hyperloom_multibranch.scheduling.prelude import CHILD_CARDS_ENV
+from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
 from hyperloom_multibranch.scheduling.reference import ReferenceSource
@@ -160,6 +162,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     Curves,
     FakeRegressionCheck,
     HeldGitRepo,
+    LeasingToolbox,
     MbFakeHeldRegistry,
     OneChampionKB,
     RecordedSessions,
@@ -190,6 +193,8 @@ from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
 
 START = 1_700_000_000.0
+#: Real seconds a PRELUDE child lingers so that what PRELUDE submits beside it is submitted while it runs.
+CHILD_BESIDE_SECONDS = 2.0
 CONC = 16
 #: An ownership scope of a pod that is gone: another boot, so none of its pids is a process of this environment.
 ANOTHER_POD = "0" * 32 + ":1:1"
@@ -292,6 +297,14 @@ def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def child_framework(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scheduler, and so the PRELUDE child, is launched on the framework checkout the child sessions are built
+    on."""
+
+    monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / "framework"))
+
+
+@pytest.fixture(autouse=True)
 def no_branch_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     """The scripted branches end fewer explore tests than a grace lasts, so the judge's grace would refuse the stops
     these sessions script; the test of the grace sets it back."""
@@ -368,6 +381,7 @@ class Stage:
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
+    on_this_machine: bool = False
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
@@ -399,6 +413,8 @@ class Stage:
         )
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
+        if isinstance(toolbox, LeasingToolbox):
+            toolbox.clock = self.time.now
         rule = workload_rule(setup.workload, self.handle(Role.GATE))
         self.sessions = RecordedSessions(
             toolbox,
@@ -431,7 +447,9 @@ class Stage:
             self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
         )
         digest = toolbox.config.image_digest
-        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.gate, self.regression)
+        return Peers(
+            runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.gate, self.regression, self.on_this_machine
+        )
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
@@ -521,11 +539,14 @@ class Stage:
         )
 
 
-def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
+def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0, linger: float = 0.0) -> Stage:
+    """A session on ``tmp_path`` whose PRELUDE child roots on ``child``, runs ``linger`` real seconds and exits with
+    ``exit_code``."""
+
     time = VirtualClock(START)
     layout = create_session(tmp_path / "workspace", WORKLOAD.model_basename, time.clock)
     session = "" if child is None else str(child)
-    processes = MbFakeHeldRegistry(layout.pids, time, session=session, exit_code=exit_code)
+    processes = MbFakeHeldRegistry(layout.pids, time, session=session, exit_code=exit_code, linger=linger)
     judge = ScriptedCompletion([OPENING, STEER])
     return Stage(layout, time, processes, judge, [])
 
@@ -700,11 +721,13 @@ async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at
     stage = _stage(tmp_path, child=child)
     stage.settings = replace(SETTINGS, workload=AGENTX)
     stage.scripts = SCRIPTS
+    stage.toolbox_type, stage.on_this_machine = LeasingToolbox, True
 
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
     assert not [request for request in stage.toolbox.requests.values() if request.purpose is Purpose.BASELINE]
+    assert isinstance(stage.toolbox, LeasingToolbox) and stage.toolbox.leased == [] and stage.processes.env is None
     baseline = await stage.handle(Role.OBSERVER).baseline()
     assert (baseline.request_ids, baseline.values[GRADED_INTVTY_P50]) == ((), DEFAULT_BASELINE[GRADED_INTVTY_P50])
     assert baseline.source.startswith(f"prelude-child:{run} ")
@@ -843,7 +866,7 @@ async def test_a_session_copies_the_reference_material_it_was_given_and_its_mani
 
 
 async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_session_model_and_one_without_none(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checkout = tmp_path / "InferenceX"
     (checkout / "configs").mkdir(parents=True)
@@ -852,6 +875,7 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
     briefed = {}
     for name, references in (("given", (given,)), ("without", ())):
         (tmp_path / name).mkdir()
+        monkeypatch.setenv(MB_FRAMEWORK_REPO_ENV, str(tmp_path / name / "framework"))
         stage = _stage(tmp_path / name, child=child_with_patch(tmp_path / name))
         stage.settings = replace(stage.settings, references=references)
         await stage.run()
@@ -883,6 +907,27 @@ async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
 
 
+async def test_a_session_on_this_machine_runs_its_root_tests_beside_the_prelude_child_on_leased_cards(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path), linger=CHILD_BESIDE_SECONDS)
+    stage.toolbox_type, stage.on_this_machine = LeasingToolbox, True
+    stage.judge = ScriptedCompletion([_reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    toolbox = stage.toolbox
+    assert isinstance(toolbox, LeasingToolbox)
+    assert (toolbox.leased, toolbox.released) == ([("prelude", WORKLOAD.tp)], ["lease-1"])
+    assert toolbox.beside_a_lease and all(toolbox.beside_a_lease)
+    assert stage.processes.env is not None and stage.processes.env[CHILD_CARDS_ENV] == "6"
+    baseline = await stage.handle(Role.OBSERVER).baseline()
+    assert sorted(baseline.request_ids) == sorted(
+        request_id for request_id, request in toolbox.requests.items() if request.purpose is Purpose.BASELINE
+    )
+
+
 async def test_a_child_whose_baseline_failed_fails_prelude_at_once_with_its_reason(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=failed_child(tmp_path), exit_code=1)
 
@@ -891,7 +936,8 @@ async def test_a_child_whose_baseline_failed_fails_prelude_at_once_with_its_reas
     assert outcome.stop_reason is SessionStopReason.PRELUDE_FAILED and outcome.exit_code == 1
     assert "stop_reason='baseline_failed'" in outcome.error and repr(BASELINE_ERROR_CLASS) in outcome.error
     assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
-    assert stage.judge.calls == [] and stage.toolbox.requests == {}
+    assert stage.judge.calls == []
+    assert {request.purpose for request in stage.toolbox.requests.values()} == {Purpose.BASELINE}
     assert stage.time.now() - START < 60.0
     assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.PRELUDE_FAILED.value
 

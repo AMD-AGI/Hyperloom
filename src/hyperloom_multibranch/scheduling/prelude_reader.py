@@ -36,6 +36,9 @@ MB_LATEST_STATE_SCHEMA_VERSION = 6
 GIT_TIMEOUT_SECONDS = 60.0
 
 MB_STATE_FILE = "state.json"
+#: The main flow seeds ``framework_repo_path`` from this variable of its environment
+#: (src/hyperloom/inference_optimizer/cli/bootstrap.py), which the child inherits from the scheduler.
+MB_FRAMEWORK_REPO_ENV = "FRAMEWORK_REPO_PATH"
 #: The key of the main flow's ``--launch-info-file`` (src/hyperloom/inference_optimizer/cli ``_emit_launch_info``).
 MB_LAUNCH_SESSION_DIR_KEY = "session_dir"
 #: The decode ceiling of a roofline snapshot (src/hyperloom/inference_optimizer/roofline_snapshot.py).
@@ -146,11 +149,10 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
     baseline_tput = _number(state.get("baseline_tput"), "baseline_tput")
     if outcome_status(stop_reason, baseline_tput) != MB_OUTCOME_COMPLETED:
         raise PreludeReadError(_no_baseline(state, stop_reason, baseline_tput))
-    framework_root = _framework_root(state)
     baseline_run, refusal = _baseline_run(state)
     return PreludeArtifacts(
         session_dir=session_dir,
-        framework_root=framework_root if framework_root is not None and _is_checkout(framework_root) else None,
+        framework_root=_checkout(str(state.get("framework_repo_path") or "")),
         framework_version=str(state.get("framework_version") or ""),
         roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
         profile=_latest_profile(session_dir),
@@ -241,11 +243,18 @@ def _trace_mtime(trace_dir: Path) -> float | None:
         return None
 
 
-def framework_pin(artifacts: PreludeArtifacts) -> UpstreamPin | None:
-    """The framework checkout's remote at its ``HEAD``, which nothing in the child patched; ``None`` without a
+def launched_root(framework: str, env: Mapping[str, str], base_image_digest: str) -> Recipe:
+    """The root recipe a child launched with ``env`` gives once it measured its baseline, known before it starts: the
+    child runs on the checkout ``env`` names, as :func:`read_prelude` reads it back, and changes nothing of it. Raises
+    :class:`PreludeReadError`. Blocks."""
+
+    return root_recipe(framework, framework_pin(_checkout(env.get(MB_FRAMEWORK_REPO_ENV, ""))), base_image_digest)
+
+
+def framework_pin(root: Path | None) -> UpstreamPin | None:
+    """The framework checkout ``root``'s remote at its ``HEAD``, which nothing in the child patched; ``None`` without a
     checkout."""
 
-    root = artifacts.framework_root
     if root is None:
         return None
     remotes = _git(root, "remote").split()
@@ -290,11 +299,6 @@ def _number(value: object, what: str) -> float:
     return float(value)
 
 
-def _framework_root(state: Mapping[str, object]) -> Path | None:
-    root = str(state.get("framework_repo_path") or "")
-    return Path(root) if root else None
-
-
 def _roofline_ceiling(snapshots: object, baseline_ceiling: object) -> Mapping[str, float]:
     """The latest snapshot's decode ceiling, else the baseline-arm ceiling, as a bound on output throughput.
 
@@ -315,6 +319,11 @@ def _snapshot_list(snapshots: object) -> list[object]:
     if not isinstance(snapshots, list):
         raise PreludeReadError(f"roofline_snapshots is not a list: {snapshots!r}")
     return snapshots
+
+
+def _checkout(path: str) -> Path | None:
+    root = Path(path.strip()) if path.strip() else None
+    return root if root is not None and _is_checkout(root) else None
 
 
 def _is_checkout(root: Path) -> bool:
@@ -347,6 +356,7 @@ __all__ = [
     "PreludeReadError",
     "UpstreamPin",
     "framework_pin",
+    "launched_root",
     "read_child_session",
     "read_prelude",
     "root_recipe",

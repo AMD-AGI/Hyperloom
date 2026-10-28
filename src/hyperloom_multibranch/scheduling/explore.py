@@ -119,7 +119,8 @@ class ExploreWindow:
     """The commit every gain is measured against, the commit the first branches start from, the roofline ceiling, the
     clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests and
     leases may use before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no
-    limit, for either), the upper bound of the GPU seconds the PRELUDE child used, which no limit counts, and the
+    limit, for either), the upper bound of the GPU seconds the PRELUDE child used outside a lease, which no limit
+    counts (0 where it ran on leased cards, whose card time the integration branch's progress holds), and the
     directions the user wrote, one user branch each.
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:

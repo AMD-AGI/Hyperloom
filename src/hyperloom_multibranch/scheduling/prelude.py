@@ -4,25 +4,31 @@
 """PRELUDE: run the main flow once for the baseline and roofline, then root the session on its result.
 
 The child is ``hyperloom optimize`` with every optimization lever and enablement off, given the whole remaining session
-budget. A baseline it cannot establish ends it with the main flow's own baseline stop, and PRELUDE fails naming that
+budget. It changes nothing of the framework checkout it is launched on, so the root recipe -- that checkout at its
+``HEAD`` on the toolbox's image -- is known before it starts: the experiment repository stores it as the root commit and
+the integration branch is opened on it with its K at once. The baseline every recorded value is anchored to is measured
+through the toolbox while the child runs: as many tests of the root as the rule gate asks for, from which the gate
+writes the baseline and its bar; on a toolbox that measures on this machine's cards, the child runs on cards leased for
+it. Either failing ends the other and PRELUDE. Where that lease would leave fewer cards than one test needs, the child
+runs first and the root tests after it. The longest of those tests, start to finish, is how long one test of this
+workload takes; it is FINAL's reserve. A gate that asks for none (AgentX, whose test takes over an hour) is given the
+child's own run of the root instead, once the child has ended: its report and per-request export are copied to
+``MB-prelude/baseline/``, the toolbox reads the copy as it reads a test's round, and that run's wall time is the
+reserve.
+
+A baseline the child cannot establish ends it with the main flow's own baseline stop, and PRELUDE fails naming that
 stop; it never spends the session repairing the combo. Its session is read by
-:mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe, which the experiment
-repository stores as the root commit, and the session profile is written. The Recipe KB's champions for that profile are
-read as warm-start leads for the specialists, the best of them prepared for replay on the root's image and offered to
-the integrator as the session's champion, which EXPLORE opens on when it beats the baseline; their files are in the
+:mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone; a child that rooted on another recipe than the one
+committed fails PRELUDE, and the session profile is written. The Recipe KB's champions for that profile are read as
+warm-start leads for the specialists, the best of them prepared for replay on the root's image and offered to the
+integrator as the session's champion, which EXPLORE opens on when it beats the baseline; their files are in the
 session's blob store; no Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot
 be read is recorded and gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing
 nothing: one it refuses stays a lead with the refusal named in place of the replay, unless the champion was built on
 another image, whose launch config alone is checked in its place, and one acceptance has not answered for when
-:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked. The baseline every recorded value
-is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
-roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
-baseline and its bar. The longest of those tests, start to finish, is how long one test of this workload takes;
-it is FINAL's reserve. A gate that asks for none (AgentX, whose test takes over an hour) is given the child's own run of
-the root instead: its report and per-request export are copied to ``MB-prelude/baseline/``, the toolbox reads the copy
-as it reads a test's round, and that run's wall time is the reserve.
+:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
 
-Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
+Once the child has ended, the toolbox is asked for the TraceLens report of the child's latest roofline
 profile, so the root has operator shares in the blackboard; PRELUDE does not wait for it, and a child without a profile
 or a refusal only leaves a PRELUDE decision naming why. The toolbox reads a trace only inside its own directory, and the
 child's session lies outside the session, so the trace and its point config are copied there first.
@@ -42,9 +48,10 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import shutil
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -61,9 +68,9 @@ from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, PreludeMeasurement, SessionGate
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import LineageEvent, SessionProfile
-from hyperloom_multibranch.contracts.blackboard.vocab import LineageKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.blackboard.knowledge.warm_start import (
     LAUNCH_ONLY_REASON,
     PreparedReplay,
@@ -85,12 +92,13 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeArtifacts,
     PreludeReadError,
     framework_pin,
+    launched_root,
     read_child_session,
     read_prelude,
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import ReusedPrelude, Workload
 
 if TYPE_CHECKING:
@@ -111,6 +119,14 @@ PRELUDE_FLAGS = (
     "--degraded-kb",
 )
 PRELUDE_BRANCH = "prelude"
+#: The cards the child runs on: the main flow keeps the ones it is given, and otherwise takes the machine's first TP
+#: (src/hyperloom/orchestrator/actions/executors/_workload_envs.py).
+CHILD_CARDS_ENV = "ROCR_VISIBLE_DEVICES"
+#: The child's lease is the lineage root's: its card time counts on the integration branch, not as a branch of its own.
+CHILD_LEASE_CHARGE = LeaseCharge(LeaseKind.PRELUDE_CHILD, INTEGRATION_BRANCH)
+#: The lease refusal that leaves the child to run before the root tests: its cards would leave fewer than one test's.
+LEAVES_NO_MEASUREMENT = "lease_leaves_no_measurement"
+CHILD_FIRST = "child runs before the root tests"
 #: The child reaps the inference servers it started on its own way out, which takes far longer than a kill's grace.
 #: A cancelled PRELUDE gives it at most this, and never more than half the time left before the hard stop, so CLOSE
 #: keeps the other half.
@@ -154,7 +170,7 @@ class WarmStartSource:
 
 @dataclass(frozen=True)
 class _DerivedRoot:
-    """The root recipe a finished child session gives, before the session commits it."""
+    """The root recipe a finished child session gives."""
 
     child: Path
     artifacts: PreludeArtifacts
@@ -162,14 +178,57 @@ class _DerivedRoot:
 
 
 @dataclass(frozen=True)
+class _OpenedRoot:
+    """The root recipe as committed, and the integration branch opened on its commit."""
+
+    recipe: Recipe
+    commit: str
+
+
+@dataclass(frozen=True)
+class _ChildCards:
+    """Where the child runs: on the cards of ``lease`` (``None`` where it takes cards itself), and beside the root
+    tests or, when ``alongside`` is false, before them."""
+
+    lease: BranchLease | None
+    alongside: bool
+
+    def env(self) -> Mapping[str, str] | None:
+        """The child's environment: this process's, with the leased cards named in :data:`CHILD_CARDS_ENV`."""
+
+        if self.lease is None:
+            return None
+        return {**os.environ, CHILD_CARDS_ENV: ",".join(str(card) for card in self.lease.gpu_ids)}
+
+
+@dataclass(frozen=True)
+class _ChildRun:
+    hours: float
+    hard_stop: HardStop
+    cards: _ChildCards
+
+
+@dataclass(frozen=True)
+class _SettledRoot:
+    """What the finished child gives the root: the session profile, the warm-start leads and the GPU-time bound."""
+
+    profile: SessionProfile
+    warm_leads: tuple[WarmLead, ...]
+    child_gpu_seconds: float
+
+
+@dataclass(frozen=True)
 class PreludeResult:
-    """The root commit the session starts from, the profile it runs on, the Recipe KB's leads for it and the upper
-    bound of the GPU seconds the main-flow child used; the rest is in the blackboard and ``MB-prelude/``."""
+    """The root commit the session starts from, the profile it runs on, the Recipe KB's leads for it, the upper
+    bound of the GPU seconds the main-flow child used outside a lease (0 where it ran on leased cards, whose card time
+    the blackboard charges the integration branch) and the longest wall time, in seconds, of the root tests the
+    baseline anchored on; the rest is in the blackboard and ``MB-prelude/``."""
 
     root_commit: str
     profile: SessionProfile
     warm_leads: tuple[WarmLead, ...]
     child_gpu_seconds_upper_bound: float
+    longest_root_test: float
 
     @property
     def champion(self) -> PreparedReplay | None:
@@ -234,15 +293,22 @@ def _rooted_child(decisions: Path) -> Path:
     raise ValueError(f"{decisions} records no {ROOT_COMMITTED!r}")
 
 
+#: Puts the integration branch at the root commit on the roster with its K and gives the toolbox the quota.
+OpenIntegration = Callable[[str], Awaitable[None]]
+
+
 @dataclass(frozen=True)
 class PreludeServices:
     """The experiment repository the root is committed to, the rule gate and the session's tests the baseline is
-    measured with, and the toolbox that analyses the child's profile."""
+    measured with, the toolbox that analyses the child's profile and leases its cards, which it does only where it
+    measures on this machine's cards (``on_this_machine``), and what opens the integration branch on the root."""
 
     repo: ExperimentRepo
     gate: SessionGate
     tests: SessionTests
     toolbox: RealToolbox
+    on_this_machine: bool
+    open_integration: OpenIntegration
 
 
 class Prelude:
@@ -259,6 +325,8 @@ class Prelude:
         self._gate = services.gate
         self._tests = services.tests
         self._toolbox = services.toolbox
+        self._on_this_machine = services.on_this_machine
+        self._open_integration = services.open_integration
         self._decisions = context.decisions
         self._clock = context.clock
         self._child_baseline: tuple[ChildBaselineRun | None, str] = (None, "PRELUDE committed no root")
@@ -266,16 +334,29 @@ class Prelude:
     async def root(
         self, workload: Workload, budget: SessionBudget, hard_stop: HardStop, base_image_digest: str
     ) -> PreludeResult:
-        """Root the session on the main flow's result, on ``base_image_digest``; raises :class:`PreludeFailed` when
-        there is none.
+        """Root the session on the main flow's result, on ``base_image_digest``, and measure its baseline; raises
+        :class:`PreludeFailed` when there is none.
 
-        The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its K.
+        The root is the framework checkout the child is launched on, which it does not change, so it is committed and
+        the integration branch opened on it before the child starts, and the root tests run beside the child, on the
+        cards a lease holds for it; where that lease would leave fewer cards than one test needs, and for a gate that
+        anchors on the child's own run, the child runs first. Either failing ends the other; a child that rooted on
+        another recipe fails PRELUDE.
         """
 
-        spawned = self._clock.now()
-        child = await self._run_child(workload, budget, hard_stop)
-        derived = await self._derive_root(child, workload.framework, base_image_digest)
-        return await self._commit_root(derived, workload, (self._clock.now() - spawned) * workload.tp)
+        hours = self._child_hours(budget)
+        opened = await self._open_root(await self._launched_root(workload.framework, base_image_digest))
+        root_tests = await self._gate.baseline_test_count()
+        cards = await self._child_cards(workload.tp, root_tests)
+        child = asyncio.ensure_future(self._root_on_child(opened, workload, _ChildRun(hours, hard_stop, cards)))
+        if not cards.alongside:
+            await child
+        baseline = asyncio.ensure_future(self._measure_baseline(opened.commit, root_tests))
+        await together(child, baseline)
+        settled = child.result()
+        return PreludeResult(
+            opened.commit, settled.profile, settled.warm_leads, settled.child_gpu_seconds, baseline.result()
+        )
 
     async def reuse(self, earlier: ReusedPrelude, workload: Workload, base_image_digest: str) -> PreludeResult:
         """Root the session as :meth:`root` does, on the child session of ``earlier``, without starting a child: the
@@ -289,24 +370,85 @@ class Prelude:
                 f"the child session {derived.child} now gives the root recipe {derived.recipe.digest()}, not "
                 f"{earlier.root_recipe_digest} that {earlier.session} committed"
             )
-        return await self._commit_root(derived, workload, 0.0)
+        opened = await self._open_root(derived.recipe)
+        settled = await self._settle(opened.commit, derived, workload, 0.0)
+        longest = await self._measure_baseline(opened.commit, await self._gate.baseline_test_count())
+        return PreludeResult(opened.commit, settled.profile, settled.warm_leads, 0.0, longest)
 
-    async def _derive_root(self, child: Path, framework: str, base_image_digest: str) -> _DerivedRoot:
+    def _child_hours(self, budget: SessionBudget) -> float:
         try:
-            artifacts = await asyncio.to_thread(read_prelude, child)
-            pin = await asyncio.to_thread(framework_pin, artifacts)
-            recipe = root_recipe(framework, pin, base_image_digest)
-        except PreludeReadError as exc:
-            raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
-        return _DerivedRoot(child, artifacts, recipe)
+            return budget.prelude_max_hours(self._clock.now())
+        except BudgetExhausted as exc:
+            raise PreludeFailed(str(exc)) from exc
 
-    async def _commit_root(self, derived: _DerivedRoot, workload: Workload, child_gpu_seconds: float) -> PreludeResult:
-        child, artifacts, recipe = derived.child, derived.artifacts, derived.recipe
+    async def _launched_root(self, framework: str, base_image_digest: str) -> Recipe:
+        try:
+            return await asyncio.to_thread(launched_root, framework, os.environ, base_image_digest)
+        except PreludeReadError as exc:
+            raise PreludeFailed(f"cannot root the session on the framework checkout the child runs on: {exc}") from exc
+
+    async def _open_root(self, recipe: Recipe) -> _OpenedRoot:
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
         root = await self._repo.init_root(recipe)
         await self._blackboard.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
         )
+        await self._open_integration(root)
+        return _OpenedRoot(recipe, root)
+
+    async def _child_cards(self, tp: int, root_tests: int) -> _ChildCards:
+        """Lease the child's ``tp`` cards where it runs beside the root tests on cards they measure on."""
+
+        if root_tests == 0:
+            return _ChildCards(None, alongside=False)
+        if not self._on_this_machine:
+            return _ChildCards(None, alongside=True)
+        try:
+            lease = await self._toolbox.lease_branch_sandbox(PRELUDE_BRANCH, tp, charge=CHILD_LEASE_CHARGE)
+        except RequestRejected as refused:
+            if refused.code != LEAVES_NO_MEASUREMENT:
+                raise
+            self._decisions.record(
+                Decision(DecisionKind.PRELUDE, CHILD_FIRST, PRELUDE_BRANCH, {"refusal": refused.reason})
+            )
+            return _ChildCards(None, alongside=False)
+        return _ChildCards(lease, alongside=True)
+
+    async def _root_on_child(self, opened: _OpenedRoot, workload: Workload, run: _ChildRun) -> _SettledRoot:
+        """Run the child and settle the root on what it measured; the child's lease ends with it."""
+
+        spawned = self._clock.now()
+        try:
+            child = await self._run_child(workload, run)
+        finally:
+            if run.cards.lease is not None:
+                await asyncio.shield(self._toolbox.release_branch_sandbox(run.cards.lease.lease_id))
+        # A leased child's card time is already the integration branch's, from the lease the blackboard records.
+        gpu_seconds = 0.0 if run.cards.lease is not None else (self._clock.now() - spawned) * workload.tp
+        derived = await self._derive_root(child, workload.framework, opened.recipe.base_image_digest)
+        if derived.recipe.digest() != opened.recipe.digest():
+            raise PreludeFailed(
+                f"the child session {child} gives the root recipe {derived.recipe.digest()}, not "
+                f"{opened.recipe.digest()} that the session committed before it started"
+            )
+        return await self._settle(opened.commit, derived, workload, gpu_seconds)
+
+    async def _derive_root(self, child: Path, framework: str, base_image_digest: str) -> _DerivedRoot:
+        try:
+            artifacts = await asyncio.to_thread(read_prelude, child)
+            pin = await asyncio.to_thread(framework_pin, artifacts.framework_root)
+            recipe = root_recipe(framework, pin, base_image_digest)
+        except PreludeReadError as exc:
+            raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
+        return _DerivedRoot(child, artifacts, recipe)
+
+    async def _settle(
+        self, root: str, derived: _DerivedRoot, workload: Workload, child_gpu_seconds: float
+    ) -> _SettledRoot:
+        """Write the session profile from the child's session, record the root as committed on it, start the root
+        profile and read the warm-start leads."""
+
+        artifacts = derived.artifacts
         model_config = await asyncio.to_thread(summarize_model_config, workload.model)
         profile = _session_profile(self._layout.session_id, workload, artifacts, model_config)
         await self._blackboard.write_session_profile(profile)
@@ -317,14 +459,15 @@ class Prelude:
                 INTEGRATION_BRANCH,
                 {
                     "root_commit": root,
-                    "child_session": str(child),
+                    "child_session": str(derived.child),
                     "child_gpu_seconds_upper_bound": child_gpu_seconds,
                 },
             )
         )
         self._child_baseline = (artifacts.baseline_run, artifacts.baseline_run_refusal)
         await self._start_root_profile(root, artifacts.profile)
-        return PreludeResult(root, profile, await self._warm_start(profile, recipe, root), child_gpu_seconds)
+        leads = await self._warm_start(profile, derived.recipe, root)
+        return _SettledRoot(profile, leads, child_gpu_seconds)
 
     async def _start_root_profile(self, root: str, profile: ChildProfile | None) -> None:
         """Start the toolbox's TraceLens report of the child's ``profile`` for the ``root`` commit, without waiting for
@@ -408,16 +551,13 @@ class Prelude:
             return replace(lead, unchecked=PREFLIGHT_OUT_OF_TIME)
         return lead
 
-    async def _run_child(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> Path:
-        try:
-            hours = budget.prelude_max_hours(self._clock.now())
-        except BudgetExhausted as exc:
-            raise PreludeFailed(str(exc)) from exc
-        argv = prelude_argv(workload, hours, self._layout.prelude_launch)
+    async def _run_child(self, workload: Workload, run: _ChildRun) -> Path:
+        argv = prelude_argv(workload, run.hours, self._layout.prelude_launch)
         self._decisions.record(Decision(DecisionKind.PRELUDE, "child started", PRELUDE_BRANCH, {"argv": list(argv)}))
-        exit_code = await self._wait(
-            await self._processes.spawn(argv, branch=PRELUDE_BRANCH, log=self._layout.prelude_log), hard_stop
+        spawned = await self._processes.spawn(
+            argv, branch=PRELUDE_BRANCH, log=self._layout.prelude_log, env=run.cards.env()
         )
+        exit_code = await self._wait(spawned, run.hard_stop)
         try:
             child = read_child_session(self._layout.prelude_launch)
         except PreludeReadError as exc:
@@ -443,15 +583,14 @@ class Prelude:
         await self._processes.kill_branch(PRELUDE_BRANCH)
         return exit_code
 
-    async def measure_baseline(self, root: str) -> float:
-        """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; return the longest
-        wall time, in seconds, of the root tests it anchored on. Raises :class:`PreludeFailed` when a baseline test is
-        refused, which takes back the ones accepted before it, or the baseline anchors nothing.
+    async def _measure_baseline(self, root: str, count: int) -> float:
+        """Measure the baseline on ``root`` with ``count`` root tests through the toolbox and have the rule gate anchor
+        it; return the longest wall time, in seconds, of the root tests it anchored on. Raises :class:`PreludeFailed`
+        when a baseline test is refused, which takes back the ones accepted before it, or the baseline anchors nothing.
 
         A gate that asks for no root test anchors on the child's own run of the root (:meth:`_anchor_on_child_run`).
         """
 
-        count = await self._gate.baseline_test_count()
         if count == 0:
             return await self._anchor_on_child_run(root)
         request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
