@@ -8,18 +8,18 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_MCP_SERVER_NAME as MCP_SERVER_NAME,
+)
+from hyperloom.orchestrator.mcp_tool_names import (
+    CONTEXT_TOOL_NAMES,
+    CONTEXT_TOOL_QUALIFIED_NAMES,
+    qualified_context_tool_name,
+)
 
 from .mcp_sdk import build_sdk_mcp_server
 
 log = logging.getLogger(__name__)
-
-
-MCP_SERVER_NAME = "inference_optimizer_context"
-
-
-def _qualified(tool_name: str) -> str:
-    """Return the fully-qualified MCP tool name."""
-    return f"mcp__{MCP_SERVER_NAME}__{tool_name}"
 
 
 @dataclass
@@ -288,15 +288,11 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
-        "failure_ids you can then inspect with get_failure.",
+        f"failure_ids you can then inspect with {qualified_context_tool_name('get_failure')}.",
         _VARIANT_FAILURES_SCHEMA,
         "get_variant_failures",
     ),
 )
-
-
-CONTEXT_TOOL_NAMES: tuple[str, ...] = tuple(s[0] for s in CONTEXT_TOOL_SPECS)
-CONTEXT_TOOL_QUALIFIED_NAMES: tuple[str, ...] = tuple(_qualified(n) for n in CONTEXT_TOOL_NAMES)
 
 
 def _make_handler(
@@ -368,4 +364,5 @@ __all__ = [
     "ContextProvider",
     "MCP_SERVER_NAME",
     "build_context_tools_server",
+    "qualified_context_tool_name",
 ]

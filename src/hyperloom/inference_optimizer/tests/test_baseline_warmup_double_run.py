@@ -35,6 +35,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridLaunch,
     GridRecipe,
 )
+from hyperloom.orchestrator.actions.executors._inferencex_patcher import BENCH_SEED_ENV
 from hyperloom.orchestrator.actions.executors._workload_envs import BenchmarkTarget
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1557,6 +1558,113 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
     assert "server_lifecycle" not in captured[0]["benchmark"]
 
 
+def _round_seeds(launches: list) -> list[str | None]:
+    return [launch["env"].get(BENCH_SEED_ENV) for launch in launches]
+
+
+def test_baseline_warmup_round_samples_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
+    """The measured round reuses the warmup server, so a shared prompt set would be served from its prefix cache."""
+    # A stray value in the orchestrator's own env must not reach the measured round.
+    monkeypatch.setenv(BENCH_SEED_ENV, "7")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    captured: list = []
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(captured, launches=launches)
+    ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(_executor(base, tmp_path)(ctx))
+
+    assert result["status"] == "succeeded"
+    assert _round_seeds(launches) == ["1", None]
+    # A process env, not a config env: Magpie keeps config envs in the server-reuse identity.
+    assert all(BENCH_SEED_ENV not in cfg["benchmark"]["envs"] for cfg in captured)
+
+
+def test_deferred_accuracy_rounds_keep_the_measured_seed(tmp_path):
+    """Only the discarded warmup moves; the measured and the deferred accuracy rounds keep the default prompts."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(launches=launches)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(tmp_path / "ws"),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(_executor(base, tmp_path)(ctx))
+
+    assert _round_seeds(launches) == ["1", None, None]
+
+
+def test_run_grid_warmup_round_samples_other_prompts_than_the_measured_round(tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    monkeypatch.setenv(BENCH_SEED_ENV, "7")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, state = _cold_then_hot_fake_run(launches=launches)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(_candidate_grid(base, tmp_path / "grid"))
+
+    assert state["calls"] == 2
+    assert _round_seeds(launches) == ["1", None]
+
+
+def test_a_grid_launch_marked_as_warmup_moves_its_seed(tmp_path, monkeypatch):
+    """Explore's warmup is a whole grid launch the decision round reuses the server of."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    launches: list = []
+    fake_run, _state = _cold_then_hot_fake_run(launches=launches)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        _run(
+            run_grid(
+                grid=[GridVariant(name="candidate")],
+                output_root=tmp_path / "grid",
+                recipe=GridRecipe(base_yaml_path=base, target=BenchmarkTarget(gpu_type="mi300x")),
+                launch=GridLaunch(magpie_python=sys.executable, warmup_round=True),
+            )
+        )
+
+    assert _round_seeds(launches) == ["1"]
+
+
+def test_a_native_agentx_warmup_keeps_its_seed(tmp_path, monkeypatch):
+    """The native AgentX client is not the patched one, so its rounds are left exactly as they were."""
+    from hyperloom.orchestrator.actions.executors import benchmark_config
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.magpie_agentx.native_config",
+        lambda _path: True,
+    )
+    env = {BENCH_SEED_ENV: "7"}
+    benchmark_config.apply_benchmark_round_seed(tmp_path / "variant.yaml", env, warmup=True)
+    assert env == {}
+
+
 def test_baseline_single_round_when_script_not_builtin(tmp_path):
     """A non-builtin benchmark script falls back to one round even with double-run on."""
     base = tmp_path / "base.yaml"
@@ -1823,6 +1931,109 @@ def test_baseline_nonzero_rc_with_valid_measurement_fails(tmp_path):
     assert result["status"] == "failed", result
     assert result["error_class"] == "magpie_nonzero_after_valid_measurement", result
     assert result["returncode"] == 1
+
+
+def test_baseline_nonzero_rc_after_complete_protocol_is_named_harness_side(tmp_path):
+    """A run that served every request and still exited non-zero failed around the benchmark."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+
+    def fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        ws = slot / "benchmark_vllm_20260602_010101"
+        ws.mkdir(parents=True)
+        # The replay served all 4097 requests; the wrapper then refused to emit a result.
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": False,
+                    "framework": "vllm",
+                    "throughput": {
+                        "num_prompts": 4097,
+                        "completed_requests": 4097,
+                        "duration_seconds": 4486.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 3, "replay finished: 4097/4097", "power validation failed")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {"baseline_double_run": False, "output_dir": str(output_dir), "timeout_sec": 10, "gpu_type": "mi300x"}
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = _run(executor(ctx))
+
+    assert result["status"] == "failed", result
+    assert result["error_class"] == "magpie_nonzero_invalid_measurement", result
+    assert result["returncode"] == 3
+    # The attempt is still signed for the record; the stop comes on this first occurrence.
+    assert result.get("output_signature"), result
+
+
+@pytest.mark.asyncio
+async def test_harness_side_refusal_stops_the_baseline_on_its_first_occurrence(tmp_path, session_dir):
+    """A second attempt runs the same harness over the same workload, so one refusal ends the run."""
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord = make_coordinator(session_dir)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+
+    def fake_run(cmd, *args, **kwargs):
+        ws = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_vllm_20260602_010101"
+        ws.mkdir(parents=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": False,
+                    "framework": "vllm",
+                    "throughput": {
+                        "num_prompts": 4097,
+                        "completed_requests": 4097,
+                        "duration_seconds": 4486.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 3, "replay finished: 4097/4097", "power validation failed")
+
+    task = Task(task_id="harness-refusal-1", kind="baseline", state="running", params={}, idempotency_key="1")
+    ctx = _make_ctx(
+        {
+            "baseline_double_run": False,
+            "output_dir": str(tmp_path / task.task_id),
+            "timeout_sec": 600,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        result = await _executor(base, tmp_path)(ctx)
+
+    assert result["error_class"] == "magpie_nonzero_invalid_measurement", result
+    await coord.writeback.handle_unpromotable_result(task, result)
+    # No streak is spent: the class stops the run where it is first seen.
+    assert coord.shared_state.baseline_failure_streak == 0
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (machine_state.PHASE_CLOSE, "baseline_failed")
 
 
 def test_baseline_rejects_stale_workspace_on_crash(tmp_path, monkeypatch):

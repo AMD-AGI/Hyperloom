@@ -159,6 +159,8 @@ class ClientRun:
     num_warmups: int | None = None
     profile: bool = False
     trust_remote_code: bool = False
+    # Prompt-sampling seed; ``None`` keeps the client's own default.
+    seed: int | None = None
 
 
 def build_client_command(run: ClientRun) -> list[str]:
@@ -207,6 +209,8 @@ def build_client_command(run: ClientRun) -> list[str]:
         cmd.append("--profile")
     if run.trust_remote_code:
         cmd.append("--trust-remote-code")
+    if run.seed is not None:
+        cmd += ["--seed", str(run.seed)]
     return cmd
 
 

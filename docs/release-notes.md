@@ -38,8 +38,9 @@ it.
 - **`hyperloom hosted run` runs the legacy `optimize` flow for a hosting platform.** It reads the campaign spec and the host's
   inputs, runs `optimize` in a session directory derived from the run (a restart resumes it), and records how it ended in
   `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. Host-only inputs, including the
-  new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. `src/hyperloom/hosted/app_bootstrap.sh`
-  builds the wheel of a commit once and installs its hash-pinned `requirements/app.lock` into a venv.
+  new `HYPERLOOM_GRANT_LIMITS`, are removed from the environment before `optimize` starts. The entry runs the packaged `install.sh`
+  before `optimize` on every leg; a failing installer ends the run finally. `src/hyperloom/hosted/app_bootstrap.sh`
+  builds the wheel of a commit once and installs it, alone, into the image's framework Python environment; `install.sh` resolves the dependencies.
 - **The accuracy eval can no longer be turned off.** `--no-eval`, the
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of
