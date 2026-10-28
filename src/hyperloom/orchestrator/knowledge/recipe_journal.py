@@ -240,16 +240,12 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     )
 
 
-def rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict[str, Any]]:
-    claimed = {str(row.get(key) or "") for row in superseding or [] if isinstance(row, dict)}
-    kept: list[dict[str, Any]] = []
-    for row in live_rows or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get(key) or "") in claimed:
-            continue
-        kept.append(dict(row))
-    return kept
+def rows_not_superseded(live_rows: Any, superseding: Any, *keys: str) -> list[dict[str, Any]]:
+    def identity(row: Mapping[str, Any]) -> tuple[str, ...]:
+        return tuple(str(row.get(key) or "") for key in keys)
+
+    claimed = {identity(row) for row in superseding or [] if isinstance(row, dict)}
+    return [dict(row) for row in live_rows or [] if isinstance(row, dict) and identity(row) not in claimed]
 
 
 def appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
@@ -1056,28 +1052,30 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         }
 
     def _final_recipe_overrides(self) -> dict[str, Any]:
-        # Read-modify-write under the cid flock, so two finalises of the same
-        # session leave one row rather than tearing the lists they both append to.
+        # Sessions and failures merge with the live row: a row this session
+        # reports again replaces the live copy, and every other live row stays.
         state = self.shared_state
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         my_sessions = list(attrs["sessions"] or [])
+        my_failures = list(attrs["what_failed"] or [])
         extras = dict(attrs.get("workload") or {})
         overrides: dict[str, Any] = {
-            "what_worked": attrs["what_worked"],
-            "what_failed": attrs["what_failed"],
+            "what_failed": rows_not_superseded(live.get("what_failed"), my_failures, "name", "reason") + my_failures,
             "last_profiled": attrs["last_profiled"],
             "sessions": rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
             "extras": extras,
         }
-        # The row's own figures survive a session that never validated a win,
-        # or whose win does not beat what the row already advertises.
+        # The row's own figures, and the what_worked rows that explain its
+        # best_config, survive a session that never validated a win, or whose
+        # win does not beat what the row already advertises.
         my_throughput = float(attrs.get("best_throughput") or 0.0)
         won = bool(state.optimization_stack or float(state.cumulative_gain_validated or 0.0) > 0.0)
         won = won or bool(str(state.current_best.get("extra_server_args") or "").strip())
         if won and my_throughput > recorded_float(live.get("best_throughput")):
             overrides["best_config"] = attrs["best_config"]
             overrides["best_throughput"] = my_throughput
+            overrides["what_worked"] = attrs["what_worked"]
         return overrides
 
     def _write_local_recipe(self) -> dict[str, Any]:
