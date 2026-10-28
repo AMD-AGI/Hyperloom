@@ -137,13 +137,15 @@ def _put_interpreter_first_on_path() -> None:
     os.environ["PATH"] = os.pathsep.join([bin_dir, *entries])
 
 
-def _installer_environment() -> dict[str, str]:
+def _installer_environment(state_dir: Path) -> dict[str, str]:
     """The environment of ``install.sh``: the running interpreter and its environment are the ones it installs into.
 
     Without ``INFERENCE_OPTIMIZER_FORCE_PYTHON`` the script prefers the image's ``/opt/venv`` over ``PYTHON``, where this
-    wheel is not installed.
+    wheel is not installed.  ``HYPERLOOM_STATE_DIR`` is the one host input it gets back: it is how the script knows the
+    install is hosted and installs the wheel's ``hosted`` extra.
     """
     environment = {name: value for name, value in os.environ.items() if name not in HOST_ONLY_VARS}
+    environment[Var.STATE_DIR] = str(state_dir)
     environment["PYTHON"] = sys.executable
     environment["INFERENCE_OPTIMIZER_FORCE_PYTHON"] = "1"
     if sys.prefix != sys.base_prefix:
@@ -166,7 +168,7 @@ def _run_installer(state_dir: Path) -> None:
                 ["bash", str(INSTALL_SCRIPT)],
                 stdin=subprocess.DEVNULL,
                 stdout=log,
-                env=_installer_environment(),
+                env=_installer_environment(state_dir),
                 stderr=subprocess.STDOUT,
                 check=False,
             ).returncode

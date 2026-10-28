@@ -658,7 +658,15 @@ def test_the_installer_sees_no_host_only_input(run, monkeypatch):
     entry.main(["run"])
     seen = (run.work / "seen").read_text()
     assert "sentinel-secret" not in seen
-    assert not [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+    leaked = [name for name in host_info.HOST_ONLY_VARS if f"\n{name}=" in "\n" + seen]
+    assert leaked == [Var.STATE_DIR]
+
+
+def test_the_installer_is_told_the_state_dir_so_it_installs_the_hosted_extra(run, monkeypatch):
+    run.installer.write_text(f'#!/bin/bash\necho "$HYPERLOOM_STATE_DIR" > {run.work}/seen\n')
+    FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    assert (run.work / "seen").read_text().strip() == str(run.state)
 
 
 def test_a_missing_installer_ends_the_run_finally(run, monkeypatch):
