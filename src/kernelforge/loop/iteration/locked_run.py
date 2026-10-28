@@ -206,6 +206,7 @@ class LockedRunMixin:
             reusable_benchmark,
             _optimization_plan_path,
             optimization_plan_executable,
+            _lane_record,
         ) = attempt
         # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
         # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).

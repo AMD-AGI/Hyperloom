@@ -531,6 +531,9 @@ def _experience_with(category: str, **fields: Any) -> dict[str, Any]:
         ({"experience": _experience_with("change", kind="config")}, r"experience.change has unknown keys: kind"),
         ({"experience": {**_experience_with("change"), "reasoning": "x"}}, "experience has unknown keys: reasoning"),
         ({"require": [{"check": True}]}, "reason must be a non-empty string"),
+        ({"code_fields": "change.summary"}, "code_fields must be a list"),
+        ({"code_fields": ["change.summary"]}, "is not a file"),
+        ({"code_fields": ["change.missing"]}, "names no field"),
     ],
 )
 def test_malformed_mappings_fail_at_load(override: dict[str, Any], message: str) -> None:

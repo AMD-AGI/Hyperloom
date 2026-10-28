@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import subprocess
 from pathlib import Path
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
+from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.loop.decision_labels import DecisionLabel
+from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.iteration.iteration_types import (
     IterationResult,
     LoopAgents,
@@ -22,7 +24,9 @@ from kernelforge.loop.iteration.iteration_types import (
     _append_finding,
 )
 from kernelforge.loop.merge_candidates import merge_plan
-from kernelforge.loop.run_state import complete_orchestration_probe, make_event
+from kernelforge.loop.loop_log import iteration_header
+from kernelforge.loop.run_state import ITERATION_STARTED, complete_orchestration_probe, make_event
+from kernelforge.loop.fanout import lane_rationale
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError
 from kernelforge.tools.process_reaping import processes_under
 
@@ -66,13 +70,7 @@ class IterationPhasesMixin:
 
         self._update_search_policy(iteration)
 
-        print(
-            f"--- Iteration {iteration} "
-            f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
-            f"remaining: {self._time_remaining() / 60:.0f} min) ---"
-            if self.best_mean_case_speedup is not None
-            else f"--- Iteration {iteration} ---"
-        )
+        print(iteration_header(iteration, self.best_mean_case_speedup, self._time_remaining()))
         roofline_progress = self._render_roofline_progress()
         if roofline_progress:
             print(roofline_progress)
@@ -87,7 +85,7 @@ class IterationPhasesMixin:
         self.run_state.iteration = iteration
         self.state_store.append_event(
             make_event(
-                "iteration_started",
+                ITERATION_STARTED,
                 iteration,
                 best_before_ms=self.best_wall_ms,
                 best_before_mean_case_speedup=self.best_mean_case_speedup,
@@ -124,6 +122,7 @@ class IterationPhasesMixin:
         # sourcing an attempt leaves the iteration without one.
         optimization_plan_path = ""
         optimization_plan_executable = False
+        lane_record = None
         if hazard is not None:
             unmeasured_result = self._unmeasurable_on_a_held_device(
                 iteration=iteration,
@@ -138,12 +137,14 @@ class IterationPhasesMixin:
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            rationale = lane_rationale(queued_lane.lane_id)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
+            session_sink["session_started"] = True
+            lane_record = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -190,7 +191,7 @@ class IterationPhasesMixin:
                             session_end_reason="orchestration_error",
                         ),
                         frame,
-                        decision_label="ORCHESTRATION_ERROR",
+                        decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
                         on_iteration=on_iteration,
                     )
                     return None
@@ -213,18 +214,12 @@ class IterationPhasesMixin:
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback.
-            extra_kwargs = {}
-            try:
-                params = inspect.signature(agent_fn).parameters
-                if "baseline_case_times" in params:
-                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                if "best_mean_case_speedup" in params:
-                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                if "session_sink" in params:
-                    extra_kwargs["session_sink"] = session_sink
-            except (ValueError, TypeError):
-                log.debug("could not introspect agent_fn signature", exc_info=True)
+            # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
+            extras = {
+                "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+                "session_sink": session_sink,
+            }
+            extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
                 rationale = await agent_fn(
@@ -270,6 +265,7 @@ class IterationPhasesMixin:
             reusable_benchmark=reusable_benchmark,
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
+            lane_record=lane_record,
         )
 
     async def _collect_session_candidate(
@@ -383,15 +379,15 @@ class IterationPhasesMixin:
                 if new_files_only:
                     self._git_discard_worktree()
                 if agent_error:
-                    decision_label = "AGENT_ERROR"
+                    decision_label = DecisionLabel.AGENT_ERROR.value
                     summary = f"agent_fn error: {agent_error}"
                 elif api_failed:
-                    decision_label = "API_ERROR"
+                    decision_label = DecisionLabel.API_ERROR.value
                     summary = (
                         "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
                     )
                 elif new_files_only:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = (
                         "NO TRACKED CHANGES: the whole candidate was in "
                         "new file(s) matching "
@@ -402,7 +398,7 @@ class IterationPhasesMixin:
                         "rather than measured with the next candidate."
                     )
                 else:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = "NO TRACKED CHANGES: agent produced no candidate diff"
                 print("  [agent] No tracked source changes; skipping candidate")
                 result = IterationResult(
@@ -471,7 +467,6 @@ class IterationPhasesMixin:
             decision_label=decision_label,
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,

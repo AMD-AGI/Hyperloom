@@ -30,6 +30,7 @@ from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
+from kernelforge.loop.loop_log import kb_write_line
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -1435,10 +1436,7 @@ def write_experience_to_kb(
         summary_override=summary_override,
         usage=usage,
     )
-    if status.get("written"):
-        print(f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True)
-    else:
-        print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
+    print(kb_write_line(status), flush=True)
     return status
 
 

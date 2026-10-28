@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 
 from kernelforge.loop.handoffs import HandoffStore
+from kernelforge.loop.loop_log import LOOP_BANNER, experiment_line
 from kernelforge.loop.iteration.iteration_types import IterationResult
 from kernelforge.loop.prompt_view import MAX_RECENT_ATTEMPT_LINES, render_long_horizon_header
 from kernelforge.loop.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
@@ -115,7 +116,7 @@ class CampaignReportMixin:
             )
             print(self._supervisor_banner())
 
-        print("Starting autonomous iteration loop")
+        print(LOOP_BANNER)
         print(f"  Kernel: {self.ic.kernel_file}")
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
@@ -136,7 +137,7 @@ class CampaignReportMixin:
                 f"{max(0.0, _budget_sec - self.ic.budget_reserve_sec) / 60:.0f} min. "
                 f"Raise --max-hours for a longer run."
             )
-        print(f"  Experiment: {self.experiment.experiment_id}")
+        print(experiment_line(self.experiment.experiment_id))
         print()
 
     def _print_final_report(self) -> None:
@@ -184,7 +185,7 @@ class CampaignReportMixin:
         if self.llm_usage.get("calls"):
             for line in llm_spend_lines(self.llm_usage):
                 print(line)
-        print(f"  Experiment: {self.experiment.experiment_id}")
+        print(experiment_line(self.experiment.experiment_id))
 
     def _implementer_history(self, *, digest, optimization_plan_path) -> str:
         """Assemble the cross-iteration experience the Implementer session reads.
