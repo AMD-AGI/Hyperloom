@@ -626,7 +626,7 @@ module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1426
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
 module-lines src/hyperloom/orchestrator/phases/kernel.py 3970
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 1884
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 1883
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
 module-lines src/hyperloom/orchestrator/policy/gate.py 1564
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2568
