@@ -32,9 +32,9 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.contracts.recipe import PatchRef
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
-from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.blackboard.vocab import MergeOutcome, UsageSource
 from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, ResolvedPatch
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -62,6 +62,7 @@ from hyperloom_multibranch.scheduling.exports import (
     SessionExports,
     step_lines,
 )
+from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.integrator import (
@@ -311,6 +312,36 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert f"Lesson standings: {knowledge['lesson_standings']['status']}" in markdown
     assert all(line in markdown.splitlines() for line in step_lines(report.exports.knowledge_steps()))
     assert len(step_lines(report.exports.knowledge_steps())) == len(knowledge)
+
+
+async def test_the_breakdown_spend_includes_the_close_llm_calls(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``spend.llm_usd`` must count the playbook author's call (#121 c3498); a snapshot taken before it would miss it."""
+
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    before = (await blackboard.snapshot()).llm_usd
+    author = ScriptedCompletion(cost_usd=0.11)
+    # The fixture's handle is an observer; CLOSE records the author's spend as the scheduler.
+    scheduler = LocalBlackboard(blackboard.root, Writer(Role.SCHEDULER, "scheduler"), clock=blackboard._clock)
+    closer = _closer(
+        layout,
+        blackboard,
+        _clean(),
+        final,
+        None,
+        author=recorded(author, scheduler, UsageSource.AUTHOR),  # type: ignore[arg-type]
+    )
+
+    report = await closer.close(SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP)
+
+    assert author.calls and report.exports is not None
+    spend = json.loads(report.exports.breakdown.read_text())["spend"]
+    assert spend["llm_usd"] == pytest.approx(before + 0.11)
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(

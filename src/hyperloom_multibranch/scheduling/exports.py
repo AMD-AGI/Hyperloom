@@ -254,6 +254,9 @@ class SessionExports:
         )
         playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
         curation = await self._curate(snapshot)
+        # The playbook author and the curator record their LLM spend after the first snapshot; the breakdown must
+        # read them, or ``spend.llm_usd`` misses CLOSE (#121 c3498).
+        snapshot = await self._blackboard.snapshot()
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, playbook, curation)
         merges = _merge_statistics(read_jsonl(self._layout.merges))
