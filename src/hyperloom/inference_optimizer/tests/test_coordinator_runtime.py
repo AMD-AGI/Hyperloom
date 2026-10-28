@@ -2137,16 +2137,11 @@ async def test_a_prelude_roofline_cancelled_outside_the_run_is_enqueued_again(se
             await c.tasks.transition(task.task_id, "running")
             await c.tasks.transition(task.task_id, "succeeded")
         c.shared_state.auto_roofline_pending_task_id = task.task_id
-        calls: list[str] = []
-
-        async def _initial_analysis(**_kwargs):
-            calls.append("initial")
-
-        c.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline = _initial_analysis
 
         await c.phase_machine._release_holds_no_task_will_settle()
 
-        assert (c.shared_state.auto_roofline_pending_task_id, len(calls)) == ("", requeued)
+        fresh = [t.task_id for t in await c.tasks.queued() if t.kind == "roofline"]
+        assert (len(fresh), c.shared_state.auto_roofline_pending_task_id) == (requeued, "".join(fresh))
     finally:
         await c.stop()
 
