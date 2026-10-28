@@ -403,7 +403,8 @@ def test_multibranch_execs_into_its_entry_with_the_environment_unchanged_but_for
     entry.main(["run"])
     assert [(c[0], c[1]) for c in calls] == [("hyperloom-multibranch", ["hyperloom-multibranch", "hosted", "run"])]
     bin_dir = str(Path(sys.executable).parent)
-    assert calls[0][2].pop("PATH").split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
+    path = calls[0][2].pop("PATH")
+    assert path.split(os.pathsep)[0] == bin_dir  # the installer's interpreter resolves the command
     before.pop("PATH", None)
     assert calls[0][2] == before and Var.RUN_ID in before
     assert fake.calls == [] and not (run.state / "session.json").exists() and not (run.state / "exit.json").exists()
