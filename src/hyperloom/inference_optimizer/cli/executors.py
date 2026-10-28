@@ -12,7 +12,6 @@ must not import ``cli`` (one-way dependency).
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -32,9 +31,6 @@ from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-
-log = logging.getLogger(__name__)
 
 
 # Declarative action_kind -> ExecutorFn map.
@@ -144,13 +140,9 @@ def _build_specialist_executor(
     # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
     mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
     if mcp_config_path is None and knowledge_plane is not None:
-        try:
-            pr_mcp_url = knowledge_plane.specialist_mcp_url()
-        except AttributeError:
-            pr_mcp_url = ""
         generated = write_specialist_mcp_config(
             session_dir=session_dir,
-            pr_monitor_mcp_url=pr_mcp_url,
+            pr_monitor_mcp_url=knowledge_plane.specialist_mcp_url(),
         )
         if generated is not None:
             mcp_config_path = str(generated)
@@ -183,7 +175,6 @@ def _build_specialist_executor(
             "domain": run_result.domain,
             "gap_canonical_id": run_result.gap_canonical_id,
             "specialist_done": run_result.specialist_done,
-            "turns_used": run_result.turns_used,
             "workspace": run_result.workspace,
             "transcript_path": run_result.transcript_path,
             "done_path": run_result.done_path,
@@ -250,12 +241,3 @@ def _register_executors(
 
     # kernel_agent: the KERNEL_AGENT phase's whole pipeline, run under the task's lanes.
     coordinator.sub.register_executor("kernel_agent", lambda ctx: coordinator.phase_kernel.run_agent(ctx))
-
-    if log.isEnabledFor(logging.DEBUG):
-        for required_kind in ("roofline", "profile"):
-            if required_kind not in coordinator.sub.executor_registry:
-                log.debug(
-                    "register_executors: %r missing from sub-agent registry; "
-                    "PRELUDE analysis task will fail with no_executor",
-                    required_kind,
-                )

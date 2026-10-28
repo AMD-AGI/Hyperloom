@@ -20,6 +20,7 @@ from typing import Any, Iterator, Mapping
 
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import EnvValueError, env_flag
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -282,11 +283,7 @@ def _uses_aiter(
 # Per-variant env overrides -> forwarded to the SSH-launched sglang via
 # ``multi_node/commands/infera.py::_collect_forward_env`` (reads these control envs).
 def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profiler_dir: str):
-    forwarded = (
-        json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True))
-        if extra_env
-        else None
-    )
+    forwarded = json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()})) if extra_env else None
     unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
     return _scoped_env(
         {
@@ -647,8 +644,6 @@ async def _probe_completion_tokens(
 ) -> tuple[int, str]:
     import httpx as _httpx
 
-    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
-
     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
     if not model_id:
         return -1, "completion_probe: no model id"
@@ -669,7 +664,7 @@ async def _probe_completion_tokens(
     if resp.status_code != 200:
         return -1, f"completion_probe_http={resp.status_code}"
     try:
-        return generated_tokens(resp.json()), ""
+        return multi_node.generated_tokens(resp.json()), ""
     except ValueError:
         return 0, ""
 

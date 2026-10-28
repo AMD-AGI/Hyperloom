@@ -125,7 +125,7 @@ def _collect_forward_env() -> dict[str, str]:
     aiter_rebuild = os.environ.get("AITER_REBUILD", "").strip()
     if aiter_rebuild:
         fwd["AITER_REBUILD"] = aiter_rebuild
-    return filter_forward_env(fwd, warn_on_drop=True)
+    return filter_forward_env(fwd)
 
 
 @dataclass(frozen=True)

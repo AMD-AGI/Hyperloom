@@ -173,7 +173,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import dispatch_domain, gap_backfilled_domain, normalize_dispatch_tags
+        from .domains import dispatch_domain, gap_backfilled_domain
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -186,12 +186,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Resolve as the runner does, so a tags-only or gap-backfilled dispatch is warmed for the domain it runs as.
         resolved_domain = dispatch_domain(params)
         domain = resolved_domain.key if resolved_domain is not None else ""
-        normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:
             params["pr_monitor_available"] = bool(plane is not None and getattr(plane, "pr_monitor_enabled", True))
-
-        params.setdefault("kb_subgraph", {})
 
         for attr, key, convert in _STATE_PARAMS:
             value = convert(getattr(state, attr))
@@ -817,7 +814,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         product = {
             "summary": round_entry.get("summary") or "",
             "proposals_total": round_entry.get("proposals_total"),
-            "empty": round_entry.get("empty"),
             "confidence": round_entry.get("confidence"),
             "new_findings": round_entry.get("new_findings") or [],
             "residual_questions": round_entry.get("residual_questions") or [],

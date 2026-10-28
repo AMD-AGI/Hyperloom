@@ -1944,7 +1944,6 @@ def _build_specialist_prompt_text() -> str:
     )
 
     inputs = SpecialistPromptInputs(
-        task_id="t-test",
         domain=get_domain("serving_specialist"),
         max_turns=12,
         gap_canonical_id="gap-x",

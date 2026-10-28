@@ -1108,14 +1108,13 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
-    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
+    """Two keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
     params: dict = {"domain": "kernel_agent"}
 
     await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert params["gpu_type"] == "mi300x"
-    assert params["kb_subgraph"] == {}
     assert "keep_threshold_pct" in params
 
     empty: dict = {"domain": "kernel_agent"}

@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -829,6 +830,22 @@ def test_pick_head_first_fallback_sorts_when_local_missing(monkeypatch):
     ordered = lm._pick_head_first(nodes)
     addrs = [n["NodeManagerAddress"] for n in ordered]
     assert addrs == sorted(addrs)
+
+
+def test_rank0_pid_ignores_another_deployments_pid_under_the_default_dir(monkeypatch, tmp_path):
+    """A custom pid dir without rank_0.pid has no rank 0 PID, whatever the default dir holds."""
+    lm = _load_script_module("lm_rank0_pid_custom_dir", "launch_multinode.py")
+    default_tmp = tmp_path / "tmp"
+    (default_tmp / "multi_node_pids").mkdir(parents=True)
+    (default_tmp / "multi_node_pids" / "rank_0.pid").write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(default_tmp))
+    custom = tmp_path / "custom_pids"
+    custom.mkdir()
+
+    assert lm._rank0_pid_from_log(str(custom)) is None
+
+    (custom / "rank_0.pid").write_text("17\n", encoding="utf-8")
+    assert lm._rank0_pid_from_log(str(custom)) == 17
 
 
 def test_wait_for_nodes_returns_when_enough_gpu_nodes(monkeypatch):

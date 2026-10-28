@@ -59,7 +59,7 @@ def test_domain_description_separates_it_from_the_serving_domain():
 
 def _focus_text(framework: str = "custom") -> str:
     """Render the domain focus block as one string."""
-    inputs = SpecialistPromptInputs(task_id="t-1", domain=get_domain(DOMAIN_KEY), framework=framework)
+    inputs = SpecialistPromptInputs(domain=get_domain(DOMAIN_KEY), framework=framework)
     return "\n".join(_focus_framework_rewrite_specialist(inputs))
 
 
@@ -375,7 +375,6 @@ def _dispatched_prompt(tmp_path: Path, framework: str, evidence: str = "") -> st
     params = _dispatch(tmp_path, framework, evidence)
     system, user = build_specialist_prompts(
         SpecialistPromptInputs(
-            task_id="t-1",
             domain=get_domain(str(params["domain"])),
             gap_canonical_id=str(params.get("gap_canonical_id") or ""),
             task_kind=str(params.get("task_kind") or ""),
