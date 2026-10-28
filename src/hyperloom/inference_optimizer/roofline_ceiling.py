@@ -17,6 +17,7 @@ from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 from hyperloom.inference_optimizer.model_config_utils import load_model_config_dict, _merge_config_scopes
+from hyperloom.inference_optimizer.tracelens_arch_spec import bundled_arch_specs
 
 log = logging.getLogger(__name__)
 
@@ -399,6 +400,11 @@ def apply_runtime_dtype(meta: "ModelMeta", rt: RuntimeDtype) -> "ModelMeta":
     )
 
 
+def _with_precision_aliases(peaks: dict[str, float]) -> dict[str, float]:
+    """*peaks*, keyed by precision, under every tag :data:`_PRECISION_TAGS` reads that precision as."""
+    return {alias: tflops for tag, tflops in peaks.items() for alias in _PRECISION_TAGS[tag]}
+
+
 def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, precision_tag: str | None) -> float:
     """``(gpu, precision)`` → TFLOPS from *specs*' ``peak_tflops`` table (case-insensitive); 0.0 on any miss."""
     spec = specs.get((gpu_type or "").strip().lower())
@@ -411,12 +417,20 @@ def _resolve_tflops(specs: dict[str, dict[str, Any]], gpu_type: str | None, prec
 
 
 def _compute_peak(gpu_type: str | None, precision_tag: str | None) -> tuple[float, str]:
-    """``(gpu, precision)`` → ``(TFLOPS, convention)``: max-achievable, else vendor dense peak, else ``(0.0, "unknown")``."""
+    """``(gpu, precision)`` → ``(TFLOPS, convention)``: max-achievable, vendor dense, TraceLens's bundled spec, else 0."""
     achievable = _resolve_tflops(HW_SPECS_ACHIEVABLE, gpu_type, precision_tag)
     if achievable > 0:
         return achievable, "achievable"
     vendor = _resolve_tflops(HW_SPECS, gpu_type, precision_tag)
-    return (vendor, "vendor") if vendor > 0 else (0.0, "unknown")
+    if vendor > 0:
+        return vendor, "vendor"
+    tracelens = _resolve_tflops(_tracelens_specs(gpu_type), gpu_type, precision_tag)
+    return (tracelens, "tracelens") if tracelens > 0 else (0.0, "unknown")
+
+
+def _tracelens_specs(gpu_type: str | None) -> dict[str, dict[str, Any]]:
+    """TraceLens's bundled arch spec, keyed like ``HW_SPECS``, for a board ``HW_SPECS`` has no row for."""
+    return bundled_arch_specs(gpu_type, _PRECISION_TAGS, published=HW_SPECS)
 
 
 @dataclass(frozen=True)
@@ -699,7 +713,7 @@ def compute_theoretical_peak_output_tok_per_sec(
     meta: ModelMeta, shape: DecodeShape, *, gpu_type: str, num_gpus: int, kv_dtype_bytes: float
 ) -> float:
     """Decode-only memory-bound ceiling for ``output_throughput`` (returns 0.0, never raises, on unknown gpu_type / degenerate divisor). ``meta.active_weight_bytes`` shrinks per-token IO for MoE."""
-    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    spec = {**_tracelens_specs(gpu_type), **HW_SPECS}.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
     bw_total_bytes_per_sec = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
@@ -812,7 +826,7 @@ def _read_vae_geometry(model_path: str) -> tuple[int, int]:
 
 def compute_diffusion_mem_img_per_sec(*, gpu_type: str, num_gpus: int, weight_bytes: int, num_steps: int) -> float:
     """Memory-roofline ceiling for diffusion image throughput (images/sec)."""
-    spec = HW_SPECS.get((gpu_type or "").strip().lower())
+    spec = {**_tracelens_specs(gpu_type), **HW_SPECS}.get((gpu_type or "").strip().lower())
     if spec is None:
         return 0.0
     bw = spec["hbm_bw_gbps"] * 1e9 * max(num_gpus, 1)
@@ -1023,28 +1037,8 @@ def compute_roofline_breakdown_from_state(
 #: Max-achievable (sustained) TFLOPS from TraceLens arch JSON files (same HBM
 #: bandwidth as HW_SPECS, empirically-measured max throughput instead of vendor
 #: dense TFLOPS).
-_MI300X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 708.0,
-    "bfloat16": 708.0,
-    "fp16": 654.0,
-    "float16": 654.0,
-    "fp8": 1273.0,
-    "float8_e4m3fn": 1273.0,
-    "float8_e5m2": 1273.0,
-    "fp32": 163.0,
-    "float32": 163.0,
-}
-_MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 843.0,
-    "bfloat16": 843.0,
-    "fp16": 794.0,
-    "float16": 794.0,
-    "fp8": 1519.0,
-    "float8_e4m3fn": 1519.0,
-    "float8_e5m2": 1519.0,
-    "fp32": 194.0,
-    "float32": 194.0,
-}
+_MI300X_ACHIEVABLE_TFLOPS = _with_precision_aliases({"bf16": 708.0, "fp16": 654.0, "fp8": 1273.0, "fp32": 163.0})
+_MI325X_ACHIEVABLE_TFLOPS = _with_precision_aliases({"bf16": 843.0, "fp16": 794.0, "fp8": 1519.0, "fp32": 194.0})
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
     "mi300x": {
         "hbm_bw_gbps": 5300.0,
@@ -1062,6 +1056,7 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
 _COMPUTE_PEAK_SOURCES = {
     "achievable": "TraceLens arch JSON (max-achievable sustained)",
     "vendor": "vendor dense peak (achievable-table miss fallback)",
+    "tracelens": "TraceLens bundled arch spec under $TRACELENS_ROOT (no HW_SPECS row)",
     "unknown": "unavailable",
 }
 
@@ -1196,7 +1191,7 @@ def compute_roofline_from_perfmodel(
 ) -> "PerfModelBreakdown | None":
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     gpu_key = (target.gpu_type or "").strip().lower()
-    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
+    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or {**_tracelens_specs(gpu_key), **HW_SPECS}.get(gpu_key)
     if spec is None:
         return None
 

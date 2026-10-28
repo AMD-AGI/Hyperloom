@@ -1022,3 +1022,103 @@ def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
 def test_num_bits_still_wins_when_the_tag_is_unknown():
     cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "some_new_format", "num_bits": 6}}}
     assert rc._resolve_quant_config_weight_bytes(cfg) == 0.75
+
+
+#: A TraceLens arch spec in the shape TraceLens bundles. The numbers are synthetic.
+_TRACELENS_SPEC = {
+    "name": "Radeon 8060S",
+    "mem_bw_gbps": 100.0,
+    "memory_gb": 16.0,
+    "max_achievable_tflops": {"matrix_fp16": 9.0, "matrix_bf16": 10.0, "matrix_fp32": 2.0, "matrix_int8": 8.0},
+}
+
+
+def _tracelens_root_with(tmp_path, monkeypatch, file_stem: str, spec: dict | str) -> Path:
+    from hyperloom.inference_optimizer.tracelens_arch_spec import ARCH_SPEC_DIR
+
+    root = tmp_path / "TraceLens"
+    path = root / ARCH_SPEC_DIR / f"{file_stem}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(spec if isinstance(spec, str) else json.dumps(spec), encoding="utf-8")
+    monkeypatch.setenv("TRACELENS_ROOT", str(root))
+    return path
+
+
+def test_a_board_without_a_hw_specs_row_uses_tracelens_bundled_spec(tmp_path, monkeypatch):
+    _tracelens_root_with(tmp_path, monkeypatch, "Radeon_8060S", _TRACELENS_SPEC)
+
+    out = _perfmodel(gpu_type="radeon8060s")
+    assert out is not None
+    assert out.hbm_bw_gbps == pytest.approx(100.0)
+    assert out.peak_achievable_tflops == pytest.approx(10.0)
+
+    provenance = rc.resolve_compute_peak_provenance("radeon8060s", "bfloat16")
+    assert provenance["compute_peak_convention"] == "tracelens"
+    assert provenance["compute_peak_tflops"] == pytest.approx(10.0)
+    assert "TraceLens" in provenance["compute_peak_source"]
+
+    meta, shape = _dense_meta(), rc.DecodeShape(isl=128, osl=64, concurrency=8)
+    mem = rc.compute_theoretical_peak_output_tok_per_sec(
+        meta, shape, gpu_type="radeon8060s", num_gpus=1, kv_dtype_bytes=2.0
+    )
+    cmp = rc.compute_compute_bound_ceiling_tok_per_sec(
+        rc.ComputeTarget(gpu_type="radeon8060s", num_gpus=1, precision_tag="bf16"),
+        active_weight_bytes=meta.active_weight_bytes,
+        weight_bytes=meta.weight_bytes,
+        weight_dtype_bytes=meta.weight_dtype_bytes,
+    )
+    assert mem > 0 and cmp > 0
+
+
+def test_a_tracelens_spec_claims_no_peak_for_a_precision_it_lacks(tmp_path, monkeypatch):
+    _tracelens_root_with(tmp_path, monkeypatch, "Radeon_8060S", _TRACELENS_SPEC)
+    assert rc.resolve_compute_peak_provenance("radeon8060s", "fp8")["compute_peak_convention"] == "unknown"
+
+
+def test_a_board_with_a_hw_specs_row_ignores_a_tracelens_spec(tmp_path, monkeypatch):
+    _tracelens_root_with(tmp_path, monkeypatch, "R9700", _TRACELENS_SPEC)
+    assert rc.resolve_compute_peak_provenance("r9700", "bf16")["compute_peak_convention"] == "vendor"
+    assert rc.resolve_compute_peak_provenance("r9700", "fp4")["compute_peak_convention"] == "unknown"
+    assert _perfmodel(gpu_type="r9700").hbm_bw_gbps == pytest.approx(640.0)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "{not json",
+        json.dumps({**_TRACELENS_SPEC, "mem_bw_gbps": 0}),
+        json.dumps({**_TRACELENS_SPEC, "max_achievable_tflops": None}),
+        json.dumps(["not", "an", "object"]),
+        json.dumps({**_TRACELENS_SPEC, "source": "These are benchmark derived peak flops and bw"}),
+    ],
+    ids=["unparseable", "zero-bandwidth", "no-peaks", "not-an-object", "measured"],
+)
+def test_an_unusable_or_measured_tracelens_spec_leaves_the_board_without_a_ceiling(tmp_path, monkeypatch, spec):
+    _tracelens_root_with(tmp_path, monkeypatch, "Radeon_8060S", spec)
+    assert _perfmodel(gpu_type="radeon8060s") is None
+    assert rc.resolve_compute_peak_provenance("radeon8060s", "bf16")["compute_peak_convention"] == "unknown"
+    assert rc.compute_theoretical_peak_output_tok_per_sec(
+        _dense_meta(),
+        rc.DecodeShape(isl=128, osl=64, concurrency=8),
+        gpu_type="radeon8060s",
+        num_gpus=1,
+        kv_dtype_bytes=2.0,
+    ) == pytest.approx(0.0)
+
+
+def test_a_board_without_a_tracelens_spec_has_no_ceiling(tmp_path, monkeypatch):
+    _tracelens_root_with(tmp_path, monkeypatch, "MI300X", _TRACELENS_SPEC)
+    assert _perfmodel(gpu_type="radeon8060s") is None
+    monkeypatch.delenv("TRACELENS_ROOT")
+    assert _perfmodel(gpu_type="radeon8060s") is None
+
+
+def test_the_achievable_tables_keep_every_precision_alias():
+    assert rc._MI300X_ACHIEVABLE_TFLOPS == {
+        "bf16": 708.0, "bfloat16": 708.0, "fp16": 654.0, "float16": 654.0,
+        "fp8": 1273.0, "float8_e4m3fn": 1273.0, "float8_e5m2": 1273.0, "fp32": 163.0, "float32": 163.0,
+    }  # fmt: skip
+    assert rc._MI325X_ACHIEVABLE_TFLOPS == {
+        "bf16": 843.0, "bfloat16": 843.0, "fp16": 794.0, "float16": 794.0,
+        "fp8": 1519.0, "float8_e4m3fn": 1519.0, "float8_e5m2": 1519.0, "fp32": 194.0, "float32": 194.0,
+    }  # fmt: skip
