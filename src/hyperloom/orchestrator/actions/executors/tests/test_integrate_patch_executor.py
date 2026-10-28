@@ -67,6 +67,43 @@ index 0000000..1111111 100644
 """
 
 
+# A framework rewrite in the shape the enablement lane authors them: the new
+# path only runs when an environment variable turns it on.
+_SWITCH_GATED_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,5 @@
++import os
+ def f():
+-    return 1
++    if os.environ.get("HL_TEST_FUSE") == "1":
++        return 2
++    return 1
+"""
+
+
+# The reads a scan of diff lines cannot tell apart from the gate above: an
+# opt-out that runs the new path precisely while the name is unset, a write,
+# and a value the code needs. None of them keeps the change from running, so
+# none of them may cost the round its bench.
+_ENV_READING_PATCH = """\
+diff --git a/src.py b/src.py
+index 0000000..1111111 100644
+--- a/src.py
++++ b/src.py
+@@ -1,2 +1,6 @@
++import os
+ def f():
+-    return 1
++    if not os.environ.get("HL_TEST_DISABLE_FAST_PATH"):
++        os.environ["HL_TEST_CHILD_FLAG"] = "1"
++        return 2 + len(os.getenv("TRITON_CACHE_DIR") or "")
++    return 1
+"""
+
+
 # Targets a file absent from the framework tree — must be caught by the
 # missing-target preflight, not a wasted ``git apply``.
 _MISSING_TARGET_PATCH = """\
@@ -538,7 +575,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         current_best={},
         enablement=EnablementRound(),
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -895,38 +932,24 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_an_enablement_integrate_that_runs_after_the_lane_succeeded_is_graded_as_any_other(tmp_path: Path):
-    """The tag was stamped at admission; the executor grades by what the lane is when it runs."""
+@pytest.mark.parametrize(
+    ("phase", "lane"),
+    [("ENABLEMENT", EnablementRound(succeeded=True)), ("FRAMEWORK_AGENT", EnablementRound())],
+    ids=["lane-succeeded", "phase-moved-on"],
+)
+async def test_an_enablement_round_the_lane_no_longer_takes_is_skipped(tmp_path: Path, phase, lane):
+    """The tag was stamped at admission; the executor skips the round once the lane takes no more."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    state = SharedState(phase="FRAMEWORK_AGENT", enablement=EnablementRound(succeeded=True))
-    ctx = _make_ctx(
-        "t-int-late",
-        {
-            "specialist_task_id": "nonexistent",
-            "enablement": True,
-            "enablement_before_observation_path": "/s/reports/bringup/round-old.json",
-        },
-    )
-    ctx.extra["shared_state"] = state
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-    resolved: dict[str, Any] = {}
-    resolve = executor._stage_resolve
+    ctx = _make_ctx("t-int-late", {"specialist_task_id": "nonexistent", "enablement": True})
+    ctx.extra["shared_state"] = SharedState(phase=phase, enablement=lane)
 
-    async def _spy(attempt, params, extra):
-        try:
-            return await resolve(attempt, params, extra)
-        finally:
-            resolved.update(params)
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
 
-    executor._stage_resolve = _spy
-
-    await executor(ctx)
-
-    assert "enablement" not in resolved
-    assert "enablement_before_observation_path" not in resolved
+    assert result["status"] == "skipped"
+    assert "enablement" not in result
 
 
 @pytest.mark.asyncio
@@ -1162,12 +1185,13 @@ async def _run_enablement_integrate(
     extra_params: dict[str, Any] | None = None,
     bench_effective_config: dict[str, Any] | None = None,
     bench_materialized_config: str = "",
+    patch_contents: list[str] | None = None,
 ):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
     init_git_repo(repo)
-    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=[_VALID_PATCH])
+    _write_specialist_workspace(session_dir, "t-spec-en", patch_contents=patch_contents or [_VALID_PATCH])
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
@@ -1688,6 +1712,145 @@ async def test_a_setup_command_that_is_not_an_install_fails_the_round_before_any
     assert result["patches_applied"] == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("patch", [_SWITCH_GATED_PATCH, _ENV_READING_PATCH], ids=["gate", "opt-out-write-value"])
+async def test_a_patch_that_reads_an_env_name_still_gets_its_bench(tmp_path: Path, monkeypatch, patch: str):
+    """The diff text does not say whether a read keeps the change off.
+
+    An opt-out runs the new path while the name is unset, a write sets rather
+    than reads, and a value read gates nothing; on the line all three look like
+    the gate above. Refusing the round over that would cost rounds that work
+    their measurement, so the bench is what decides.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    monkeypatch.delenv("HL_TEST_DISABLE_FAST_PATH", raising=False)
+
+    result, _repo = await _run_enablement_integrate(tmp_path, monkeypatch, booted=True, patch_contents=[patch])
+
+    assert result["status"] == "kept"
+    assert result[RESULT_BENCHED] is True
+    assert "inert_round_env_reads" not in result
+
+
+@pytest.mark.asyncio
+async def test_an_inert_round_hands_on_the_env_names_its_patch_added_a_read_of(tmp_path: Path, monkeypatch):
+    """A boot that stopped where the one before it stopped is where an unset switch is worth a look.
+
+    The patch was there and the boot ended at the same wall with the same
+    failure, as though it were not, so the names ride along for the next
+    mandate to check. They are a lead beside a boot that was observed twice,
+    not a verdict on the patch.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path, monkeypatch, booted=False, patch_contents=[_SWITCH_GATED_PATCH]
+    )
+
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert result["inert_round_env_reads"] == ["HL_TEST_FUSE"]
+
+
+@pytest.mark.asyncio
+async def test_a_revert_that_served_hands_on_no_env_names(tmp_path: Path, monkeypatch):
+    """A server that served ran the patched code; its switch is not the lead.
+
+    This round reverts on minimal correctness, not on runnability: the boot got
+    all the way up, so nothing here says the change was never reached.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    same_wall = boot_log_for(LadderStage.ENGINE_INIT)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.0,
+        before_log=same_wall,
+        after_log=same_wall,
+        patch_contents=[_SWITCH_GATED_PATCH],
+    )
+
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "inert_round_env_reads" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_revert_at_another_wall_hands_on_no_env_names(tmp_path: Path, monkeypatch):
+    """A boot that ended somewhere else than the one before it did something.
+
+    Where it ended earlier the patch is the likeliest cause, and an unset name
+    it reads explains none of it.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=False,
+        before_log=boot_log_for(LadderStage.GRAPH_CAPTURE),
+        after_log=boot_log_for(LadderStage.ENGINE_INIT),
+        patch_contents=[_SWITCH_GATED_PATCH],
+    )
+
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "inert_round_env_reads" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_declared_switch_arms_its_gate_and_the_round_benches(tmp_path: Path, monkeypatch):
+    """The same patch with the switch in its manifest is armed, so nothing is refused."""
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(
+        session_dir,
+        "t-spec-armed",
+        patch_contents=[_SWITCH_GATED_PATCH],
+        done_payload_override={
+            "framework_switches": [{"switch": "HL_TEST_FUSE", "category": "fuse_collectives", "target": "src.py:f"}]
+        },
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+
+    benched: dict[str, Any] = {}
+
+    async def _fake_bench(_bench, **kwargs):
+        benched.update(kwargs)
+        return {
+            "output_throughput": 150.0,
+            "completed_requests": 12,
+            "error": "",
+            "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
+        }, {
+            "accuracy_pass": None,
+            "enablement_accuracy": 0.5,
+            "timed_out": False,
+        }
+
+    async def _noop_kb(*_args, **_kwargs):
+        return None
+
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
+    monkeypatch.setattr(executor, "_maybe_write_framework_kb_record", _noop_kb)
+
+    params = {
+        "specialist_task_id": "t-spec-armed",
+        "framework_source_root": str(repo),
+        "enablement": True,
+    }
+    result = await executor(_make_ctx("t-int-armed", params))
+
+    assert result["status"] == "kept"
+    assert benched["extra_envs_applied"]["HL_TEST_FUSE"] == "1"
+
+
 async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, patch_contents=None, ledger=None):
     """Drive one enablement round to an exit that reports no outcome lists.
 
@@ -1725,7 +1888,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     arrange(monkeypatch)
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(ledger or [])),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1866,7 +2029,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1926,7 +2089,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -2909,7 +3072,7 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
     monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(prior_ledger)),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",

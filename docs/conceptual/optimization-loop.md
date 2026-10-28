@@ -140,6 +140,9 @@ revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
 `enablement_attempts_exhausted` (eight consecutive failed rounds).
 
+Only the enablement lane authors rounds here; the LLM proposes `target_analysis`.
+A round that reaches its executor after the lane stopped taking rounds is skipped.
+
 A KEEP or an advance ends the held round whoever authored it, since the wall
 that round was aimed at is behind the boot. A specialist still queued under that
 round is cancelled rather than left to author against the old wall; one already

@@ -257,7 +257,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
                 "annotations": {"step_root_count": 12},
             }
         ],
-        "chunk_level": [{"path": "/w/t/chunk0.json"}, {"path": "/w/t/chunk1.json"}],
         "checks": [],
     }
     validate.update(overrides)
@@ -303,14 +302,12 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     assert quality["capture_sidecar_files_present"] == 3
     assert quality["analyzed_rank"] == 0
     assert quality["rank_count_certified"] == 1
-    assert quality["chunk_count_certified"] == 2
     assert quality["file_count_by_role"]["capture_sidecar"] == 3
 
     # The unbounded tables must not have been copied in.
     flat = json.dumps(validate)
     assert "candidates" not in flat
     assert "rank_level" not in flat
-    assert "chunk_level" not in flat
     assert "capture_traces/bs_" not in flat
 
 
@@ -860,7 +857,6 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    assert out["chunk_level"] == []
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"

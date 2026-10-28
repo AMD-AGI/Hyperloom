@@ -23,22 +23,17 @@ _RAY_OWNED_VISIBLE_DEVICE_VARS = (
 )
 
 
-def _should_use_ray_backend() -> bool:
-    """Whether GPU/serving work runs through the Ray backend.
+def ray_exec_enabled() -> bool:
+    """Whether serving and ``needs_gpu`` specialist work runs through the Ray backend.
 
-    ``INFERENCE_OPTIMIZER_RAY_EXEC`` wins when set; otherwise single-node is ON, multi-node OFF, and pytest OFF.
+    Multi-node is always OFF. On single-node ``INFERENCE_OPTIMIZER_RAY_EXEC`` decides when set; otherwise it is ON,
+    and OFF under pytest.
     """
     from ._multi_node_env import is_multi_node
 
-    auto = not os.environ.get("PYTEST_CURRENT_TEST") and not is_multi_node()
-    return env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=auto)
-
-
-def ray_gpu_specialist_exec_enabled() -> bool:
-    """Whether ``needs_gpu`` specialists route through the Ray backend."""
-    from ._multi_node_env import is_multi_node
-
-    return _should_use_ray_backend() and not is_multi_node()
+    if is_multi_node():
+        return False
+    return env_flag("INFERENCE_OPTIMIZER_RAY_EXEC", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def ray_gpu_pending_limit() -> int:
@@ -57,7 +52,7 @@ def ray_serving_priority_enabled() -> bool:
 
 def serving_slot_busy() -> bool:
     """Best-effort check: is Ray's whole-machine ``serving_slot`` currently held?"""
-    if not ray_gpu_specialist_exec_enabled():
+    if not ray_exec_enabled():
         return False
     import ray
 
@@ -220,7 +215,7 @@ def mark_ray_backend_unhealthy() -> None:
 
 __all__ = [
     "RayExecutionBackend",
-    "_should_use_ray_backend",
+    "ray_exec_enabled",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
     "strip_visible_devices_from_config",

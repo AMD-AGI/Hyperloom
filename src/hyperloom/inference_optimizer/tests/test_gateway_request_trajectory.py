@@ -162,6 +162,35 @@ def test_an_anthropic_messages_reply_is_one_streamed_request(tmp_path):
     assert attributes["cache_creation_input_tokens"] == 0
 
 
+def test_the_redials_of_one_messages_reply_stay_in_one_request(tmp_path, monkeypatch):
+    """A connection that came up only on the third dial is still one call: one row, covering every attempt."""
+    monkeypatch.setattr(llm_config, "_ANTHROPIC_CONNECT_BACKOFF_S", 0.0)
+    events = (
+        {"type": "message_start", "message": {"id": "msg_02", "model": "claude-x", "content": [], "usage": {}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    )
+    body = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+    dials: list[object] = []
+
+    def dial(request):
+        dials.append(request)
+        if len(dials) <= llm_config.ANTHROPIC_CONNECT_RETRIES:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, content=body)
+
+    with httpx.Client(base_url="https://gateway.test", transport=httpx.MockTransport(dial)) as client:
+        with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
+            result = llm_config.anthropic_messages(client, component="breakdown", model="claude-x", max_tokens=8)
+
+    assert result.text == "ok"
+    assert len(dials) == llm_config.ANTHROPIC_CONNECT_RETRIES + 1
+    (row,) = _requests(tmp_path)
+    assert row["attributes"]["message_id"] == "msg_02"
+
+
 def test_an_observer_fault_never_reaches_the_request(tmp_path, monkeypatch):
     def broken(_record):
         raise ValueError("observer bug")

@@ -35,7 +35,7 @@ from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_pr
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode, with_output_per_gpu
+from hyperloom.common.perf_metric import agentx_active, is_agentx_mode, with_output_per_gpu
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -105,7 +105,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     LaunchLayer,
     MaterializeOptions,
-    agentx_active,
     default_baseline_config,
     prepare_agentx_runtime,
 )
@@ -142,7 +141,7 @@ from .magpie_agentx import ServerArgvInvalidError
 
 
 log = logging.getLogger(__name__)
-
+_BENCHMARK_MODE_ATTR = "benchmark_mode"
 
 #: The producer label the baseline event's fragments are written under.
 _RECORDER_PRODUCER = "orchestrator"
@@ -2252,7 +2251,7 @@ class BenchmarkRunExecutor:
                     establish_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
                     drop_moe_runner_backend=force_drop_moe_runner_backend,
                     flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
-                    agentx_mode=agentx_active(shared_state),
+                    agentx_mode=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
                     grading=getattr(shared_state, "grading", None),
                 ),
             )
@@ -2341,7 +2340,7 @@ class BenchmarkRunExecutor:
             env=os.environ,
             inferencex_path=attempt.inferencex_path,
             config_path=config_path,
-            active=agentx_active(shared_state),
+            active=agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, "")),
         )
         if agx_err:
             agentx = {"error_class": AGENTX_PREFLIGHT_ERROR_CLASS, "error": agx_err}
@@ -3641,7 +3640,7 @@ class BenchmarkRunExecutor:
         # Parse accuracy eval results (GSM8K for serving, or the image-quality gate for scriptable frameworks).
         eval_framework = (report or {}).get("framework") or os.environ.get("FRAMEWORK") or None
         shared_state = round_.ctx_extra.get("shared_state") or self.shared_state
-        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
+        benchmark_mode = str(getattr(shared_state, _BENCHMARK_MODE_ATTR, "") or "")
         # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         if (
             round_.run_eval_disabled
@@ -3909,7 +3908,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
             shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and agentx_active(shared_state):
+            is_agentx = agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, ""))
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and is_agentx:
                 refuse_cacheless_agentx_baseline(result)
         except BaseException as exc:
             if recorder is not None:

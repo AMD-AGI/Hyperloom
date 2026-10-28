@@ -856,7 +856,6 @@ class SpecialistPromptInputs:
     """Typed inputs the Coordinator hands to the prompt builder."""
 
     # Identity
-    task_id: str
     domain: SpecialistDomain
     max_turns: int = DEFAULT_SPECIALIST_MAX_TURNS
 
@@ -865,8 +864,6 @@ class SpecialistPromptInputs:
     gpu_type: str = ""
     allocated_gpu_ids: tuple[int, ...] = ()
     tp: int = 0
-    hbm_gb: float = 0.0
-    peak_tflops: float = 0.0
     arch_notes: str = ""
     # Advisory competitor target gap block; direction hint only.
     target_gap_notes: str = ""
@@ -903,8 +900,6 @@ class SpecialistPromptInputs:
     gap_layer: str = ""
     gap_evidence: dict[str, Any] = field(default_factory=dict)
 
-    # Optional structured KB context. Empty in the RecipeKB-first path.
-    kb_subgraph: dict[str, Any] = field(default_factory=dict)
     # Experience service ``prompt_block`` read for this dispatch; empty when no Experience was rendered.
     experience_kb_block: str = ""
 
@@ -963,10 +958,9 @@ class SpecialistPromptInputs:
     notes: str = ""
 
     # Dispatch profile dials (see orchestrator.specialists.profile) that shape
-    # single-domain / cross-domain / freeform / bench prompting.
+    # single-domain / cross-domain / freeform prompting.
     scope: str = "domain"
     mode: str = MODE_PATCH
-    bench: bool = False
     # Free-form task description (only populated when scope == 'freeform').
     task_description: str = ""
 
@@ -1424,10 +1418,6 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         rows.append(f"- TP: {inp.tp}")
     else:
         rows.append(f"- TP: {_NONE_PLACEHOLDER}")
-    if inp.hbm_gb > 0:
-        rows.append(f"- HBM per GPU: {inp.hbm_gb:.1f} GB")
-    if inp.peak_tflops > 0:
-        rows.append(f"- Peak TFLOPs (declared): {inp.peak_tflops:.1f}")
     # Workload context.
     workload_rows: list[str] = []
     if inp.precision:
@@ -1543,8 +1533,7 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
         True when every prior KB/PR/research source is empty.
     """
     return (
-        not inp.kb_subgraph
-        and not inp.experience_kb_block
+        not inp.experience_kb_block
         and not inp.warm_start_recipe
         and not inp.warm_start_lessons
         and not inp.warm_start_pitfalls
@@ -1552,81 +1541,76 @@ def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
     )
 
 
-def _section_kb_subgraph(inp: SpecialistPromptInputs) -> list[str]:
+# Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
+_COLD_START_DIRECTIVE = (
+    "**COLD-START MODE — no priors available.**",
+    "",
+    "All prior sources for this gap are empty:",
+    "",
+    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
+    + "research hints were available for this "
+    + "(model, hardware, domain) tuple.",
+    "- Warm-start recipe: ``(none)`` (Section 5).",
+    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
+    "",
+    "**Directive — a coin-flip proposal is worse than none.** "
+    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
+    + "Section 1 as your fallback prior and take the **1–2 "
+    + "most conservative, well-attested defaults** that fit "
+    + "the hardware (Section 2) and the gap symptom "
+    + "(Section 3); flag each ``provenance: "
+    + "domain_focus_default`` and call it an unvalidated "
+    + "fallback in the proposal's ``reason``. If none clears "
+    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
+    + "which you considered and why each was rejected — a "
+    + "bare empty exit with no rationale reads as a tool "
+    + "failure. Do NOT add a ``confidence`` field: "
+    + "self-reported confidence / gain fields are stripped "
+    + "before review. Record in ``residual_questions`` what "
+    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
+    + "future round should pursue.",
+)
+
+
+def _section_kb_context(inp: SpecialistPromptInputs) -> list[str]:
     """Build the advisory KB-context section of the specialist prompt.
 
-    Falls back to research hints when the structured KB subgraph is empty.
+    Renders the research hints, the cold-start directive, or the none placeholder.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
 
     Returns:
-        Prompt lines rendering the KB subgraph (or hint-based fallback).
+        Prompt lines for the KB-context section.
     """
     rows = ["## 4. KB CONTEXT (optional, advisory)", ""]
-    cold = _is_cold_start(inp)
-    if not inp.kb_subgraph:
-        if inp.research_hints:
-            rows.extend(
-                [
-                    "Structured KB context is empty for this (model, hardware, domain), but "
-                    + "the research scout collected source-backed priors this "
-                    + "session. Treat these as your advisory prior (co-equal with "
-                    + "RecipeKB priors; the Critic still gates the final answer):",
-                    "",
-                    inp.research_hints,
-                    "",
-                    "Anchor proposals on these hints where they fit the gap " + "(Section 3) and hardware (Section 2).",
-                ]
-            )
-            return rows
-        if cold:
-            # Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
-            rows.extend(
-                [
-                    "**COLD-START MODE — no priors available.**",
-                    "",
-                    "All prior sources for this gap are empty:",
-                    "",
-                    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
-                    + "research hints were available for this "
-                    + "(model, hardware, domain) tuple.",
-                    "- Warm-start recipe: ``(none)`` (Section 5).",
-                    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
-                    "",
-                    "**Directive — a coin-flip proposal is worse than none.** "
-                    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
-                    + "Section 1 as your fallback prior and take the **1–2 "
-                    + "most conservative, well-attested defaults** that fit "
-                    + "the hardware (Section 2) and the gap symptom "
-                    + "(Section 3); flag each ``provenance: "
-                    + "domain_focus_default`` and call it an unvalidated "
-                    + "fallback in the proposal's ``reason``. If none clears "
-                    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
-                    + "which you considered and why each was rejected — a "
-                    + "bare empty exit with no rationale reads as a tool "
-                    + "failure. Do NOT add a ``confidence`` field: "
-                    + "self-reported confidence / gain fields are stripped "
-                    + "before review. Record in ``residual_questions`` what "
-                    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
-                    + "future round should pursue.",
-                ]
-            )
-        else:
-            rows.extend(
-                [
-                    _NONE_PLACEHOLDER,
-                    "",
-                    "(No structured KB context supplied. Use Sections 1, 3, 5, "
-                    + "and 6 plus source inspection; record missing RecipeKB / "
-                    + "research / PR questions in ``residual_questions`` so a "
-                    + "future round can warm richer advisory context.)",
-                ]
-            )
+    if inp.research_hints:
+        rows.extend(
+            [
+                "Structured KB context is empty for this (model, hardware, domain), but "
+                + "the research scout collected source-backed priors this "
+                + "session. Treat these as your advisory prior (co-equal with "
+                + "RecipeKB priors; the Critic still gates the final answer):",
+                "",
+                inp.research_hints,
+                "",
+                "Anchor proposals on these hints where they fit the gap " + "(Section 3) and hardware (Section 2).",
+            ]
+        )
         return rows
-    rows.append("```json")
-    rows.append(json.dumps(inp.kb_subgraph, sort_keys=True, separators=(",", ":")))
-    rows.append("```")
+    if _is_cold_start(inp):
+        rows.extend(_COLD_START_DIRECTIVE)
+    else:
+        rows.extend(
+            [
+                _NONE_PLACEHOLDER,
+                "",
+                "(No structured KB context supplied. Use Sections 1, 3, 5, "
+                + "and 6 plus source inspection; record missing RecipeKB / "
+                + "research / PR questions in ``residual_questions`` so a "
+                + "future round can warm richer advisory context.)",
+            ]
+        )
     return rows
 
 
@@ -1859,47 +1843,71 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
         The rendered related-lessons section lines.
     """
     rows = ["## 5b. RELATED LESSONS (prior KEEPs on this model+hw)", ""]
-    if not inp.warm_start_lessons:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
     for point in inp.warm_start_lessons:
-        # External warm-start data may arrive as a plain string rather than a
-        # dict "point"; render the bare statement to tolerate shape drift.
-        if isinstance(point, str):
-            statement = point.strip()
-            if statement:
-                rows.append(f"- **{statement}**")
+        line = _kb_point_line(inp, point, text_key="statement", count_label="validated")
+        if not line:
             continue
-        if not isinstance(point, dict):
-            continue
-        statement = str(point.get("statement") or "").strip()
-        if not statement:
-            continue
-        impact_str = _render_measured_impact(point.get("measured_impact"))
-        conf = point.get("confidence")
-        meta_bits: list[str] = []
-        if isinstance(conf, (int, float)) and conf > 0:
-            meta_bits.append(f"conf={float(conf):.2f}")
-        # validated_count is the strongest cross-session signal; fall back to source_session_id.
-        vc = point.get("validated_count")
-        if isinstance(vc, int) and vc > 1:
-            meta_bits.append(f"validated={vc}")
-        recent_ids = point.get("source_session_ids")
-        if isinstance(recent_ids, list) and recent_ids:
-            meta_bits.append(f"recent={recent_ids[-1]}")
-        else:
-            src_sid = str(point.get("source_session_id") or "").strip()
-            if src_sid:
-                meta_bits.append(f"src={src_sid}")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        # Version-mismatch annotation; the LLM gets the final call.
-        version_note = _format_version_note(inp, point)
-        rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
+        rows.append(line)
+        impact_str = _render_measured_impact(point.get("measured_impact")) if isinstance(point, dict) else ""
         if impact_str:
             rows.append(f"    impact: {impact_str}")
-    if len(rows) == 2:  # only the header + blank line, all lessons filtered out
+    if len(rows) == 2:  # only the header + blank line: no lessons, or all filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
+
+
+def _kb_point_line(
+    inp: SpecialistPromptInputs,
+    point: Any,
+    *,
+    text_key: str,
+    count_label: str,
+    lead_meta_key: str = "",
+) -> str:
+    """Render one RecipeKB lesson / pitfall row as a prompt bullet.
+
+    Args:
+        inp: The specialist prompt inputs (reads the framework version).
+        point: The row: a ``{text_key, confidence, validated_count, ...}``
+            dict, or a bare string.
+        text_key: The dict key holding the row's text.
+        count_label: The label ``validated_count`` renders under.
+        lead_meta_key: A dict key rendered first in the metadata, if any.
+
+    Returns:
+        The bullet line, or "" when the row carries no text.
+    """
+    # External warm-start data may arrive as a plain string rather than a
+    # dict "point"; render the bare text to tolerate shape drift.
+    if isinstance(point, str):
+        text = point.strip()
+        return f"- **{defang_prompt_structure(text)}**" if text else ""
+    if not isinstance(point, dict):
+        return ""
+    text = str(point.get(text_key) or "").strip()
+    if not text:
+        return ""
+    meta_bits: list[str] = []
+    lead = str(point.get(lead_meta_key) or "").strip() if lead_meta_key else ""
+    if lead:
+        meta_bits.append(f"{lead_meta_key}={lead}")
+    conf = point.get("confidence")
+    if isinstance(conf, (int, float)) and conf > 0:
+        meta_bits.append(f"conf={float(conf):.2f}")
+    # validated_count is the strongest cross-session signal; fall back to source_session_id.
+    vc = point.get("validated_count")
+    if isinstance(vc, int) and vc > 1:
+        meta_bits.append(f"{count_label}={vc}")
+    recent_ids = point.get("source_session_ids")
+    if isinstance(recent_ids, list) and recent_ids:
+        meta_bits.append(f"recent={recent_ids[-1]}")
+    else:
+        src_sid = str(point.get("source_session_id") or "").strip()
+        if src_sid:
+            meta_bits.append(f"src={src_sid}")
+    meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+    # Version-mismatch annotation; the LLM gets the final call.
+    return f"- **{defang_prompt_structure(text)}**{meta}{_format_version_note(inp, point)}"
 
 
 def _format_version_note(
@@ -1975,42 +1983,11 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
         The rendered known-pitfalls section lines.
     """
     rows = ["## 5c. KNOWN PITFALLS (do NOT repeat — prior REVERTs)", ""]
-    if not inp.warm_start_pitfalls:
-        rows.append(_NONE_PLACEHOLDER)
-        return rows
     for point in inp.warm_start_pitfalls:
-        # Tolerate plain-string pitfalls alongside the structured dict "point".
-        if isinstance(point, str):
-            description = point.strip()
-            if description:
-                rows.append(f"- **{description}**")
-            continue
-        if not isinstance(point, dict):
-            continue
-        description = str(point.get("description") or "").strip()
-        if not description:
-            continue
-        severity = str(point.get("severity") or "").strip()
-        conf = point.get("confidence")
-        meta_bits: list[str] = []
-        if severity:
-            meta_bits.append(f"severity={severity}")
-        if isinstance(conf, (int, float)) and conf > 0:
-            meta_bits.append(f"conf={float(conf):.2f}")
-        vc = point.get("validated_count")
-        if isinstance(vc, int) and vc > 1:
-            meta_bits.append(f"observed={vc}")
-        recent_ids = point.get("source_session_ids")
-        if isinstance(recent_ids, list) and recent_ids:
-            meta_bits.append(f"recent={recent_ids[-1]}")
-        else:
-            src_sid = str(point.get("source_session_id") or "").strip()
-            if src_sid:
-                meta_bits.append(f"src={src_sid}")
-        meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        version_note = _format_version_note(inp, point)
-        rows.append(f"- **{description}**{meta}{version_note}")
-    if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
+        line = _kb_point_line(inp, point, text_key="description", count_label="observed", lead_meta_key="severity")
+        if line:
+            rows.append(line)
+    if len(rows) == 2:  # only the header + blank line: no pitfalls, or all filtered out
         rows.append(_NONE_PLACEHOLDER)
     return rows
 
@@ -2258,8 +2235,8 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         (
             "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
             "are a curator, not a brainstormer: rank by expected gain x "
-            "confidence, drop anything contradicting ``kb_subgraph`` / "
-            "``pr_evidence``, and stop at 2. A 3rd or 4th must beat the median "
+            "confidence, drop anything contradicting ``pr_evidence``, and stop "
+            "at 2. A 3rd or 4th must beat the median "
             "of the first two. Padding is a failure, not thoroughness: each "
             "weak entry costs a Critic reject and a slot on the serial "
             "benchmark queue. One real proposal is a better round than two "
@@ -2519,7 +2496,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pd_disaggregation(inp),  # § 1a (PD-disaggregation; omitted unless disaggregated)
             _section_execution_budget(inp),  # omitted when no budget
             _section_gap(inp),
-            _section_kb_subgraph(inp),
+            _section_kb_context(inp),
             _section_roofline_evidence(inp),
             _section_experience_kb(inp),
             _section_runtime_findings(inp),

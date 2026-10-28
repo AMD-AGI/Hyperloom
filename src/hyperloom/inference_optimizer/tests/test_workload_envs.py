@@ -414,6 +414,33 @@ def test_mimo_v2_injects_triton_attention(monkeypatch, tmp_path):
     assert "attention-backend triton" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 
+def test_mimo_v2_attention_pin_is_not_suppressed_by_a_compound_backend_flag(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    src = _write(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--decode-attention-backend aiter"})
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/path/models/MiMo-V2-7B"))
+    tokens = bench["envs"]["EXTRA_SGLANG_ARGS"].split()
+    assert tokens[tokens.index("--attention-backend") + 1] == "triton"
+    assert "--decode-attention-backend" in tokens
+
+
+def test_sparse_block_size_is_not_suppressed_by_a_json_key(monkeypatch):
+    monkeypatch.setattr(we, "_sparse_kv_block_size", lambda _model: 128)
+    bench = {
+        "framework": "vllm",
+        "envs": {"EXTRA_VLLM_ARGS": '--speculative-config {"method":"mtp","block_size":4}'},
+    }
+    we._pin_model_launch_workarounds(bench, "/models/sparse")
+    assert "--block-size 128" in bench["envs"]["EXTRA_VLLM_ARGS"]
+
+
+def test_sparse_block_size_keeps_an_operator_pin(monkeypatch):
+    monkeypatch.setattr(we, "_sparse_kv_block_size", lambda _model: 128)
+    bench = {"framework": "vllm", "envs": {"EXTRA_VLLM_ARGS": "--block_size=64"}}
+    we._pin_model_launch_workarounds(bench, "/models/sparse")
+    assert bench["envs"]["EXTRA_VLLM_ARGS"] == "--block_size=64"
+
+
 def test_run_eval_from_env(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -785,28 +812,6 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
-
-
-# agentx_active: persisted benchmark_mode as a fallback for a missing env var
-
-
-def test_agentx_active_true_from_yaml(monkeypatch, native_benchmark):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    assert we.agentx_active() is True
-
-
-def test_agentx_active_false_with_neither_signal(monkeypatch):
-    _clear_env(monkeypatch)
-    assert we.agentx_active() is False
-    assert we.agentx_active(SimpleNamespace(benchmark_mode="")) is False
-
-
-def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
-    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still be recognized as AgentX-active from the
-    # session's persisted mode.
-    _clear_env(monkeypatch)
-    assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
 # Scriptable baseline sampling cost (measurement contract values)

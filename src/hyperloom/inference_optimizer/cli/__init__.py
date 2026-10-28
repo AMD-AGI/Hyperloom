@@ -84,9 +84,7 @@ from .bootstrap import (
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
@@ -2367,7 +2365,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
         )
         sys.exit(2)
     if _critic_agent_runtime_needed(critic_choice):
-        critic_agent_root = _resolve_agent_root("critic")
+        critic_agent_root = _resolve_agent_root()
         if critic_agent_root is None:
             print(
                 f"ERROR: --critic-agent selected but critic-agent runtime not "
@@ -2379,7 +2377,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_agent_runtime(critic_agent_root, agent="critic")
+        _validate_agent_runtime(critic_agent_root)
         if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
             print(
                 "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "

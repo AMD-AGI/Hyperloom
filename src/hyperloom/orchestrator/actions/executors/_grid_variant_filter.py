@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.env_safety import operator_extra_env
 from hyperloom.common.gpu_identity import is_gfx_arch
 
 from ._grid_base import (
@@ -55,8 +56,8 @@ def _parse_skip_spec(spec: str) -> list[str]:
 # Matches ``--cuda-graph-max-bs 64`` and ``--cuda_graph_max_bs=64``; captures the integer value.
 _RE_CUDA_GRAPH_MAX_BS = re.compile(r"--cuda[-_]graph[-_]max[-_]bs[= ]+(\d+)")
 
-# Multi-node grid prioritisation + invalid-variant filtering.
-_MN_PARAMS_PRIORITY: tuple[str, ...] = (
+# Multi-node grid prioritisation + invalid-variant filtering: params tags first, then backend tiers.
+_MN_PRIORITY_TAGS: tuple[str, ...] = (
     "cuda_graph_max_bs",
     "max_running_requests",
     "chunked_prefill",
@@ -64,9 +65,6 @@ _MN_PARAMS_PRIORITY: tuple[str, ...] = (
     "decode_steps",
     "torch_compile",
     "mem_fraction",
-)
-
-_MN_BACKENDS_PRIORITY: tuple[str, ...] = (
     "tier1",
     "tier2",
     "tier3",
@@ -77,27 +75,23 @@ _MN_BACKENDS_PRIORITY: tuple[str, ...] = (
 )
 
 
-def _mn_priority_index(variant: "GridVariant", priority_tags: "tuple[str, ...] | list[str]") -> int:
-    """Return the rank of ``variant`` against ``priority_tags`` (lower = first)."""
+def _mn_priority_index(variant: "GridVariant") -> int:
+    """Return the rank of ``variant`` against ``_MN_PRIORITY_TAGS`` (lower = first)."""
     haystack = variant.note or variant.name or ""
-    for idx, tag in enumerate(priority_tags):
-        if tag and tag in haystack:
+    for idx, tag in enumerate(_MN_PRIORITY_TAGS):
+        if tag in haystack:
             return idx
-    return len(priority_tags)
+    return len(_MN_PRIORITY_TAGS)
 
 
-def reorder_grid_for_multi_node(
-    grid: list["GridVariant"],
-    *,
-    priority_tags: "tuple[str, ...] | list[str]",
-) -> list["GridVariant"]:
+def reorder_grid_for_multi_node(grid: list["GridVariant"]) -> list["GridVariant"]:
     """Stable-sort ``grid`` so likely multi-node winners run first."""
     from ._multi_node_env import is_multi_node
 
     if not is_multi_node():
         return grid
     # ``sorted`` is stable, so ties keep input order.
-    return sorted(grid, key=lambda v: _mn_priority_index(v, priority_tags))
+    return sorted(grid, key=_mn_priority_index)
 
 
 def apply_multi_node_invalid_variants(
@@ -136,18 +130,11 @@ def apply_multi_node_invalid_variants(
 _RE_AITER_MOE_RUNNER = re.compile(r"--moe[-_]runner[-_]backend[= ]+aiter\b")
 
 
-def _operator_pinned_envs() -> dict[str, str]:
-    """Return the operator's ``--extra-env`` pins from the CLI handoff env."""
-    from hyperloom.common.env_safety import operator_extra_env
-
-    return operator_extra_env()
-
-
 def apply_aiter_moe_pin_filter(
     grid: list["GridVariant"],
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Drop variants that re-enable the aiter MoE runner when it is pinned off."""
-    pins = _operator_pinned_envs()
+    pins = operator_extra_env()
     aiter_pinned_off = "SGLANG_USE_AITER" in pins and not is_truthy(pins["SGLANG_USE_AITER"], default=True)
     if not aiter_pinned_off:
         return list(grid), []

@@ -589,7 +589,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
         from ..actions.executors._ray_backend import (
             ray_gpu_pending_limit,
-            ray_gpu_specialist_exec_enabled,
+            ray_exec_enabled,
             ray_serving_priority_enabled,
             serving_slot_busy,
         )
@@ -627,7 +627,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             gpu_count = serving_tp
         # Under single-node Ray the physical GPU mutex is Ray's ``num_gpus``, not this SQLite pool, so
         # admission there is a count-based pending limit and several specialists may share one GPU.
-        if ray_gpu_specialist_exec_enabled():
+        if ray_exec_enabled():
             gpu_lease = await gpu_pool.try_acquire_ray_observation(
                 holder_id=task.task_id,
                 task_id=task.task_id,

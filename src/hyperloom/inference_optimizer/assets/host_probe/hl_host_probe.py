@@ -62,9 +62,6 @@ def _env_int(name: str, default: int) -> int:
 #: Launcher variables naming this process's rank, most specific first.
 _RANK_ENVS = ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK")
 
-#: Launcher variables naming the size of the job.
-_WORLD_SIZE_ENVS = ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE")
-
 
 def _env_first_int(names: "tuple[str, ...]", default: int) -> int:
     """Return the first of ``names`` holding an int, else ``default``."""
@@ -79,11 +76,6 @@ def _env_first_int(names: "tuple[str, ...]", default: int) -> int:
 def _rank() -> int:
     """Return this process's distributed rank, 0 when the launcher named none."""
     return _env_first_int(_RANK_ENVS, 0)
-
-
-def _world_size() -> int:
-    """Return the size of the distributed job, 1 when the launcher named none."""
-    return _env_first_int(_WORLD_SIZE_ENVS, 1)
 
 
 def _under_roots(filename: str, roots: "tuple[str, ...]") -> bool:
@@ -223,11 +215,9 @@ class HostProbe:
         self._next_generation = 0
         self._host_sites_truncated = False
         self._calls_truncated = False
-        self._patched: list[tuple[object, str, object]] = []
         self._installed = False
-        # Whether the tier-2 hook is installed right now, versus whether it ever ran.
+        # Whether the tier-2 hook is installed right now.
         self._deep_installed = False
-        self._deep_collected = False
         self._started = time.time()
         # Same instant as ``_started``, on the monotonic clock.
         self._perf_started = time.perf_counter()
@@ -391,7 +381,7 @@ class HostProbe:
                 self._host_sites[key] = stats
             stats.record(elapsed, nbytes, shape_sig, caller, time.time() - self._started)
 
-    def _wrap(self, owner: object, attr: str, api: str, *, measure_bytes: bool = False) -> None:
+    def _wrap(self, owner: object, attr: str, api: str) -> None:
         """Replace ``owner.attr`` with a timing wrapper, if it exists."""
         try:
             original = getattr(owner, attr)
@@ -407,18 +397,11 @@ class HostProbe:
                 return original(*args, **kwargs)
             finally:
                 elapsed = time.perf_counter() - started
-                nbytes = 0
-                if measure_bytes:
-                    for value in args:
-                        raw = getattr(value, "nbytes", None)
-                        if isinstance(raw, int):
-                            nbytes = raw
-                            break
                 try:
                     probe._record_host_call(
                         api,
                         elapsed,
-                        nbytes=nbytes,
+                        nbytes=0,
                         shape_sig=probe._shape_signature(args),
                     )
                 except Exception:
@@ -429,8 +412,6 @@ class HostProbe:
             setattr(owner, attr, wrapper)
         except (AttributeError, TypeError):
             self._notes.append(f"cannot wrap {api} (immutable attribute)")
-            return
-        self._patched.append((owner, attr, original))
 
     def _wrap_h2d(self, tensor_type: object) -> None:
         """Wrap ``Tensor.to`` / ``Tensor.cuda`` to count host-to-device copies."""
@@ -470,8 +451,6 @@ class HostProbe:
                 setattr(tensor_type, attr, wrapper)
             except (AttributeError, TypeError):
                 self._notes.append(f"cannot wrap {api} (immutable attribute)")
-                continue
-            self._patched.append((tensor_type, attr, original))
 
     def _install_tier1(self) -> None:
         """Wrap the host-stall and transfer entry points once the process imports torch.
@@ -597,7 +576,6 @@ class HostProbe:
         sys.setprofile(self._profile_hook)
         threading.setprofile(self._profile_hook)
         self._deep_installed = True
-        self._deep_collected = True
 
     # -- lifecycle --------------------------------------------------------
 
@@ -611,20 +589,6 @@ class HostProbe:
             self._install_tier2()
         atexit.register(self.write_report)
         return self
-
-    def uninstall(self) -> None:
-        """Restore every patched attribute and remove the tier-2 hook."""
-        if self._deep_installed:
-            sys.setprofile(None)
-            threading.setprofile(None)  # type: ignore[arg-type]
-            self._deep_installed = False
-        while self._patched:
-            owner, attr, original = self._patched.pop()
-            try:
-                setattr(owner, attr, original)
-            except (AttributeError, TypeError):
-                pass
-        self._installed = False
 
     def report(self) -> dict:
         """Build this process's evidence report."""
@@ -655,8 +619,6 @@ class HostProbe:
                     "count": stats.count,
                     "wall_s": round(stats.wall_s, 6),
                     "arg_samples": samples,
-                    "strict_distinct": strict_distinct,
-                    "loose_distinct": loose_distinct,
                     "strict_repeat_rate": _repeat_rate(samples, strict_distinct),
                     "loose_repeat_rate": _repeat_rate(samples, loose_distinct),
                     "first_s": round(stats.first_s, 3),
@@ -668,13 +630,9 @@ class HostProbe:
         return {
             "schema": SCHEMA,
             "rank": _rank(),
-            "world_size": _world_size(),
-            "pid": os.getpid(),
             "wall_seconds": round(time.time() - self._started, 3),
             "roots": list(self.roots),
             "roots_unset": not self.roots,
-            "tier1_enabled": True,
-            "tier2_enabled": self._deep_collected,
             "host_calls": host_calls,
             "framework_calls": framework_calls,
             "truncated": {
@@ -715,11 +673,6 @@ def _repeat_rate(samples: int, distinct: int) -> float:
 _ACTIVE: "HostProbe | None" = None
 
 
-def active() -> "HostProbe | None":
-    """Return the installed probe, or ``None``."""
-    return _ACTIVE
-
-
 def install_from_env() -> "HostProbe | None":
     """Install a probe from the environment, or do nothing."""
     global _ACTIVE
@@ -749,6 +702,5 @@ def install_from_env() -> "HostProbe | None":
 __all__ = [
     "SCHEMA",
     "HostProbe",
-    "active",
     "install_from_env",
 ]

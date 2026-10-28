@@ -1944,20 +1944,6 @@ def test_a_snapshot_refreshed_between_two_demoted_tasks_stays_readable_to_git(mo
         shutil.rmtree(base, ignore_errors=True)
 
 
-def test_a_symlink_left_at_the_prompt_name_is_not_written_through(tmp_path, monkeypatch):
-    victim = tmp_path / "victim"
-    victim.write_text("app only", encoding="utf-8")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / "prompt.md").symlink_to(victim)
-    (workspace / "process.log").symlink_to(victim)
-    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path, default_max_turns=1)
-    runner._write_prompt(workspace, "sys", "user")
-    assert victim.read_text(encoding="utf-8") == "app only"
-    assert "sys" in (workspace / "prompt.md").read_text(encoding="utf-8")
-    assert not (workspace / "prompt.md").is_symlink()
-
-
 async def test_the_dispatcher_does_not_write_the_prompt_or_log_through_a_planted_link(tmp_path, monkeypatch):
     victim = tmp_path / "victim"
     victim.write_text("app only", encoding="utf-8")

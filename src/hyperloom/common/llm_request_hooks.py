@@ -4,14 +4,16 @@
 """Process-wide observers of the single HTTP LLM requests the ``llm_config`` helpers issue.
 
 ``hyperloom.common`` may not import the trace packages, so a ledger that wants one row per gateway request registers
-an observer here. An observer fault never reaches the caller's request.
+an observer here. An observer fault never reaches the caller's request. The reader that folds a streamed Messages
+reply back into one body lives here too: it is what marks an observation's first token.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -146,7 +148,74 @@ def observed_request(
     _notify(observation._record(None))
 
 
+class AnthropicStream:
+    """A streamed Messages reply, folded back into the body a whole reply carries.
+
+    A line ends only at CR, LF or CRLF, as server-sent events end it: httpx's ``iter_lines`` also ends one at U+0085,
+    U+2028 and U+2029, which JSON carries unescaped. A last line with no LF yet waits for more bytes, since its CR may
+    be the first half of a CRLF. Bytes that arrive after ``deadline`` (``time.monotonic``) raise ``TimeoutError``.
+    """
+
+    def __init__(self, observation: RequestObservation, deadline: float | None = None) -> None:
+        self._observation = observation
+        self._deadline = deadline
+        self._pending = b""
+        self._data: list[bytes] = []
+        self._body: dict[str, Any] = {}
+        self._stopped = False
+
+    def feed(self, chunk: bytes) -> None:
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise TimeoutError("anthropic messages reply outlasted its timeout_s")
+        lines = (self._pending + chunk).splitlines(keepends=True)
+        self._pending = lines.pop() if lines and not lines[-1].endswith(b"\n") else b""
+        for line in lines:
+            self._line(line.rstrip(b"\r\n"))
+
+    def finish(self) -> dict[str, Any]:
+        """Take the last line and return the reply's body; a stream that ended before ``message_stop`` raises."""
+        self._line(self._pending.rstrip(b"\r\n"))
+        self._line(b"")
+        if not self._stopped:
+            raise RuntimeError("anthropic messages stream ended before message_stop")
+        return self._body
+
+    def _line(self, line: bytes) -> None:
+        if line.startswith(b"data:"):
+            self._data.append(line[len(b"data:") :].strip())
+        elif not line and self._data:
+            data, self._data = b"\n".join(self._data), []
+            try:
+                event = json.loads(data)
+            except ValueError as exc:
+                raise RuntimeError(f"anthropic messages stream carried a non-JSON event: {exc!r}") from exc
+            try:
+                self._fold(event)
+            except (KeyError, IndexError, TypeError) as exc:
+                raise RuntimeError(f"anthropic messages stream carried a malformed event: {data[:200]!r}") from exc
+
+    def _fold(self, event: Mapping[str, Any]) -> None:
+        kind = event["type"]
+        if kind == "message_start":
+            self._body = event["message"]
+        elif kind == "content_block_start":
+            self._body["content"].append(event["content_block"])
+        elif kind == "content_block_delta" and event["delta"]["type"] == "text_delta":
+            self._body["content"][event["index"]]["text"] += event["delta"]["text"]
+            self._observation.mark_first_token()
+        elif kind == "message_delta":
+            self._body.update(event["delta"])
+            self._body["usage"] = {**self._body["usage"], **event["usage"]}
+        elif kind == "message_stop":
+            self._stopped = True
+        elif kind == "error":
+            raise RuntimeError(
+                f"anthropic messages stream error: {event['error']['type']}: {event['error']['message']}"
+            )
+
+
 __all__ = [
+    "AnthropicStream",
     "LLMRequestObserver",
     "LLMRequestRecord",
     "PROTOCOL_ANTHROPIC_MESSAGES",

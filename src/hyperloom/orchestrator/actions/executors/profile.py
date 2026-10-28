@@ -16,9 +16,7 @@ from typing import Any, Mapping
 
 import yaml
 
-from hyperloom.orchestrator.trace_analysis._capture_shapes import (
-    is_capture_fragment as _shared_is_capture_fragment,
-)
+from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment
 from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
     trace_rank as _trace_rank,
@@ -56,26 +54,14 @@ _INPUT_DIMS_FRACTION_FLOOR = 0.90
 _USER_ANNOTATION_MARKER = '"user_annotation"'
 
 
-def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
-    """Stream-decompress ``path`` for ``substring``, reading at most ``max_bytes`` (default :data:`_TRACE_CONFIRM_BYTES`)."""
-    if not substring:
-        return False
-    if max_bytes is None:
-        try:
-            max_bytes = int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES",
-                    _TRACE_CONFIRM_BYTES,
-                )
-            )
-        except (TypeError, ValueError):
-            max_bytes = _TRACE_CONFIRM_BYTES
+def _trace_contains(path: Path, substring: str) -> bool:
+    """Stream-decompress ``path`` for ``substring``, reading at most :data:`_TRACE_CONFIRM_BYTES`."""
     read = 0
     carry = ""
     chunk_size = 4_000_000
     try:
         with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-            while read < max_bytes:
+            while read < _TRACE_CONFIRM_BYTES:
                 chunk = fh.read(chunk_size)
                 if not chunk:
                     break
@@ -103,13 +89,6 @@ def _sample_trace_text(path: Path) -> str | None:
             e,
         )
         return None
-
-
-def _count_substring_occurrences(text: str, substring: str) -> int:
-    """Count non-overlapping ``substring`` occurrences as a cheap lower-bound event count (avoids full JSON parsing)."""
-    if not substring:
-        return 0
-    return text.count(substring)
 
 
 # Structured verdict ids for the post-profile trace validation.
@@ -293,7 +272,6 @@ def _build_trace_validate(
         "verdict": certificate.get("verdict") or {},
         "trace_dir_level": certificate.get("trace_dir_level") or {},
         "rank_level": certificate.get("rank_level") or [],
-        "chunk_level": [],
         "checks": checks,
     }
 
@@ -386,8 +364,8 @@ def _check_capture_input_dims(capture_files: list[Path]) -> tuple[dict, str]:
     # name key found nothing in any real trace, so this check reported "no cpu_op events" on captures
     # that were fully instrumented, and the advisory below rationalised the miss as an SGLang naming
     # quirk. Verified against a real sglang capture: 0 hits for the name form, 2915 for this one.
-    cpu_op_count = _count_substring_occurrences(text, '"cat": "cpu_op"')
-    input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
+    cpu_op_count = text.count('"cat": "cpu_op"')
+    input_dims_count = text.count('"Input Dims"')
     if not cpu_op_count:
         # Zero cpu_op leaves no fraction to judge, and on ROCm/SGLang it is an event-naming difference rather
         # than a capture failure -- which is what the advisory says.
@@ -444,8 +422,8 @@ def _check_step_annotations(main_trace: Path | None, main_text: str | None, scri
             skip_reason="main trace could not be sampled",
             sampled_file=main_trace.name,
         ), ""
-    user_ann_count = _count_substring_occurrences(main_text, _USER_ANNOTATION_MARKER)
-    execute_count = _count_substring_occurrences(main_text, '"execute_')
+    user_ann_count = main_text.count(_USER_ANNOTATION_MARKER)
+    execute_count = main_text.count('"execute_')
     # ``execute_*`` labels are the real health signal; ``user_annotation`` presence is profiler-version-dependent.
     confirmed_absent = (
         not scriptable
@@ -535,7 +513,7 @@ def _split_chunk_is_empty(chunk: Path) -> bool:
     if not chunk.name.endswith(".json.gz"):
         return False
     text = _sample_trace_text(chunk)
-    return text is not None and _count_substring_occurrences(text, '"execute_') == 0
+    return text is not None and text.count('"execute_') == 0
 
 
 def _check_trace_has_ops(main_trace: Path | None) -> tuple[dict, str]:
@@ -677,6 +655,27 @@ def _merge_profile_params(params: dict[str, Any]) -> None:
         params.setdefault("args_mode", "replace")
 
 
+def _mn_round_trace_root() -> str:
+    """Return the shared torch-trace base dir for multi-node, or ''."""
+    from ._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return ""
+    provisioned = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    if provisioned:
+        return provisioned
+    scoped = mn_profile_trace_root() / f"default-{os.getpid()}" / "torch_trace"
+    try:
+        scoped.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning(
+            "cannot mkdir multi-node profile fallback dir %s: %s; downstream readers may FileNotFoundError",
+            scoped,
+            exc,
+        )
+    return str(scoped)
+
+
 # Restarts the multi-node server for this profiling round; returns the refusal result when it failed.
 async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -> dict[str, Any] | None:
     from ._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
@@ -741,24 +740,6 @@ async def _infera_profile_window(round_trace_root: str):
             await trigger_infera_engine_profile("stop")
 
 
-def _tensor_parallel_size(result: dict[str, Any], params: dict[str, Any], shared_state: Any) -> int | None:
-    for raw_tp in (result.get("tp"), params.get("tp"), getattr(shared_state, "tp", None), os.environ.get("TP")):
-        try:
-            parsed_tp = int(raw_tp or 0)
-        except (TypeError, ValueError):
-            continue
-        if parsed_tp > 0:
-            return parsed_tp
-    return None
-
-
-def _safe_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 # Attaches this round's multi-node trace files, selecting the heaviest as the main trace.
 def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
     trace_dir = Path(round_trace_root)
@@ -774,9 +755,8 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
     trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
     result["trace_dir"] = str(trace_dir)
     result["trace_files"] = [str(p) for p in trace_files]
-    _record_trace_topology(result, trace_files)
     if trace_files:
-        main_trace = max(trace_files, key=_safe_size)
+        main_trace = max(trace_files, key=_trace_size_bytes)
         result["main_trace_path"] = str(main_trace)
         log.info(
             "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
@@ -848,9 +828,7 @@ def _record_missing_traces(result: dict[str, Any], workspace: Path, workspace_st
 
 
 # Attaches the single-node trace dir this run produced, and certifies it.
-def _record_workspace_traces(
-    result: dict[str, Any], workspace_str: str, tensor_parallel_size: int | None, framework: str, preflight: Any
-) -> None:
+def _record_workspace_traces(result: dict[str, Any], workspace_str: str, framework: str, preflight: Any) -> None:
     workspace = Path(workspace_str)
     trace_dir, trace_files = _first_trace_dir_with(workspace, _trace_files_for_dir)
     capture_only = False
@@ -862,8 +840,7 @@ def _record_workspace_traces(
         return
     result["trace_dir"] = str(trace_dir)
     result["trace_files"] = [str(p) for p in trace_files]
-    _record_trace_topology(result, trace_files)
-    main_trace: Path | None = trace_dir
+    main_trace = trace_dir
     if capture_only:
         result["profile_trace_selection_reason"] = "capture_only_fallback"
         log.info(
@@ -872,18 +849,11 @@ def _record_workspace_traces(
             trace_dir,
         )
     else:
-        main_trace = _preferred_main_trace_path(
-            trace_dir,
-            trace_files,
-            require_single_rank=False,
-            tensor_parallel_size=tensor_parallel_size,
+        main_trace = _preferred_main_trace_path(trace_dir, trace_files)
+        result["profile_trace_selection_reason"] = (
+            "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
         )
-        if main_trace is not None:
-            result["profile_trace_selection_reason"] = (
-                "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
-            )
-    if main_trace is not None:
-        result["main_trace_path"] = str(main_trace)
+    result["main_trace_path"] = str(main_trace)
     try:
         _record_trace_validation(result, trace_dir, framework, preflight)
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
@@ -891,11 +861,6 @@ def _record_workspace_traces(
 
 
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
-
-
-def _is_capture_trace(path: Path, root: Path | None = None) -> bool:
-    """True when ``path`` is a CUDA-graph capture sidecar rather than a trace."""
-    return _shared_is_capture_fragment(path, root)
 
 
 def _trace_size_bytes(path: Path) -> int:
@@ -920,44 +885,18 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
     candidates = [
         p
         for p in trace_dir.rglob("*.trace.json.gz")
-        if not _is_capture_trace(p, trace_dir) and not _is_split_chunk(p, trace_dir)
+        if not is_capture_fragment(p, trace_dir) and not _is_split_chunk(p, trace_dir)
     ]
     return sorted(candidates, key=lambda p: (-_trace_size_bytes(p), str(p)))
 
 
 def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     """Return CUDA-graph capture sidecars under ``trace_dir`` (fallback only)."""
-    return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
+    return sorted(p for p in trace_dir.rglob("*.json.gz") if is_capture_fragment(p, trace_dir))
 
 
-def _record_trace_topology(result: dict[str, Any], trace_files: list[Path]) -> None:
-    """Attach per-rank and merged trace paths to a profile result."""
-    rank_paths: dict[str, list[str]] = {}
-    for path in trace_files:
-        rank = _trace_rank(path)
-        if rank is not None:
-            rank_paths.setdefault(str(rank), []).append(str(path))
-    result["rank_trace_paths"] = rank_paths
-    result["merged_trace_paths"] = [str(path) for path in trace_files if path.name.startswith("merged-")]
-
-
-def _preferred_main_trace_path(
-    trace_dir: Path,
-    trace_files: list[Path],
-    *,
-    require_single_rank: bool = False,
-    preferred_rank: int = 0,
-    tensor_parallel_size: int | None = None,
-) -> Path | None:
-    """Trace path to pass downstream to TraceLens."""
-    if require_single_rank:
-        return select_primary_trace(
-            trace_files,
-            file_size=_trace_size_bytes,
-            preferred_rank=preferred_rank,
-            tensor_parallel_size=tensor_parallel_size,
-        )
-
+def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:
+    """Trace path to pass downstream to TraceLens: the first ``merged-*`` trace, else ``trace_dir``."""
     merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
     return merged[0] if merged else trace_dir
 
@@ -1009,32 +948,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.common.benchmark_config import benchmark_config_path
 
         return benchmark_config_path() or _default_profile_config()
-
-    def _resolve_mn_round_trace_root(self, ctx) -> str:
-        """Return the shared torch-trace base dir for multi-node, or ''."""
-        from ._multi_node_env import is_multi_node, rayjob_id_from_state
-
-        if not is_multi_node():
-            return ""
-        provisioned = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-        if provisioned:
-            return provisioned
-        # Tier 2: derive from state-file rayjob_id (out-of-band launches).
-        rid = rayjob_id_from_state()
-        if rid:
-            scoped = mn_profile_trace_root() / rid / "torch_trace"
-        else:
-            # Tier 3: pid-scoped last-resort.
-            scoped = mn_profile_trace_root() / f"default-{os.getpid()}" / "torch_trace"
-        try:
-            scoped.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            log.warning(
-                "cannot mkdir multi-node profile fallback dir %s: %s; downstream readers may FileNotFoundError",
-                scoped,
-                exc,
-            )
-        return str(scoped)
 
     def _inject_host_probe(self, config_path: Path, output_dir: Path) -> str:
         """Put the profile start-up shim on the materialized config's ``PYTHONPATH`` and arm the host probe.
@@ -1268,9 +1181,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         params = ctx.task.params or {}
         _merge_profile_params(params)
         extra = getattr(ctx, "extra", None) or {}
-        shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
-            self, "shared_state", None
-        )
         from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
 
         if is_magpie_agentx(configured_benchmark()):
@@ -1278,24 +1188,19 @@ class ProfileExecutor(BenchmarkRunExecutor):
         if not (params.get("output_dir") or extra.get("workspace")):
             output_dir = self._resolve_workspace(ctx, "profile")
             output_dir.mkdir(parents=True, exist_ok=True)
-            if extra is None:
-                ctx.extra = {"workspace": str(output_dir)}
-                extra = ctx.extra
-            else:
-                extra["workspace"] = str(output_dir)
+            extra["workspace"] = str(output_dir)
         import time as _time
 
         task_started_unix = _time.time()
         from ._multi_node_env import log_mn_banner
 
-        round_trace_root = self._resolve_mn_round_trace_root(ctx)
+        round_trace_root = _mn_round_trace_root()
         log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
             refusal = await _restart_round_server(params, round_trace_root)
             if refusal is not None:
                 return refusal
-            if isinstance(extra, dict):
-                extra["mn_round_restarted"] = True
+            extra["mn_round_restarted"] = True
         async with _infera_profile_window(round_trace_root):
             result = await super().__call__(ctx)
         self._collect_rewrite_evidence(result)
@@ -1306,8 +1211,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             _record_workspace_traces(
                 result,
                 workspace_str,
-                _tensor_parallel_size(result, params, shared_state),
-                str(getattr(ctx, "framework", "") or (extra.get("framework") if isinstance(extra, dict) else "") or ""),
+                str(getattr(ctx, "framework", "") or extra.get("framework") or ""),
                 self._instrumentation_preflight,
             )
         if result.get("main_trace_path"):
@@ -1364,14 +1268,8 @@ def _map_native_capture(capture: dict[str, Any], measurement: dict[str, Any]) ->
     if not files or not all(path.is_file() for path in files):
         return result
     trace_dir = files[0].parent
-    main = _preferred_main_trace_path(
-        trace_dir,
-        files,
-        require_single_rank=True,
-        tensor_parallel_size=measurement.get("tp"),
-    )
+    main = select_primary_trace(files, file_size=_trace_size_bytes, tensor_parallel_size=measurement.get("tp"))
     result.update(trace_dir=str(trace_dir), trace_files=[str(path) for path in files])
-    _record_trace_topology(result, files)
     if main is None:
         return result
     result.update(main_trace_path=str(main), primary_rank=_trace_rank(main), trace_input_ready=True)

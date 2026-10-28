@@ -38,10 +38,11 @@ diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
 
 
 @pytest.fixture
-def pod_patcher():
+def pod_patcher(monkeypatch):
     import hyperloom.inference_optimizer as io_pkg
 
     script = Path(io_pkg.__file__).parent / "multi_node" / "scripts" / "apply_tracelens_patch_multinode.py"
+    monkeypatch.syspath_prepend(str(script.parent))
     spec = importlib.util.spec_from_file_location("_tracelens_pod_patcher_under_test", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -63,7 +64,6 @@ def _install(tmp_path: Path, monkeypatch, version: str) -> tuple[Path, Path]:
     ver.__version__ = version
     monkeypatch.setitem(sys.modules, "sglang", mod)
     monkeypatch.setitem(sys.modules, "sglang.version", ver)
-    monkeypatch.delenv("HYPERLOOM_SGLANG_SHAPE_MODE", raising=False)
 
     tracelens = tmp_path / "TraceLens"
     gc_dir = tracelens / "examples" / "custom_workflows" / "inference_analysis" / "sglang_gc_patch" / "sglang_0_5_21"
@@ -73,46 +73,29 @@ def _install(tmp_path: Path, monkeypatch, version: str) -> tuple[Path, Path]:
 
 
 @pytest.mark.parametrize(
-    ("version", "override", "expected"),
-    [
-        ("0.5.17", "", False),
-        ("0.5.18", "", True),
-        ("0.5.21.dev3+gabc1234", "", True),
-        ("0.5.21", "patch", False),
-        ("0.5.10", "sitecustomize", True),
-        ("", "", False),
-    ],
+    ("version", "expected"),
+    [("0.5.17", False), ("0.5.18", True), ("0.5.21.dev3+gabc1234", True), ("", False)],
 )
-def test_gate_follows_version_then_override(pod_patcher, monkeypatch, version, override, expected):
-    if override:
-        monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", override)
-    else:
-        monkeypatch.delenv("HYPERLOOM_SGLANG_SHAPE_MODE", raising=False)
+def test_gate_follows_the_pod_version(pod_patcher, version, expected):
     assert pod_patcher._uses_gc_patch(version) is expected
 
 
 def test_pod_applies_gc_patch_then_skips(pod_patcher, tmp_path, monkeypatch):
     target, tracelens = _install(tmp_path, monkeypatch, "0.5.21")
 
-    first = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None
-    )
+    first = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None)
     assert first["status"] == "applied", first
     assert first["patch_set"] == "graph-capture"
     assert "_set_profile_trace_tag" in target.read_text(encoding="utf-8")
 
-    second = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None
-    )
+    second = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None)
     assert second["status"] == "skipped", second
 
 
 def test_pod_below_gate_stays_on_roofline(pod_patcher, tmp_path, monkeypatch):
     target, tracelens = _install(tmp_path, monkeypatch, "0.5.17")
 
-    result = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None
-    )
+    result = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None)
     assert result["patch_set"] == "roofline"
     assert target.read_text(encoding="utf-8") == _SOURCE
 
@@ -122,7 +105,7 @@ def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, m
     target, tracelens = _install(tmp_path, monkeypatch, "0.5.22")
 
     result = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None, patch_set="graph-capture"
+        tracelens_root=str(tracelens), sglang_version_pin=None, patch_set="graph-capture"
     )
     assert result["status"] == "skipped"
     assert result["error"] is None
@@ -148,23 +131,9 @@ def test_pod_without_exact_gc_set_skips_without_failing(pod_patcher, tmp_path, m
 def test_controller_roofline_choice_wins_over_pod_version(pod_patcher, tmp_path, monkeypatch):
     target, tracelens = _install(tmp_path, monkeypatch, "0.5.21")
 
-    result = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None, patch_set="roofline"
-    )
+    result = pod_patcher._apply_on_pod(tracelens_root=str(tracelens), sglang_version_pin=None, patch_set="roofline")
     assert result["patch_set"] == "roofline"
     assert target.read_text(encoding="utf-8") == _SOURCE
-
-
-def test_controller_graph_capture_choice_wins_over_pod_env(pod_patcher, tmp_path, monkeypatch):
-    target, tracelens = _install(tmp_path, monkeypatch, "0.5.21")
-    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patch")
-
-    result = pod_patcher._apply_on_pod(
-        tracelens_root=str(tracelens), tracelens_internal_root="", sglang_version_pin=None, patch_set="graph-capture"
-    )
-    assert result["status"] == "applied", result
-    assert result["patch_set"] == "graph-capture"
-    assert "_set_profile_trace_tag" in target.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("mode", "expected"), [("sitecustomize", "graph-capture"), ("patched", "roofline")])
@@ -212,7 +181,9 @@ def test_infera_forwards_patch_set(monkeypatch):
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
 
     monkeypatch.setattr(inf, "_infera_require_state", lambda: {"backend": "infera"})
-    monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda state: [{"podIP": "10.0.1.0", "sshPort": 22}])
+    monkeypatch.setattr(
+        inf.infera_support, "gpu_ssh_targets_from_state", lambda state: [{"podIP": "10.0.1.0", "sshPort": 22}]
+    )
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: "")
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     op_args: list[str] = []

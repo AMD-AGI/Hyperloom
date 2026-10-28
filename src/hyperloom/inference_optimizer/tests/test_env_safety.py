@@ -46,7 +46,6 @@ def test_filter_forward_env_drops_bad_keys():
             "LD_PRELOAD": "/evil.so",
             "X Y": "nope",
         },
-        warn_on_drop=False,
     )
     assert out == {"MORI_FOO": "1"}
 
@@ -429,3 +428,13 @@ def test_any_custom_headers_name_is_secret_shaped():
     assert common_env_safety.is_secret_shaped_env_name("SERVICE_CUSTOM_HEADERS")
     assert common_env_safety.is_secret_shaped_env_name("service_custom_headers")
     assert not common_env_safety.is_secret_shaped_env_name("TOKENIZERS_PARALLELISM")
+
+
+def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
+    """Names the launch assigns per process, by name and by the prefixes a scheduler exports."""
+    assert common_env_safety.is_launch_provided_env_name("LOCAL_RANK")
+    assert common_env_safety.is_launch_provided_env_name("world_size")
+    assert common_env_safety.is_launch_provided_env_name("SLURM_PROCID")
+    assert common_env_safety.is_launch_provided_env_name("TORCHELASTIC_RUN_ID")
+    assert not common_env_safety.is_launch_provided_env_name("HL_FUSE_RMSNORM")
+    assert not common_env_safety.is_launch_provided_env_name("")

@@ -97,7 +97,7 @@ def _engine_core_crash(root_error: str) -> str:
 
 
 def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() -> None:
-    from hyperloom.orchestrator.bringup.observe import round_advanced
+    from hyperloom.orchestrator.bringup.observe import round_advanced, round_outcome_unchanged
 
     before, after = (
         ladder.classify(ladder.BootStreams(_engine_core_crash(error)), server_elapsed_sec=1.0, trees=["/opt/vllm"])
@@ -109,6 +109,26 @@ def test_a_child_process_root_error_keys_the_failure_not_the_parent_reraise() ->
     )
     assert failure_digest(before) != failure_digest(after)
     assert round_advanced(before, after)
+    assert not round_outcome_unchanged(before, after)
+
+
+def test_only_two_observed_boots_at_one_wall_read_as_unchanged() -> None:
+    """The one outcome that shows a patch moved the boot nowhere.
+
+    A half that was never observed is not that outcome: without the boot before
+    it, nothing says where this one would have stopped unpatched.
+    """
+    from hyperloom.orchestrator.bringup.observe import round_outcome_unchanged
+
+    crash = _engine_core_crash("AttributeError: 'MambaSpec' object has no attribute 'x'")
+    before, after = (
+        ladder.classify(ladder.BootStreams(crash), server_elapsed_sec=elapsed, trees=["/opt/vllm"])
+        for elapsed in (1.0, 2.0)
+    )
+
+    assert round_outcome_unchanged(before, after)
+    assert not round_outcome_unchanged(None, after)
+    assert not round_outcome_unchanged(before, None)
 
 
 def test_a_traceback_logged_below_error_does_not_key_the_failure() -> None:

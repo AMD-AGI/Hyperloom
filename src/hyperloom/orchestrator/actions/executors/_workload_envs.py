@@ -39,9 +39,8 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_INTVTY_P50,
     INTVTY_OBJECTIVES,
-    agentx_enabled as agentx_enabled,
+    agentx_enabled,
     intvty_grading_enabled,
-    agentx_active as _agentx_active,
     parse_intvty_noise_pct,
 )
 from hyperloom.common.env_safety import (
@@ -125,25 +124,6 @@ def _first_env(names: tuple[str, ...]) -> str:
     return ""
 
 
-def agentx_active(shared_state: Any = None) -> bool:
-    """Whether AgentX is enabled, preferring persisted state over the ambient env var.
-
-    ``benchmark_mode`` is stamped at seed precisely so it survives a restart,
-    while ``HYPERLOOM_AGENTX`` only describes the shell that happens to be
-    running -- an SDK caller, or a re-baseline/variant round driven from a
-    subprocess that did not inherit it, would otherwise miss the AgentX-sized
-    timeout or publish the agentic number under a synthetic tag. Either saying
-    "agentx" is enough.
-
-    Args:
-        shared_state: Session state, when the caller has one.
-
-    Returns:
-        True when AgentX is enabled for this session, by either signal.
-    """
-    return _agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
-
-
 def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     """The environment the AgentX derivations read, carrying a rung's own CONC.
 
@@ -152,9 +132,9 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     here -- re-merging them would make this reader resolve a knob differently
     from every other one.
 
-    Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
-    so every bound derived from it is linear in the concurrency being measured,
-    not in the one the session was launched at.
+    The AgentX warmup scales with ``CONC``, so every bound derived from it is
+    linear in the concurrency being measured, not in the one the session was
+    launched at.
 
     Args:
         conc: The rung's concurrency, or ``None`` to read the session's.
@@ -256,22 +236,9 @@ def geak_acceptance(metric_basis: str, noise_pct: float) -> dict[str, Any] | Non
     }
 
 
-def cli_workload_defaults() -> tuple[int, int, int]:
-    """The CLI's ``ISL``/``OSL``/``CONC`` defaults, as one source for fallbacks.
-
-    Every last-resort fallback in this module reads them from here, so a
-    materialized recipe and the workload spec published beside it cannot
-    disagree about what "unset" means. The CLI resolves its own flags from the
-    same ``hyperloom.common`` constants, so the two cannot drift apart.
-    """
-    return DEFAULT_ISL, DEFAULT_OSL, DEFAULT_CONC
-
-
 def build_agentx_workload_spec(
-    bench: dict[str, Any],
     envs: dict[str, Any],
     *,
-    model_path: str | None = None,
     env: Mapping[str, str] | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -287,16 +254,13 @@ def build_agentx_workload_spec(
     will actually run with, not the operator's raw inputs.
 
     Args:
-        bench: The benchmark mapping being materialized.
-        envs: That mapping's ``envs``, already carrying the switch's overrides.
-        model_path: The model this round serves, when the caller knows it.
+        envs: The benchmark mapping's ``envs``, already carrying the switch's overrides.
         env: The resolved process environment, carrying this round's ``CONC``
             (see :func:`agentx_env_for_conc`). Defaults to ``os.environ``.
     """
     from hyperloom.common.agentx_workload import (
         MLPERF_CORPUS,
         MLPERF_PORT,
-        is_mlperf_backend,
         mlperf_flow,
         mlperf_trajectories,
     )
@@ -323,8 +287,7 @@ def build_agentx_workload_spec(
         """
         return str(proc_env.get(key) or envs.get(key) or default)
 
-    default_isl, default_osl, default_conc = cli_workload_defaults()
-    conc = int(served_knob("CONC", default_conc))
+    conc = int(served_knob("CONC", DEFAULT_CONC))
     metric_basis = geak_metric_axis(benchmark_mode="agentx", grading=grading)[1]
     intvty_p90_veto_pct = (
         float(grading["noise_pct"])
@@ -334,32 +297,29 @@ def build_agentx_workload_spec(
     acceptance = geak_acceptance(metric_basis, intvty_p90_veto_pct)
     keep_rule = {"acceptance": acceptance} if acceptance else {}
     isl_osl_placeholder = {
-        "isl": int(served_knob("ISL", default_isl)),
-        "osl": int(served_knob("OSL", default_osl)),
+        "isl": int(served_knob("ISL", DEFAULT_ISL)),
+        "osl": int(served_knob("OSL", DEFAULT_OSL)),
         "note": "CLI defaults only; agentic replay ignores fixed ISL/OSL",
     }
-    if is_mlperf_backend(proc_env) or is_mlperf_backend(envs):
-        return {
-            "kind": "agentx_mlperf_agentic",
-            "client": "mlperf",
-            "scenario": "mlperf-agentic-v6",
-            "corpus": MLPERF_CORPUS,
-            "canonical_corpus": MLPERF_CORPUS,
-            "num_entries": mlperf_trajectories(envs),
-            "duration_s": 0,
-            "geak_loop_duration_s": 0,
-            "concurrency": conc,
-            "metric_basis": metric_basis,
-            "intvty_p90_veto_pct": intvty_p90_veto_pct,
-            **keep_rule,
-            "metric_window_s": 0.0,
-            "flow": mlperf_flow(envs),
-            "port": int(envs.get("PORT") or MLPERF_PORT),
-            "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-            "isl_osl_placeholder": isl_osl_placeholder,
-        }
-
-    raise ValueError("Only the MLPerf client uses a Hyperloom workload spec")
+    return {
+        "kind": "agentx_mlperf_agentic",
+        "client": "mlperf",
+        "scenario": "mlperf-agentic-v6",
+        "corpus": MLPERF_CORPUS,
+        "canonical_corpus": MLPERF_CORPUS,
+        "num_entries": mlperf_trajectories(envs),
+        "duration_s": 0,
+        "geak_loop_duration_s": 0,
+        "concurrency": conc,
+        "metric_basis": metric_basis,
+        "intvty_p90_veto_pct": intvty_p90_veto_pct,
+        **keep_rule,
+        "metric_window_s": 0.0,
+        "flow": mlperf_flow(envs),
+        "port": int(envs.get("PORT") or MLPERF_PORT),
+        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
+        "isl_osl_placeholder": isl_osl_placeholder,
+    }
 
 
 def apply_agentx_switch(
@@ -398,7 +358,6 @@ def apply_agentx_switch(
         MLPERF_PORT,
         MLPERF_SERVED_MODEL,
         agentx_client_script,
-        is_mlperf_backend,
         mlperf_flow,
         mlperf_trajectories,
     )
@@ -411,37 +370,28 @@ def apply_agentx_switch(
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
-    if is_mlperf_backend(_agentx_env):
-        envs[BACKEND_ENV] = "mlperf"
-        # The harness dials a fixed port and model name. Pinning both here is the
-        # one place they are enforced, so a recipe PORT cannot leave the server
-        # and the client on different sockets.
-        envs["PORT"] = str(MLPERF_PORT)
-        envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
-        # Settled once here; the client and the published spec read these back.
-        envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
-        envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
-        envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
-        envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
-        # The round's CONC is what the measurement is recorded under. A baseline
-        # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
-        envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
-        pin_mlperf_round_concurrency(envs)
-        from ._server_argv import add_server_arg_unless_pinned
-
-        add_server_arg_unless_pinned(
-            envs,
-            framework,
-            f"--served-model-name {MLPERF_SERVED_MODEL}",
-            pinned_by=("served-model-name", "served_model_name"),
-        )
-    bench["workload_spec"] = build_agentx_workload_spec(
-        bench,
+    envs[BACKEND_ENV] = "mlperf"
+    # The harness dials a fixed port and model name. Pinning both here is the
+    # one place they are enforced, so a recipe PORT cannot leave the server
+    # and the client on different sockets.
+    envs["PORT"] = str(MLPERF_PORT)
+    envs["MLPERF_AGENTIC_MODEL"] = MLPERF_SERVED_MODEL
+    # Settled once here; the client and the published spec read these back.
+    envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
+    envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
+    envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
+    envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+    # The round's CONC is what the measurement is recorded under. A baseline
+    # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
+    envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)
+    pin_mlperf_round_concurrency(envs)
+    add_server_arg_unless_pinned(
         envs,
-        model_path=model_path,
-        env=_agentx_env,
-        grading=grading,
+        framework,
+        f"--served-model-name {MLPERF_SERVED_MODEL}",
+        pinned_by=("--served-model-name", "--served_model_name"),
     )
+    bench["workload_spec"] = build_agentx_workload_spec(envs, env=_agentx_env, grading=grading)
 
 
 def prepare_agentx_runtime(
@@ -449,7 +399,6 @@ def prepare_agentx_runtime(
     env: dict[str, str] | None = None,
     inferencex_path: str | None = None,
     config_path: Path | str | None = None,
-    output_dir: Path | str | None = None,
     active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
@@ -573,12 +522,11 @@ def _resolve_framework_repo_path(
     envs: dict[str, Any],
     *,
     framework: str,
-    extra_aliases: tuple[str, ...] = (),
 ) -> str:
     """Resolve the framework checkout a session may patch, prefixed forms first.
 
-    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` > any
-    per-framework alias > :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
+    Resolution order is ``<FRAMEWORK>_REPO_PATH`` > ``<FRAMEWORK>_DIR`` >
+    :data:`GENERIC_FRAMEWORK_ROOT_ENV`, with ``os.environ``
     ahead of the materialized ``envs`` at each rung. The prefixed names keep
     precedence because they are the more specific statement, so adding the generic
     form changes no existing behaviour; it exists because a session is
@@ -588,13 +536,12 @@ def _resolve_framework_repo_path(
     Args:
         envs: The materialized ``benchmark.envs`` mapping.
         framework: Framework name, used for the env prefix.
-        extra_aliases: Additional per-framework spellings to accept, in order.
 
     Returns:
         The resolved path, or ``""`` when nothing was supplied.
     """
     prefix = str(framework or "").strip().upper()
-    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", *extra_aliases, GENERIC_FRAMEWORK_ROOT_ENV)
+    names = (f"{prefix}_REPO_PATH", f"{prefix}_DIR", GENERIC_FRAMEWORK_ROOT_ENV)
     for name in names:
         value = os.environ.get(name, "").strip() or str(envs.get(name) or "").strip()
         if value:
@@ -661,18 +608,20 @@ def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
     return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
 
 
-def _apply_custom_runtime_defaults(
+def apply_scriptable_runtime_defaults(
     bench: dict[str, Any],
     envs: dict[str, Any],
     *,
     gpu_type: str | None,
     explicit_benchmark_script: bool,
 ) -> None:
-    """Resolve an operator-supplied workload's checkout, entrypoint and pins.
+    """Re-pin an operator's scriptable entrypoint and its runtime paths.
 
-    The other scriptable helpers know their framework's repo URL and shipped
-    script; here both arrive at launch, so this only wires what was given and
-    leaves anything missing to fail where it is diagnosable.
+    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
+    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
+    replaces the resolved absolute path. Only the ``custom`` framework has such
+    an entrypoint: its repo and script arrive at launch, so this only wires what
+    was given and leaves anything missing to fail where it is diagnosable.
 
     ``--extra-env`` is the only channel an operator has for the knobs their own
     script reads, so those pins are written into ``benchmark.envs`` rather than
@@ -711,29 +660,6 @@ def _apply_custom_runtime_defaults(
     # reaches the script.
     envs["FRAMEWORK_REPO_PATH"] = repo_path
     _publish_scriptable_repo_root("custom", repo_path)
-
-
-def apply_scriptable_runtime_defaults(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    *,
-    gpu_type: str | None,
-    explicit_benchmark_script: bool,
-) -> None:
-    """Re-pin an operator's scriptable entrypoint and its runtime paths.
-
-    Every config path that re-derives ``benchmark_script`` from ``gpu_type``
-    must call this, otherwise the bare ``{framework}_{gpu_type}.sh`` it writes
-    replaces the resolved absolute path. Each helper is a no-op for frameworks
-    other than its own, so a new one is added here once.
-    """
-    for apply in (_apply_custom_runtime_defaults,):
-        apply(
-            bench,
-            envs,
-            gpu_type=gpu_type,
-            explicit_benchmark_script=explicit_benchmark_script,
-        )
 
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
@@ -1103,10 +1029,9 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # recipe and the workload spec published beside it cannot disagree about what
     # "unset" means; normally the CLI has already projected the resolved values
     # into these envs before materialization.
-    _default_isl, _default_osl, _default_conc = cli_workload_defaults()
-    isl_val = int(envs.get("ISL") or _default_isl)
-    osl_val = int(envs.get("OSL") or _default_osl)
-    conc_val = int(envs.get("CONC") or _default_conc)
+    isl_val = int(envs.get("ISL") or DEFAULT_ISL)
+    osl_val = int(envs.get("OSL") or DEFAULT_OSL)
+    conc_val = int(envs.get("CONC") or DEFAULT_CONC)
     # Steady-state window for profiling configs (detected by YAML
     # ``benchmark.envs.PROFILE`` or ``profiler.torch_profiler.enabled``, not the process env).
     # The captured-step count is capped at
@@ -1334,7 +1259,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
             envs,
             bench.get("framework"),
             f"--attention-backend {_mimo_attn_backend}",
-            pinned_by=("attention-backend",),
+            pinned_by=("--attention-backend", "--attention_backend"),
         )
         # vLLM registers this checkpoint under MiMoV2FlashForCausalLM but the HF
         # config declares MiMoV2ForCausalLM, which the pod-local vLLM build
@@ -1345,7 +1270,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
                 envs,
                 bench.get("framework"),
                 '--hf-overrides {"architectures":["MiMoV2FlashForCausalLM"]}',
-                pinned_by=("hf-overrides", "hf_overrides"),
+                pinned_by=("--hf-overrides", "--hf_overrides"),
             )
     # Sparse-attention KV-cache block size (config-derived, model-agnostic).
     # Models like MiniMax-M3 (MSA) place the main K/V and the indexer side-cache
@@ -1370,7 +1295,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
                 envs,
                 bench.get("framework"),
                 f"--block-size {_sparse_bs}",
-                pinned_by=("block-size", "block_size"),
+                pinned_by=("--block-size", "--block_size"),
             )
     return _model_basename
 
@@ -1400,7 +1325,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
             envs,
             bench.get("framework"),
             "--trust-remote-code",
-            pinned_by=("trust-remote-code",),
+            pinned_by=("--trust-remote-code", "--trust_remote_code"),
         )
 
 
