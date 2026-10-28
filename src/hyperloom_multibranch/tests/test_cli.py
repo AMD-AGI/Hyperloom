@@ -7,6 +7,11 @@
 it takes that session's directory and nothing else, refuses before building anything when the directory cannot
 support FINAL -- a session another build ran, and one still running, included -- and holds the directory against a
 second recovery while it works.
+
+``hosted run`` maps the campaign spec a host injected onto the options of ``run`` and builds the session's settings as
+``run`` does, measuring on the grant's cards and ending a CLOSE grace before the grant does; it tells the host in
+``exit.json`` that the run is over once CLOSE ran or when nothing a restart changes keeps a session from running, and
+leaves the host to start a crashed run again, which then finishes the session the first start began.
 """
 
 from __future__ import annotations
@@ -17,7 +22,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,13 +52,16 @@ from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
 from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.points import PointError
+from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
-from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
-from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.hosted_run import GRANT_MARGIN_SECONDS
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
 from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
@@ -482,7 +491,7 @@ def agent_cli(agent_binaries: None, monkeypatch: pytest.MonkeyPatch) -> list[Run
 
     runs: list[RunSettings] = []
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object, *report_root: object) -> int:
         runs.append(settings)
         return 0
 
@@ -962,3 +971,230 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
 
     assert agent_cli == [_settings()]
     assert not any(workspace.iterdir())
+
+
+#: A grant of four GPUs that has a day left.
+GRANT = {"max_sandboxes": 4, "max_gpus": 4, "gpu_hours": 100, "max_runtime_sec": 86400}
+#: The campaign spec of :data:`WORKLOAD_ARGS` as a multibranch run, as a host injects it.
+SPEC: dict[str, object] = {
+    "schema": "hyperloom.campaign-spec/v1",
+    "flow": "multibranch",
+    "model": {"path": "/models/Llama-3-8B"},
+    "framework": {"name": "vllm", "image": IMAGE[0]},
+    "hardware": {"gpu_type": "mi300x", "tp": 2},
+    "workload": {"conc": 16, "isl": 1024, "osl": 512, "precision": "fp8"},
+    "objective": {"target_gain_pct": 10},
+    "budget": {"max_hours": 2, "max_gpu_hours": 12, "max_llm_usd": 40},
+    "placement": {"profile": "hosted-gpu", "max_parallel_tests": 1},
+    "multibranch": {"workload": "inferencex", "max_branches": 3},
+}
+#: The ``run`` options the same session is spelled with on the command line.
+SPEC_RUN_ARGS = (
+    "--max-hours", "2", "--max-gpu-hours", "12", "--max-llm-usd", "40", "--max-branches", "3",
+    "--max-parallel-tests", "1",
+)  # fmt: skip
+
+
+@dataclass
+class Host:
+    """A host's inputs to ``hosted run``: its state directory, the workspace sessions are created in, and the delay of
+    every grant stop armed."""
+
+    state_dir: Path
+    workspace: Path
+    spec_file: Path
+    stops: list[float]
+
+    def exit_document(self) -> dict[str, object]:
+        return json.loads((self.state_dir / "exit.json").read_text(encoding="utf-8"))
+
+    def started(self, seconds_ago: float) -> None:
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        os.environ["HYPERLOOM_RUN_CREATED_AT"] = stamp.isoformat()
+
+    def spec(self, **sections: object) -> None:
+        self.spec_file.write_text(json.dumps({**SPEC, **sections}), encoding="utf-8")
+
+
+@pytest.fixture
+def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Host:
+    """The inputs a host injects into a run created ten minutes ago, the grant stop recorded rather than armed."""
+
+    state_dir, workspace = tmp_path / "state", tmp_path / "workspace"
+    state_dir.mkdir()
+    workspace.mkdir()
+    given = Host(state_dir, workspace, tmp_path / "spec.json", [])
+    given.spec()
+    for name, value in {
+        "HYPERLOOM_INPUT_FILE": str(given.spec_file),
+        "HYPERLOOM_RUN_ID": "run-1",
+        "HYPERLOOM_STATE_DIR": str(state_dir),
+        "HYPERLOOM_GRANT_LIMITS": json.dumps(GRANT),
+        "E2B_API_URL": "http://service.invalid",
+        "E2B_SANDBOX_URL": "http://sandboxes.invalid",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-0123456789",
+        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"runner": "ar-runner-g2"}),
+        "HYPERLOOM_SOURCE_REPO": "AMD-AGI/Hyperloom",
+        "HYPERLOOM_SOURCE_SHA": "c" * 40,
+        "USER_DATA_PATH": str(workspace),
+    }.items():
+        monkeypatch.setenv(name, value)
+    for name in ("HYPERLOOM_MCP_PORT", "HYPERLOOM_MCP_TOKEN", "HYPERLOOM_EVENTS_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    given.started(seconds_ago=600)
+    monkeypatch.setattr(cli, "arm_grant_stop", given.stops.append)
+    return given
+
+
+def _session_ending(stop_reason: str | None, returncode: int) -> Callable[..., int]:
+    """A session that creates its directory in the workspace, reports it, and ends with ``returncode`` after a CLOSE
+    that reported ``stop_reason``, or without a CLOSE when it is ``None``."""
+
+    def run_session(settings: RunSettings, peer_factory: object, services: object, report_root: Callable) -> int:
+        layout = create_session(Path(os.environ["USER_DATA_PATH"]), settings.workload.model_basename, Clock())
+        report_root(layout.root)
+        if stop_reason is not None:
+            _report(layout, stop_reason=stop_reason)
+            return returncode
+        raise CacheBuildError(f"{'c' * 40} is not a commit of the source")
+
+    return run_session
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_runs_the_session_the_same_options_of_run_would(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on_the_command_line = _settings(*SPEC_RUN_ARGS)
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+    assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a host credential"
+
+
+def _no_local_cards() -> tuple[int, ...]:
+    raise AssertionError("a hosted run measures on the grant's cards, not this container's")
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_for(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+    host.spec(placement={"profile": "hosted-gpu"})
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    assert settings.caps.max_parallel_tests == GRANT["max_gpus"] // 2
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_session_ends_a_close_grace_and_a_margin_before_the_grant_and_is_stopped_a_grace_before_it(
+    host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.started(seconds_ago=GRANT["max_runtime_sec"] - 3600)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    [settings] = agent_cli
+    grace = MB_CLOSE_GRACE_CAP_SECONDS
+    assert settings.max_hours == pytest.approx((3600 - grace - GRANT_MARGIN_SECONDS) / 3600, abs=0.01)
+    assert host.stops == [pytest.approx(3600 - grace, abs=30)]
+
+
+@pytest.mark.parametrize(
+    ("sections", "field"),
+    [
+        ({"multibranch": None}, "multibranch.workload"),
+        ({"multibranch": {"max_branches": 3}}, "multibranch.workload"),
+        ({"workload": {"isl": 1024, "osl": 512, "precision": "fp8"}}, "workload.conc"),
+        ({"workload": {"conc": 16, "isl": 1024, "osl": 512}}, "workload.precision"),
+        ({"multibranch": {"workload": "agentx"}}, "--isl is not taken by an agentx workload"),
+    ],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_spec_a_session_cannot_run_on_ends_the_run_for_good_naming_the_field_and_builds_nothing(
+    sections: dict[str, object], field: str, host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(**sections)
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert field in str(document["error"])
+    assert agent_cli == [] and host.stops == []
+    assert not any(host.workspace.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_hosted_session_that_ran_close_ends_the_run_for_good_with_its_stop_reason(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "run_session", _session_ending("time_exhausted", 0))
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+    session = json.loads((host.state_dir / "session.json").read_text(encoding="utf-8"))["session_dir"]
+    assert Path(session).parent.parent == host.workspace
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_runner_cache_that_cannot_be_built_ends_the_run_for_good(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "run_session", _session_ending(None, 0))
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_FAILED
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_FAILED)
+    assert "is not a commit of the source" in str(document["error"])
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_hosted_session_that_crashes_leaves_the_host_to_start_the_run_again(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def crashes(*args: object) -> int:
+        raise RuntimeError("the scheduler crashed")
+
+    monkeypatch.setattr(cli, "run_session", crashes)
+
+    with pytest.raises(RuntimeError, match="crashed"):
+        cli.main(["hosted", "run"])
+
+    assert not (host.state_dir / "exit.json").exists()
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_finishes_the_session_an_earlier_start_began_and_ends_the_run_for_good(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+    host.spec(multibranch=None)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [_settings()], "the session is finished on the settings its manifest holds, not the spec's"
+    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
+    assert len(host.stops) == 1
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_restart_over_a_session_that_already_chose_ends_the_run_for_good(
+    host: Host, agent_cli: list[RunSettings], tmp_path: Path
+) -> None:
+    layout = _ended_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    _report(layout, final={"chosen": {"commit": "c9"}})
+    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "already chose c9" in str(document["error"])
+    assert agent_cli == []
