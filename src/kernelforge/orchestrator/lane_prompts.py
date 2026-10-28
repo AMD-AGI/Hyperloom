@@ -14,6 +14,10 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from kernelforge.orchestrator.contracts import LaneGround, OrchestrationContext, SpecialistRound
 
 LANE_KEY = "lane"
+# How long the siblings wait for the first lane to start answering before they start anyway and write the prefix
+# themselves. With summarized thinking the first streamed event arrives within about 30 s; a lead still silent at
+# this point is retrying or stuck, and holding the round for its whole timeout would serialize the lanes.
+LEAD_RESPONSE_WAIT_SEC = 120.0
 
 _LANE_TASK = (
     "Produce the optimization plan this lane's Implementer "
@@ -74,8 +78,8 @@ async def run_lanes_after_the_first_starts(
 ) -> list[object]:
     """Every lane's answer or exception, in lane order, with the siblings started once the first lane is answering.
 
-    Without ``shared_prompt_cache`` every lane starts at once, and so do the siblings of a first lane that ends
-    without starting a response.
+    Without ``shared_prompt_cache`` every lane starts at once. Otherwise the siblings start when the first lane begins
+    its response, when it ends without one, or after :data:`LEAD_RESPONSE_WAIT_SEC`, whichever comes first.
     """
     if width <= 1 or not shared_prompt_cache:
         return await asyncio.gather(*(run_lane(index) for index in range(width)), return_exceptions=True)
@@ -83,7 +87,7 @@ async def run_lanes_after_the_first_starts(
     first = asyncio.ensure_future(run_lane(0, on_response_started=started.set))
     waiting = asyncio.ensure_future(started.wait())
     try:
-        await asyncio.wait({first, waiting}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({first, waiting}, timeout=LEAD_RESPONSE_WAIT_SEC, return_when=asyncio.FIRST_COMPLETED)
         siblings = await asyncio.gather(*(run_lane(index) for index in range(1, width)), return_exceptions=True)
         (lead,) = await asyncio.gather(first, return_exceptions=True)
     finally:
