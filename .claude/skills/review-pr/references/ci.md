@@ -2,11 +2,18 @@
 
 ## What the gate decides, and the review does not
 
-`scripts/code_metrics_design.py` runs `private_reach_problems`, `tuple_return_problems`,
-`raw_vocabulary_problems`, `global_write_problems`, `forwarder_problems` and
-`single_implementation_problems` on every PR, reporting them as A1, A9, A10, A11 and A12. Those
-five are not review rules: a finding on one of them belongs to the `code-metrics` job, and a card
-that re-derives it is re-flagging a gated rule. A8 is the partial case. `flag_argument_problems`
+`scripts/code_metrics_design.py` runs `tuple_return_problems`, `raw_vocabulary_problems`,
+`global_write_problems`, `forwarder_problems` and `single_implementation_problems` on every PR,
+reporting them as A9, A10, A11 and A12. Those four are not review rules: a finding on one of them
+belongs to the `code-metrics` job, and a card that re-derives it is re-flagging a gated rule.
+
+Two cautions before reading any gate as total coverage. First, scope: `private_reach_problems`
+resolves ownership with `Packages.unit()`, built from `.importlinter`, which makes
+`hyperloom.orchestrator` a single unit -- a private import between two of its subpackages is
+reported by nobody, which is A1's. Second, the waiver: `code_metrics_report.py:136-138` puts
+`design` in `waivable_failed`, and `PRIVATE_REACH` and `FORWARDER` are not in `ADVISORY`, so a
+`baseline-raise` label turns both into listed-but-passing findings. On a labelled PR the gate
+decides none of them. A8 is the partial case. `flag_argument_problems`
 reports a flag argument, but only on a function absent from the base tree, so the flag added to a
 function that already existed stays A8's. `vulture` reports a parameter no body reads, which is
 also the gate's. Nothing here measures a parameter only tests vary, on any function --

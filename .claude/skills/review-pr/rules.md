@@ -9,10 +9,13 @@ PR the rule was learned from.
 Severity is `blocking` under one of the four kinds SKILL.md's output contract names: the current
 behaviour is wrong, the premise does not reproduce or the named failure survives the change,
 something that had to move in the same PR did not (title, description, docstring), or the diff
-breaks a rule `AGENTS.md` states outright. Everything else is `advisory`:
-it is adjudicated in `verdicts.txt` like any other rule and then **not published**, because a
-review that ships it has stopped being two parts. An advisory `FIRE` is a note for the reviewer
-answering a later question from the author, not a line on the card.
+breaks a rule `AGENTS.md` states outright. Everything else is `advisory`: it takes no verdict line
+and is **not published**, because a review that ships it has stopped being two parts. Adjudicate an
+advisory rule only when it fires, and then as a note for the reviewer answering a later question
+from the author, never a line on the card. A rule that is blocking in one shape and advisory in
+another takes its line for the blocking shape alone. A `SKIPPED:` line is not a finding and none of
+this reaches it: it states what the review did not check, so V4's `# PARTIAL:` lines go on the card
+under SKILL.md's SKIPPED protocol whatever V4's severity.
 
 Rules that duplicate a static gate (ruff, pylint, bandit, CodeQL, gitleaks, REUSE) or that restate
 [`AGENTS.md`](../../../AGENTS.md) are deliberately absent. See
@@ -32,6 +35,11 @@ When a human reviewer catches something the skill missed:
 3. Write the false-positive self-check into the body: the condition under which the shape is
    correct and the rule must stay silent.
 4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
+5. Run this skill on the PR that carries the change, against the version of it on `main`, and read
+   the card. A change to the review process is reviewed by the review process; skipping that is
+   how #2227 shipped two rounds of the same defect -- a deleted rule whose gate was confirmed by
+   matching ids rather than by reading what the gate measures -- both caught by a human who did
+   run it.
 
 ## Index
 
@@ -61,7 +69,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
 | matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
-| imports from another package, adds an `_internal`/`_`-prefixed import, reads or writes another object's `_attr`, uses `getattr(obj, "_x")`, or adds an exemption to an import check | A2 |
+| imports from another package, adds an `_internal`/`_`-prefixed import, reads or writes another object's `_attr`, uses `getattr(obj, "_x")`, or adds an exemption to an import check | A1 A2 |
 | adds a string the runtime imports (`import_module`, `-m`, `"pkg.mod:attr"`), a module-level hook a higher layer sets, or an import under `if TYPE_CHECKING:` | A2 |
 | adds a helper that uses only stdlib (io, json, stat, hashing, subprocess, retry, time), or edits a module under `hyperloom/common/` or whose name says utility (`*utils*`, `io`, `jsonio`, `proctree`, `timeutil`, `_subprocess_kill`) | A3 |
 | adds a new module, or adds methods, fields or imports to a module or class already over a size trigger | A5 |
@@ -926,7 +934,7 @@ publishes it and is untouched, so <other reader>:<line> still resolves it as <ol
 ### D12 -- A function this diff adds, or whose complexity it raises, may not exceed cyclomatic complexity 20
 
 **Severity:** blocking
-**Fires when:** `ci.txt` shows the `code-metrics` job waived by the `baseline-raise` label, and the
+**Fires when:** `meta.txt` carries a `label: baseline-raise` line, which waives the `code-metrics` job, and the
 diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds branches to an
 existing one. Without that label the job already fails this ceiling on the files the PR touches and
 reports the two numbers itself, so the rule stays silent: re-measuring a green gate produced 22
@@ -999,7 +1007,7 @@ resolves this shape -- reuse it`
 ### D14 -- A function this diff adds, or whose signature it widens, may not exceed five parameters
 
 **Severity:** blocking
-**Fires when:** `ci.txt` shows the `code-metrics` job waived by the `baseline-raise` label, and the
+**Fires when:** `meta.txt` carries a `label: baseline-raise` line, which waives the `code-metrics` job, and the
 diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to
 an existing one. Without that label the job already fails this limit on the files the PR touches,
 so the rule stays silent; it fired on none of 9 adjudications in the recorded reviews.
@@ -1049,12 +1057,13 @@ test for one of its sentences, or for a sentence of *Clean design*, *Trust the c
 *Simplify by removing a mechanism*. A finding names the owner, the type or the split that would
 satisfy it; one that cannot is taste and goes.
 
-Five of this family's rules are gone: A1, A9, A10, A11 and A12 are decided mechanically by the
-`code-metrics` job, which runs `private_reach_problems`, `tuple_return_problems`,
-`raw_vocabulary_problems`, `global_write_problems`, `forwarder_problems` and
-`single_implementation_problems` in `scripts/code_metrics_design.py` under those same rule ids; of
-the shapes those five carried, only A1's added import and A12's pure forwarder were blocking here,
-and the gate reports both. A review that adjudicated them was re-deciding what a gate had already
+Four of this family's rules are gone: A9, A10, A11 and A12 are decided mechanically by the
+`code-metrics` job, which runs `tuple_return_problems`, `raw_vocabulary_problems`,
+`global_write_problems`, `forwarder_problems` and `single_implementation_problems` in
+`scripts/code_metrics_design.py` under those same rule ids. A9, A10, A11 and A12's
+single-implementation case were advisory here anyway; A12's pure forwarder was blocking and the
+gate reports it. A1 and A8 stay, each narrowed to the part of its shape the gate's own scope does
+not reach -- matching rule ids are not matching coverage, which is what #2227 got wrong twice. A review that adjudicated them was re-deciding what a gate had already
 decided, and in 23 recorded reviews the whole family produced 119 verdict lines and no finding.
 A8 stays, narrowed to the two shapes `flag_argument_problems` and vulture cannot see. Re-flagging a
 gated rule is a defect in the review; see [`references/ci.md`](references/ci.md).
@@ -1070,6 +1079,16 @@ vocabulary in a utility module, and A7's consumer branch on a framework, backend
 Everything else is `advisory` -- below two real findings, below 0.8, or never fired -- so it takes
 no verdict line and is not published. Each rule's Severity line records its own count. Wrong behaviour
 that a shape defect causes is still blocking, under the C or S rule it breaks, not under the A rule.
+
+### A1 -- Cross a subpackage boundary only through the names its owner exports
+
+**Severity:** blocking (`AGENTS.md` *Code shape*: "A module is used through the names its owner exports; outside its owning package, an `_`-name or an `_internal` package is not an interface"). 5/5 real in a 30-PR replay, 2026-10-11, for an added import in non-test code. Narrowed to what the gate cannot see, which is a matter of scope rather than of shape: `scripts/code_metrics_design.py::private_reach_problems` reports the same import, but resolves ownership with `Packages.unit()`, built from `.importlinter`'s `root_packages` plus each contract's `layers`/`modules` entries -- 19 units on this tree, of which `hyperloom.orchestrator` is one. This rule's owner is `hyperloom.<layer>.<subpkg>`, which is finer, so an added private import between two subpackages of one unit resolves to the same unit for the gate and is reported by nobody. The gate's own findings are also waived by the `baseline-raise` label (`code_metrics_report.py:136-138` puts `design` in `waivable_failed`, and `PRIVATE_REACH` is not in `ADVISORY`), so a labelled PR returns the cross-unit case here too.
+**Fires when:** the diff adds, in non-test code, an `import`/`from ... import` taking an `_`-name or passing through an `_`-prefixed module segment, and either (a) both modules resolve to the same `.importlinter` unit while belonging to different `hyperloom.<layer>.<subpkg>` packages -- `orchestrator.actions` reaching into `orchestrator.trace_analysis._capture_shapes` is the live shape; or (b) `meta.txt` carries a `baseline-raise` label, which waives the gate's cross-unit finding.
+**The rule:** a leading underscore and an `_internal` package both mean "not part of the interface". Reaching for one couples the caller to the owner's implementation, and the owner can no longer change it without breaking a caller it cannot see. When the caller genuinely needs the value, the fix is in the owner: promote the name to a public export, add a method or property that answers the question, or move the state onto the collaborator that owns it. Re-exporting the private name under the same alias (`_X as _X`) across subpackages is the same reach, laundered.
+**Seen in:** PR #1794 -- `ConversationCollaborator` wrote `self._coord._kb_last_read` and `IntentRouter` read it back with `getattr`; the fix moved the state to its owner. PR #2227 -- deleting this rule as gated was wrong for exactly case (a): `orchestrator/actions/executors/profile.py:19,22` import `_capture_shapes` and `_trace_rank` from `orchestrator.trace_analysis`, and four more files in `predictor/` and `kernel/` carry the same shape, all invisible to a gate whose unit is `hyperloom.orchestrator`.
+**Not a finding when:** importer and imported module are in the same `hyperloom.<layer>.<subpkg>` package, where the underscore means package-private; the access is in a test module, conftest or fixture under any `tests/` directory; the name belongs to stdlib or a third-party library with no public equivalent (`sys._getframe`, namedtuple `_replace`); the identifier lives in a standalone script shipped to a remote host or injected as source text; the name is a dunder; the import predates the diff and was only moved (V1); or the two modules resolve to different `.importlinter` units on a PR with no `baseline-raise` label, which the gate reports.
+**Evidence:** `$WORK/diff.txt` for the added import; `$WORK/meta.txt` for a `label:` line; the owner module in the head tree to confirm the name is private and what public export would serve.
+**Report as:** `A1 <file>:<line> -- reaches <owner>.<_name> across a subpackage the gate counts as one unit; export <public name> from <owner> (or add <method>) and use that`
 
 ### A2 -- Dependencies point one way down the layers; an upward or cyclic edge is not made legal by deferring or hiding it
 
@@ -1143,7 +1162,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 
 ### A13 -- No ceremony the types or the callers already rule out
 
-**Severity:** blocking for (1), the redundant re-check or re-conversion: 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Trust the caller*: "redundant re-checks, layered fallbacks, and belt-and-braces defaults buy nothing"). (2)'s pure rename and (3) are advisory: no fire of either shape, so no evidence either way. The finding names the guarantee, and without it the item goes. An unread parameter is the `code-metrics` design checks'.
+**Severity:** blocking for (1), the redundant re-check or re-conversion: 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Trust the caller*: "redundant re-checks, layered fallbacks, and belt-and-braces defaults buy nothing"). (2)'s pure rename and (3) are advisory: no fire of either shape, so no evidence either way. The finding names the guarantee, and without it the item goes. An unread parameter is vulture's, which the gate runs as a ratchet.
 **Fires when:** added lines (1) re-check with `isinstance`, `is None`, `or {}`/`or ""` or a membership fallback, or re-convert with an identity conversion (`Path(p)` of a `Path`, `str(s)` of a `str`), a value that its non-Optional annotation and every in-tree caller already guarantee, or that the same function has already dereferenced unconditionally; (2) bind a local that only renames a parameter, import or local and is never rebound (`x_fn = x`, `filtered = list(items)` with no filter); (3) add `except E: raise` or `except E: log(...); raise` with no cleanup.
 **The rule:** validate at the boundary, then trust internal callers. A guard for a state the types and callers make impossible is not safety: its else-branch is dead code a reader has to reason about, and agents copy the guard into the next function. Delete it with the defaulted branch it feeds. A local that only renames, a copy that filters nothing and a handler that only re-raises are the same ceremony. This rule is the concrete check for *Trust the caller*; a broad `except` is *Don't grow the debt*'s.
 **Seen in:** PR #1658 deleted `if level not in _LEVELS:` from `inference_optimizer/multi_node/_internal/log.py` (its only callers pass a level they own) and `filtered_patches: list[Path] = list(patches)`, which filtered nothing, from `_server_patcher._discover_sglang_plan`. PR #1642 deleted the one-use alias `_tracelens_patch_enabled_fn = _tracelens_patch_enabled`. PR #1620 -- "getattr-with-default, dict.get, isinstance, str/bool/int coercions ... cannot raise. The except handlers in these try blocks were dead code."

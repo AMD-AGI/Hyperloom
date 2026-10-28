@@ -86,7 +86,7 @@ follow [`references/re-review.md`](references/re-review.md) beside the steps bel
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt`, a skim of `diff.txt`, or a `label:` line in `meta.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 75 rules across 11
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 76 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list, V2 and V7 without
 a verdict line. On a re-review, so are
