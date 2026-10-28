@@ -78,6 +78,7 @@ from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, poo
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL, JobStatus, ToolJobs, ToolRequest
+from hyperloom_multibranch.toolbox.tools.op_shares import PROFILE_REQUEST_PARAM
 
 logger = logging.getLogger(__name__)
 
@@ -404,12 +405,13 @@ class RealToolbox:
         return tuple(entry.request_id for entry in pending)
 
     def cancel_tool_jobs(self, branch_id: str) -> int:
-        """Cancel the tool jobs (profile, roofline, build, kernel_tune, ...) ``branch_id`` started and that have not
-        ended; its queued and running tests are left as they are. Returns how many were cancelled."""
+        """Cancel the tool jobs (profile, roofline, build, kernel_tune, ...) ``branch_id`` started or joined and that have
+        not ended; its queued and running tests are left as they are. A shared analysis other branches still wait on runs
+        on for them, without ``branch_id``. Returns how many were cancelled."""
 
         if self._tools is None:
             return 0
-        return sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, []))
+        return sum(self._tools.leave(job, branch_id) for job in self._tool_jobs.pop(branch_id, []))
 
     def submit_tool(self, request: ToolRequest, *, job_id: str | None = None) -> str:
         """Start an asynchronous tool (profile, roofline, build, ...) for a branch; returns its job id at once.
@@ -421,8 +423,13 @@ class RealToolbox:
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
         job_id = self._tools.submit(request, job_id=job_id)
-        self._tool_jobs.setdefault(request.branch, []).append(job_id)
+        self._held_by(request.branch, job_id)
         return job_id
+
+    def _held_by(self, branch: str, job_id: str) -> None:
+        held = self._tool_jobs.setdefault(branch, [])
+        if job_id not in held:
+            held.append(job_id)
 
     @property
     def analysis_tools(self) -> tuple[str, ...]:
@@ -451,13 +458,24 @@ class RealToolbox:
         whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the blackboard's record
         of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
         cannot be spared.
+
+        An analysis of a profile test is one job per profile test and tool, whichever branch asks (board #153 c3447): a
+        job of that pair that is running is joined (its result goes to every branch that asked) and one that succeeded is
+        shared as it is, its pointer pushed to the asking branch at once; a failed or cancelled one is not reused, so the
+        next submission starts a new job. The first submission's own ``params`` are the job's. The pairs are kept with
+        the tool results (``ToolJobs.share``), so a restarted toolbox shares what the one before it finished.
         """
 
-        self._analysis_jobs(tool)
+        jobs = self._analysis_jobs(tool)
         request = await analysis_request(
             self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id), self.trace_root
         )
-        return self.submit_tool(request)
+        profile = request.params.get(PROFILE_REQUEST_PARAM)
+        if not profile:
+            return self.submit_tool(request)
+        job_id = await jobs.share(request, f"{request.tool}:{profile}")
+        self._held_by(branch, job_id)
+        return job_id
 
     async def analyze_root_profile(self, commit_id: str, trace_dir: Path, point_config: Path, *, source_id: str) -> str:
         """Start the deterministic TraceLens report of the PRELUDE child's trace as job ``prelude:<source_id>``; return its id.

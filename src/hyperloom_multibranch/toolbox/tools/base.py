@@ -9,6 +9,11 @@ result file and pushes a :class:`~hyperloom_multibranch.contracts.blackboard.rec
 that asked. A push the sink refuses is retried and, when it still fails, kept for :meth:`ToolJobs.redeliver`, so a
 finished job is never silent.
 
+Work whose answer is the same whoever asks is started once (:meth:`ToolJobs.share`, keyed by the caller): a branch that
+asks while the job runs joins it, and the job's pointer then goes to every branch that joined; one that asks after it
+succeeded gets its pointer at once, as it is; a failed or cancelled job is not reused. The keys and their jobs are kept in
+the results directory (:mod:`.shared_jobs`), so a restarted runner shares what the one before it finished.
+
 A job runs in its own cancel scope, the channel the orchestrator's subprocess helpers watch: a tool that hands its work
 to a thread (``run_with_session_kill``) has that thread end the child's process group when the job is cancelled or
 the loop goes away, instead of leaving it for the interpreter to wait on at exit.
@@ -21,7 +26,7 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -31,6 +36,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors import COOPERATIVE_REAP_BUDGET_SEC
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
+from hyperloom_multibranch.toolbox.tools.shared_jobs import SHARED_JOBS_FILE, SharedEntry, SharedJobLedger
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +111,11 @@ class _Job:
     workdir: Path
     status: JobStatus = JobStatus.RUNNING
     pointer: ToolResultPointer | None = None
-    delivered: bool = False
+    #: The branches the result goes to, in the order they asked, and those whose push the sink accepted.
+    recipients: list[str] = field(default_factory=list)
+    delivered: set[str] = field(default_factory=set)
+    #: The shared key this job answers (:meth:`ToolJobs.share`), or ``""``.
+    key: str = ""
     cancel_requested: bool = False
     scope: CancelScope = field(default_factory=CancelScope)
     inner: asyncio.Task[ToolOutput] | None = None
@@ -145,6 +155,7 @@ class ToolJobs:
         self._attempts = max(1, push_attempts)
         self._delay = push_delay_seconds
         self._jobs: dict[str, _Job] = {}
+        self._shared = SharedJobLedger(self._results_dir / SHARED_JOBS_FILE)
         self._closed = False
 
     @property
@@ -170,10 +181,66 @@ class ToolJobs:
             raise InvalidRequest(f"job id {job_id!r} is not a plain file name")
         if job_id in self._jobs:
             raise InvalidRequest(f"job id {job_id!r} is already in use")
-        job = _Job(job_id, request, self._results_dir / quote(job_id, safe=""))  # shared storage rejects ":" in names
+        job = _Job(job_id, request, self._workdir(job_id), recipients=[request.branch])
         self._jobs[job_id] = job
         job.task = asyncio.get_running_loop().create_task(self._run(job), name=f"tool-job-{job_id}")
         return job_id
+
+    def _workdir(self, job_id: str) -> Path:
+        return self._results_dir / quote(job_id, safe="")  # shared storage rejects ":" in names
+
+    async def share(self, request: ToolRequest, key: str) -> str:
+        """The job that answers ``key``, for ``request.branch``: a running one is joined and a succeeded one shared (see
+        :meth:`join`); without either, ``request`` starts a new job, which ``key`` then names. Returns its id.
+
+        The lookup and the start are one step of the event loop, so callers that ask at once start one job. Raises as
+        :meth:`submit` does when it starts one.
+        """
+        found = self._answering(key)
+        if found is not None:
+            await self.join(found, request.branch)
+            return found
+        job_id = self.submit(request)
+        self._jobs[job_id].key = key
+        self._shared.record(key, SharedEntry(job_id, request.tool, JobStatus.RUNNING.value))
+        return job_id
+
+    def _answering(self, key: str) -> str | None:
+        """The id of the job ``key`` names when it runs or succeeded; ``None`` when there is none to share."""
+        entry = self._shared.get(key)
+        if entry is None:
+            return None
+        job = self._jobs.get(entry.job_id)
+        if job is None:  # a job of a runner before this one: only one that succeeded has a result to share
+            job = self._adopted(entry) if entry.succeeded else None
+        return job.job_id if job is not None and job.status in (JobStatus.RUNNING, JobStatus.SUCCEEDED) else None
+
+    def _adopted(self, entry: SharedEntry) -> _Job:
+        """The settled job of an earlier runner, its pointer delivered to the branch it was pushed to then."""
+        assert entry.pointer is not None
+        branch = entry.pointer.branch
+        job = _Job(entry.job_id, ToolRequest(entry.tool, branch), self._workdir(entry.job_id), JobStatus.SUCCEEDED)
+        job.pointer, job.recipients, job.delivered = entry.pointer, [branch], {branch}
+        self._jobs[job.job_id] = job
+        return job
+
+    async def join(self, job_id: str, branch: str) -> None:
+        """Send the job's result to ``branch`` too: when it ends, or now, as it is, when it already ended. A branch the
+        result already goes to is not sent it twice."""
+        job = self._job(job_id)
+        if branch in job.recipients:
+            return
+        job.recipients.append(branch)
+        if job.pointer is not None:
+            await self._push(job)
+
+    def leave(self, job_id: str, branch: str) -> bool:
+        """Stop sending the job's result to ``branch``; the job is cancelled when no branch is left to send it to.
+        Returns whether it was cancelled (False for a job that already ended or that other branches still wait on)."""
+        job = self._job(job_id)
+        if branch in job.recipients:
+            job.recipients.remove(branch)
+        return False if job.recipients else self.cancel(job_id)
 
     def has_job(self, job_id: str) -> bool:
         return job_id in self._jobs
@@ -216,13 +283,13 @@ class ToolJobs:
         return job.status
 
     def undelivered(self) -> tuple[str, ...]:
-        """Jobs that ended but whose pointer the sink never accepted."""
-        return tuple(j.job_id for j in self._jobs.values() if j.pointer is not None and not j.delivered)
+        """Jobs that ended but whose pointer the sink never accepted for some branch it goes to."""
+        return tuple(job.job_id for job in self._jobs.values() if _owed(job))
 
     async def redeliver(self) -> tuple[str, ...]:
         """Push every undelivered pointer again; returns the job ids still undelivered."""
         for job in list(self._jobs.values()):
-            if job.pointer is not None and not job.delivered:
+            if _owed(job):
                 await self._push(job)
         return self.undelivered()
 
@@ -258,6 +325,9 @@ class ToolJobs:
             summary=_short(f"{job.status.value}: {summary}"),
             **_share_fields(output),
         )
+        if job.key:
+            pointer = job.pointer if job.status is JobStatus.SUCCEEDED else None
+            self._shared.record(job.key, SharedEntry(job.job_id, job.request.tool, job.status.value, pointer))
         await self._push(job)
 
     async def _execute(self, job: _Job) -> tuple[ToolOutput | None, str]:
@@ -298,15 +368,27 @@ class ToolJobs:
         return output.summary
 
     async def _push(self, job: _Job) -> None:
+        """Push the job's pointer to every branch it goes to that has not accepted it, each with its own branch."""
         assert job.pointer is not None
+        for branch in [branch for branch in job.recipients if branch not in job.delivered]:
+            if await self._pushed(replace(job.pointer, branch=branch)):
+                job.delivered.add(branch)
+            else:
+                log.error("job %s ended but its result could not be pushed; redeliver() will retry", job.job_id)
+
+    async def _pushed(self, pointer: ToolResultPointer) -> bool:
         for attempt in range(1, self._attempts + 1):
             try:
-                await self._sink.notify_tool_result(job.pointer)
+                await self._sink.notify_tool_result(pointer)
             except Exception:
-                log.warning("pushing the result of job %s failed (attempt %d)", job.job_id, attempt, exc_info=True)
+                log.warning("pushing the result of job %s failed (attempt %d)", pointer.job_id, attempt, exc_info=True)
                 if attempt < self._attempts:
                     await asyncio.sleep(self._delay)
                 continue
-            job.delivered = True
-            return
-        log.error("job %s ended but its result could not be pushed; redeliver() will retry", job.job_id)
+            return True
+        return False
+
+
+def _owed(job: _Job) -> bool:
+    """Whether the job ended and some branch it goes to has not accepted its pointer."""
+    return job.pointer is not None and any(branch not in job.delivered for branch in job.recipients)
