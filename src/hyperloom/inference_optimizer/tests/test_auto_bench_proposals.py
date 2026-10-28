@@ -14,10 +14,12 @@ class _Tasks:
         self._queued, self._running = list(queued), list(running)
         self.created: list[dict[str, Any]] = []
         self.ended: dict[str, str] = {}
+        self.results: dict[str, dict] = {}
 
     async def find_by_idempotency_key(self, key):
         if key in self.ended:
-            return SimpleNamespace(state=self.ended[key])
+            outcome = {"outcome": {"result": self.results.get(key, {"status": "ok"})}}
+            return SimpleNamespace(state=self.ended[key], history=[{"to": self.ended[key], "evidence": outcome}])
         created = any(c["idempotency_key"] == key for c in self.created)
         return SimpleNamespace(state="queued") if created else None
 
@@ -264,6 +266,19 @@ async def test_a_reference_batch_that_ended_without_running_is_enqueued_again(mo
     assert await fp.enqueue_cycle_batch() is False
 
     assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s0-a2"]
+
+
+async def test_a_reference_batch_whose_task_succeeded_on_a_failed_result_is_enqueued_again(monkeypatch):
+    """GLM-5.3: the executor returned cycle_bench_unavailable, the task settled succeeded, and the screen stayed shut."""
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    fp = _agentx_phase()
+    fp._coord.shared_state.optimization_stack = [{"kind": "code_patch"}, {"kind": "code_patch"}]
+    fp._coord.tasks.ended = {"cycle-reference-c0-s2": "succeeded"}
+    fp._coord.tasks.results = {"cycle-reference-c0-s2": {"status": "failed", "error_class": "cycle_bench_unavailable"}}
+
+    assert await fp.enqueue_cycle_batch() is True
+
+    assert [b["idempotency_key"] for b in _explores(fp)] == ["cycle-reference-c0-s2-a1"]
 
 
 async def test_no_reference_batch_once_the_stack_has_one_or_the_screen_cannot_admit(monkeypatch):

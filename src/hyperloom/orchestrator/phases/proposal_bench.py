@@ -30,6 +30,16 @@ _COORDINATOR_SOURCE = "coordinator_internal"
 _CYCLE_REFERENCE_ATTEMPTS = 3
 _UNRUN_STATES = frozenset({"cancelled", "failed"})
 
+
+def _never_ran(task: Any) -> bool:
+    """Whether a reference batch's task ended without a batch: cancelled, failed, or settled on a failed result."""
+    if str(task.state) in _UNRUN_STATES:
+        return True
+    last = (list(getattr(task, "history", None) or []) or [{}])[-1]
+    result = ((last.get("evidence") or {}).get("outcome") or {}).get("result") or {}
+    return str(result.get("status") or "") == "failed"
+
+
 __all__ = ["CUSTOM_PROPOSAL_DOMAIN", "ProposalBench", "kb_exposure_of"]
 
 # ``untested_proposal_rows`` names a round's domain without the ``_specialist`` suffix.
@@ -211,7 +221,7 @@ class ProposalBench(CoordinatorCollaborator):
         for attempt in range(_CYCLE_REFERENCE_ATTEMPTS):
             key = base if attempt == 0 else f"{base}-a{attempt}"
             task = await self.tasks.find_by_idempotency_key(key)
-            if task is None or str(task.state) not in _UNRUN_STATES:
+            if task is None or not _never_ran(task):
                 return key
         return None
 
