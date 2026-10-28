@@ -140,10 +140,16 @@ revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
 `enablement_attempts_exhausted` (eight consecutive failed rounds).
 
-A KEEP or an advance ends the held round whoever authored it, since the wall
-that round was aimed at is behind the boot. A specialist still queued under that
-round is cancelled rather than left to author against the old wall; one already
-running reports normally.
+The Coordinator's enablement lane does all the authoring in ENABLEMENT: it
+dispatches each round's specialist and submits the patch for review. The
+orchestration agent can propose only `target_analysis` here. A round whose
+integrate reaches the executor after the lane succeeded, began revalidation,
+or the phase moved on is skipped without applying anything.
+
+A KEEP or an advance ends the held round, whether it came from the round's own
+patch or from a build's launch probe, since the wall that round was aimed at is
+behind the boot. A specialist still queued under that round is cancelled rather
+than left to author against the old wall; one already running reports normally.
 
 ### Enablement escalation ladder
 

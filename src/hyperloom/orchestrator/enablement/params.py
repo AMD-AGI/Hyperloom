@@ -154,11 +154,7 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
 
 
 def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
-    """What an integrate_patch needs to be graded as this enablement round.
-
-    Shared by the lane's own specialist dispatch, whose integrate inherits it,
-    and by an integrate the round did not dispatch but that executes in its phase.
-    """
+    """What an integrate_patch needs to be graded as this enablement round; the lane's specialist hands it on."""
     return {
         "enablement": True,
         # The verdict this round was dispatched on. The prompt builder renders

@@ -538,7 +538,7 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
     state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         current_best={},
         enablement=EnablementRound(),
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -895,38 +895,52 @@ async def test_executor_missing_specialist_workspace_fails_cleanly(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_an_enablement_integrate_that_runs_after_the_lane_succeeded_is_graded_as_any_other(tmp_path: Path):
-    """The tag was stamped at admission; the executor grades by what the lane is when it runs."""
+@pytest.mark.parametrize(
+    ("phase", "lane"),
+    [
+        ("ENABLEMENT", EnablementRound(succeeded=True)),
+        ("ENABLEMENT", EnablementRound(validation_pending=True)),
+        ("FRAMEWORK_AGENT", EnablementRound()),
+    ],
+    ids=["lane-succeeded", "lane-revalidating", "phase-moved-on"],
+)
+async def test_an_enablement_round_the_lane_no_longer_takes_is_skipped_without_applying(
+    tmp_path: Path, phase: str, lane: EnablementRound
+):
+    """Admitted while the lane took rounds, it reaches the executor after the lane moved on.
+
+    Grading it as an optimisation candidate would land an enablement patch on the
+    anchor; the result carries no ``enablement`` key, so the lane does not take it
+    as a round either.
+    """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    state = SharedState(phase="FRAMEWORK_AGENT", enablement=EnablementRound(succeeded=True))
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-late", patch_contents=[_VALID_PATCH])
+    state = SharedState(phase=phase, enablement=lane)
+    state.record_specialist_patch_verdict("t-spec-late", "approve")
     ctx = _make_ctx(
         "t-int-late",
         {
-            "specialist_task_id": "nonexistent",
+            "specialist_task_id": "t-spec-late",
+            "framework_source_root": str(repo),
             "enablement": True,
             "enablement_before_observation_path": "/s/reports/bringup/round-old.json",
         },
     )
     ctx.extra["shared_state"] = state
-    executor = IntegratePatchExecutor(session_dir=session_dir)
-    resolved: dict[str, Any] = {}
-    resolve = executor._stage_resolve
 
-    async def _spy(attempt, params, extra):
-        try:
-            return await resolve(attempt, params, extra)
-        finally:
-            resolved.update(params)
+    result = await IntegratePatchExecutor(session_dir=session_dir)(ctx)
 
-    executor._stage_resolve = _spy
-
-    await executor(ctx)
-
-    assert "enablement" not in resolved
-    assert "enablement_before_observation_path" not in resolved
+    assert result["status"] == "skipped"
+    assert result["skipped_reason"] == "enablement_lane_closed"
+    assert result["specialist_task_id"] == "t-spec-late"
+    assert result["patches_applied"] == []
+    assert "enablement" not in result
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
@@ -1725,7 +1739,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     arrange(monkeypatch)
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(ledger or [])),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1866,7 +1880,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -1926,7 +1940,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",
@@ -2909,7 +2923,7 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
     monkeypatch.setattr(keep_probe, "probe_keep_environment", _probe)
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
     shared_state = SimpleNamespace(
-        phase="FRAMEWORK_AGENT",
+        phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(prior_ledger)),
         save=lambda _dir: None,
         get_specialist_patch_verdict=lambda _subject: "approve",

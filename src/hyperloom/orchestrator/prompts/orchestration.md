@@ -198,9 +198,12 @@ Drive `baseline_tput > 0` so the Coordinator advances, after any `hold` the
 <!-- phase: ENABLEMENT -->
 ### ENABLEMENT — phase goal
 
-The combo (model + backend) cannot run at all. Drive it to a booting,
-accuracy-passing baseline so `baseline_tput > 0` and the run can proceed,
-after any `hold` the `=== Phase ===` block shows.
+The combo (model + backend) cannot run at all. The Coordinator's enablement
+lane brings it to a booting, accuracy-passing baseline (`baseline_tput > 0`):
+it dispatches each authoring specialist, submits its patch for review, and
+revalidates a KEEP. You propose nothing here but `target_analysis`; the run
+advances once the lane succeeds, after any `hold` the `=== Phase ===` block
+shows.
 
 A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. A patch that boots the server and holds accuracy is a valid KEEP

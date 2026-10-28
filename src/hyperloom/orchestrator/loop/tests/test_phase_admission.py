@@ -70,8 +70,6 @@ def test_a_phase_that_proposes_nothing_says_so():
         ("FRAMEWORK_AGENT", "explore"),
         ("FRAMEWORK_AGENT", "integrate_patch"),
         ("FRAMEWORK_AGENT", "specialist"),
-        ("ENABLEMENT", "specialist"),
-        ("ENABLEMENT", "integrate_patch"),
         ("ENABLEMENT", "target_analysis"),
         ("KERNEL_AGENT", "integrate"),
         ("CLOSE", "report"),
@@ -86,12 +84,14 @@ def test_the_prelude_baseline_is_admitted_before_any_measurement():
     assert _dispatcher("PRELUDE", baseline_tput=0.0).admission_denial_for_action("baseline") is None
 
 
-def test_enablement_keeps_its_baseline_for_the_coordinator():
-    """ENABLEMENT runs its baseline only as the Coordinator's revalidation of a KEEP."""
-    denied = _dispatcher("ENABLEMENT").admission_denial_for_action("baseline")
+@pytest.mark.parametrize("action", ["baseline", "specialist", "integrate_patch"])
+def test_enablement_keeps_its_rounds_and_their_revalidation_for_the_coordinator(action: str):
+    """ENABLEMENT runs a specialist and an integrate only as the enablement lane's round, and a baseline only as
+    the revalidation of its KEEP."""
+    denied = _dispatcher("ENABLEMENT", baseline_tput=0.0).admission_denial_for_action(action)
 
     assert denied is not None and denied.rule == "phase_incompatible"
-    assert denied.hint == "ENABLEMENT proposes: integrate_patch, specialist, target_analysis"
+    assert denied.hint == "ENABLEMENT proposes: target_analysis"
 
 
 @pytest.mark.parametrize("action", ["baseline", "explore", "specialist"])

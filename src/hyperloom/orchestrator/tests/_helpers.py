@@ -95,14 +95,16 @@ def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
 def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
     """The ``ctx.extra`` an integrate_patch task gets from the coordinator, for ``params``.
 
-    An enablement round reads its stack from the SharedState the coordinator
-    always threads in, and passes the Critic gate on a recorded approval.
+    An enablement round runs in ENABLEMENT, reads its stack from the SharedState
+    the coordinator always threads in, and passes the Critic gate on a recorded
+    approval.
     """
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     if not params.get("enablement"):
         return {}
     state = SharedState()
+    state.phase = "ENABLEMENT"
     state.record_specialist_patch_verdict(str(params.get("specialist_task_id") or ""), "approve")
     return {"shared_state": state}
 

@@ -26,7 +26,7 @@ from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
-from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
+from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
@@ -49,32 +49,13 @@ _MIN_LEASE_SEC = 300.0
 _MOVED_ROUND_OUTCOMES = {"kept": BOOTED, "advanced": ADVANCED}
 
 
-def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
-    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
+def takes_enablement_round(state: Any) -> bool:
+    """Whether an enablement round may run now: in ENABLEMENT, while the lane accepts rounds.
 
-    Admission happens long before execution, so the lane may have moved on. A
-    closed lane (succeeded, or revalidating) strips the enablement context, and
-    the integrate is graded as any other. An untagged one executing in ENABLEMENT
-    gets the round's context; a tagged one already carries it.
-
-    Args:
-        params: The integrate_patch params; updated in place.
-        state: The shared state, which owns the lane and the phase.
-        session_dir: The session root, for the recorded boot verdict.
+    Admission happens long before execution, so a round can reach its executor
+    after the lane succeeded, started revalidating, or the phase moved on.
     """
-    if not state.enablement.accepts_rounds:
-        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
-            del params[key]
-        return
-    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
-        return
-    verdict, _ = recorded_verdict(
-        state.enablement.launch_observation_path,
-        wrapper_text=state.enablement.launch_log or "",
-        session_dir=session_dir,
-    )
-    for key, value in _round_carriers(state, verdict.signature).items():
-        params.setdefault(key, value)
+    return (state.phase or "").strip().upper() == PHASE_ENABLEMENT and state.enablement.accepts_rounds
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -443,8 +424,7 @@ class EnablementLane(CoordinatorCollaborator):
     async def close_booted(self, *, reason: str) -> None:
         """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
 
-        Once the lane no longer accepts rounds, an integrate that executes afterwards is graded as any other
-        candidate rather than as an enablement round.
+        Once the lane no longer accepts rounds, a round's integrate that reaches its executor afterwards is skipped.
         """
         enablement = self.shared_state.enablement
         enablement.succeeded = True
@@ -546,8 +526,8 @@ class EnablementLane(CoordinatorCollaborator):
           ``enablement.launch_log`` replaced, so the next round targets that gap.
         * anything else — no patch is kept.
 
-        A kept or advanced patch moves the lane whoever authored it; a stall
-        from a specialist the lane never dispatched leaves it untouched.
+        A kept or advanced result moves the lane whether it answers the lane's
+        round or a build's launch probe; a probe's stall leaves it untouched.
 
         Args:
             res: The integrate_patch result dict.
@@ -794,11 +774,11 @@ def _authoring_round_id(holder: str) -> str:
 
 
 async def _is_foreign_stall(rounds: Any, spec_tid: str, *, status: str) -> bool:
-    """Whether this result bought nothing for a specialist the lane never dispatched."""
+    """Whether this result bought nothing and answers no round the lane dispatched, as a build's launch probe."""
     if not spec_tid or status in _MOVED_ROUND_OUTCOMES or await rounds.get(_authoring_round_id(spec_tid)) is not None:
         return False
     log.info(
-        "ENABLEMENT: integrate for specialist %s, which the lane did not dispatch, bought nothing (%s); "
+        "ENABLEMENT: integrate %s answers no round the lane dispatched and bought nothing (%s); "
         "the lane's round is left to its holder",
         spec_tid,
         status or "unreported",

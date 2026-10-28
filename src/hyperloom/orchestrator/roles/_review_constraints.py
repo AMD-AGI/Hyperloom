@@ -68,7 +68,8 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "`advise` with a phase hint rather than reject."
     ),
     "ENABLEMENT": (
-        "Typical proposals are `specialist` and `integrate_patch`. "
+        "Proposals are the Coordinator's enablement lane landing its round's patch "
+        "as `integrate_patch`. "
         "The gate is runnability plus the accuracy floor, not throughput: a patch "
         "that boots the model and holds accuracy is a legitimate KEEP even with "
         "no throughput gain. The before/after benchmark gate does not apply — a "

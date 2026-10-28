@@ -16,11 +16,10 @@ from typing import Any
 from hyperloom.common.coerce import to_float
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
-from ...enablement.lane import bind_integrate_to_lane
 from ...state.shared_state import inject_stack_base_params
 from ._enablement_config import _enablement_gap, _stamp_framework_kb_provenance
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_refusals import _enforce_critic_gate
+from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
 from ._patch_git import _detect_p_level
 from ._patch_source_pr import DEFAULT_DIFF_FETCH_TIMEOUT_SEC, _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
@@ -112,8 +111,8 @@ class ResolveStageMixin:
                 "error_class": "integrate_restore_incomplete",
                 "error": "previous integration still requires recovery",
             }
-        if shared_state is not None:
-            bind_integrate_to_lane(params, shared_state, session_dir=Path(self.session_dir))
+        if (skipped := _enablement_lane_closed_skip(params, shared_state)) is not None:
+            return skipped
         if shared_state is not None and not params.get("accuracy_baseline"):
             base_acc = to_float(getattr(shared_state, "baseline_accuracy", 0.0), 0.0)
             if base_acc > 0:
