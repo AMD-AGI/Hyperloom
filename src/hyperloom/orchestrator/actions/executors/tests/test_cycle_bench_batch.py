@@ -404,3 +404,103 @@ def test_a_session_batch_runs_the_launchs_effective_env_over_its_runtime_env(tmp
     spec = cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
     assert spec.env == {"A": "1", "B": "2", "C": "3"}
+
+
+@pytest.mark.parametrize(
+    ("stack", "held", "attribution_bs"),
+    [
+        ([{"kind": "config"}], {}, 4),
+        ([{"kind": "config"}], {"stack_len": 0, "trace": "/t/old.trace.json.gz"}, 4),
+        ([{"kind": "config"}], {"stack_len": 1, "trace": "/t/kept.trace.json.gz"}, 0),
+        ([], {}, 0),
+    ],
+)
+def test_a_session_batch_captures_a_moved_stack_no_capture_describes_at_its_heaviest_batch_size(
+    tmp_path, stack, held, attribution_bs
+):
+    decode = "[t TP0] Decode batch, #running-req: {n}, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
+    state = _workspace(tmp_path, "\n".join([decode.format(n=4)] * 3 + [decode.format(n=1)]), {"effective_argv": ["x"]})
+    state.optimization_stack = stack
+    state.last_attribution_trace = held
+
+    assert cba.session_batch(state, [], out_dir=tmp_path / "o", port=1).attribution_bs == attribution_bs
+
+
+def test_only_the_first_base_of_a_batch_records_the_attribution_capture(tmp_path, monkeypatch):
+    ran: list[tuple[str, int]] = []
+
+    def _run_arm(spec):
+        ran.append((spec.out_dir.name, spec.attribution_bs))
+        return _arm(10.0, 20.0)
+
+    monkeypatch.setattr(cba, "run_arm", _run_arm)
+
+    cba.run_batch(cba.BatchSpec(**{**_batch(tmp_path).__dict__, "attribution_bs": 2}))
+
+    assert ran == [("base", 2), ("lever-a", 0), ("base2", 0)]
+
+
+def test_an_arm_captures_its_attribution_batch_size_after_every_measured_window(tmp_path, monkeypatch):
+    calls: list[tuple[str, int]] = []
+    window = ["[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00"]
+
+    def _hold(url, log_path, prompts, spec):
+        calls.append(("measure", len(prompts)))
+        return window
+
+    def _capture(url, log_path, spec, rng):
+        calls.append(("capture", spec.attribution_bs))
+        return "/o/attribution/p-TP-0.trace.json.gz"
+
+    monkeypatch.setattr(cba, "_launch_server", lambda argv, env, log: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(cba, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(cba, "wait_for_server_ready", lambda url, **_k: True)
+    monkeypatch.setattr(cba, "_hold_steady_decode", _hold)
+    monkeypatch.setattr(cba, "decode_cycles_ms", lambda lines, bs: [10.0])
+    monkeypatch.setattr(cba, "_capture_attribution", _capture)
+    spec = cba.ArmSpec(
+        argv=["x"], env={}, out_dir=tmp_path, port=1, batch_sizes=(1, 2), prompt_tokens=4, vocab_size=2000
+    )
+
+    result = cba.run_arm(cba.ArmSpec(**{**spec.__dict__, "attribution_bs": 2}))
+
+    assert calls == [("measure", 1), ("measure", 2), ("capture", 2)]
+    assert (result.error, result.attribution_trace) == ("", "/o/attribution/p-TP-0.trace.json.gz")
+
+
+def test_a_profile_capture_asks_sglang_for_step_annotations_and_keeps_the_first_ranks_trace(tmp_path, monkeypatch):
+    posted: list[tuple[str, dict]] = []
+    trace_dir = tmp_path / "attribution"
+
+    def _post(url, body, timeout=60.0):
+        posted.append((url, body))
+        for rank in (1, 0):
+            (trace_dir / f"p-TP-{rank}.trace.json.gz").write_bytes(b"x")
+        return True
+
+    monkeypatch.setattr(cba, "_post", _post)
+
+    trace = cba.record_profile("http://127.0.0.1:9", trace_dir, 32, poll_s=0.0)
+
+    assert trace == str(trace_dir / "p-TP-0.trace.json.gz")
+    assert posted == [
+        (
+            "http://127.0.0.1:9/start_profile",
+            {
+                "output_dir": str(trace_dir),
+                "num_steps": 32,
+                "activities": ["CPU", "GPU"],
+                "with_stack": False,
+                "record_shapes": False,
+                "detailed_annotations": True,
+                "merge_profiles": False,
+                "profile_by_stage": False,
+            },
+        )
+    ]
+
+
+def test_a_profile_capture_the_server_refused_records_no_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr(cba, "_post", lambda url, body, timeout=60.0: False)
+
+    assert cba.record_profile("http://127.0.0.1:9", tmp_path / "attribution", 32, poll_s=0.0) == ""

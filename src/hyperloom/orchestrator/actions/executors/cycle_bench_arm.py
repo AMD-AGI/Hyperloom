@@ -9,13 +9,16 @@ The arithmetic -- the bench-shaped argv and env, reading cycles off the log, wei
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import random
 import statistics
 import threading
 import time
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,8 @@ from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, decode_c
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
+
+log = logging.getLogger(__name__)
 
 #: Operator switch for the cycle screen (default off): switched patches are admitted dormant and screened by
 #: cycle-bench batches instead of each taking a replay round.
@@ -46,6 +51,10 @@ CYCLE_ARM_MINUTES = 8.0
 
 #: Candidates per batch: with its two bases, about an hour of serving lanes.
 CYCLE_BATCH_MAX_ARMS = 6
+
+#: Decode steps one attribution capture records: an eighth of the opening profile's, so the orchestrator parsing it
+#: into the module table holds a fraction of that trace in memory.
+ATTRIBUTION_STEPS = 32
 
 #: Explore ``reason`` of a Coordinator-enqueued cycle-bench batch.
 CYCLE_BATCH_REASON = "cycle_bench_batch"
@@ -68,6 +77,7 @@ class BatchSpec:
     """One cycle-bench batch: the stack's launch, the weights, the candidates' switch envs, and where it runs.
 
     *reference* is the previous batch's base2 on the same stack, the tree before this batch's patches were admitted.
+    A nonzero *attribution_bs* has the base also record a profiler capture at that batch size.
     """
 
     argv: list[str]
@@ -80,6 +90,7 @@ class BatchSpec:
     vocab_size: int
     bands: cb.Bands
     reference: dict[int, float] | None = None
+    attribution_bs: int = 0
 
 
 def cycle_arms(levers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -136,7 +147,17 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
         vocab_size=int(config["vocab_size"]),
         bands=CYCLE_BANDS,
         reference=_reference(state),
+        attribution_bs=_attribution_bs(state, weights),
     )
+
+
+def _attribution_bs(state: Any, weights: dict[int, float]) -> int:
+    """The heaviest batch size when a kept round moved the stack and no capture describes it yet, else 0."""
+    stack_len = len(getattr(state, "optimization_stack", None) or [])
+    held = getattr(state, "last_attribution_trace", None) or {}
+    if not stack_len or held.get("stack_len") == stack_len:
+        return 0
+    return max(weights, key=lambda bs: weights[bs])
 
 
 #: Source paths a steady-decode batch without the host KV cache never exercises: tokenization, the API front end,
@@ -185,9 +206,9 @@ def run_batch(spec: BatchSpec, stop: threading.Event | None = None) -> dict[str,
     A base off the reference is booted once more; off it again, the admitted patches moved the switched-off tree and
     the batch stops before its candidates. Once *stop* is set no further arm boots.
     """
-    arms = {_BASES[0]: _boot(spec, _BASES[0], {}, stop)}
+    arms = {_BASES[0]: _boot(spec, _BASES[0], {}, stop, attribution_bs=spec.attribution_bs)}
     if not arms[_BASES[0]].error and not _matches_reference(spec, arms[_BASES[0]]):
-        arms[_BASES[0]] = _boot(spec, "base-rerun", {}, stop)
+        arms[_BASES[0]] = _boot(spec, "base-rerun", {}, stop, attribution_bs=spec.attribution_bs)
         if not arms[_BASES[0]].error and not _matches_reference(spec, arms[_BASES[0]]):
             gap = cb.weighted_gain_pct(spec.reference or {}, arms[_BASES[0]].cycle_ms, spec.weights)
             reason = f"the switched-off tree runs {gap:+.2f}% against the previous batch's base2"
@@ -207,7 +228,9 @@ def _graded(spec: BatchSpec, arms: dict[str, ArmResult], summary: dict[str, Any]
     return {**summary, "arms": {name: arm.__dict__ for name, arm in arms.items()}, "weights": spec.weights}
 
 
-def _boot(spec: BatchSpec, name: str, switches: dict[str, str], stop: threading.Event | None) -> ArmResult:
+def _boot(
+    spec: BatchSpec, name: str, switches: dict[str, str], stop: threading.Event | None, *, attribution_bs: int = 0
+) -> ArmResult:
     if stop is not None and stop.is_set():
         return ArmResult(error="the batch was stopped before this arm")
     return run_arm(
@@ -219,6 +242,7 @@ def _boot(spec: BatchSpec, name: str, switches: dict[str, str], stop: threading.
             batch_sizes=tuple(bs for bs in BATCH_GRID if spec.weights.get(bs, 0) > 0) or BATCH_GRID,
             prompt_tokens=spec.prompt_tokens,
             vocab_size=spec.vocab_size,
+            attribution_bs=attribution_bs,
         )
     )
 
@@ -264,6 +288,8 @@ class ArmSpec:
     settle_s: float = 10.0
     window_s: float = 60.0
     boot_timeout_s: float = 1800.0
+    attribution_bs: int = 0
+    attribution_steps: int = ATTRIBUTION_STEPS
 
 
 @dataclass
@@ -275,10 +301,15 @@ class ArmResult:
     samples: dict[int, int] = field(default_factory=dict)
     boot_s: float | None = None
     error: str = ""
+    attribution_trace: str = ""
 
 
 def run_arm(spec: ArmSpec) -> ArmResult:
-    """Boot the server, hold each batch size in steady decode for one log window, then tear the server down."""
+    """Boot the server, hold each batch size in steady decode for one log window, then tear the server down.
+
+    With an *attribution_bs*, the measured server then records a profiler capture at that size; the capture runs
+    after every window, so it never touches the cycles.
+    """
     spec.out_dir.mkdir(parents=True, exist_ok=True)
     log_path = spec.out_dir / _SERVER_LOG
     result = ArmResult()
@@ -292,8 +323,7 @@ def run_arm(spec: ArmSpec) -> ArmResult:
         result.boot_s = round(time.monotonic() - started, 1)
         rng = random.Random(spec.seed)
         for bs in spec.batch_sizes:
-            prompts = [[rng.randrange(1000, spec.vocab_size) for _ in range(spec.prompt_tokens)] for _ in range(bs)]
-            window = _hold_steady_decode(url, log_path, prompts, spec)
+            window = _hold_steady_decode(url, log_path, _prompts(rng, spec, bs), spec)
             cycles = decode_cycles_ms(window, bs=bs) if window is not None else []
             if not cycles:
                 result.error = f"no steady decode at bs={bs}"
@@ -301,28 +331,92 @@ def run_arm(spec: ArmSpec) -> ArmResult:
             result.cycle_ms[bs] = statistics.median(cycles)
             result.samples[bs] = len(cycles)
             result.accept_len[bs] = _mean_accept(window, bs)
+        if spec.attribution_bs:
+            result.attribution_trace = _capture_attribution(url, log_path, spec, rng)
         return result
     finally:
         _terminate_server(proc)
         (spec.out_dir / "arm.json").write_text(json.dumps(result.__dict__, default=str, indent=1), encoding=_ENCODING)
 
 
+def _prompts(rng: random.Random, spec: ArmSpec, bs: int) -> list[list[int]]:
+    return [[rng.randrange(1000, spec.vocab_size) for _ in range(spec.prompt_tokens)] for _ in range(bs)]
+
+
 def _hold_steady_decode(url: str, log_path: Path, prompts: list[list[int]], spec: ArmSpec) -> list[str] | None:
     """Send *prompts*, wait until all of them decode with an empty queue, and return one log window's lines."""
+    with _steady_decode(url, log_path, prompts, spec) as steady:
+        if not steady:
+            return None
+        start = _line_count(log_path)
+        time.sleep(spec.window_s)
+        return _read_lines(log_path)[start:]
+
+
+def _capture_attribution(url: str, log_path: Path, spec: ArmSpec, rng: random.Random) -> str:
+    """Hold the attribution batch size in steady decode and record a profiler capture of it; ``""`` without one."""
+    with _steady_decode(url, log_path, _prompts(rng, spec, spec.attribution_bs), spec) as steady:
+        if not steady:
+            log.warning("cycle bench: no steady decode at bs=%d to capture", spec.attribution_bs)
+            return ""
+        return record_profile(url, (spec.out_dir / "attribution").resolve(), spec.attribution_steps)
+
+
+@contextlib.contextmanager
+def _steady_decode(url: str, log_path: Path, prompts: list[list[int]], spec: ArmSpec) -> Iterator[bool]:
+    """Send *prompts* and yield, once settled, whether all of them decode with an empty queue; abort them after."""
     since = _line_count(log_path)
     for ids in prompts:
         threading.Thread(target=_generate, args=(url, ids, spec.max_new_tokens), daemon=True).start()
     try:
-        if not _wait_steady(log_path, since, len(prompts), timeout_s=900.0):
-            return None
-        time.sleep(spec.settle_s)
-        start = _line_count(log_path)
-        time.sleep(spec.window_s)
-        return _read_lines(log_path)[start:]
+        steady = _wait_steady(log_path, since, len(prompts), timeout_s=900.0)
+        if steady:
+            time.sleep(spec.settle_s)
+        yield steady
     finally:
         _post(url + "/abort_request", {"abort_all": True})
         time.sleep(5.0)
         _post(url + "/flush_cache", None)
+
+
+def record_profile(url: str, trace_dir: Path, steps: int, *, timeout_s: float = 600.0, poll_s: float = 5.0) -> str:
+    """Record *steps* steps with sglang's torch profiler into *trace_dir*; the first rank's capture, or ``""``.
+
+    Step annotations give the module table its windows; Python stacks and shapes would only multiply the trace size.
+    """
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    body = {
+        "output_dir": str(trace_dir),
+        "num_steps": steps,
+        "activities": ["CPU", "GPU"],
+        "with_stack": False,
+        "record_shapes": False,
+        "detailed_annotations": True,
+        "merge_profiles": False,
+        "profile_by_stage": False,
+    }
+    if not _post(url + "/start_profile", body, timeout=timeout_s):
+        log.warning("cycle bench: %s refused /start_profile; the module table keeps its previous source", url)
+        return ""
+    captures = _settled_captures(trace_dir, timeout_s=timeout_s, poll_s=poll_s)
+    if not captures:
+        log.warning("cycle bench: no complete profiler capture under %s", trace_dir)
+        return ""
+    return str(next((path for path in captures if "-TP-0" in path.name), captures[0]))
+
+
+def _settled_captures(trace_dir: Path, *, timeout_s: float, poll_s: float) -> list[Path]:
+    """The capture files once two polls in a row see the same names and sizes; empty when none settle in time."""
+    deadline = time.monotonic() + timeout_s
+    seen: list[tuple[str, int]] = []
+    while time.monotonic() < deadline:
+        files = sorted(trace_dir.glob("*.trace.json*"))
+        sizes = [(path.name, path.stat().st_size) for path in files]
+        if sizes and sizes == seen:
+            return files
+        seen = sizes
+        time.sleep(poll_s)
+    return []
 
 
 def _generate(url: str, ids: list[int], max_new: int) -> None:
@@ -330,14 +424,15 @@ def _generate(url: str, ids: list[int], max_new: int) -> None:
     _post(url + "/generate", {"input_ids": ids, "sampling_params": sampling}, timeout=7200.0)
 
 
-def _post(url: str, body: Any, timeout: float = 60.0) -> None:
+def _post(url: str, body: Any, timeout: float = 60.0) -> bool:
+    """Whether the server answered with a success status."""
     data = json.dumps(body).encode() if body is not None else b""
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout):  # nosec B310 - local bench server
-            pass
+            return True
     except OSError:
-        pass  # an aborted generate or a slow flush; the log window is the measurement
+        return False  # an aborted generate or a slow flush; the log window is the measurement
 
 
 def _wait_steady(log_path: Path, since: int, bs: int, *, timeout_s: float) -> bool:
@@ -371,6 +466,7 @@ __all__ = [
     "ArmResult",
     "ArmSpec",
     "BatchSpec",
+    "record_profile",
     "run_arm",
     "run_batch",
     "session_batch",
