@@ -1468,7 +1468,8 @@ directory already holds `manifest.json` and `state.json`, otherwise the spec map
 `--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
 It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
 refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
-run` with the environment unchanged.
+run` after the same `install.sh` run as the legacy flow, with the entry's environment plus the running interpreter's bin
+directory first on `PATH`.
 
 ## Resume Existing Session
 
