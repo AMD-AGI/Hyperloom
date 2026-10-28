@@ -77,6 +77,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 |
 | carries a `baseline-raise` label in `meta.txt`, waiving the `code-metrics` gate, and adds or widens a `def`/`async def` under `src/` outside `tests/` | D12 D14 |
 | adds a `def` or `async def` under `src/`, or adds a parameter to one | A8 |
+| adds a function whose body is one forwarding call | A12 |
 | adds an `isinstance`/`is None`/`or {}` guard on an internal value, a renaming local, or an `except ...: raise` | A13 |
 | adds or renames a function, parameter, module binding or import alias | A14 |
 | reaches through two or more collaborators (`a.b.c.method()`), or adds a module function that mostly reads one parameter's fields | A4 |
@@ -1061,9 +1062,10 @@ Four of this family's rules are gone: A9, A10, A11 and A12 are decided mechanica
 `code-metrics` job, which runs `tuple_return_problems`, `raw_vocabulary_problems`,
 `global_write_problems`, `forwarder_problems` and `single_implementation_problems` in
 `scripts/code_metrics_design.py` under those same rule ids. A9, A10, A11 and A12's
-single-implementation case were advisory here anyway; A12's pure forwarder was blocking and the
-gate reports it. A1 and A8 stay, each narrowed to the part of its shape the gate's own scope does
-not reach -- matching rule ids are not matching coverage, which is what #2227 got wrong twice. A review that adjudicated them was re-deciding what a gate had already
+single-implementation case were advisory here anyway. A1, A8 and A12 stay, each narrowed to the
+part of its shape the gate's own code does not reach: a unit coarser than the rule's package, an
+empty parameter list, a new function. Matching rule ids are not matching coverage -- #2227 got that
+wrong four times, once per rule, and every time the gate function existed and carried the right id. A review that adjudicated them was re-deciding what a gate had already
 decided, and in 23 recorded reviews the whole family produced 119 verdict lines and no finding.
 A8 stays, narrowed to the two shapes `flag_argument_problems` and vulture cannot see. Re-flagging a
 gated rule is a defect in the review; see [`references/ci.md`](references/ci.md).
@@ -1156,9 +1158,19 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or adds a parameter to one, and the parameter is either (a) a `bool` or two-value `Literal` whose first use is `if <param>:` ending in `return`, with a production caller that also passes dummies (`""`, `0`, `None`) for parameters only the other body reads -- this shape only where the function exists at the merge base, the gate having the rest; or (b) one that only tests set to a non-default value, on any function, new or widened alike.
 **The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. A parameter varied only by tests is plumbing the change introduced -- the production path has one value, so the parameter is a seam for the test rather than an input, and the branch it guards is untested in the shape production runs. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameter goes.
 **Seen in:** PR #1660 -- "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests", both on functions that already existed; the same PR's 28-parameter `_sweep_one_arm_single_server` is D14's and A4's, not this rule's.
-**Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; or, for shape (a) alone, the function is new at this head, where `flag_argument_problems` already decides it -- shape (b) has no such exemption.
+**Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; or, for shape (a) alone, the function is new at this head on a PR with no `baseline-raise` label, where `flag_argument_problems` decides it -- a labelled PR waives that finding (`FLAG_ARGUMENT` is not in the gate's `ADVISORY` set), so shape (a) returns here; shape (b) has no exemption either way.
 **Evidence:** `$WORK/diff.txt` for the signature; `$WORK/base.txt` to confirm the function existed there; `git grep` for the production call sites and what each passes.
 **Report as:** `A8 <file>:<line> -- <fn> <takes flag <name> selecting two bodies|takes <param> only tests set>; <split it|drop it>`
+
+### A12 -- A parameterless method that only forwards to one collaborator
+
+**Severity:** blocking (`AGENTS.md` *Simplify by removing a mechanism*: "a forwarding layer with no job of its own"). 2/2 real in a 30-PR replay, 2026-10-11. Narrowed to what the gate's own code cannot reach: `scripts/code_metrics_design.py::_forwarded_to` computes `params = _parameter_names(function, receiver)` and returns `None` when `not params` (`:692-693`), so a forwarder that takes an argument is reported by `forwarder_problems` and a parameterless one is reported by nobody. The gate's finding is also waived by a `baseline-raise` label (`FORWARDER` is absent from `code_metrics_design.py`'s `ADVISORY`, and `code_metrics_report.py:136-142` stops failing on `design` once waived), which returns the parameter-taking shape here too.
+**Fires when:** the diff adds, in non-test code, a `def` or `async def` whose body after the docstring is a single `return`/`await` of one call on a collaborator, with the same arguments in the same order, and either (a) the function takes no parameter other than `self`/`cls`; or (b) `meta.txt` carries a `label: baseline-raise` line.
+**The rule:** a function that only renames and forwards is a layer with no job: call the target by its own name. The finding names the forwarder, its target, and the call sites that would bind to the target directly.
+**Seen in:** PR #1642 -- `_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature, and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. PR #2227 -- deleting this rule as gated was wrong for the parameterless shape, which `_forwarded_to` returns `None` for before it ever reaches `_forwards_to`.
+**Not a finding when:** the forwarder adapts something -- adds a default, converts or checks a type at runtime, binds `self` state, converts units, computes an argument -- narrowing only the annotation is not adapting; it is a staged-migration adapter that names its remaining consumer (*Finish the replacement*); it is a documented test monkeypatch point; or it takes a parameter on a PR with no `baseline-raise` label, which the gate reports.
+**Evidence:** `$WORK/diff.txt` for the new def; `$WORK/meta.txt` for a `label:` line; `git grep` over the head tree, excluding tests, for the target and the forwarder's callers.
+**Report as:** `A12 <file>:<line> -- <fn> only forwards to <target> and takes no parameter the gate can see; call <target> directly at <call sites>`
 
 ### A13 -- No ceremony the types or the callers already rule out
 

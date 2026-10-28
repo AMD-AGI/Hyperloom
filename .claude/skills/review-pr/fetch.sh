@@ -176,7 +176,14 @@ jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort 
     echo "$login"
     continue
   fi
-  case "$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)" in
+  # A 404 is the valid negative: not a collaborator. Any other failure -- a rate limit, a network
+  # drop -- must not read as one, or comments.txt silently loses entries the review is required
+  # to settle, which is the shape the CR strip above already cost once.
+  perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>"$raw/perm.err")
+  if [ $? -ne 0 ] && ! grep -q 'HTTP 404' "$raw/perm.err"; then
+    die "cannot resolve $login's permission: $(tr -d '\r' < "$raw/perm.err" | tail -1)"
+  fi
+  case "$perm" in
     admin | write) echo "$login" ;;
   esac
 done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
