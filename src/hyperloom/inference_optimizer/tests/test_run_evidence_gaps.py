@@ -201,7 +201,6 @@ def test_a_run_with_no_evidence_raises_no_gaps(tmp_path):
 
 
 def test_one_unreadable_artifact_does_not_cost_the_other_censuses(tmp_path, monkeypatch):
-    """The caller catches OSError around the whole call, so a raising census would silence all four."""
     events = eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10)
 
     def _denied(*_args, **_kwargs):

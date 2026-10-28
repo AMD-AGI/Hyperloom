@@ -151,26 +151,14 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         )
 
     def _extract_gaps_from_run_evidence(self) -> list[dict[str, Any]]:
-        """Derive gaps from what this run was measured doing, rather than from how its rounds came out.
-
-        Every other signal here is shaped like an outcome -- short of target, crashed, no promotion for N rounds --
-        which says a session is stuck without saying what it is stuck on. These say what the run is doing: a kernel
-        recompiled per call shape, a launch that could fold into its neighbour, a step class that never reached a
-        graph, a prompt paid for twice. On GLM-5.3 those four were where the hand-tuned stack's largest steps came
-        from, and none of them has an outcome a session could have noticed.
-        """
         from hyperloom.orchestrator.state.run_evidence_gaps import run_evidence_gaps
 
-        try:
-            return run_evidence_gaps(
-                session_dir=self.session_dir,
-                trace_path=getattr(self.shared_state, "last_profile_trace", ""),
-                workspace=(self.shared_state.current_best or {}).get("workspace")
-                or getattr(self.shared_state, "baseline_workspace", ""),
-            )
-        except OSError:
-            log.warning("gaps refresh: run evidence unreadable", exc_info=True)
-            return []
+        state = self.shared_state
+        return run_evidence_gaps(
+            session_dir=self.session_dir,
+            trace_path=state.last_profile_trace,
+            workspace=(state.current_best or {}).get("workspace") or state.baseline_workspace,
+        )
 
     def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:
         """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); key the rows on ``workload_id`` (matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.

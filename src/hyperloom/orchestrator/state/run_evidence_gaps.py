@@ -72,13 +72,13 @@ def _recompile_gaps(session_dir: Any) -> list[dict[str, Any]]:
     for row in variant_counts(jit_cache_dir(Path(str(session_dir or ".")))):
         if not row.get("single_constant_leak"):
             continue
-        widest = (row.get("varying") or [{}])[0]
+        widest = row["varying"][0]
         out.append(
             _gap(
                 "recompile",
                 row["kernel"],
                 f"{row['kernel']} was compiled into {row['variants']} variants, "
-                f"{widest.get('distinct_values', '?')} of them differing only after `_{widest.get('after', '?')}_`: "
+                f"{widest['distinct_values']} of them differing only after `_{widest['after']}_`: "
                 "a constant is tracking a runtime quantity, and every new call shape stalls the engine to compile. "
                 "Making that argument runtime rather than constexpr removes the recompiles without changing what "
                 "the kernel computes.",
@@ -175,17 +175,14 @@ def run_evidence_gaps(*, session_dir: Any, trace_path: Any, workspace: Any) -> l
     """Every cause-shaped gap this run's own evidence supports.
 
     Each census reads its own artifact and is kept to it: a run whose JIT cache
-    a later process left unreadable still has a trace to count launches in, and
-    the caller catches ``OSError`` around the whole call, so letting one census
-    raise would quietly cost the other three.
+    a later process left unreadable still has a trace to count launches in.
     """
-    capture = resolve_capture(trace_path)
     gaps: list[dict[str, Any]] = []
     for name, census in (
         ("recompile", lambda: _recompile_gaps(session_dir)),
-        ("graph_coverage", lambda: _graph_gaps(capture)),
+        ("graph_coverage", lambda: _graph_gaps(resolve_capture(trace_path))),
         ("front_end_input_cost", lambda: _input_cost_gaps(workspace)),
-        ("foldable_launch", lambda: _foldable_gaps(capture)),
+        ("foldable_launch", lambda: _foldable_gaps(resolve_capture(trace_path))),
     ):
         try:
             gaps.extend(census())
