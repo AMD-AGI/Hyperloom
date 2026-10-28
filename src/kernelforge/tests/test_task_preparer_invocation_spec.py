@@ -15,6 +15,7 @@ from kernelforge.cli import main
 from kernelforge.loop import task_preparer
 from kernelforge.loop import task_preparer_prompts
 from kernelforge.loop import task_preflight
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.mark.asyncio
@@ -218,11 +219,10 @@ def test_prepare_agent_does_not_receive_shell_access(tmp_path, monkeypatch):
     monkeypatch.setattr(task_preparer, "create_registered_backend", fake_factory)
     usage = object()
     configured = AgentRuntimeConfig(provider="codex", model="gpt-test")
+    monkeypatch.setattr(task_preparer, "agent_runtime", lambda _config: configured)
     result = asyncio.run(
         task_preparer._run_prepare_agent(
-            config=SimpleNamespace(
-                agent_runtime=lambda: configured,
-            ),
+            config=SimpleNamespace(),
             turn=task_preparer._AuthoringTurn(
                 workspace=tmp_path,
                 prompt="prompt",
@@ -246,6 +246,7 @@ def test_prepare_agent_does_not_receive_shell_access(tmp_path, monkeypatch):
     assert spec.additional_directories == [str(tmp_path / "read-only")]
     assert spec.target_files == [str(tmp_path / "driver.py")]
     assert spec.protected_globs == ["kernel.py"]
+    assert spec.protected_path_rules is FORGE_PROTECTED_PATHS
     assert spec.allow_dirty_targets is True
     assert spec.allow_untracked is True
     assert captured["usage"] is usage
@@ -274,15 +275,13 @@ def test_prepare_agent_owns_the_driver_it_is_asked_to_author(
         lambda runtime: FakeBackend(),
     )
     driver = tmp_path / "driver.py"
+    monkeypatch.setattr(
+        task_preparer, "agent_runtime", lambda _config: AgentRuntimeConfig(provider="codex", model="gpt-test")
+    )
 
     asyncio.run(
         task_preparer._run_prepare_agent(
-            config=SimpleNamespace(
-                agent_runtime=lambda: AgentRuntimeConfig(
-                    provider="codex",
-                    model="gpt-test",
-                ),
-            ),
+            config=SimpleNamespace(),
             turn=task_preparer._AuthoringTurn(
                 workspace=tmp_path,
                 prompt="prompt",
@@ -324,12 +323,10 @@ def test_prepare_agent_initializes_required_git_workspace(
         return FakeBackend()
 
     monkeypatch.setattr(task_preparer, "create_registered_backend", fake_factory)
-    config = SimpleNamespace(
-        agent_runtime=lambda: AgentRuntimeConfig(
-            provider="codex",
-            model="gpt-test",
-        ),
+    monkeypatch.setattr(
+        task_preparer, "agent_runtime", lambda _config: AgentRuntimeConfig(provider="codex", model="gpt-test")
     )
+    config = SimpleNamespace()
 
     first = asyncio.run(
         task_preparer._run_prepare_agent(

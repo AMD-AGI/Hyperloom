@@ -25,6 +25,7 @@ from kernelforge.agent_backends.deepseek import (
 from kernelforge.agent_backends.registry import get_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 from kernelforge.tracker.usage import UsageAccumulator
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 _GATEWAY_URL = "https://gateway.example.invalid/v1"
 
@@ -121,6 +122,7 @@ def _spec(repo: Path, kernel: Path, **fields: object) -> AgentRunSpec:
         "cwd": str(repo),
         "timeout_sec": 30,
         "target_files": [str(kernel)],
+        "protected_path_rules": FORGE_PROTECTED_PATHS,
     }
     base.update(fields)
     return AgentRunSpec(**base)  # type: ignore[arg-type]

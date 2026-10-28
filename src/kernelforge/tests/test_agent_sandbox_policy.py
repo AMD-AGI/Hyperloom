@@ -99,7 +99,8 @@ def test_prepare_agent_never_downgrades_the_configured_sandbox(
 ) -> None:
     """Run the prep turn under the configured policy, raised only if read-only."""
     seen = _capture_runtime(monkeypatch, task_preparer)
-    config = SimpleNamespace(agent_runtime=lambda: _runtime(configured))
+    monkeypatch.setattr(task_preparer, "agent_runtime", lambda _config: _runtime(configured))
+    config = SimpleNamespace()
 
     asyncio.run(
         task_preparer._run_prepare_agent(
@@ -131,10 +132,8 @@ def test_flydsl_driver_preparation_never_downgrades_the_configured_sandbox(
 ) -> None:
     """Apply the same policy to the FlyDSL rewrite driver authoring turn."""
     seen = _capture_runtime(monkeypatch, driver_preparation)
-    config = SimpleNamespace(
-        agent_runtime=lambda: _runtime(configured),
-        max_turns=10,
-    )
+    monkeypatch.setattr(driver_preparation, "agent_runtime", lambda _config: _runtime(configured))
+    config = SimpleNamespace(max_turns=10)
 
     asyncio.run(
         driver_preparation._run_agent(

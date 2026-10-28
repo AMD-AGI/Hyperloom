@@ -61,7 +61,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
-from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS, TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle, KnownCases, PerformanceRun
 from kernelforge.roofline_ceiling.report import (
@@ -246,6 +246,7 @@ def _spec(
         # campaign's multi-GiB JIT cache into memory and reject the session for
         # the build products of its own measurement.
         hooks=_writable_only_within(writable_dirs),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_paths=[path for path in protected_paths if path],
         allow_tracked_changes=False,
         ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),

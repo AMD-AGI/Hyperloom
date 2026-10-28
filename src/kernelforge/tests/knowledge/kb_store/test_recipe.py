@@ -11,10 +11,7 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.loop import knowledge_integration as experience_integration
 from kernelforge.knowledge.kb_store import writer as experience_sink
-from kernelforge.knowledge.kb_store.config import (
-    KnowledgeConfig,
-    KnowledgeStoreMode,
-)
+from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KERNEL_CANONICAL_DIMENSIONS,
     KernelRecipeIdentity,

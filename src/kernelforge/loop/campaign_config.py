@@ -28,7 +28,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 )
 from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 from kernelforge.loop.experiments_layout import ExperimentsLayout
-from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
+from kernelforge.tools.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.agent_relay import AgentRelayPolicy
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB

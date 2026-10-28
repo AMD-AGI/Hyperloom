@@ -16,6 +16,7 @@ from typing import Any
 
 from kernelforge.cli.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.agent_backends.runtime import agent_runtime, agent_runtime_for
 from kernelforge.agent_backends.gateway import (
     anthropic_environment_from_openai,
     openai_gateway_from_anthropic,
@@ -127,7 +128,7 @@ def resolve_relay_policy(
     """
     from kernelforge.agent_backends.registry import get_agent_provider, list_agent_providers
 
-    primary = replace(config, agent_fallback_provider="").agent_runtime().provider
+    primary = agent_runtime(replace(config, agent_fallback_provider="")).provider
     members = (name for name in list_agent_providers() if name != primary and get_agent_provider(name).auto_selectable)
     providers = [primary, *members]
     return AgentRelayPolicy(
@@ -157,7 +158,7 @@ def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> Ag
     profiles = []
     for member in policy.profiles:
         model = config.agent_model if member.profile_id == primary.profile_id else ""
-        runtime = strict_config.agent_runtime_for(member.provider, model or resolve_agent_model(member.provider))
+        runtime = agent_runtime_for(strict_config, member.provider, model or resolve_agent_model(member.provider))
         profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
     return AgentRelayConfig(
         primary_profile_id=primary.profile_id,
@@ -265,7 +266,7 @@ def probe_agent_profile(
                     file=sys.stderr,
                 )
             create_registered_backend(
-                strict_config.agent_runtime(),
+                agent_runtime(strict_config),
                 preflight=True,
                 probe_cwd=workspace,
             )
@@ -407,7 +408,7 @@ def start_search_actors(
 
 
 def _single_profile_relay(config: Config) -> AgentRelayConfig:
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
     profile = AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort)
     return AgentRelayConfig(primary_profile_id=profile.profile_id, profiles=(profile,))
 

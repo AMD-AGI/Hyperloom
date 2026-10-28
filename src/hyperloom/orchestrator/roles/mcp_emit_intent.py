@@ -18,15 +18,16 @@ from hyperloom.inference_optimizer.protocol.intent import (
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
     validate_envelope,
 )
+from hyperloom.orchestrator.mcp_tool_names import (
+    EMIT_INTENT_TOOL_NAME,
+    EMIT_INTENT_TOOL_QUALIFIED,
+    MCP_SERVER_NAME,
+)
+
 from .mcp_sdk import build_sdk_mcp_server
 
 
 log = logging.getLogger(__name__)
-
-
-MCP_SERVER_NAME = "inference_optimizer"
-EMIT_INTENT_TOOL_NAME = "emit_intent"
-EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 
 
 # Vocabulary a required-field name cannot carry on its own: closed value sets, numeric bounds, and the optional dials

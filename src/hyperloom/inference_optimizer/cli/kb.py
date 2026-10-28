@@ -183,18 +183,15 @@ def _bootstrap_knowledge_plane(
     """Construct the :class:`KnowledgePlane` facade."""
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
     from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
-    from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
     pr_mcp_url = pr_monitor_mcp_url() if pr_enabled else ""
 
-    pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:
         reason = getattr(args, "pr_degraded_reason", None) or "explicit_flag"
         print(f"PR Monitor       : DISABLED ({reason})")
     elif not pr_mcp_url:
         print("PR Monitor       : DISABLED (no MCP URL configured)")
-        pr_client.enabled = False
     else:
         print(f"PR Monitor       : {pr_mcp_url}")
 
@@ -209,7 +206,7 @@ def _bootstrap_knowledge_plane(
     else:
         config = getattr(recipe_kb_client, "knowledge_config", None) or KnowledgeConfig.from_env()
     return KnowledgePlane.from_clients(
-        pr_monitor=pr_client,
+        pr_monitor_enabled=bool(pr_mcp_url),
         pr_monitor_mcp_url=pr_mcp_url,
         recipe_kb=recipe_kb_client,
         config=config,

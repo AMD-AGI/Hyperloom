@@ -24,8 +24,10 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config
 from kernelforge.resources import resource_path
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
@@ -339,7 +341,7 @@ async def _run_agent(
     turn: _AuthoringTurn,
     usage: UsageAccumulator | None = None,
 ) -> str:
-    runtime = with_writable_sandbox(config.agent_runtime())
+    runtime = with_writable_sandbox(agent_runtime(config))
     backend = create_registered_backend(runtime)
     run_spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
@@ -351,6 +353,7 @@ async def _run_agent(
         target_files=[str(turn.stage_driver)],
         # Deliberately no driver_script, for the reason task_preparer records at its own AgentRunSpec: that field
         # declares the measurement surface the guard must defend, so it snapshots the driver as protected.
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=[path.name for path in turn.evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,

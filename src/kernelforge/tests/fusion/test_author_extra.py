@@ -29,6 +29,7 @@ from kernelforge.fusion.author import (
     run_author,
 )
 from kernelforge.fusion.llm_failure import AGENT_SAFETY_REJECTION_ATTR
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)
@@ -1263,6 +1264,7 @@ def test_declared_harness_target_survives_the_default_name_globs(tmp_path):
             allow_dirty_targets=True,
             allow_untracked=True,
             allow_dirty_baseline=True,
+            protected_path_rules=FORGE_PROTECTED_PATHS,
             protected_globs=[],
             tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True),
         )
