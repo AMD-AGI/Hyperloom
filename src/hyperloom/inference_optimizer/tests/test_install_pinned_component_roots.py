@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX and TraceLens revisions."""
+"""A rerun of the kernel-agent install follows the pinned Magpie, InferenceX, TraceLens and GEAK revisions."""
 
 from __future__ import annotations
 
@@ -46,6 +46,32 @@ def test_magpie_and_inferencex_paths_stay_out_of_dotenv(tmp_path: Path) -> None:
     text = dotenv.read_text(encoding="utf-8")
     assert "MAGPIE_PATH=" not in text
     assert "INFERENCEX_PATH=" not in text
+
+
+@pytest.mark.parametrize("managed", [True, False], ids=["installer-cache-checkouts", "operator-checkouts"])
+def test_tool_roots_in_dotenv_are_left_to_the_operator(tmp_path: Path, managed: bool) -> None:
+    """An installer-managed TraceLens/GEAK path leaves .env; one the operator wrote there stays as written.
+
+    A managed path written back would read as an override on the next install once its pin moves.
+    """
+    if managed:
+        tracelens, geak = tmp_path / "cache" / "TraceLens@0000000", tmp_path / "cache" / "GEAK@0000000"
+    else:
+        tracelens, geak = tmp_path / "opt" / "TraceLens", tmp_path / "geak"
+    runner = geak / "interface" / "run_e2e.py"
+    entries = {"TRACELENS_ROOT": tracelens, "GEAK_ROOT": geak, "GEAK_E2E_RUNNER": runner}
+    dotenv = tmp_path / "repo" / ".env"
+    dotenv.parent.mkdir()
+    dotenv.write_text("".join(f"{key}={value}\n" for key, value in entries.items()), encoding="utf-8")
+
+    _source_kernel_tools(tmp_path, entries, "write_env_file")
+
+    lines = dotenv.read_text(encoding="utf-8").splitlines()
+    for key, value in entries.items():
+        if managed:
+            assert not any(line.startswith(f"{key}=") for line in lines), key
+        else:
+            assert f"{key}={value}" in lines, key
 
 
 @pytest.mark.parametrize("stale", [True, False], ids=["stale-cache-checkout", "operator-checkout"])

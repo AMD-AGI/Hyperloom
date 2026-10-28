@@ -997,14 +997,19 @@ write_env_file() {
   remove_dotenv_var SAFE_API_KEY
   remove_dotenv_var AMD_LLM_API_KEY
   remove_dotenv_var LLM_GATEWAY_KEY
-  [ -n "${TRACELENS_ROOT:-}" ] && upsert_dotenv_var TRACELENS_ROOT "$TRACELENS_ROOT"
+  # Like MAGPIE_PATH: a pinned cache path written here would read back as an override after the pin moves. The
+  # kernel-agent env file carries it to the runtime; an operator's own path is left as written.
+  [ -z "${_tracelens_root_was_set:-}" ] && remove_dotenv_var TRACELENS_ROOT
   if [ -n "${TRACELENS_INTERNAL_ROOT:-}" ]; then
     upsert_dotenv_var TRACELENS_INTERNAL_ROOT "$TRACELENS_INTERNAL_ROOT"
     upsert_dotenv_var TL_EXTENSION "TraceLens_internal"
   fi
   [ -n "${HYPERLOOM_ROOT:-}" ] && upsert_dotenv_var HYPERLOOM_ROOT "$HYPERLOOM_ROOT"
-  [ -n "${GEAK_E2E_RUNNER}" ] && upsert_dotenv_var GEAK_E2E_RUNNER "$GEAK_E2E_RUNNER"
-  [ -n "${GEAK_ROOT}" ] && upsert_dotenv_var GEAK_ROOT "$GEAK_ROOT"
+  # The runner lives in the GEAK checkout, so it follows GEAK_ROOT out of .env.
+  if [ -z "${_geak_root_is_operator_override:-}" ]; then
+    remove_dotenv_var GEAK_ROOT
+    remove_dotenv_var GEAK_E2E_RUNNER
+  fi
   [ -n "${GEAK_CLAUDE_MODEL_VAL}" ] && upsert_dotenv_var GEAK_CLAUDE_MODEL "$GEAK_CLAUDE_MODEL_VAL"
   [ -n "${_geak_claude_bin}" ] && upsert_dotenv_var GEAK_CLAUDE_BIN "$_geak_claude_bin"
   [ -n "${GEAK_RUN_MODE_VAL}" ] && upsert_dotenv_var GEAK_RUN_MODE "$GEAK_RUN_MODE_VAL"
