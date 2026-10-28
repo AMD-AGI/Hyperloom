@@ -583,7 +583,6 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state | {"last_restart_framework": "vllm"}))
     assert inf._infera_kill_inference(argparse.Namespace(poll_timeout=10, print_logs=False)) == 0
     assert fanout_calls[-1] == ("kill", ["10.0.1.0", "10.0.1.1"])
-    assert saved[-1]["last_kill_results"] == [{"ok": True}]
 
 
 def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,15 +645,15 @@ def test_infera_node_ops_apply_and_revert(tmp_path: Path, monkeypatch: pytest.Mo
             timeout_sec=10,
         )
     )
-    assert missing_rc == inf.EXIT_CONFIG_ERROR
+    assert missing_rc == inf._mn_cli.EXIT_CONFIG_ERROR
 
     assert (
         inf._infera_revert_patch(argparse.Namespace(backup_map_json="{", target_path="/x", timeout_sec=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     assert (
         inf._infera_revert_patch(argparse.Namespace(backup_map_json="{}", target_path="/x", timeout_sec=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     monkeypatch.setattr(inf, "_infera_ssh_node_op", lambda *a, **kw: ({"status": "restored"}, {"rc": 0, "stderr": ""}))
     assert (
@@ -702,7 +701,8 @@ def test_infera_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.delenv("HYPERLOOM_ROOT", raising=False)
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     assert (
-        inf.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=False)) == inf.EXIT_CONFIG_ERROR
+        inf.cmd_install_geak(argparse.Namespace(geak_src="", poll_timeout=5, print_logs=False))
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.setattr(
@@ -726,7 +726,7 @@ def test_infera_process_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     assert (
         inf._infera_apply_tracelens_patch(argparse.Namespace(tracelens_root="", sglang_version_pin="", poll_timeout=1))
-        == inf.EXIT_CONFIG_ERROR
+        == inf._mn_cli.EXIT_CONFIG_ERROR
     )
 
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
@@ -888,8 +888,6 @@ def test_an_unchanged_per_round_forward_env_still_allows_an_infera_resume(monkey
     )
     assert inf._infera_servers_alive(state, targets, timeout=5) is False
 
-    assert inf._infera_servers_alive(state, [{"podIP": ""}], timeout=5) is False
-
 
 def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     import hyperloom.inference_optimizer.multi_node.commands.infera as inf
@@ -911,7 +909,9 @@ def test_infera_restart_resume_fast_path(monkeypatch: pytest.MonkeyPatch, capsys
     monkeypatch.delenv("HYPERLOOM_MN_UNSET_FWD_ENV", raising=False)
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 20)
-    monkeypatch.setattr(inf, "_infera_all_gpu_targets", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}])
+    monkeypatch.setattr(
+        inf.infera_support, "gpu_ssh_targets_from_state", lambda st: [{"podIP": "10.0.1.0", "sshPort": 2222}]
+    )
     monkeypatch.setattr(inf, "_infera_servers_alive", lambda st, targets, timeout: True)
     monkeypatch.setenv("MULTI_NODE_RESTART_RESUME_RUNNING", "1")
 

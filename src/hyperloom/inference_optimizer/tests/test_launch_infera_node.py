@@ -227,3 +227,25 @@ def test_ray_start_real_daemon_leaves_the_launcher_group(monkeypatch, tmp_path):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text(encoding="utf-8").strip()), signal.SIGKILL)
         worker.join(timeout=5)
+
+
+def test_term_then_kill_waits_for_the_whole_process_group(monkeypatch):
+    """A port holder that exits on SIGTERM is not enough: the reaper waits until its process group is gone."""
+    mod = _load_module()
+    group_checks = []
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            group_checks.append(pgid)
+            if len(group_checks) >= 3:
+                raise ProcessLookupError
+
+    monkeypatch.setattr(mod.os, "kill", lambda pid, sig: None)
+    monkeypatch.setattr(mod.os, "killpg", fake_killpg)
+    monkeypatch.setattr(mod, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+
+    assert mod._term_then_kill([4242], 1.0, pgid=4242) == []
+    assert len(group_checks) >= 3
+    assert not mod._group_alive(4242)
+    assert not mod._group_alive(None)

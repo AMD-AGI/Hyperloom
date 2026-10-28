@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of scripts/code_metrics.py: the ratchet, its refusals, and the report.
+"""Contract of scripts/code_metrics.py: the comparison with the base, its refusals, and the report.
 
 The gate is driven through ``main()`` in a scratch git repository; only the tool runs
-(``measure`` and the version check) are replaced, so baseline I/O, the base-ref
+(``measure`` and the version check) are replaced, so the base tree, the base-ref
 comparison and the report are the real code. The parsers are tested on captured tool
 output shapes, so no tool needs to be installed.
 """
@@ -24,40 +24,35 @@ import code_metrics_collect as collect
 import code_metrics_report
 
 ROOT = Path(__file__).resolve().parents[2]
-BASELINE = "scripts/code_metrics_baseline.txt"
 VERSIONS = {"ruff": "0.16.2"}
 CC = "cyclomatic-complexity"
-OUT_OF_DATE = "### Baseline out of date (run `python scripts/code_metrics.py --update-baseline`)"
-GREW = "### Baseline grew relative to the base branch"
-NEW = "### New violations (not in the baseline)"
-WORSE = "### Worse than the baseline"
+NEW = "### New violations (not at the base)"
+WORSE = "### Worse than at the base"
+IMPROVED = "### Improved by this change (informational)"
+INVENTORY = "### Over the limit in this tree"
 
 
 class Repo:
-    """A git repo holding the real pyproject.toml and a baseline, with the tools stubbed."""
+    """A git repo holding the real pyproject.toml, with the tools stubbed for this tree and for the base."""
 
     def __init__(self, path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.path = path
         self.findings: list[collect.Finding] = []
-        #: What the per-file tools would report for the touched files at the base.
-        self.at_base: dict[tuple[str, str, str], int] = {}
+        #: What the tools would report for the tree at the base.
+        self.base: list[collect.Finding] = []
         (path / "scripts").mkdir()
         shutil.copyfile(ROOT / "pyproject.toml", path / "pyproject.toml")
         shutil.copyfile(ROOT / ".importlinter", path / ".importlinter")
         self.git("init", "-q", "-b", "main")
-        monkeypatch.setattr(code_metrics, "measure", lambda root, config, units: collect.worst_per_unit(self.findings))
-        monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: dict(self.at_base))
+        monkeypatch.setattr(code_metrics, "measure", self.measure)
         monkeypatch.setattr(code_metrics, "check_tools", lambda config: dict(VERSIONS))
+
+    def measure(self, root: Path, config, units) -> dict[tuple[str, str, str], collect.Finding]:
+        return collect.worst_per_unit(self.findings if root.resolve() == self.path.resolve() else self.base)
 
     def git(self, *args: str) -> str:
         argv = ["git", "-C", str(self.path), "-c", "user.name=t", "-c", "user.email=t@example.com", *args]
         return subprocess.run(argv, capture_output=True, text=True, check=True).stdout.strip()
-
-    def write_baseline(self, entries: dict[tuple[str, str, str], int]) -> None:
-        (self.path / BASELINE).write_text(code_metrics.dump_baseline(entries), encoding="utf-8")
-
-    def baseline(self) -> dict[tuple[str, str, str], int]:
-        return code_metrics.load_baseline((self.path / BASELINE).read_text(encoding="utf-8"))
 
     def touch(self, *paths: str) -> None:
         """Change ``paths`` in the working tree, so a ``--base-ref`` run judges them."""
@@ -68,8 +63,14 @@ class Repo:
 
     def commit(self) -> str:
         self.git("add", "-A")
-        self.git("commit", "-q", "-m", "state")
+        self.git("commit", "-q", "--allow-empty", "-m", "state")
         return self.git("rev-parse", "HEAD")
+
+    def change(self, *paths: str) -> str:
+        """Commit the base, then touch ``paths`` in the working tree; returns the base commit."""
+        base = self.commit()
+        self.touch(*paths)
+        return base
 
     def gate(self, *args: str) -> tuple[int, str]:
         report = self.path / "report.md"
@@ -95,184 +96,87 @@ def cc(path: str, unit: str, value: int, line: int = 3) -> collect.Finding:
     return collect.Finding(CC, path, unit, value, line)
 
 
-def key(path: str, unit: str, metric: str = CC) -> tuple[str, str, str]:
-    return (metric, path, unit)
-
-
-def test_clean_tree_with_matching_baseline_passes(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [cc("src/a.py", "f", 12)]
-    code, report = repo.gate()
-    assert code == 0
-    assert "## Code metrics gate: PASSED" in report
+def test_a_change_that_leaves_every_unit_as_the_base_had_it_passes(repo: Repo) -> None:
+    base = repo.change("src/a.py")
+    repo.base = [cc("src/a.py", "f", 25)]
+    repo.findings = [cc("src/a.py", "f", 25)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+    assert "## Code metrics gate: PASSED\n" in report
+    assert section(report, NEW) == section(report, WORSE) == section(report, IMPROVED) == ""
+    assert "| Cyclomatic complexity | fails > 20 | 0 | 0 | 0 | 1 | +0 |" in report
 
 
 def test_new_violation_fails_and_report_links_the_offender(repo: Repo) -> None:
-    repo.write_baseline({})
-    repo.findings = [cc("src/new.py", "Planner.pick", 15, line=42)]
-    code, report = repo.gate("--link-base", "https://github.com/o/r/blob/abc123")
+    base = repo.change("src/new.py")
+    repo.findings = [cc("src/new.py", "Planner.pick", 25, line=42)]
+    code, report = repo.gate("--base-ref", base, "--link-base", "https://github.com/o/r/blob/abc123")
     assert code == 1
     assert "## Code metrics gate: FAILED" in report
     rows = section(report, NEW)
     assert "[`src/new.py:42`](https://github.com/o/r/blob/abc123/src/new.py#L42) `Planner.pick`" in rows
-    assert "| Cyclomatic complexity | 15 | fails > 20 |" in rows
-    assert section(report, WORSE) == section(report, OUT_OF_DATE) == ""
-
-
-def test_baselined_unit_that_got_worse_fails(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [cc("src/a.py", "f", 13)]
-    code, report = repo.gate()
-    assert code == 1
-    assert "`f` | Cyclomatic complexity | 12 | 13 |" in section(report, WORSE)
-    assert section(report, NEW) == ""
-
-
-@pytest.mark.parametrize(("now", "shown"), [(11, "| 12 | 11 |"), (None, "| 12 | within the limit, or removed |")])
-def test_improved_or_removed_unit_fails_as_out_of_date_naming_the_command(repo: Repo, now, shown) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [] if now is None else [cc("src/a.py", "f", now)]
-    code, report = repo.gate()
-    assert code == 1
-    assert shown in section(report, OUT_OF_DATE)
-    assert "Run `python scripts/code_metrics.py --update-baseline`" in report
-
-
-def test_update_baseline_tightens_and_then_the_gate_passes_against_the_base(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12, key("src/a.py", "gone"): 20})
-    base = repo.commit()
-    repo.findings = [cc("src/a.py", "f", 11)]
-    assert repo.gate("--update-baseline")[0] == 0
-    assert repo.baseline() == {key("src/a.py", "f"): 11}
-    code, report = repo.gate("--base-ref", base)
-    assert code == 0, report
-    assert "| Cyclomatic complexity | fails > 20 | 0 | 0 | 0 | 1 | -1 |" in report
-
-
-def test_update_baseline_never_absorbs_a_worse_or_new_unit(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [cc("src/a.py", "f", 14), cc("src/b.py", "g", 30)]
-    assert repo.gate("--update-baseline")[0] == 0
-    assert repo.baseline() == {key("src/a.py", "f"): 12}
-    code, report = repo.gate()
-    assert code == 1
-    assert "`g`" in section(report, NEW)
-    assert "| 12 | 14 |" in section(report, WORSE)
-
-
-def test_baseline_entry_added_relative_to_base_fails(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    base = repo.commit()
-    repo.write_baseline({key("src/a.py", "f"): 12, key("src/b.py", "g"): 30})
-    repo.findings = [cc("src/a.py", "f", 12), cc("src/b.py", "g", 30)]
-    code, report = repo.gate("--base-ref", base)
-    assert code == 1
-    assert "`src/b.py` `g` | Cyclomatic complexity | absent | 30 |" in section(report, GREW)
-    assert section(report, NEW) == ""
-
-
-def test_baseline_value_raised_relative_to_base_fails(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    base = repo.commit()
-    repo.write_baseline({key("src/a.py", "f"): 14})
-    repo.findings = [cc("src/a.py", "f", 14)]
-    code, report = repo.gate("--base-ref", base)
-    assert code == 1
-    assert "`src/a.py` `f` | Cyclomatic complexity | 12 | 14 |" in section(report, GREW)
+    assert "| Cyclomatic complexity | 25 | fails > 20 |" in rows
     assert section(report, WORSE) == ""
 
 
-def test_moved_unit_is_matched_not_new_and_its_update_passes_against_the_base(repo: Repo) -> None:
-    repo.write_baseline({key("src/old.py", "Planner.pick"): 14})
-    base = repo.commit()
-    repo.findings = [cc("src/new.py", "Planner.pick", 13)]
-    code, report = repo.gate()
+def test_a_unit_worse_than_at_the_base_fails(repo: Repo) -> None:
+    base = repo.change("src/a.py")
+    repo.base = [cc("src/a.py", "f", 22)]
+    repo.findings = [cc("src/a.py", "f", 23)]
+    code, report = repo.gate("--base-ref", base)
     assert code == 1
+    assert "`f` | Cyclomatic complexity | 22 | 23 |" in section(report, WORSE)
     assert section(report, NEW) == ""
-    assert "moved to `src/new.py:3` `Planner.pick` (13)" in section(report, OUT_OF_DATE)
-    assert repo.gate("--update-baseline")[0] == 0
-    assert repo.baseline() == {key("src/new.py", "Planner.pick"): 13}
-    assert repo.gate("--base-ref", base)[0] == 0
 
 
-@pytest.mark.parametrize(("unit", "value"), [("Planner.pick", 15), ("Planner.choose", 14), ("Scheduler.pick", 14)])
+@pytest.mark.parametrize(("now", "shown"), [(22, "| 25 | 22 |"), (None, "| 25 | within the limit, or removed |")])
+def test_an_improved_or_removed_unit_passes_and_is_listed(repo: Repo, now, shown) -> None:
+    base = repo.change("src/a.py")
+    repo.base = [cc("src/a.py", "f", 25)]
+    repo.findings = [] if now is None else [cc("src/a.py", "f", now)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+    assert f"`src/a.py` `f` | Cyclomatic complexity {shown}" in section(report, IMPROVED)
+
+
+def test_moved_unit_is_matched_with_the_unit_it_left_at_the_base(repo: Repo) -> None:
+    base = repo.change("src/old.py", "src/new.py")
+    repo.base = [cc("src/old.py", "Planner.pick", 24)]
+    repo.findings = [cc("src/new.py", "Planner.pick", 23)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 0, report
+    assert section(report, NEW) == ""
+    assert "| 24 | moved to `src/new.py:3` `Planner.pick` (23) |" in section(report, IMPROVED)
+
+
+@pytest.mark.parametrize(("unit", "value"), [("Planner.pick", 25), ("Planner.choose", 24), ("Scheduler.pick", 24)])
 def test_move_that_got_worse_or_renamed_is_a_new_violation(repo: Repo, unit: str, value: int) -> None:
-    repo.write_baseline({key("src/old.py", "Planner.pick"): 14})
+    base = repo.change("src/old.py", "src/new.py")
+    repo.base = [cc("src/old.py", "Planner.pick", 24)]
     repo.findings = [cc("src/new.py", unit, value)]
-    code, report = repo.gate()
+    code, report = repo.gate("--base-ref", base)
     assert code == 1
     assert f"`{unit}`" in section(report, NEW)
-    assert "within the limit, or removed" in section(report, OUT_OF_DATE)
+    assert "within the limit, or removed" in section(report, IMPROVED)
 
 
 @pytest.mark.parametrize(
-    "baseline",
+    "at_base",
     [
         # A.run improves under the limit while B.run worsens; both move.
-        {key("src/a.py", "A.run"): 14, key("src/b.py", "B.run"): 11},
+        [cc("src/a.py", "A.run", 24), cc("src/b.py", "B.run", 21)],
         # Two same-named units: the worse one must not borrow the other's allowance.
-        {key("src/a.py", "main"): 14, key("src/b.py", "main"): 11},
+        [cc("src/a.py", "main", 24), cc("src/b.py", "main", 21)],
     ],
 )
-def test_a_worse_unit_cannot_borrow_another_units_allowance_by_moving(repo: Repo, baseline) -> None:
-    repo.write_baseline(baseline)
-    base = repo.commit()
-    unit = sorted(baseline)[1][2]
-    repo.findings = [cc("src/new.py", unit, 13)]
-    code, report = repo.gate()
-    assert code == 1
-    assert f"`{unit}` | Cyclomatic complexity | 13 |" in section(report, NEW)
-    assert repo.gate("--update-baseline")[0] == 0
-    assert key("src/new.py", unit) not in repo.baseline()
-    repo.touch("src/new.py")
-    assert repo.gate("--base-ref", base)[0] == 1
-
-
-def test_a_baseline_entry_cannot_move_away_from_a_unit_that_is_still_over(repo: Repo) -> None:
-    repo.write_baseline({key("src/old.py", "f"): 30})
-    base = repo.commit()
-    # The entry is edited over to a new same-named unit while the old one stays at 30.
-    repo.write_baseline({key("src/new.py", "f"): 30})
-    repo.findings = [cc("src/old.py", "f", 30), cc("src/new.py", "f", 30)]
-    repo.touch("src/new.py")
+def test_a_worse_unit_cannot_borrow_another_units_allowance_by_moving(repo: Repo, at_base) -> None:
+    base = repo.change("src/a.py", "src/b.py", "src/new.py")
+    repo.base = at_base
+    unit = at_base[1].unit
+    repo.findings = [cc("src/new.py", unit, 23)]
     code, report = repo.gate("--base-ref", base)
     assert code == 1
-    assert "`src/new.py` `f` | Cyclomatic complexity | absent | 30 |" in section(report, GREW)
-    # A real move (the old unit is gone) still keeps the entry.
-    repo.findings = [cc("src/new.py", "f", 30)]
-    code, report = repo.gate("--base-ref", base)
-    assert section(report, GREW) == ""
-
-
-SECRET = "GITHUB_TOKEN=ghs_not_a_real_token"
-
-
-@pytest.mark.parametrize("baseline", ["/proc/self/environ", "../outside.txt", "scripts/"])
-def test_the_baseline_path_must_be_a_plain_repository_file(repo: Repo, baseline: str) -> None:
-    pyproject = repo.path / "pyproject.toml"
-    text = pyproject.read_text(encoding="utf-8")
-    pyproject.write_text(text.replace(f'baseline = "{BASELINE}"', f'baseline = "{baseline}"'), encoding="utf-8")
-    code, report = repo.gate()
-    assert code == 2
-    assert "`baseline` takes a plain repository file path" in report
-
-
-def test_a_symlinked_baseline_is_refused_without_reading_it(repo: Repo, tmp_path_factory) -> None:
-    secret = tmp_path_factory.mktemp("outside") / "environ"
-    secret.write_text(SECRET + "\n", encoding="utf-8")
-    (repo.path / BASELINE).symlink_to(secret)
-    code, report = repo.gate()
-    assert code == 2
-    assert f"`{BASELINE}` must be a regular file in the repository, not a symlink" in report
-    assert SECRET not in report
-
-
-def test_a_malformed_baseline_line_is_not_echoed(repo: Repo) -> None:
-    (repo.path / BASELINE).write_text(SECRET + "\n", encoding="utf-8")
-    code, report = repo.gate()
-    assert code == 2
-    assert "baseline line 1 is not `<metric> <path>[::<unit>] <value>`" in report
-    assert SECRET not in report
+    assert f"`{unit}` | Cyclomatic complexity | 23 |" in section(report, NEW)
 
 
 def test_a_symlinked_python_file_in_scope_is_refused_not_skipped(tmp_path: Path) -> None:
@@ -287,15 +191,38 @@ def test_a_symlinked_python_file_in_scope_is_refused_not_skipped(tmp_path: Path)
 
 
 def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
-    repo.write_baseline({key("src/old.py", "A.run"): 14})
-    repo.findings = [cc("src/x.py", "A.run", 12), cc("src/y.py", "A.run", 12)]
-    code, report = repo.gate()
+    base = repo.change("src/old.py", "src/x.py", "src/y.py")
+    repo.base = [cc("src/old.py", "A.run", 24)]
+    repo.findings = [cc("src/x.py", "A.run", 22), cc("src/y.py", "A.run", 22)]
+    code, report = repo.gate("--base-ref", base)
     assert code == 1
-    assert "### New violations (not in the baseline): 2" in report
+    assert f"{NEW}: 2" in report
+
+
+def test_a_copy_of_a_unit_still_over_at_its_old_place_is_new(repo: Repo) -> None:
+    base = repo.change("src/old.py", "src/new.py")
+    repo.base = [cc("src/old.py", "f", 30)]
+    repo.findings = [cc("src/old.py", "f", 30), cc("src/new.py", "f", 30)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert f"{NEW}: 1" in report
+    assert "| `src/new.py:3` `f` | Cyclomatic complexity | 30 | fails > 20 |" in section(report, NEW)
+    assert section(report, IMPROVED) == ""
+
+
+def test_duplication_is_compared_with_the_base_like_every_other_dimension(repo: Repo) -> None:
+    dup = "duplicated-lines"
+    base = repo.change("src/a.py")
+    repo.base = [collect.Finding(dup, "src/a.py", collect.MODULE, 40, 1)]
+    repo.findings = [collect.Finding(dup, "src/a.py", collect.MODULE, 40, 1)]
+    assert repo.gate("--base-ref", base)[0] == 0
+    repo.findings = [collect.Finding(dup, "src/a.py", collect.MODULE, 45, 1)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert "`src/a.py:1` | Duplicated lines per file | 40 | 45 |" in section(report, WORSE)
 
 
 def test_loosening_the_config_relative_to_base_fails(repo: Repo) -> None:
-    repo.write_baseline({})
     base = repo.commit()
     pyproject = repo.path / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
@@ -312,7 +239,6 @@ def test_loosening_the_config_relative_to_base_fails(repo: Repo) -> None:
 
 
 def test_raising_the_tuple_limit_or_dropping_a_vocabulary_root_is_loosening(repo: Repo) -> None:
-    repo.write_baseline({})
     base = repo.commit()
     pyproject = repo.path / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
@@ -327,7 +253,6 @@ def test_raising_the_tuple_limit_or_dropping_a_vocabulary_root_is_loosening(repo
 
 
 def test_the_design_checks_run_on_the_change_and_report_in_their_own_section(repo: Repo) -> None:
-    repo.write_baseline({})
     (repo.path / "src/hyperloom/common").mkdir(parents=True)
     (repo.path / "src/hyperloom/common/state.py").write_text("X = 1\n", encoding="utf-8")
     base = repo.commit()
@@ -356,7 +281,6 @@ def pair(a: int, b: int) -> tuple[int, int, int]:
 
 
 def test_failing_design_checks_fail_and_the_override_label_waives_them(repo: Repo) -> None:
-    repo.write_baseline({})
     (repo.path / "src/hyperloom/common").mkdir(parents=True)
     (repo.path / "src/hyperloom/common/pick.py").write_text("X = 1\n", encoding="utf-8")
     base = repo.commit()
@@ -375,7 +299,6 @@ def test_failing_design_checks_fail_and_the_override_label_waives_them(repo: Rep
 
 
 def test_a_missing_import_contracts_file_is_could_not_run(repo: Repo) -> None:
-    repo.write_baseline({})
     (repo.path / ".importlinter").unlink()
     base = repo.commit()
     code, report = repo.gate("--base-ref", base)
@@ -384,7 +307,6 @@ def test_a_missing_import_contracts_file_is_could_not_run(repo: Repo) -> None:
 
 
 def test_the_change_cannot_redraw_the_package_units_it_is_judged_by(repo: Repo) -> None:
-    repo.write_baseline({})
     base = repo.commit()
     (repo.path / ".importlinter").write_text("[importlinter]\nroot_packages =\n    hyperloom\n", encoding="utf-8")
     (repo.path / "src/hyperloom/orchestrator").mkdir(parents=True, exist_ok=True)
@@ -398,7 +320,6 @@ def test_the_change_cannot_redraw_the_package_units_it_is_judged_by(repo: Repo) 
 
 
 def test_moving_the_import_contracts_file_is_loosening(repo: Repo) -> None:
-    repo.write_baseline({})
     base = repo.commit()
     shutil.copyfile(repo.path / ".importlinter", repo.path / "other.ini")
     pyproject = repo.path / "pyproject.toml"
@@ -414,34 +335,19 @@ def test_moving_the_import_contracts_file_is_loosening(repo: Repo) -> None:
     )
 
 
-def test_moving_the_baseline_file_does_not_escape_the_base_comparison(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    base = repo.commit()
-    pyproject = repo.path / "pyproject.toml"
-    pyproject.write_text(
-        pyproject.read_text(encoding="utf-8").replace(f'baseline = "{BASELINE}"', 'baseline = "other.txt"'),
-        encoding="utf-8",
-    )
-    (repo.path / "other.txt").write_text(code_metrics.dump_baseline({key("src/a.py", "f"): 20}), encoding="utf-8")
-    repo.findings = [cc("src/a.py", "f", 20)]
+def test_base_without_the_gate_skips_the_loosening_check_with_a_note(repo: Repo) -> None:
+    (repo.path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
+    base = repo.change("src/a.py")
+    shutil.copyfile(ROOT / "pyproject.toml", repo.path / "pyproject.toml")
+    repo.base = [cc("src/a.py", "f", 25)]
+    repo.findings = [cc("src/a.py", "f", 26)]
     code, report = repo.gate("--base-ref", base)
     assert code == 1
-    assert "| 12 | 20 |" in section(report, GREW)
-
-
-def test_base_without_the_gate_skips_growth_with_a_note(repo: Repo) -> None:
-    (repo.path / "pyproject.toml").write_text("[project]\nname = 'x'\n", encoding="utf-8")
-    base = repo.commit()
-    shutil.copyfile(ROOT / "pyproject.toml", repo.path / "pyproject.toml")
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [cc("src/a.py", "f", 12)]
-    code, report = repo.gate("--base-ref", base)
-    assert code == 0
-    assert "has no code-metrics config yet" in report
+    assert "has no code-metrics config yet; the loosening check starts once it does." in report
+    assert "| 25 | 26 |" in section(report, WORSE)
 
 
 def test_unresolvable_base_ref_or_tool_failure_cannot_pass(repo: Repo, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo.write_baseline({})
     repo.commit()
     code, report = repo.gate("--base-ref", "no-such-ref")
     assert code == 2
@@ -457,20 +363,37 @@ def test_unresolvable_base_ref_or_tool_failure_cannot_pass(repo: Repo, monkeypat
     assert "ruff 0.15.0 (pinned 0.16.2)" in report
 
 
-def test_seed_refuses_to_overwrite_an_existing_baseline(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 12})
-    repo.findings = [cc("src/a.py", "f", 40), cc("src/b.py", "g", 40)]
-    assert code_metrics.main(["--root", str(repo.path), "--seed-baseline"]) == 2
-    assert repo.baseline() == {key("src/a.py", "f"): 12}
-
-
 def test_report_truncates_long_sections(repo: Repo) -> None:
-    repo.write_baseline({})
-    repo.findings = [cc(f"src/m{i:02d}.py", "f", 11) for i in range(30)]
-    _code, report = repo.gate()
-    assert "### New violations (not in the baseline): 30" in report
+    paths = [f"src/m{i:02d}.py" for i in range(30)]
+    base = repo.change(*paths)
+    repo.findings = [cc(path, "f", 21) for path in paths]
+    _code, report = repo.gate("--base-ref", base)
+    assert f"{NEW}: 30" in report
     assert "...and 5 more; the job log lists every row." in report
     assert "src/m24.py" in report and "src/m25.py" not in report
+
+
+def test_without_a_base_every_unit_over_a_limit_is_listed_and_none_fails(repo: Repo) -> None:
+    repo.findings = [cc(f"src/m{i:02d}.py", "f", 21) for i in range(30)]
+    code, report = repo.gate()
+    assert code == 0, report
+    assert "No base to compare with: every unit over a threshold is listed below, none fails." in report
+    inventory = section(report, f"{INVENTORY}: 30")
+    assert all(f"`src/m{i:02d}.py:3` `f` | Cyclomatic complexity | 21 | fails > 20 |" in inventory for i in range(30))
+    assert section(report, NEW) == ""
+    assert "| Cyclomatic complexity | fails > 20 | 0 | 0 | 0 | 30 | n/a |" in report
+
+
+def test_a_push_run_lists_every_unit_over_a_limit_and_a_pull_request_run_does_not(repo: Repo, monkeypatch) -> None:
+    api_stub(monkeypatch, [MERGED], [])
+    base = repo.change("src/mine.py")
+    repo.base = repo.findings = [cc(f"src/m{i:02d}.py", "f", 21) for i in range(30)]
+    code, report = repo.gate("--base-ref", base, "--pushed-sha", PUSHED)
+    assert code == 0, report
+    assert all(f"`src/m{i:02d}.py:3` `f`" in section(report, f"{INVENTORY}: 30") for i in range(30))
+    code, report = repo.gate("--base-ref", base, "--pull-request-json", write_pr(repo, []))
+    assert code == 0, report
+    assert INVENTORY not in report
 
 
 class FakeUnits:
@@ -609,8 +532,6 @@ def test_repo_config_names_every_metric_with_a_threshold() -> None:
     # A pending metric (PENDING) is the one name the table may still be missing.
     assert set(collect.METRICS) - set(collect.PENDING) <= set(config.thresholds) <= set(collect.METRICS)
     assert config.tools["ruff"] in (ROOT / ".github/workflows/lint.yml").read_text(encoding="utf-8")
-    baseline = code_metrics.load_baseline((ROOT / config.baseline).read_text(encoding="utf-8"))
-    assert not [path for _metric, path, _unit in baseline if Path(path).name.startswith("code_metrics")]
     assert f'"radon=={config.tools["radon"]}"' in (ROOT / ".github/workflows/code-metrics.yml").read_text(
         encoding="utf-8"
     )
@@ -670,7 +591,6 @@ def test_scope_that_measures_fewer_files_than_the_base_is_loosened(repo: Repo) -
     for path in ["src/a/x.py", "src/b/y.py", "scripts/z.py"]:
         (repo.path / path).parent.mkdir(parents=True, exist_ok=True)
         (repo.path / path).write_text("x = 1\n", encoding="utf-8")
-    repo.write_baseline({})
     base = repo.commit()
     pyproject = repo.path / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
@@ -686,7 +606,6 @@ def test_scope_that_measures_fewer_files_than_the_base_is_loosened(repo: Repo) -
 def test_widening_the_scope_is_not_loosening(repo: Repo) -> None:
     (repo.path / "src/a").mkdir(parents=True)
     (repo.path / "src/a/x.py").write_text("x = 1\n", encoding="utf-8")
-    repo.write_baseline({})
     pyproject = repo.path / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")
     pyproject.write_text(text.replace('roots = ["src", "scripts"]', 'roots = ["src/a"]'))
@@ -698,7 +617,6 @@ def test_widening_the_scope_is_not_loosening(repo: Repo) -> None:
 
 def test_an_edit_to_the_gate_is_reported_for_review_without_failing(repo: Repo) -> None:
     (repo.path / "scripts/code_metrics.py").write_text("x = 1\n", encoding="utf-8")
-    repo.write_baseline({})
     base = repo.commit()
     (repo.path / "scripts/code_metrics.py").write_text("x = 2\n", encoding="utf-8")
     pyproject = repo.path / "pyproject.toml"
@@ -711,7 +629,6 @@ def test_an_edit_to_the_gate_is_reported_for_review_without_failing(repo: Repo) 
 
 
 def test_report_says_when_another_copy_of_the_gate_judged_the_tree(repo: Repo, monkeypatch) -> None:
-    repo.write_baseline({})
     assert "not by this tree's copy" in repo.gate()[1]
     monkeypatch.setattr(code_metrics, "__file__", str(repo.path / "scripts" / "code_metrics.py"))
     assert "not by this tree's copy" not in repo.gate()[1]
@@ -940,24 +857,23 @@ def test_every_package_under_src_is_measured() -> None:
     assert packages <= {Path(path).parts[1] for path in production if path.startswith("src/")}
 
 
-# --- touched-file scope, base backlog, the override label --------------------
+# --- touched-file scope, the comparison with the base, the override label ----
 
 OUTSIDE = "### Outside this change (informational)"
-AT_BASE = "### Already over at the base (backlog, not this change's)"
 LABEL = "baseline-raise"
 
 
 def test_a_violation_in_an_untouched_file_never_fails_the_change(repo: Repo) -> None:
-    repo.write_baseline({key("src/old.py", "f"): 21, key("src/gone.py", "g"): 30})
-    base = repo.commit()
-    repo.touch("src/mine.py")
-    # Drift on main: new and worse units, and an entry already out of date, all in files this change leaves alone.
+    base = repo.change("src/mine.py")
+    repo.base = [cc("src/old.py", "f", 21)]
+    # A new and a worse unit, both in files this change leaves alone.
     repo.findings = [cc("src/old.py", "f", 25), cc("src/other.py", "h", 40)]
     code, report = repo.gate("--base-ref", base)
     assert code == 0, report
-    assert section(report, NEW) == section(report, WORSE) == section(report, OUT_OF_DATE) == ""
+    assert section(report, NEW) == section(report, WORSE) == ""
     outside = section(report, OUTSIDE)
-    assert "`src/other.py` `h`" in outside and "`src/old.py` `f`" in outside and "`src/gone.py` `g`" in outside
+    assert "`src/other.py` `h` | Cyclomatic complexity | absent | 40 |" in outside
+    assert "`src/old.py` `f` | Cyclomatic complexity | 21 | 25 |" in outside
     assert "Judged: the 1 files this change touches." in report
 
 
@@ -969,9 +885,8 @@ def test_a_violation_in_an_untouched_file_never_fails_the_change(repo: Repo) -> 
     ],
 )
 def test_a_new_or_worse_unit_in_a_touched_file_fails(repo: Repo, finding: collect.Finding, title: str) -> None:
-    repo.write_baseline({key("src/old.py", "f"): 21})
-    base = repo.commit()
-    repo.touch(finding.path)
+    base = repo.change(finding.path)
+    repo.base = [cc("src/old.py", "f", 21)]
     repo.findings = [finding]
     code, report = repo.gate("--base-ref", base)
     assert code == 1
@@ -979,105 +894,22 @@ def test_a_new_or_worse_unit_in_a_touched_file_fails(repo: Repo, finding: collec
     assert finding.path not in section(report, OUTSIDE)
 
 
-def test_a_fixed_unit_in_a_touched_file_must_leave_the_baseline(repo: Repo) -> None:
-    repo.write_baseline({key("src/old.py", "f"): 21})
-    base = repo.commit()
-    repo.touch("src/old.py")
-    repo.at_base = {key("src/old.py", "f"): 21}
-    code, report = repo.gate("--base-ref", base)
-    assert code == 1
-    assert "`src/old.py` `f` | Cyclomatic complexity | 21 | within the limit, or removed |" in section(
-        report, OUT_OF_DATE
-    )
-    assert repo.gate("--update-baseline")[0] == 0
-    assert repo.gate("--base-ref", base)[0] == 0
-
-
 @pytest.mark.parametrize(("at_base", "now", "code"), [(None, 21, 1), (24, 25, 1), (25, 25, 0), (30, 25, 0)])
 def test_the_complexity_ceiling_compares_head_with_the_base(repo: Repo, at_base, now, code) -> None:
-    """A unit the change adds or raises fails; one the base already had at that value or worse is backlog."""
-    repo.write_baseline({})
-    base = repo.commit()
-    repo.touch("src/a.py")
+    """A unit the change adds or raises fails; one the base already had at that value or worse passes."""
+    base = repo.change("src/a.py")
     repo.findings = [cc("src/a.py", "f", now)]
-    repo.at_base = {} if at_base is None else {key("src/a.py", "f"): at_base}
+    repo.base = [] if at_base is None else [cc("src/a.py", "f", at_base)]
     got, report = repo.gate("--base-ref", base)
     assert got == code, report
-    if code:
+    if at_base is None:
         assert f"| Cyclomatic complexity | {now} | fails > 20 |" in section(report, NEW)
+    elif code:
+        assert f"`f` | Cyclomatic complexity | {at_base} | {now} |" in section(report, WORSE)
+    elif at_base > now:
+        assert f"`f` | Cyclomatic complexity | {at_base} | {now} |" in section(report, IMPROVED)
     else:
-        assert f"`f` | Cyclomatic complexity | {at_base} | {now} |" in section(report, AT_BASE)
-
-
-DRIFT = "### Baseline already out of date at the base (not this change's"
-
-
-@pytest.mark.parametrize(
-    ("recorded", "at_base", "now", "code"),
-    [
-        # Main improved the unit (or fixed it) and this change left it as the base had it: informational.
-        (21, 18, 18, 0),
-        (21, None, None, 0),
-        # This change improved it: the baseline must be tightened in the same change.
-        (21, 21, 18, 1),
-        (21, 21, None, 1),
-        # Main improved it, and this change improved it further: still this change's to record.
-        (21, 20, 18, 1),
-        # This change made it worse than the base, under a stale allowance: never excused.
-        (30, 25, 26, 1),
-        (30, None, 25, 1),
-    ],
-)
-def test_an_out_of_date_entry_main_already_outgrew_does_not_fail(repo: Repo, recorded, at_base, now, code) -> None:
-    repo.write_baseline({key("src/a.py", "f"): recorded})
-    base = repo.commit()
-    repo.touch("src/a.py")
-    repo.at_base = {} if at_base is None else {key("src/a.py", "f"): at_base}
-    repo.findings = [] if now is None else [cc("src/a.py", "f", now)]
-    got, report = repo.gate("--base-ref", base)
-    assert got == code, report
-    if code:
-        assert f"`src/a.py` `f` | Cyclomatic complexity | {recorded} |" in section(report, OUT_OF_DATE)
-        assert section(report, DRIFT) == ""
-    else:
-        assert section(report, OUT_OF_DATE) == ""
-        shown = "under the limit" if at_base is None else at_base
-        assert f"`src/a.py` `f` | Cyclomatic complexity | {recorded} | {shown} |" in section(report, DRIFT)
-
-
-def test_an_entry_a_new_unit_moved_into_is_never_excused_as_drift(repo: Repo) -> None:
-    """Main removed ``old.py::f``; a same-named unit this change adds elsewhere is matched as its move."""
-    repo.write_baseline({key("src/old.py", "f"): 30})
-    base = repo.commit()
-    repo.touch("src/old.py", "src/new.py")
-    repo.findings = [cc("src/new.py", "f", 25)]
-    code, report = repo.gate("--base-ref", base)
-    assert code == 1, report
-    assert "moved to `src/new.py:3` `f` (25)" in section(report, OUT_OF_DATE)
-    assert section(report, DRIFT) == ""
-
-
-def test_an_out_of_date_entry_the_base_cannot_measure_still_fails(repo: Repo) -> None:
-    dup = key("src/a.py", collect.MODULE, "duplicated-lines")
-    repo.write_baseline({dup: 40})
-    base = repo.commit()
-    repo.touch("src/a.py")
-    code, report = repo.gate("--base-ref", base)
-    assert code == 1, report
-    assert "`src/a.py` | Duplicated lines per file | 40 |" in section(report, OUT_OF_DATE)
-
-
-def test_a_worse_than_baseline_unit_the_base_already_had_is_backlog(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 22})
-    base = repo.commit()
-    repo.touch("src/a.py")
-    repo.findings = [cc("src/a.py", "f", 24)]
-    repo.at_base = {key("src/a.py", "f"): 24}
-    code, report = repo.gate("--base-ref", base)
-    assert code == 0, report
-    assert "| 24 | 24 |" in section(report, AT_BASE)
-    repo.at_base = {key("src/a.py", "f"): 23}
-    assert repo.gate("--base-ref", base)[0] == 1
+        assert section(report, NEW) == section(report, WORSE) == section(report, IMPROVED) == ""
 
 
 def write_pr(repo: Repo, labels: list[str], **fields) -> str:
@@ -1086,13 +918,10 @@ def write_pr(repo: Repo, labels: list[str], **fields) -> str:
     return str(path)
 
 
-def test_the_override_label_waives_new_worse_and_growth_but_lists_them_all(repo: Repo, capsys) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 21})
-    base = repo.commit()
-    repo.write_baseline({key("src/a.py", "f"): 21, key("src/b.py", "g"): 30})
-    repo.touch("src/a.py", "src/b.py", *(f"src/m{i:02d}.py" for i in range(30)))
-    repo.findings = [cc("src/a.py", "f", 23), cc("src/b.py", "g", 30)]
-    repo.findings += [cc(f"src/m{i:02d}.py", "f", 22) for i in range(30)]
+def test_the_override_label_waives_new_and_worse_but_lists_them_all(repo: Repo, capsys) -> None:
+    base = repo.change("src/a.py", *(f"src/m{i:02d}.py" for i in range(30)))
+    repo.base = [cc("src/a.py", "f", 21)]
+    repo.findings = [cc("src/a.py", "f", 23)] + [cc(f"src/m{i:02d}.py", "f", 22) for i in range(30)]
     code, _report = repo.gate("--base-ref", base, "--pull-request-json", write_pr(repo, []))
     assert code == 1
     capsys.readouterr()
@@ -1101,7 +930,6 @@ def test_the_override_label_waives_new_worse_and_growth_but_lists_them_all(repo:
     assert f"## Code metrics gate: PASSED with waived findings (`{LABEL}`)" in report
     waived = f" (waived by the `{LABEL}` label)"
     assert "`src/a.py:3` `f` | Cyclomatic complexity | 21 | 23 |" in section(report, WORSE + waived)
-    assert "`src/b.py` `g` | Cyclomatic complexity | absent | 30 |" in section(report, GREW + waived)
     assert f"{NEW}{waived}: 30" in report and "...and 5 more" in report
     # The job log is the full list: every waived row, untruncated.
     log = capsys.readouterr().out
@@ -1109,19 +937,21 @@ def test_the_override_label_waives_new_worse_and_growth_but_lists_them_all(repo:
 
 
 def test_the_override_label_waives_nothing_else(repo: Repo) -> None:
-    repo.write_baseline({key("src/a.py", "f"): 21})
     base = repo.commit()
-    repo.touch("src/a.py")
-    repo.at_base = {key("src/a.py", "f"): 21}
+    pyproject = repo.path / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace("cyclomatic-complexity = 20\n", "cyclomatic-complexity = 25\n")
+    )
     pr = write_pr(repo, [LABEL], title=f"Fix {chr(0x4E2D)}")
     code, report = repo.gate("--base-ref", base, "--pull-request-json", pr)
     assert code == 1
-    assert "within the limit, or removed" in section(report, OUT_OF_DATE)
+    assert "threshold `cyclomatic-complexity` loosened from 20 to 25" in section(
+        report, "### Gate configuration loosened"
+    )
     assert "PR title, line 1 | CJK character U+4E2D" in section(report, "### English only")
 
 
 def test_pr_title_body_and_commit_messages_must_be_english(repo: Repo) -> None:
-    repo.write_baseline({})
     commits = [["a" * 40, "fine"], ["b" * 40, f"subject\n\nbody {chr(0x3002)}"]]
     pr = write_pr(repo, [], body=f"ok\n{chr(0xFF01)}", commits=commits)
     code, report = repo.gate("--pull-request-json", pr)
@@ -1149,10 +979,11 @@ def test_the_label_comes_from_the_api_at_run_time(repo: Repo, monkeypatch) -> No
     forged = repo.path.parent / "event.json"
     forged.write_text(json.dumps({"pull_request": {"labels": []}}), encoding="utf-8")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(forged))
-    repo.write_baseline({})
+    base = repo.change("src/a.py")
     repo.findings = [cc("src/a.py", "f", 30)]
-    code, report = repo.gate("--pr-number", "7")
+    code, report = repo.gate("--base-ref", base, "--pr-number", "7")
     assert code == 0, report
+    assert f"{NEW} (waived by the `{LABEL}` label): 1" in report
     assert calls == [
         ("https://api.github.com/repos/o/r/pulls/7", "tok"),
         ("https://api.github.com/repos/o/r/pulls/7/commits?per_page=100&page=1", "tok"),
@@ -1188,9 +1019,9 @@ MERGED = {"number": 7, "merged_at": "2026-10-12T00:00:00Z", "merge_commit_sha": 
 def test_a_push_applies_the_label_of_the_pr_whose_merge_it_is(repo: Repo, monkeypatch) -> None:
     other = {"number": 9, "merged_at": "2026-10-11T00:00:00Z", "merge_commit_sha": "e" * 40}
     calls = api_stub(monkeypatch, [other, MERGED], [LABEL])
-    repo.write_baseline({})
+    base = repo.change("src/a.py")
     repo.findings = [cc("src/a.py", "f", 30)]
-    code, report = repo.gate("--pushed-sha", PUSHED)
+    code, report = repo.gate("--base-ref", base, "--pushed-sha", PUSHED)
     assert code == 0, report
     assert "is the merge of #7; its labels apply" in report
     assert calls[:2] == [
@@ -1210,9 +1041,9 @@ def test_a_push_applies_the_label_of_the_pr_whose_merge_it_is(repo: Repo, monkey
 )
 def test_a_push_no_pr_made_waives_nothing(repo: Repo, monkeypatch, pulls) -> None:
     calls = api_stub(monkeypatch, pulls, [LABEL])
-    repo.write_baseline({})
+    base = repo.change("src/a.py")
     repo.findings = [cc("src/a.py", "f", 30)]
-    code, report = repo.gate("--pushed-sha", PUSHED)
+    code, report = repo.gate("--base-ref", base, "--pushed-sha", PUSHED)
     assert code == 1, report
     assert "No merged pull request produced" in report
     assert all("/pulls/7" not in url for url in calls)
@@ -1220,7 +1051,6 @@ def test_a_push_no_pr_made_waives_nothing(repo: Repo, monkeypatch, pulls) -> Non
 
 def test_a_push_whose_pr_cannot_be_read_is_could_not_run(repo: Repo, monkeypatch) -> None:
     api_stub(monkeypatch, collect.ToolError("could not read the API: HTTP Error 502"), [LABEL])
-    repo.write_baseline({})
     repo.findings = [cc("src/a.py", "f", 30)]
     code, report = repo.gate("--pushed-sha", PUSHED)
     assert code == 2 and "HTTP Error 502" in report
@@ -1230,7 +1060,6 @@ def test_a_push_whose_pr_cannot_be_read_is_could_not_run(repo: Repo, monkeypatch
 
 
 def test_an_unreadable_api_is_could_not_run_not_a_pass(repo: Repo, monkeypatch) -> None:
-    repo.write_baseline({})
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
     code, report = repo.gate("--pr-number", "7")
     assert code == 2 and "needs GITHUB_REPOSITORY" in report
@@ -1247,7 +1076,6 @@ def test_module_length_between_warning_and_limit_is_reported_not_failed(repo: Re
     assert "module-lines-warning = 800\n" in text and "module-lines = 1200\n" in text
     text = text.replace("module-lines-warning = 800\n", f"module-lines-warning = {warn}\n")
     pyproject.write_text(text.replace("module-lines = 1200\n", f"module-lines = {fail}\n"), encoding="utf-8")
-    repo.write_baseline({})
     base = repo.commit()
     for path, lines in [("src/warn.py", warn + 1), ("src/ok.py", warn), ("src/far.py", warn + 100)]:
         (repo.path / path).parent.mkdir(parents=True, exist_ok=True)
@@ -1277,7 +1105,6 @@ def test_a_warning_level_at_or_above_the_failing_length_is_not_reported(warn: in
 
 
 def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Repo) -> None:
-    repo.write_baseline({})
     _code, report = repo.gate()
     config = code_metrics.parse_config((repo.path / "pyproject.toml").read_text(encoding="utf-8"))
     rows = [line for line in report.splitlines() if line.startswith("| ") and "fails > " in line]
@@ -1326,60 +1153,59 @@ def test_a_directory_is_judged_when_the_change_touches_a_file_under_it() -> None
     ]
 
 
-def test_a_worse_directory_is_not_measured_again_at_the_base_as_a_file(
-    repo: Repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    asked: list[str] = []
-    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
-    repo.write_baseline({key("src/a", collect.MODULE, collect.DIRECTORY_ENTRIES): 51})
-    base = repo.commit()
-    repo.touch("src/a/new.py")
-    repo.findings = [
-        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 52, 1),
-        cc("src/a/new.py", "f", 25),
-    ]
-
+@pytest.mark.parametrize(("at_base", "title"), [(51, WORSE), (None, NEW)])
+def test_directory_size_is_compared_with_the_base(repo: Repo, at_base, title: str) -> None:
+    base = repo.change("src/a/new.py")
+    if at_base is not None:
+        repo.base = [collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, at_base, 1)]
+    repo.findings = [collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 52, 1)]
     code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    shown = "| 51 | 52 |" if at_base else "| 52 | fails > 50 |"
+    assert f"`src/a:1` | Directory size (entries) {shown}" in section(report, title)
 
-    assert asked == ["src/a/new.py"]
-    assert code == 1 and "| Directory size (entries) | 51 | 52 |" in section(report, WORSE)
 
-
-def test_a_new_directory_is_not_measured_again_at_the_base_as_a_file(
-    repo: Repo, monkeypatch: pytest.MonkeyPatch
+def test_the_base_is_the_tree_at_the_merge_base_measured_with_this_trees_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    asked: list[str] = []
-    monkeypatch.setattr(code_metrics, "base_values", lambda root, since, paths, config: asked.extend(paths) or {})
-    repo.write_baseline({})
-    base = repo.commit()
-    repo.touch("src/a/new.py")
-    repo.findings = [
-        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 51, 1),
-        cc("src/a/new.py", "f", 25),
-    ]
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.com", *args], check=True
+        )
 
-    code, report = repo.gate("--base-ref", base)
-
-    assert asked == ["src/a/new.py"]
-    assert code == 1 and "| Directory size (entries) | 51 |" in section(report, NEW)
-
-
-@pytest.mark.skipif(
-    shutil.which("ruff") is None or shutil.which("complexipy") is None or shutil.which("radon") is None,
-    reason="ruff/complexipy/radon",
-)
-def test_base_values_measures_the_files_as_they_were_at_the_base(tmp_path: Path) -> None:
-    branches = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(21))
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/a.py").write_text(f"def f(x):\n{branches}    return -1\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
-    git_id = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
-    subprocess.run(["git", "-C", str(tmp_path), *git_id, "commit", "-q", "-m", "base"], check=True)
-    (tmp_path / "src/a.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+    (tmp_path / "src/tests").mkdir(parents=True)
+    (tmp_path / "src/a.py").write_text("base = 1\n", encoding="utf-8")
+    (tmp_path / "src/tests/test_a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "docs.md").write_text("not in scope\n", encoding="utf-8")
+    # A committed file an ignore rule names is measured in this tree, so the base measures it too.
+    (tmp_path / "src/.gitignore").write_text("gen.py\n", encoding="utf-8")
+    (tmp_path / "src/gen.py").write_text("x = 1\n", encoding="utf-8")
+    git("init", "-q")
+    git("add", "-A")
+    git("add", "-f", "src/gen.py")
+    git("commit", "-q", "-m", "base")
+    (tmp_path / "src/a.py").write_text("head = 1\n", encoding="utf-8")
+    (tmp_path / "src/new.py").write_text("x = 1\n", encoding="utf-8")
     config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    got = code_metrics.base_values(tmp_path, "HEAD", ["src/a.py", "src/new.py"], config)
-    assert got == {(CC, "src/a.py", "f"): 22}
+    assert config is not None and config.roots == ("src", "scripts")
+    seen = {}
+
+    def measure(root: Path, config, units) -> dict:
+        seen["files"] = collect.list_files(root, config.roots, config.exclude)
+        seen["a"] = (root / "src/a.py").read_text(encoding="utf-8")
+        seen["docs"] = (root / "docs.md").exists()
+        return {"measured": root != tmp_path}
+
+    monkeypatch.setattr(code_metrics, "measure", measure)
+    # ``scripts`` is a root this commit does not have: the base is the roots it has.
+    assert code_metrics.measure_base(tmp_path, "HEAD", config) == {"measured": True}
+    assert collect.list_files(tmp_path, config.roots, config.exclude)[0] == ["src/a.py", "src/gen.py", "src/new.py"]
+    assert seen == {"files": (["src/a.py", "src/gen.py"], ["src/tests/test_a.py"]), "a": "base = 1\n", "docs": False}
+    # A base the tree cannot be read from is "could not run", not a failed verdict.
+    with pytest.raises(collect.ToolError, match=r"^git ls-tree -z --name-only exited 128: fatal: "):
+        code_metrics.measure_base(tmp_path, "0" * 40, config)
+    with pytest.raises(collect.ToolError, match=r"^git -C .+ archive 0+ exited 128: fatal: "):
+        code_metrics._checked(["git", "-C", str(tmp_path), "archive", "0" * 40])
 
 
 def test_ci_reads_the_pr_from_the_api_and_logs_the_full_report() -> None:

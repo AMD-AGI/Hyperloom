@@ -14,6 +14,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -831,6 +832,22 @@ def test_pick_head_first_fallback_sorts_when_local_missing(monkeypatch):
     assert addrs == sorted(addrs)
 
 
+def test_rank0_pid_ignores_another_deployments_pid_under_the_default_dir(monkeypatch, tmp_path):
+    """A custom pid dir without rank_0.pid has no rank 0 PID, whatever the default dir holds."""
+    lm = _load_script_module("lm_rank0_pid_custom_dir", "launch_multinode.py")
+    default_tmp = tmp_path / "tmp"
+    (default_tmp / "multi_node_pids").mkdir(parents=True)
+    (default_tmp / "multi_node_pids" / "rank_0.pid").write_text("4242\n", encoding="utf-8")
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(default_tmp))
+    custom = tmp_path / "custom_pids"
+    custom.mkdir()
+
+    assert lm._rank0_pid_from_log(str(custom)) is None
+
+    (custom / "rank_0.pid").write_text("17\n", encoding="utf-8")
+    assert lm._rank0_pid_from_log(str(custom)) == 17
+
+
 def test_wait_for_nodes_returns_when_enough_gpu_nodes(monkeypatch):
     lm = _load_script_module("lm_test_wait_ok", "launch_multinode.py")
     sample = [
@@ -978,6 +995,26 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     k = infera_support.build_node_kill_args("vllm")
     assert "--kill-only" in k and "--framework vllm" in k
     assert "--model" not in k
+
+
+def test_infera_pid_probe_reads_the_pid_file_the_launcher_and_kill_use(tmp_path):
+    """The resume probe, the launch and the kill name one pod PID file, whatever the controller's TMPDIR is."""
+    code = (
+        "import shlex\n"
+        "from hyperloom.inference_optimizer.multi_node._internal import infera_support as s\n"
+        "from hyperloom.inference_optimizer.multi_node.commands import infera\n"
+        "def pid_file(argv):\n"
+        "    toks = shlex.split(argv)\n"
+        "    return toks[toks.index('--pid-file') + 1]\n"
+        "launch = pid_file(s.build_node_launch_args(s.NodeLaunch(framework='sglang', model='/m', tp=1, nnodes=1)))\n"
+        "kill = pid_file(s.build_node_kill_args('sglang'))\n"
+        "print(launch, kill, launch in infera._INFERA_PID_PROBE)\n"
+    )
+    env = {**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": os.pathsep.join(sys.path)}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True).stdout
+    launch, kill, probed = out.split()
+    assert launch == kill == "/tmp/mn_infera_server.pid"
+    assert probed == "True"
 
 
 # Infera kernel ops routing/isolation (apply-patch / install-geak).
@@ -1536,7 +1573,9 @@ def test_infera_bundle_executes_without_repository_pythonpath(tmp_path, action):
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     script = tmp_path / "kernel_node_ops_bundle.py"
-    script.write_text(mn_cli._read_bundled_pod_python_script("kernel_node_ops.py"), encoding="utf-8")
+    script.write_text(
+        mn_cli._read_bundled_pod_python_script("kernel_node_ops.py", mn_cli._KERNEL_NODE_OPS_DEPS), encoding="utf-8"
+    )
     target, jit, backup, env = _isolated_patch_fixture(tmp_path)
     record, _ = _run_isolated_pod(
         script,
@@ -1783,3 +1822,37 @@ def test_finalize_patch_prints_logs_when_pod_json_is_unparseable(monkeypatch, ca
     captured = capsys.readouterr()
     assert captured.out == "pod traceback\n"
     assert "finalize-patch: could not parse per-pod JSON from dashboard logs" in captured.err
+
+
+def test_launcher_summary_survives_a_closing_brace_inside_a_string_value():
+    """A ``}`` inside a JSON string value must not cut the launcher summary short."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    logs = 'launch log line\n{"status": "ok", "prefill_url": "http://10.0.0.1:30000", "msg": "tail }"}\n'
+    assert mn_cli._extract_launcher_summary(logs) == {
+        "status": "ok",
+        "prefill_url": "http://10.0.0.1:30000",
+        "msg": "tail }",
+    }
+
+
+def test_launcher_summary_skips_a_trailing_non_json_brace_block():
+    """Server-log text after the summary (a Python dict repr) is skipped, not mistaken for the summary."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    logs = (
+        '{"status": "ok", "decode_url": "http://10.0.0.2:30001"}\n'
+        "INFO sampling {'max_tokens': 5}\n"
+        "WARN health undetermined; see prefill_0.log\n"
+    )
+    assert mn_cli._extract_launcher_summary(logs) == {"status": "ok", "decode_url": "http://10.0.0.2:30001"}
+    assert mn_cli._extract_launcher_summary("no json here") == {}
+
+
+def test_pod_json_is_the_last_document_and_honours_escaped_quotes():
+    """The per-pod JSON parser returns the last document, reads escaped quotes, and gives up on a trailing non-JSON block."""
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    assert mn_cli._extract_pod_json('{"a": 1}\nlog\n{"msg": "a\\"}", "n": {"x": 2}}') == {"msg": 'a"}', "n": {"x": 2}}
+    assert mn_cli._extract_pod_json("{\"a\": 1}\nINFO {'b': 2}") is None
+    assert mn_cli._extract_pod_json("") is None

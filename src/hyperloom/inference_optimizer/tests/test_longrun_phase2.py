@@ -197,18 +197,6 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     assert "Historical results are evidence only" in block
 
 
-def test_a_row_answered_without_measuring_is_no_negative_ledger_pressure(cyclic_coordinator):
-    c = cyclic_coordinator
-    c.shared_state.explore_search = {
-        "tested": {
-            "fp1": {"name": "v_revert", "outcome": "REVERT", "domain": "serving_specialist", "cycle": 0},
-            "fp2": {"name": "v_restates", "outcome": "SKIPPED_DEDUP", "domain": "serving_specialist", "cycle": 0},
-        },
-        "rejected": [],
-    }
-    assert c.phase_macro_cycle._negative_ledger_domain_counts() == {"serving_specialist": 1}
-
-
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state

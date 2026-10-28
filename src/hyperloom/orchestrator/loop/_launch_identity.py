@@ -190,7 +190,7 @@ class LaunchIdentityMixin:
         measurement: Mapping[str, Any],
     ) -> str:
         """Classify whether identity rests on observed or declared evidence."""
-        declared_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        declared_identity = str(measurement.get("declared_launch_identity") or "")
         if not expected_identity or declared_identity != expected_identity:
             return "unverified"
         evidence = measurement.get("launch_evidence")
@@ -240,7 +240,6 @@ class LaunchIdentityMixin:
                 server_launch_flags=measurement["resolved_server_launch_flags"],
             )["launch_identity"]
         )
-        measurement["launch_identity"] = declared_identity  # Legacy alias.
         measurement["declared_launch_identity"] = declared_identity
         measurement["observed_launch_identity"] = self._observed_launch_identity(
             declared_identity,
@@ -316,9 +315,7 @@ class LaunchIdentityMixin:
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
         if not isinstance(measurement, Mapping):
-            stored = self.shared_state.current_best_measurement
-            promoted = stored if isinstance(stored, Mapping) and stored else cb.get("measurement")
-            measurement = promoted if isinstance(promoted, Mapping) else {}
+            measurement = self.shared_state.current_best_measurement
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
         recipe_path = str(self.shared_state.baseline_config_path or "")
@@ -350,9 +347,7 @@ class LaunchIdentityMixin:
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
             "measurement_identity": {
-                "declared_launch_identity": str(
-                    measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
-                ),
+                "declared_launch_identity": str(measurement.get("declared_launch_identity") or ""),
                 "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
                 "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
                 "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),

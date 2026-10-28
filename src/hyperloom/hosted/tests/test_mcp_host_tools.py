@@ -65,7 +65,7 @@ def session(tmp_path, monkeypatch) -> Path:
     state.elapsed_charged_sec = 600.0
     state.current_best = {"action": "explore", "tput": 1100.0, "variant_name": "v-b", "extra_server_args": "--x 1"}
     state.current_best["extra_envs"] = {"A": "1"}
-    state.current_best_measurement = {"tput": 1100.0, "launch_identity": "id-1", "benchmark_workspace": "/w/b"}
+    state.current_best_measurement = {"tput": 1100.0, "declared_launch_identity": "id-1", "benchmark_workspace": "/w/b"}
     state.optimization_stack = [{"stack_entry_id": "e1", "action": "explore", "variant_name": "v-b", "tput": 1100.0}]
     state.gain_per_stack_entry = [10.0]
     state.save(root)

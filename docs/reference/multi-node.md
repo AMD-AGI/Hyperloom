@@ -99,16 +99,17 @@ RDMA, where `:22` collides with the node's own sshd.
 ### rayjob
 
 The image must have Ray installed and on `PATH` at the version the KubeRay
-cluster expects. KubeRay runs `ray start` in the head and worker containers. Pin
-Ray's CLI dependency explicitly:
+cluster expects. KubeRay runs `ray start` in the head and worker containers:
 
 ```bash
-python -m pip install "ray[default]==2.44.1" "click==8.1.8"
+python -m pip install "ray[default]==2.44.1"
 ```
 
-Keep `click` below 8.2 regardless of what Ray's declared dependency allows — Ray
-2.44.1 accepts `click>=7.0`, but click 8.2 changed `Sentinel` and breaks Ray's
-CLI on import, preventing `ray start` from running.
+Pin no `click` version. What the image owes is a Ray whose `ray start` parses
+the argv Hyperloom passes; preflight and the kernel-tools installer certify
+exactly that, by handing a representative argv to Ray's own parser. A `click`
+release that leaves the CLI parsing is no reason to downgrade it; one that
+breaks it calls for a Ray release built against it, through `RAY_VERSION`.
 
 The cluster idles through the RayJob submitter: the platform sets its entrypoint
 to `tail -f /dev/null` so the cluster stays up between rounds.
@@ -245,15 +246,18 @@ tokens on some configurations.
 ### Ray `--num-gpus` rejected (rayjob)
 
 **Symptom**: `ray start --head --num-gpus=N` fails with `Error: no such option:
---num-gpus` or Click-related import errors.
+--num-gpus`, or preflight reports `ray start does not accept ...`.
 
-**Cause**: Click ≥ 8.2 is incompatible with Ray 2.44. The rayjob image was built
-with a newer Click version.
+**Cause**: The image's Ray CLI does not parse the argv Hyperloom passes — an
+option it dropped, a value it narrowed, or a `click` release that breaks the
+CLI on import.
 
-**Fix**:
+**Fix**: reinstall Ray at the version Hyperloom pins; where the image's `click`
+is newer than that CLI accepts, set `RAY_VERSION` to a Ray release built
+against it rather than downgrading `click`.
 
 ```bash
-pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
+pip install --quiet 'ray[default]==2.44.1'
 ray --version
 ```
 

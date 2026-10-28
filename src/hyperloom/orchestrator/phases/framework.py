@@ -222,7 +222,7 @@ def _forward_integrate_source(
 ) -> None:
     """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
 
-    domain = str(src.get("domain") or src.get("source_domain") or "").strip()
+    domain = str(src.get("domain") or "").strip()
     source_phase = patch_owner_phase(src)
     if source_phase:
         dst["source_phase"] = source_phase

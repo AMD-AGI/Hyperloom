@@ -12,7 +12,6 @@ import logging
 import os
 import shlex
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +19,7 @@ from typing import Any, Iterator, Mapping
 
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import EnvValueError, env_flag
+from hyperloom.inference_optimizer import multi_node
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -282,11 +282,7 @@ def _uses_aiter(
 # Per-variant env overrides -> forwarded to the SSH-launched sglang via
 # ``multi_node/commands/infera.py::_collect_forward_env`` (reads these control envs).
 def _restart_env_scope(extra_env: dict[str, str] | None, unset_env, torch_profiler_dir: str):
-    forwarded = (
-        json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True))
-        if extra_env
-        else None
-    )
+    forwarded = json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()})) if extra_env else None
     unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
     return _scoped_env(
         {
@@ -647,8 +643,6 @@ async def _probe_completion_tokens(
 ) -> tuple[int, str]:
     import httpx as _httpx
 
-    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
-
     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
     if not model_id:
         return -1, "completion_probe: no model id"
@@ -669,7 +663,7 @@ async def _probe_completion_tokens(
     if resp.status_code != 200:
         return -1, f"completion_probe_http={resp.status_code}"
     try:
-        return generated_tokens(resp.json()), ""
+        return multi_node.generated_tokens(resp.json()), ""
     except ValueError:
         return 0, ""
 
@@ -693,34 +687,18 @@ def _models_empty_too_long(
     return (elapsed - health_ok_at) > grace_s
 
 
-def _worker_log_tail(shared_dir: str, ip: str) -> str:
-    if not shared_dir:
-        return ""
-    log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
-    try:
-        with log_path.open("rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            return f.read().decode("utf-8", "replace")
-    except OSError:
-        return ""
-
-
-def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
-    """Best-effort: True when worker ``ip``'s server log shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
+def _worker_detokenizer_wedged(tail: str) -> bool:
+    """Best-effort: True when a worker's server-log ``tail`` shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
     import re as _re
 
     # >=15 recent markers ~= 30s+ of continuous stall (marker ~every 2s).
-    tail = _worker_log_tail(shared_dir, ip)
     return len(_re.findall(r"Health check failed.*detokenizer", tail, _re.IGNORECASE)) >= 15
 
 
-def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
-    """Best-effort: return a short reason when worker ``ip``'s server log shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
+def _worker_startup_crashed(tail: str) -> str | None:
+    """Best-effort: return a short reason when a worker's server-log ``tail`` shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
     import re as _re
 
-    tail = _worker_log_tail(shared_dir, ip)
     patterns = (
         r"error: unrecognized arguments:.*",
         r"[A-Za-z0-9_./-]*: error: .*",  # argparse "<prog>: error: ..."
@@ -760,12 +738,14 @@ def _worker_health_targets(state: dict) -> list[tuple[str, str, str]]:
 def _worker_fastfail_reason(
     pending: list[str], *, elapsed: int, crash_grace: int, wedge_grace: int, timeout_s: int
 ) -> str | None:
-    shared = _shared_server_log_dir()
-    if not shared:
+    if elapsed <= min(crash_grace, wedge_grace):
         return None
+    # 64 KiB keeps the wedge rule about recent markers and keeps an earlier launch's crash, appended to the same log,
+    # out of the window.
+    tails = {ip: (_shared_worker_log_tail(ip, max_bytes=65536) or "").partition("\n")[2] for ip in pending}
     if elapsed > crash_grace:
-        for ip in pending:
-            crashed = _worker_startup_crashed(shared, ip)
+        for ip, tail in tails.items():
+            crashed = _worker_startup_crashed(tail)
             if crashed:
                 return (
                     "worker " + ip + " server crashed on startup "
@@ -778,7 +758,7 @@ def _worker_fastfail_reason(
                     + "s gate"
                 )
     if elapsed > wedge_grace:
-        wedged = [ip for ip in pending if _worker_detokenizer_wedged(shared, ip)]
+        wedged = [ip for ip, tail in tails.items() if _worker_detokenizer_wedged(tail)]
         if wedged:
             return (
                 "worker(s) detokenizer-wedged (weights loaded but "
@@ -898,6 +878,8 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     """Best-effort: capture each prefill/decode pod sglang server log into ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR/server_logs`` when a restart fails its health/serving probe, so a 503 / KV handoff / cold-JIT failure leaves a post-mortem after the pods are torn down."""
     import time as _t
 
+    from hyperloom.inference_optimizer.multi_node import INFERA_POD_LOG_FILE
+
     sess = (
         os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR")
         or os.environ.get("INFERENCE_OPTIMIZER_SESSION_DIR")
@@ -913,7 +895,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
         return
     key_path = state.get("ssh_key_path")
     known_hosts = state.get("ssh_known_hosts")
-    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", str(Path(tempfile.gettempdir()) / "mn_infera_server.log"))
+    remote = os.environ.get("HYPERLOOM_MN_SERVER_LOG_PATH", INFERA_POD_LOG_FILE)
     default_port = int(state.get("ssh_port") or 2233)
     for role in ("prefill", "decode", "worker"):
         for pod in state.get(role + "_pods") or []:
