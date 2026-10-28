@@ -31,34 +31,6 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-# _resolve_lock_sweep_dir
-
-
-def test_resolve_dir_trusts_explicit_arg(tmp_path):
-    assert aj._resolve_lock_sweep_dir(tmp_path) == tmp_path
-
-
-def test_resolve_dir_uses_env_override(tmp_path, monkeypatch):
-    build = tmp_path / "build"
-    build.mkdir()
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(tmp_path))
-    # Env override adds both <dir> and <dir>/build.
-    resolved = aj._resolve_lock_sweep_dir(None)
-    assert resolved in (tmp_path, build)
-
-
-def test_resolve_dir_none_when_nothing_exists(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "/nonexistent/aiter/xyz")
-
-    def _no_aiter(name):
-        raise ImportError("no aiter")
-
-    monkeypatch.setattr(importlib.util, "find_spec", _no_aiter)
-    # Fallbacks are absolute system paths unlikely to exist in CI sandbox.
-    resolved = aj._resolve_lock_sweep_dir(None)
-    assert resolved is None or resolved.is_dir()
-
-
 # probe_aiter_jit_cache
 
 

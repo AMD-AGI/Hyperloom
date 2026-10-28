@@ -27,11 +27,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     dedup_vllm_server_args,
     remove_server_args,
 )
-from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
 from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
 from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     _parse_skip_spec,
     apply_user_skip_list,
     reorder_grid_for_multi_node,
@@ -290,10 +287,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: False)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         assert [v.name for v in out] == [v.name for v in grid]
 
     def test_multi_node_surfaces_likely_winners_first(self, monkeypatch):
@@ -303,10 +297,7 @@ class TestReorderGridForMultiNode:
 
         monkeypatch.setattr(mne, "is_multi_node", lambda: True)
         grid = self._grid()
-        out = reorder_grid_for_multi_node(
-            grid,
-            priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
-        )
+        out = reorder_grid_for_multi_node(grid)
         # cuda_graph_max_bs (params tier-1) sorts ahead of tier5_comm; the untagged variant sinks to the end (stable
         # sort).
         assert [v.name for v in out] == [
@@ -450,90 +441,8 @@ class TestSanitizeResultDir:
             gr.sanitize_result_dir(raw)
 
 
-class TestCoerceExtraEnvs:
-    """Lock the boundary contract for LLM-supplied grid env overrides."""
-
-    def test_dict_is_passthrough(self):
-        assert coerce_extra_envs({"FOO": "1", "BAR": "two"}) == {
-            "FOO": "1",
-            "BAR": "two",
-        }
-
-    def test_dict_coerces_values_to_str(self):
-        assert coerce_extra_envs({"USE_AITER": 1, "DEBUG": True}) == {
-            "USE_AITER": "1",
-            "DEBUG": "True",
-        }
-
-    def test_space_delimited_string(self):
-        assert coerce_extra_envs("SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1") == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "1",
-        }
-
-    def test_newline_delimited_string(self):
-        assert coerce_extra_envs("FOO=1\nBAR=two\n\nBAZ=3") == {"FOO": "1", "BAR": "two", "BAZ": "3"}
-
-    def test_semicolon_delimited_string(self):
-        assert coerce_extra_envs("A=1;B=2;C=3") == {
-            "A": "1",
-            "B": "2",
-            "C": "3",
-        }
-
-    def test_string_preserves_url_in_value(self):
-        assert coerce_extra_envs("HF_ENDPOINT=https://hf.example.com/api") == {
-            "HF_ENDPOINT": "https://hf.example.com/api"
-        }
-
-    def test_string_drops_tokens_without_equals(self):
-        assert coerce_extra_envs("FOO=1 garbage BAR=2") == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_kv_tokens(self):
-        assert coerce_extra_envs(["FOO=1", "BAR=2"]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_of_dicts(self):
-        assert coerce_extra_envs([{"FOO": "1"}, {"BAR": "2"}]) == {
-            "FOO": "1",
-            "BAR": "2",
-        }
-
-    def test_list_later_entries_win(self):
-        assert coerce_extra_envs([{"FOO": "first"}, {"FOO": "last"}]) == {
-            "FOO": "last",
-        }
-
-    def test_none_returns_empty(self):
-        assert coerce_extra_envs(None) == {}
-
-    def test_unknown_type_returns_empty(self):
-        assert coerce_extra_envs(42) == {}
-        assert coerce_extra_envs(object()) == {}
-
-    def test_used_by_backends_grid_override(self):
-        llm_entry = {
-            "name": "aiter_mla_off",
-            "extra_server_args": "--attention-backend aiter --disable-mla",
-            "extra_envs": "SGLANG_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0",
-            "note": "aiter attn without MLA fast path",
-        }
-        v = GridVariant(
-            name=llm_entry["name"],
-            extra_server_args=llm_entry["extra_server_args"],
-            extra_envs=coerce_extra_envs(llm_entry["extra_envs"]),
-            note=llm_entry["note"],
-        )
-
-        assert dict(v.extra_envs.items()) == {
-            "SGLANG_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "0",
-        }
+class TestGridVariantEnvSafety:
+    """Lock the env-safety filter on LLM-supplied grid env overrides."""
 
     def test_drops_hijacking_envs_but_keeps_workload_pins(self):
         v = GridVariant(

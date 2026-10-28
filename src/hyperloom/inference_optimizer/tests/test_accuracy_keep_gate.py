@@ -53,16 +53,5 @@ def test_none_required_with_non_numeric_baseline_degrades():
 
 def test_request_baseline_accuracy_stop_records_reason():
     ss = SharedState()
-    assert request_baseline_accuracy_stop(ss, context="unit") is True
+    request_baseline_accuracy_stop(ss, context="unit")
     assert ss.stop_reason == BASELINE_ACCURACY_STOP_REASON
-
-
-def test_request_baseline_accuracy_stop_none_shared_state():
-    assert request_baseline_accuracy_stop(None, context="unit") is False
-
-
-def test_request_baseline_accuracy_stop_without_setter():
-    class _NoSetter:
-        pass
-
-    assert request_baseline_accuracy_stop(_NoSetter(), context="unit") is False

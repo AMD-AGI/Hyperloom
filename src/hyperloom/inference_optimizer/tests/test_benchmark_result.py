@@ -365,7 +365,7 @@ def _touch(path: Path, content: str = "x", *, mtime: float | None = None) -> Pat
     return path
 
 
-def test_harvest_copies_every_default_glob(tmp_path):
+def test_harvest_copies_every_default_glob(tmp_path, monkeypatch):
     """Each leak glob in ``_DEFAULT_LEAK_ARTIFACT_GLOBS`` is harvested."""
     leak_root = tmp_path / "workspace"
     destination = tmp_path / "task"
@@ -386,10 +386,10 @@ def test_harvest_copies_every_default_glob(tmp_path):
         json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.42}}}),
     )
 
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=leak_root,
     )
 
     by_name = {src.name: dst for src, dst in harvested}
@@ -406,7 +406,7 @@ def test_harvest_copies_every_default_glob(tmp_path):
     assert (destination / "server.log").read_text() == "init OK\nstarted serving"
 
 
-def test_harvest_mtime_gating_skips_stale_leaks(tmp_path):
+def test_harvest_mtime_gating_skips_stale_leaks(tmp_path, monkeypatch):
     """Files older than ``subprocess_started_unix`` are rejected."""
     leak_root = tmp_path / "workspace"
     destination = tmp_path / "task"
@@ -424,10 +424,10 @@ def test_harvest_mtime_gating_skips_stale_leaks(tmp_path):
 
     # Cutoff rejects the ~1h-old stale leak while adopting the fresh file.
     cutoff = stale.stat().st_mtime + 60.0
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=cutoff,
-        leak_root=leak_root,
     )
 
     names = {src.name for src, _ in harvested}
@@ -438,37 +438,37 @@ def test_harvest_mtime_gating_skips_stale_leaks(tmp_path):
     assert fresh.exists()
 
 
-def test_harvest_preserves_source_files(tmp_path):
+def test_harvest_preserves_source_files(tmp_path, monkeypatch):
     """``shutil.copy2`` semantics: source remains in place after harvest."""
     leak_root = tmp_path / "workspace"
     destination = tmp_path / "task"
     destination.mkdir()
     source = _touch(leak_root / "server.log", "log body")
 
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=leak_root,
     )
     assert harvested
     assert source.exists()
     assert source.read_text() == "log body"
 
 
-def test_harvest_returns_empty_when_leak_root_missing(tmp_path):
+def test_harvest_returns_empty_when_leak_root_missing(tmp_path, monkeypatch):
     """Missing leak root degrades to empty list without raising."""
     destination = tmp_path / "task"
     destination.mkdir()
     nonexistent = tmp_path / "does-not-exist"
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(nonexistent))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=nonexistent,
     )
     assert harvested == []
 
 
-def test_harvest_skips_files_already_in_destination(tmp_path):
+def test_harvest_skips_files_already_in_destination(tmp_path, monkeypatch):
     """If a leak path resolves inside the destination it's not re-copied."""
     leak_root = tmp_path / "workspace"
     destination = leak_root / "task"
@@ -477,10 +477,10 @@ def test_harvest_skips_files_already_in_destination(tmp_path):
     in_ws = _touch(destination / "server.log", "already in place")
     leaked = _touch(leak_root / "gpu_metrics.csv", "real leak")
 
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=leak_root,
     )
     by_name = {src.name: src for src, _ in harvested}
     assert "gpu_metrics.csv" in by_name
@@ -489,28 +489,7 @@ def test_harvest_skips_files_already_in_destination(tmp_path):
     assert in_ws.read_text() == "already in place"
 
 
-def test_harvest_extra_globs_extend_defaults(tmp_path):
-    """Callers can register additional leak patterns without recompiling."""
-    leak_root = tmp_path / "workspace"
-    destination = tmp_path / "task"
-    destination.mkdir()
-    _touch(leak_root / "server.log", "default")
-    custom_leak = _touch(leak_root / "custom_diagnostic.log", "site-specific")
-
-    harvested = harvest_leaked_artifacts(
-        destination,
-        subprocess_started_unix=None,
-        leak_root=leak_root,
-        extra_globs=("custom_diagnostic.log",),
-    )
-    names = {src.name for src, _ in harvested}
-    assert "server.log" in names
-    assert "custom_diagnostic.log" in names
-    assert (destination / "custom_diagnostic.log").read_text() == "site-specific"
-    assert custom_leak.exists()
-
-
-def test_harvest_multiple_profile_traces_via_glob(tmp_path):
+def test_harvest_multiple_profile_traces_via_glob(tmp_path, monkeypatch):
     """The ``profile_*.trace.json.gz`` glob catches per-variant trace names."""
     leak_root = tmp_path / "workspace"
     destination = tmp_path / "task"
@@ -518,10 +497,10 @@ def test_harvest_multiple_profile_traces_via_glob(tmp_path):
     _touch(leak_root / "profile_v1.trace.json.gz", "trace-1")
     _touch(leak_root / "profile_v2.trace.json.gz", "trace-2")
 
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=leak_root,
     )
     names = {src.name for src, _ in harvested}
     assert {"profile_v1.trace.json.gz", "profile_v2.trace.json.gz"} <= names
@@ -550,25 +529,6 @@ def test_harvest_reads_env_leak_roots(tmp_path, monkeypatch):
     assert {"server.log", "gpu_metrics.csv"} <= names
     assert (destination / "server.log").read_text() == "from-a"
     assert (destination / "gpu_metrics.csv").read_text() == "from-b"
-
-
-def test_harvest_explicit_leak_root_overrides_env(tmp_path, monkeypatch):
-    """An explicit ``leak_root`` kwarg wins over the env var."""
-    env_root = tmp_path / "env_root"
-    explicit_root = tmp_path / "explicit_root"
-    destination = tmp_path / "task"
-    destination.mkdir()
-    _touch(env_root / "server.log", "from-env")
-    _touch(explicit_root / "server.log", "from-explicit")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(env_root))
-
-    harvested = harvest_leaked_artifacts(
-        destination,
-        subprocess_started_unix=None,
-        leak_root=explicit_root,
-    )
-    assert len(harvested) == 1
-    assert (destination / "server.log").read_text() == "from-explicit"
 
 
 def test_harvest_default_roots_include_inferencex_and_result_dir(tmp_path, monkeypatch):
@@ -626,17 +586,17 @@ def test_rescue_candidate_paths_scan_inferencex_checkout(tmp_path, monkeypatch):
     assert leak.resolve() in [p.resolve() for p in out]
 
 
-def test_harvest_creates_destination_if_missing(tmp_path):
+def test_harvest_creates_destination_if_missing(tmp_path, monkeypatch):
     """Destination doesn't have to exist before the call."""
     leak_root = tmp_path / "workspace"
     destination = tmp_path / "newly_created_task" / "deep"
     _touch(leak_root / "server.log", "log body")
 
     assert not destination.exists()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
     harvested = harvest_leaked_artifacts(
         destination,
         subprocess_started_unix=None,
-        leak_root=leak_root,
     )
     assert destination.is_dir()
     assert (destination / "server.log").read_text() == "log body"

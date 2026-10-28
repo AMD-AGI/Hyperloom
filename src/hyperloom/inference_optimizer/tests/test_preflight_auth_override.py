@@ -45,7 +45,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
     monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
-    def _fake_which(name: str):
+    def _fake_which(name: str, **_kwargs):
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)

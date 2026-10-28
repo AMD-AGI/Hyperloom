@@ -10,7 +10,6 @@ cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedu
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_reap_stale_engine_ports 51
 cognitive-complexity src/hyperloom/inference_optimizer/reference_script.py::_extract_server_args 40
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 45
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_sources.py::_resolve_patch_paths 36
@@ -99,7 +98,7 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_specialist_subproc
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_specialist_subprocess_helpers_coverage_unit.py 171
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_sweep_phase_auto.py 66
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_warm_replay.py 34
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 396
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 393
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 394
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baseline_eval_fallback.py 98
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
@@ -218,8 +217,8 @@ function-lines src/hyperloom/inference_optimizer/tools/read_optimizer_state.py::
 function-lines src/hyperloom/inference_optimizer/trace/langfuse_emitter.py::LangfuseEmitter.record_session_start 52
 function-lines src/hyperloom/inference_optimizer/trace/langfuse_mapping.py::decision_to_scores 68
 function-lines src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 64
-function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::_framework_call_candidates 62
-function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::_host_call_candidates 54
+function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::_framework_call_candidates 60
+function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::_host_call_candidates 52
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::build_evidence 55
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::_replay_sweep_point 62
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 52
@@ -238,7 +237,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_perf_gate.py::PerfGateMixin._switch_off_parity 79
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_resolve.py::ResolveStageMixin._stage_provision_attempt_runtime 77
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_resolve.py::ResolveStageMixin._stage_resolve 70
-function-lines src/hyperloom/orchestrator/actions/executors/_integrate_resolve.py::ResolveStageMixin._stage_resolve_upstream_pr 51
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 56
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 52
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 70
@@ -246,7 +244,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_l
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 52
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 99
 function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 104
-function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 99
+function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 86
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_artifacts.py::_validate_aiter_gemm_artifacts 51
 function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 76
 function-lines src/hyperloom/orchestrator/actions/executors/_server_lifecycle.py::reap_recorded_servers 61
@@ -254,7 +252,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_gc_plan 56
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 74
 function-lines src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::kill_my_spawned_server 63
-function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::apply_agentx_switch 51
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 78
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._measured_round_result 56
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._mn_warmup_pass 67
@@ -268,7 +265,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Benchma
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._settle_deferred_accuracy 61
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patch_sequence 52
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 59
-function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 68
+function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 67
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 80
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::_ExploreRound.__init__ 64
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::_ExploreRound._graded_verdict 51
@@ -612,8 +609,8 @@ module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1799
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1346
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 1973
-module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1591
-module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
+module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1577
+module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1636
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3973
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1733
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1282
@@ -660,7 +657,6 @@ nested-blocks src/hyperloom/inference_optimizer/session/session_paths.py::_prune
 nested-blocks src/hyperloom/inference_optimizer/trace/parse_usage.py::parse_claude_stream_json_response 5
 nested-blocks src/hyperloom/orchestrator/actions/executors/_agentx_timeline.py::parse_profile_export 5
 nested-blocks src/hyperloom/orchestrator/actions/executors/_aiter_jit.py::clean_stale_aiter_locks 5
-nested-blocks src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 5
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::port_from_server_command 5
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::port_from_server_log 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 5

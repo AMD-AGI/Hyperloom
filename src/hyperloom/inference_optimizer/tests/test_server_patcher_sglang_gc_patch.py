@@ -77,6 +77,20 @@ def test_gc_patch_applies_and_is_idempotent(tmp_path: Path, monkeypatch):
     assert ensure_sglang_patched_for_tracelens() is True
 
 
+def test_gc_patch_uses_the_cached_tracelens_checkout_without_tracelens_root(tmp_path: Path, monkeypatch):
+    """An installer-cached ``TraceLens@<sha>`` is the TraceLens root when ``TRACELENS_ROOT`` is unset."""
+    repo = tmp_path / "sglang"
+    target = _editable_install(repo)
+    cache = tmp_path / "cache"
+    _gc_tree(cache / "TraceLens@0123abc")
+    _fake_sglang(monkeypatch, repo / "python" / "sglang", "0.5.21")
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(cache))
+
+    assert ensure_sglang_patched_for_tracelens() is True
+    assert "_set_profile_trace_tag" in target.read_text(encoding="utf-8")
+
+
 def test_newer_sglang_without_exact_gc_set_is_left_alone(tmp_path: Path, monkeypatch):
     repo = tmp_path / "sglang"
     target = _editable_install(repo)

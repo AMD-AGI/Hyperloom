@@ -45,8 +45,7 @@ def geak_harness_replays_workload(state: Any) -> bool:
     switch, matching that refusal, so a session recorded as synthetic keeps
     replaying.
     """
-    from hyperloom.common.perf_metric import is_agentx_mode
-    from ..actions.executors._workload_envs import agentx_enabled
+    from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
     mode = str(state.benchmark_mode or "").strip()
     return not (is_agentx_mode(mode) if mode else agentx_enabled())

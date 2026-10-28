@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import BaselineExecutor, ExploreExecutor
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 from hyperloom.orchestrator.actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml, GridRecipe, VariantResult
 from hyperloom.orchestrator.loop.coordinator import Coordinator
