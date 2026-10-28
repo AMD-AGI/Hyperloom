@@ -127,17 +127,24 @@ CREATE_FAILED_REASON = (
 
 
 @pytest.mark.parametrize(
-    "reason",
-    [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON, CREATE_FAILED_REASON],
-    ids=["signing_key", "runner_cache", "runner_lost", "sandbox_create_failed"],
+    "reason", [KEY_READ_ONLY_REASON, CACHE_REASON, LOST_REASON], ids=["signing_key", "runner_cache", "runner_lost"]
 )
 async def test_a_runner_that_could_not_start_or_was_lost_is_retried_and_not_held_against_the_node(reason) -> None:
     result, executor, reported = await _run(reason)
     assert len(executor.jobs) == 4, "retried in fresh sandboxes like any infrastructure failure"
-    assert [job.attempt for job in executor.jobs] == [1, 2, 3, 4], "each attempt is a new idempotency key"
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
     assert reported == [], "the sandbox's delivery or the platform's reclaim, not the node, ended the attempt"
+
+
+async def test_a_sandbox_that_failed_before_it_ran_is_retried_once_with_a_new_key_and_not_held_against_the_node() -> (
+    None
+):
+    result, executor, reported = await _run(CREATE_FAILED_REASON)
+    assert [job.attempt for job in executor.jobs] == [1, 2], "one more sandbox, under the next attempt's key, then stop"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == CREATE_FAILED_REASON
+    assert reported == [], "the template or the platform, not a node, failed the sandbox"
 
 
 def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() -> None:

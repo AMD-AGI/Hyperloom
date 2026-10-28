@@ -9,9 +9,10 @@ attempts into the request's single result:
 * ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
   ``measurement_failed``; the node is reported as an infrastructure failure. An infrastructure failure every sandbox
   repeats (:data:`UNRETRIED_INFRA_REASONS`) ends as ``measurement_failed`` at once, and its node is not reported; one it
-  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`) is retried once, and its node is not reported either. One that
-  says nothing about the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a
-  sandbox that failed before it ran) is retried like any other, and its node is not reported.
+  likely repeats (:data:`ONCE_RETRIED_INFRA_REASONS`: an aiter build past the watchdog, a sandbox that failed before it
+  ran) is retried once, and its node is not reported either. One that says nothing about the node
+  (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost) is retried like any other, and its
+  node is not reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -46,17 +47,19 @@ DEFAULT_MAX_INFRA_RETRIES = 3
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset({INERT_PATCH})
+#: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
+#: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
+SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 #: Infrastructure failures a fresh sandbox likely repeats but may not, retried once only and not held against the node:
 #: an aiter module rebuilt past the server's watchdog builds again in the next sandbox, unless the shared compiled-code
-#: cache took the first build.
-ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT})
+#: cache took the first build. A sandbox that failed before it ran most often failed on its template or on what the
+#: platform mounts into it, which the next sandbox meets the same way; one more sandbox (seconds, a new key) still
+#: separates that from a platform hiccup, where giving up at once would lose the test.
+ONCE_RETRIED_INFRA_REASONS: frozenset[str] = frozenset({JIT_BUILD_TIMEOUT, SANDBOX_CREATE_FAILED})
 #: The runner's ``error_class`` when it could not start (``hyperloom.measure.runner``).
 RUNNER_START_FAILED = "runner_start_failed"
 #: The hosted backend's ``error_class`` when it lost the sandbox (``hyperloom.measure.hosted.RUNNER_LOST``).
 RUNNER_LOST = "runner_lost"
-#: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran
-#: (``hyperloom.measure.hosted.SANDBOX_CREATE_FAILED``).
-SANDBOX_CREATE_FAILED = "sandbox_create_failed"
 #: Infrastructure failures retried like any other but never held against the node they ran on. A runner that could not
 #: start failed on what its sandbox was given (the template, an entry of the runner cache that is not what its manifest
 #: recorded, a signing key mounted read-only), which any node gives it alike. A lost runner is most often the platform

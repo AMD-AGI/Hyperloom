@@ -28,8 +28,11 @@ from hyperloom.sandbox.tests.test_sandbox_e2b import (
     CREATE_FAILED_BODY,
     CREATE_FAILED_MESSAGE,
     FAST,
+    GATEWAY_CUTS,
+    KEY_SPENT_BODY,
     KEY_MEASUREMENT,
     SANDBOX,
+    _listed,
     _Service,
     service,  # noqa: F401 (the canned service the end-to-end case runs against)
 )
@@ -283,19 +286,47 @@ def test_a_sandbox_that_failed_before_it_ran_ends_the_attempt_without_another_ke
 def test_a_failed_sandbox_is_created_once_against_the_platform_of_joint_run_4(service: _Service) -> None:
     """Agent Sandbox answers a failed sandbox with a 500, then reports its key spent (410), and a new key makes another
     sandbox that fails the same way: one acquire made three sandboxes in 27 s until the session was killed."""
-    spent = (410, {"code": 410, "message": "idempotency_key_spent: sbx-f7f56db77ec7244ae34d9886d2ed9dde"})
-    service.reply("POST", "/v2/sandboxes", *[(500, CREATE_FAILED_BODY), spent] * 20, (201, SANDBOX))
+    _platform_answers(service, *[(500, CREATE_FAILED_BODY), (410, KEY_SPENT_BODY)] * 20)
+    with pytest.raises(SandboxCreateFailed, match="sandbox_create_failed"):
+        _acquire(_e2b_pool(service))
+    assert _keys_created(service) == ["run-1:req-1:1"]
+
+
+def test_a_sandbox_that_failed_while_its_create_was_cut_is_not_created_again_under_another_key(
+    service: _Service,
+) -> None:
+    """The gateway cuts the create while the sandbox is pending; it then fails, and the replay is told the key is spent.
+    That ends the attempt: replacing the key would make another sandbox that fails the same way."""
+    _platform_answers(service, GATEWAY_CUTS[0], *[(410, KEY_SPENT_BODY), (500, CREATE_FAILED_BODY)] * 20)
+    pool = _e2b_pool(service)
+    with pytest.raises(SandboxCreateFailed, match="idempotency_key_spent"):
+        _acquire(pool)
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
+    assert pool.active == 0
+
+
+def test_a_create_cut_by_the_gateway_finds_its_pending_sandbox_through_the_pool(service: _Service) -> None:
+    _platform_answers(service, GATEWAY_CUTS[0], (201, SANDBOX))
+    service.reply("GET", "/sandboxes/sbx-1", (200, _listed("sbx-1", dict(_THIS_RUN))))
+    runner = _acquire(_e2b_pool(service))
+    assert runner.sandbox_id == "sbx-1"
+    assert _keys_created(service) == ["run-1:req-1:1", "run-1:req-1:1"]
+
+
+def _platform_answers(service: _Service, *answers) -> None:
+    service.reply("POST", "/v2/sandboxes", *answers, (201, SANDBOX))
     service.reply("GET", "/v2/sandboxes", (200, []))  # the pool counts the run's live sandboxes before it creates
+
+
+def _e2b_pool(service: _Service) -> SandboxPool:
     provider = E2BSandboxProvider(
         {"measurement": KEY_MEASUREMENT}, api_url=service.url, sandbox_url=service.url, retry=FAST
     )
-    pool = SandboxPool(provider, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1))
-    with pytest.raises(SandboxCreateFailed, match="sandbox_create_failed"):
-        _acquire(pool)
-    assert [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")] == [
-        "run-1:req-1:1"
-    ]
-    assert pool.active == 0
+    return SandboxPool(provider, {1: "runner-1"}, run_id="run-1", limits=PoolLimits(max_parallel_tests=1))
+
+
+def _keys_created(service: _Service) -> list[str]:
+    return [call.body["metadata"][IDEMPOTENCY_KEY] for call in service.calls("POST", "/v2/sandboxes")]
 
 
 def test_a_slot_freed_twice_is_freed_once() -> None:

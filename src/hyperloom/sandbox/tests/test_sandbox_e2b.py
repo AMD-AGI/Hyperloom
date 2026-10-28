@@ -205,6 +205,10 @@ def test_create_with_an_idempotency_key_is_replayed_after_a_server_error(
 #: error body (the SDK requires its ``code``) with the reason code beside it, and in ``message``, which the SDK keeps.
 CREATE_FAILED_MESSAGE = "sandbox_create_failed: workload sbx-f7f56db77ec7244ae34d9886d2ed9dde phase Failed"
 CREATE_FAILED_BODY = {"code": 500, "reason": "sandbox_create_failed", "message": CREATE_FAILED_MESSAGE}
+#: Its answer to every replay of that key afterwards: the key stays bound to the failed sandbox, whose id it names (the
+#: SDK's message of joint run 4, word for word, in the same E2B error body).
+KEY_SPENT_MESSAGE = "idempotency_key_spent: sbx-f7f56db77ec7244ae34d9886d2ed9dde"
+KEY_SPENT_BODY = {"code": 410, "reason": "idempotency_key_spent", "message": KEY_SPENT_MESSAGE}
 #: How a gateway cuts a create that is still pending: its 180 s limit, or the service's context cancelled under it.
 GATEWAY_CUTS = [
     (504, {"code": 504, "message": "context canceled"}),
@@ -241,13 +245,30 @@ def test_a_create_cut_by_the_gateway_is_replayed_and_finds_the_pending_sandbox(
     assert _keys_sent(service) == ["k-1", "k-1"], "the replay carries the same key"
 
 
+@pytest.mark.parametrize(
+    ("answer", "says"),
+    [((410, KEY_SPENT_BODY), KEY_SPENT_MESSAGE), ((500, CREATE_FAILED_BODY), "phase Failed")],
+    ids=["key_spent", "sandbox_create_failed"],
+)
 def test_a_replay_after_a_cut_that_finds_the_sandbox_failed_stops_there(
-    service: _Service, provider: E2BSandboxProvider
+    service: _Service, provider: E2BSandboxProvider, answer: tuple[int, Any], says: str
 ) -> None:
-    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], (500, CREATE_FAILED_BODY), (201, SANDBOX))
-    with pytest.raises(SandboxCreateFailed, match="phase Failed"):
+    """The pending sandbox failed while the gateway had cut the create: the replay is answered with the key spent (or the
+    failure itself), which ends this create; it is not the key of an earlier process, to be replaced by another."""
+    service.reply("POST", "/v2/sandboxes", GATEWAY_CUTS[0], answer, (201, SANDBOX))
+    with pytest.raises(SandboxCreateFailed, match=says):
         _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
     assert _keys_sent(service) == ["k-1", "k-1"]
+
+
+def test_a_key_spent_before_the_first_send_is_gone_for_the_caller_to_replace(
+    service: _Service, provider: E2BSandboxProvider
+) -> None:
+    service.reply("POST", "/v2/sandboxes", (410, KEY_SPENT_BODY))
+    with pytest.raises(SandboxGone) as gone:
+        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
+    assert type(gone.value) is SandboxGone, "an earlier process spent the key; this create made nothing"
+    assert _keys_sent(service) == ["k-1"]
 
 
 def test_a_503_on_create_is_final_even_with_an_idempotency_key(service: _Service, provider: E2BSandboxProvider) -> None:
