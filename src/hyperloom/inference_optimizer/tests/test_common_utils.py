@@ -997,31 +997,6 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert "refs/pull/42/head:refs/pull/42/head" in git_calls[-1][0]
 
 
-def test_kb_writeback_default_root_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
-
-
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
-
-
-async def test_kb_writeback_rejects_unknown_outcome() -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
-
-    with pytest.raises(ValueError):
-        await kb_writeback.write_framework_record(
-            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
-        )
-
-
 # orchestrator.roles.base — retry / backoff
 
 

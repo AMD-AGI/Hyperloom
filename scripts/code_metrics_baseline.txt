@@ -317,7 +317,7 @@ function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJou
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_remote_recipe_audit 51
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/dispatcher.py::RecipeKB.put_recipe 63
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 62
-function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 60
+function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 58
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 57
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 51
 function-lines src/hyperloom/orchestrator/knowledge/remote_recipe/client.py::RemoteRecipeClient.read 75

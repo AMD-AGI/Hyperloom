@@ -82,7 +82,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
@@ -301,7 +300,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.subprocess_
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.config
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.knowledge_plane
-    hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.pr_monitor
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.recipe_kb_t0
     hyperloom.inference_optimizer.cli.kb -> hyperloom.orchestrator.knowledge.remote_recipe
