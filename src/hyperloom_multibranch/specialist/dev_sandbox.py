@@ -38,7 +38,14 @@ from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, BranchLease, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import (
+    SCOPE_SPECIALIST,
+    BranchLease,
+    LeaseCharge,
+    QueueState,
+    RequestRejected,
+)
 from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, AgentSandbox
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 from hyperloom_multibranch.specialist.agent_session import Processes
@@ -82,7 +89,7 @@ class LeaseSource(Protocol):
     async def queue_state(self) -> QueueState: ...
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
     ) -> BranchLease: ...
 
     async def release_branch_sandbox(self, lease_id: str) -> None: ...
@@ -293,7 +300,9 @@ class DevLeases:
     async def _leased(self, branch: str, cards: int) -> BranchLease:
         """A dev sandbox takes only cards free now: waiting would hold cards a test is about to need."""
         try:
-            return await self._toolbox.lease_branch_sandbox(branch, cards, wait_sec=0)
+            return await self._toolbox.lease_branch_sandbox(
+                branch, cards, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, branch)
+            )
         except RequestRejected as error:
             raise DevRefused(error.code, error.reason) from error
         except SandboxUnavailable as error:

@@ -27,7 +27,8 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -182,6 +183,7 @@ class Toolbox:
         self._blackboard, self.requests, self.refusals = blackboard, [], []
         self.refused_envs: set[str] = set()
         self.leases: list[tuple[str, int]] = []
+        self.charges: list[LeaseCharge | None] = []
         self.released: list[str] = []
         self.cards_left = 1
         self.tables: dict[str, bytes] = {}
@@ -192,10 +194,13 @@ class Toolbox:
         self.tables[artifact.sha256] = data
         return artifact
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+    ) -> BranchLease:
         if self.cards_left < cards:
             raise RequestRejected("leasing would leave no card to measure on", "lease_leaves_no_measurement")
         self.leases.append((branch_id, cards))
+        self.charges.append(charge)
         root = self._blackboard.root.parent / "lease"
         return BranchLease(f"L{len(self.leases)}", branch_id, (3,), root, {"HIP_VISIBLE_DEVICES": "3"}, 1)
 
@@ -560,6 +565,7 @@ async def test_an_agent_runs_on_a_lease_taken_once_for_its_branch_and_given_back
     await resumed.release()
 
     assert rig.toolbox.leases == [(BRANCH, 1)]
+    assert rig.toolbox.charges == [LeaseCharge(LeaseKind.AUTONOMOUS, BRANCH)]
     assert [lease.gpu_ids for lease in rig.sandbox.leases] == [(3,), (3,)]
     assert rig.toolbox.released == ["L1", "L1"]
 

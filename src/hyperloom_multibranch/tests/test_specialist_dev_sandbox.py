@@ -15,7 +15,8 @@ from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.toolbox import BranchLease, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
+from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup, BranchPlace
 from hyperloom_multibranch.specialist.dev_sandbox import (
@@ -51,15 +52,19 @@ class _Toolbox:
     def __init__(self, root: Path) -> None:
         self.root, self.queued, self.refusal = root, 0, None
         self.leased: list[tuple[str, int]] = []
+        self.charges: list[LeaseCharge | None] = []
         self.released: list[str] = []
 
     async def queue_state(self) -> QueueState:
         return QueueState(queued_by_priority={2: self.queued})
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+    ) -> BranchLease:
         if self.refusal is not None:
             raise self.refusal
         self.leased.append((branch_id, cards))
+        self.charges.append(charge)
         lease_id = f"lease-{len(self.leased)}"
         root = self.root / lease_id
         root.mkdir(parents=True)
@@ -180,6 +185,7 @@ async def test_a_lease_is_granted_with_its_cards_ports_and_deadline(rig):
     server = rig.build(cap=2).server
     granted = await server.call("dev_sandbox_lease", cards=1, minutes=90)
     assert rig.toolbox.leased == [(B1, 1)]
+    assert rig.toolbox.charges == [LeaseCharge(LeaseKind.DEV, B1)]
     assert granted["cards"] == 1 and granted["expires_in_s"] == 30 * MINUTE
     assert granted["root"] == str(rig.toolbox.root / "lease-1")
     assert tuple(granted["ports"]) == (LIMITS.port, LIMITS.port + LIMITS.ports - 1)
@@ -209,7 +215,7 @@ async def test_a_lease_asks_the_toolbox_not_to_wait_and_is_refused_when_no_card_
     server = rig.build().server
     waits = []
 
-    async def busy(branch_id, cards, *, wait_sec=None):
+    async def busy(branch_id, cards, *, wait_sec=None, charge=None):
         waits.append(wait_sec)
         raise SandboxUnavailable("no card is free")
 

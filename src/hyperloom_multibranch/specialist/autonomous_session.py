@@ -47,9 +47,9 @@ from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_packag
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import Learning
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
-from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
+from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind, LeaseKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
     KeptChange,
     KeptChangeError,
@@ -388,7 +388,9 @@ class AutonomousSession:
         # The lease is only given back through its file, so the file's directory must exist before the lease does.
         self._place.workspace.mkdir(parents=True, exist_ok=True)
         try:
-            lease = await self._setup.toolbox.lease_branch_sandbox(self._start.branch, cards)
+            lease = await self._setup.toolbox.lease_branch_sandbox(
+                self._start.branch, cards, charge=LeaseCharge(LeaseKind.AUTONOMOUS, self._start.branch)
+            )
         except RequestRejected as error:
             raise PreflightFailed([f"the toolbox leased no cards for the agent's sandbox: {error}"]) from error
         document = {
