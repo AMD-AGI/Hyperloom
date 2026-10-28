@@ -35,6 +35,8 @@ GAIN_NOT_CONFIRMED = "gain_not_confirmed"
 # A synthetic benchmark a healthy server completes in full: any request it did not complete is a defect, whatever the
 # parent did, since throughput over the requests that did complete is not the work that was asked for.
 DROPPED_REQUESTS = "dropped_requests"
+#: The long-context check dropped beyond its own sampling noise below the root's reading (#142 c3219, bar (b)).
+LONG_CONTEXT_DROPPED = "long_context_dropped"
 _ACCURACY = "accuracy"
 
 
@@ -76,13 +78,15 @@ class DispersionThreshold:
 @dataclass(frozen=True)
 class InferenceXReading:
     """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox (``None`` for an
-    explore that skipped the eval), the requests its graded rounds sent but did not complete, and whether its
-    short-prompt check was more inconsistent than the baseline's."""
+    explore that skipped the eval), the requests its graded rounds sent but did not complete, whether its
+    short-prompt check was more inconsistent than the baseline's, and whether its long-context check dropped below the
+    root's."""
 
     throughput: float
     accuracy: float | None
     dropped: int = 0
     inconsistent: bool = False
+    long_context_dropped: bool = False
 
     def __post_init__(self) -> None:
         _checked(self.throughput)
@@ -96,6 +100,7 @@ class InferenceXReading:
         return (
             *((DROPPED_REQUESTS,) if self.dropped else ()),
             *((SHORT_PROMPTS_INCONSISTENT,) if self.inconsistent else ()),
+            *((LONG_CONTEXT_DROPPED,) if self.long_context_dropped else ()),
         )
 
 
@@ -150,7 +155,7 @@ def confirm(
 
     A gain holds when the mean of both measurements clears the bar and the retest is still a gain; one that holds is
     improved when neither showed a defect (a failed accuracy gate, dropped requests, short prompts answered more
-    inconsistently than the baselines), blocked when both showed the same one, and inconclusive otherwise. After a first
+    inconsistently than the baselines, a long-context drop), blocked when both showed the same one, and inconclusive otherwise. After a first
     measurement that skipped its eval, the retest's eval is the only one, so its failure blocks the gain. A blocked judgement names the performance defects both showed; the accuracy gate is
     in ``accuracy``.
     """

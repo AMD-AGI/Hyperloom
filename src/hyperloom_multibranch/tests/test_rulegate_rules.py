@@ -7,11 +7,22 @@ import pytest
 
 from hyperloom.common.gain_math import ACCURACY_METRICS, AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
+from hyperloom.contracts.long_context import (
+    LONG_CONTEXT_COMPLETE,
+    LONG_CONTEXT_INCOMPLETE,
+    PROMPT_ERROR,
+    PROMPT_OK,
+    LongContextPrompt,
+    LongContextResult,
+    LongContextRoot,
+    LongContextTask,
+)
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.rulegate.decision import Action, decide
+from hyperloom_multibranch.rulegate.inferencex import LONG_CONTEXT_DROPPED
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, retest_request
 from hyperloom_multibranch.rulegate.short_prompts import SHORT_PROMPTS_INCONSISTENT
@@ -77,13 +88,83 @@ class _Baseline:
         return self.record
 
 
-def _checked(throughput, check, *, request_id="r1", retest_of=None) -> TestRecord:
+def _checked(throughput, check, *, request_id="r1", retest_of=None, long_context=None) -> TestRecord:
     purpose = Purpose.EXPLORE if retest_of is None else Purpose.CONFIRM
     asked = replace(request(request_id, intent("s1", "c0")), purpose=purpose, accuracy=True, retest_of=retest_of)
     rounds = (RoundValue("measure", 64, {GRADED_OUTPUT: throughput}, failed_requests=0),)
     scores = (AccuracyValue("gsm8k", ACCURACY_METRICS[0], 0.90),)
-    measured = replace(result(request_id), rounds=rounds, accuracy=scores, short_prompt_consistency=check)
+    measured = replace(
+        result(request_id), rounds=rounds, accuracy=scores, short_prompt_consistency=check, long_context=long_context
+    )
     return TestRecord(asked, measured)
+
+
+SHA = "a" * 64
+TASK = "niah_single"
+#: 64 of 64 on the root: the lower end of its 95% interval is 0.94, so a candidate is refused below 58 of 64.
+ROOT = LongContextRoot(SHA, ("b0", "b1", "b2"), 64, 64, 1.0, 0.94, 1.0)
+
+
+def _long_context(passed, *, root=ROOT, sha=SHA, errored=0, n=64) -> LongContextResult:
+    """A check of ``n`` prompts, the first ``passed`` passed and the last ``errored`` not answered."""
+    prompts = tuple(
+        LongContextPrompt(
+            f"p-{index}",
+            TASK,
+            PROMPT_ERROR if index >= n - errored else PROMPT_OK,
+            index < passed,
+            0 if index >= n - errored else 2000,
+            1.0,
+        )
+        for index in range(n)
+    )
+    return LongContextResult(
+        status=LONG_CONTEXT_INCOMPLETE if errored else LONG_CONTEXT_COMPLETE,
+        reason=f"{errored} of {n} prompts were not answered" if errored else "",
+        prompt_set_sha256=sha,
+        length=2048,
+        max_new_tokens=128,
+        concurrency=4,
+        served_context=4096,
+        n=n,
+        passed=passed,
+        score=passed / n,
+        tasks=(LongContextTask(TASK, n, passed, passed / n),),
+        prompts=prompts,
+        seconds=10.0,
+        prefill_tokens=2000 * (n - errored),
+        root=root,
+    )
+
+
+@pytest.mark.parametrize(
+    ("check", "refused"),
+    [
+        (_long_context(57), True),
+        (_long_context(58), False),
+        (_long_context(10, root=None), False),
+        (_long_context(10, sha="b" * 64), False),
+        (_long_context(10, errored=1), False),
+        (None, False),
+    ],
+    ids=["below-the-bar", "at-the-bar", "no-root-reading", "another-prompt-set", "incomplete", "no-check"],
+)
+async def test_an_inferencex_candidate_is_refused_on_a_long_context_drop_beyond_the_checks_noise(check, refused):
+    judgement = await InferenceXRule(_Baseline(None), 64).first(_checked(1000.0, None, long_context=check), PARENT)
+
+    assert (LONG_CONTEXT_DROPPED in judgement.refused_by) is refused
+    assert judgement.verdict is (Verdict.REGRESSED if refused else Verdict.FLAT)
+
+
+async def test_a_gain_with_a_long_context_drop_on_both_measurements_is_blocked():
+    rule = InferenceXRule(_Baseline(None), 64)
+    first = await rule.first(_checked(1100.0, None, long_context=_long_context(50)), PARENT)
+    assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == (LONG_CONTEXT_DROPPED,)
+
+    retest = _checked(1100.0, None, request_id="r2", retest_of="r1", long_context=_long_context(50))
+    settled = await rule.retest(first, retest, PARENT)
+
+    assert (settled.verdict, decide(settled)) == (Verdict.BLOCKED, Action.DIAGNOSE)
 
 
 @pytest.mark.parametrize(
