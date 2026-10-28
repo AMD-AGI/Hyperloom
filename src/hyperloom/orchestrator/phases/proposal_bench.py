@@ -10,6 +10,8 @@ from collections.abc import Iterable, Mapping
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
 from ..collaborator import CoordinatorCollaborator
 from ..specialists.domains import CUSTOM_SPECIALIST_KEY
 from ..state.shared_state import inject_stack_base_params
@@ -123,6 +125,13 @@ class ProposalBench(CoordinatorCollaborator):
                 "lever bundle: enqueued explore task_id=%s over %s", task.task_id, variant["framework_lever_bundle"]
             )
         return task is not None
+
+    async def on_task_settled(self, task: Task, result: Any, verdict: Verdict) -> None:
+        """Hand a promoted settlement to FRAMEWORK: an integrate's outcome, and a moved stack's cycle batch."""
+        if task.kind == "integrate_patch":
+            await self.on_integrate_patch_settled(task, result, verdict)
+        if verdict is Verdict.ADOPTED:
+            await self.on_stack_adopted()
 
     async def on_stack_adopted(self) -> None:
         """Queue the moved stack's cycle batch before the dispatcher's next pass hands the lanes to an integrate."""
