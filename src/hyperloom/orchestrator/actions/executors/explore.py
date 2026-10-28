@@ -67,12 +67,8 @@ from ._proposal_identity import BaseControls, controls_of, effective_fingerprint
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
 from .benchmark_result import double_run_requested
-from .explore_prefilter._prefilter import RoundContext, Stack, prefilter_variants, record_decision_round
-from .explore_prefilter._remeasure import (
-    STACK_REVALIDATE_SOURCE,
-    _is_config_replay_variant,
-    is_stack_revalidation,
-)
+from .explore_prefilter._prefilter import prefilter_round, record_decision_round
+from .explore_prefilter._remeasure import STACK_REVALIDATE_SOURCE, _is_config_replay_variant, is_stack_revalidation
 from ._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -861,7 +857,7 @@ class _ExploreRound:
         self._resolve_grid()
         self._shape_runnable()
         self._open_schedule()
-        round_ctx = await self._prefilter(session_dir)
+        round_ctx = await prefilter_round(self, session_dir)
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         self.lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(self.config_path)) if self.runnable else None
         try:
@@ -893,16 +889,6 @@ class _ExploreRound:
             if self.lease is not None:
                 self.lease.close()
         return self._result()
-
-    async def _prefilter(self, session_dir: Path | None) -> RoundContext:
-        # Drop variants an opt-in pre-filter rules out before any of them is benchmarked.
-        round_ctx = RoundContext.of_round(self, session_dir)
-        stack = Stack.from_measured(self.measured_against())
-        prefiltered = await prefilter_variants(self.runnable, round_ctx, stack, is_stack_revalidation(self.params))
-        self.runnable, self.projection = prefiltered.runnable, prefiltered.projection
-        self.skipped.extend(prefiltered.dropped)
-        self.prefilter_dropped = len(prefiltered.dropped)
-        return round_ctx
 
     # ----- the stack the round accumulates ---------------------------------
 

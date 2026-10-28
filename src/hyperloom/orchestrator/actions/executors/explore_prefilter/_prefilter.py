@@ -42,7 +42,7 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 
 from . import _reuse as reuse
 from ._projection import ProjectionRequest, projection_enabled, route_variants
-from ._remeasure import _is_config_replay_variant
+from ._remeasure import _is_config_replay_variant, is_stack_revalidation
 from ._screen import screen_enabled, screen_variants
 from .._grid_base import GridVariant
 from .._grid_runner import GridRecipe, _build_variant_yaml
@@ -278,6 +278,21 @@ async def prefilter_variants(
     kept = {id(gv) for gv in routed.survivors}
     runnable = [gv for gv in variants if gv.name in protected or id(gv) in kept]
     return Prefiltered(runnable, [*dropped, *screened_out, *routed.dropped], routed.summary)
+
+
+async def prefilter_round(explore_round: Any, session_dir: Path | None) -> RoundContext:
+    """Narrow an ``explore._ExploreRound``'s runnable variants to those the pre-filters keep, before any is benchmarked.
+
+    The dropped variants join the round's ``skipped`` rows, and the round keeps their count and the projection.
+    """
+    ctx = RoundContext.of_round(explore_round, session_dir)
+    stack = Stack.from_measured(explore_round.measured_against())
+    revalidation = is_stack_revalidation(explore_round.params)
+    prefiltered = await prefilter_variants(explore_round.runnable, ctx, stack, revalidation)
+    explore_round.runnable, explore_round.projection = prefiltered.runnable, prefiltered.projection
+    explore_round.skipped.extend(prefiltered.dropped)
+    explore_round.prefilter_dropped = len(prefiltered.dropped)
+    return ctx
 
 
 @dataclass
