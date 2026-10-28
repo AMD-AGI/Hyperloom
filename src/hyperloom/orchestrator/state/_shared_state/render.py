@@ -14,6 +14,7 @@ from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_pr
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
+from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -713,10 +714,11 @@ class _RenderMixin:
         snap = cached.get("roofline_snapshot_id", "?")
         gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
         gain_str = "?" if gain is None else f"{gain:.2f}"
+        show_analysis_md = qualified_context_tool_name("show_analysis_md")
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
             "full report not inlined; see profiler_digest above or call the "
-            "show_analysis_md context tool for the verbatim analysis.md.)"
+            f"{show_analysis_md} context tool for the verbatim analysis.md.)"
         )
 
     def _format_profiler_digest(self) -> str:

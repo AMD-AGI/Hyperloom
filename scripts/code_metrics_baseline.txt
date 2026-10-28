@@ -616,7 +616,7 @@ module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1346
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 1973
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1591
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
-module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3995
+module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3973
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1733
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1384
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1277
@@ -630,8 +630,8 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3046
 module-lines src/hyperloom/orchestrator/phases/kernel.py 3970
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1879
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
-module-lines src/hyperloom/orchestrator/policy/gate.py 1565
-module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
+module-lines src/hyperloom/orchestrator/policy/gate.py 1564
+module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1201
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2568
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1465
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1337

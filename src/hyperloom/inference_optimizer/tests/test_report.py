@@ -623,7 +623,7 @@ def test_every_stop_reason_vocab_member_has_explanation():
 
 def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
     assert (
-        rp._classify_root_cause_type(
+        rp.classify_root_cause_type(
             "kv_cache_oom",
             "CUDA out of memory; no GPU memory for the KV cache",
         )

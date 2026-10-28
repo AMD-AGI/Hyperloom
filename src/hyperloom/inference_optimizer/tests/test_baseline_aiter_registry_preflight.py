@@ -374,9 +374,11 @@ def test_the_error_names_the_module_when_the_env_cannot(tmp_path):
     )
 
     assert registry_mismatch_modules(observed) == ("module_gemm_a8w8_blockscale_bpreshuffle",)
-    # A cktile kernel carries its libtype in its own name.
+    # A cktile kernel carries its libtype in its own name, but not its table: both blockscale
+    # tables name their cktile rows a8w8_blockscale_cktile_*.
     assert registry_mismatch_modules("kernel 'a8w8_blockscale_cktile_x' is not present") == (
         "module_gemm_a8w8_blockscale_cktile",
+        "module_gemm_a8w8_blockscale_bpreshuffle_cktile",
     )
     # Nothing named, nothing to unlink — the env-keyed drop stays the only behaviour.
     assert registry_mismatch_modules("Capture cuda graph failed: HIP error") == ()
