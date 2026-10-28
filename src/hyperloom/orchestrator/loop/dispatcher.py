@@ -1040,7 +1040,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
             if settles_specialist:
-                await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
+                await self._record_specialist_settlement(task, died)
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
                 task_id,
