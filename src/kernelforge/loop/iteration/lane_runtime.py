@@ -13,6 +13,8 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from kernelforge.loop.experiments_layout import LANE_PLAN_GLOB, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.loop.iteration.iteration_types import HeldRound, IterationResult, _StagedMerge, _append_finding
 from kernelforge.loop.merge_candidates import (
@@ -142,12 +144,20 @@ class LaneRuntimeMixin:
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> SummaryOutcome:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # The record turn resumes that session now: the round deletes this copy as soon as it returns.
+            sink: dict = {}
+            call = agent_factory(str(lane_dir), str(serialized_driver))
+            await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
+                session_sink=sink,
             )
+            lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
+            if not lesson:
+                print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
+            return lesson
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
@@ -381,17 +391,15 @@ class LaneRuntimeMixin:
         return _StagedMerge(merge_pair, merge_diff)
 
     def _orchestration_root(self, iteration: int) -> Path:
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).round(iteration)
 
     def _lane_plan_path(self, iteration: int, lane: int) -> Path:
-        """Where one lane's plan lives, lane 1 keeping the historical name."""
-        if lane <= 1:
-            return self._orchestration_root(iteration) / "optimization_plan.md"
-        return self._orchestration_root(iteration) / f"lane_{lane:03d}.md"
+        """Where one lane's plan lives."""
+        return self._orchestration_root(iteration) / lane_plan_name(lane)
 
     def _lane_queue_path(self) -> Path:
         """Where a round's unspent candidates wait for the iteration that measures them."""
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / "lane_queue.json"
+        return ExperimentsLayout.of(Path(self.ic.workspace_dir).resolve()).lane_queue
 
     def _persist_lane_queue(self) -> None:
         """Publish what this round has bought and not yet measured."""
@@ -401,20 +409,7 @@ class LaneRuntimeMixin:
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                path,
-                {
-                    "candidates": [
-                        {
-                            "lane_id": lane.lane_id,
-                            "plan": lane.plan,
-                            "diff": lane.diff,
-                            "agent_profile_id": lane.agent_profile_id,
-                        }
-                        for lane in self._lane_queue
-                    ]
-                },
-            )
+            atomic_write_json(path, {"candidates": [lane.to_dict() for lane in self._lane_queue]})
         except OSError as error:
             print(
                 f"  [lanes] queue not durable ({error}); the "
@@ -427,15 +422,7 @@ class LaneRuntimeMixin:
         path = self._lane_queue_path()
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-            queued = [
-                LaneResult(
-                    lane_id=str(entry["lane_id"]),
-                    plan=str(entry["plan"]),
-                    diff=str(entry["diff"]),
-                    agent_profile_id=str(entry.get("agent_profile_id") or ""),
-                )
-                for entry in record["candidates"]
-            ]
+            queued = [LaneResult.from_dict(entry) for entry in record["candidates"]]
         except (OSError, ValueError, KeyError, TypeError):
             log.debug("no readable lane queue at %s", path)
             return
@@ -467,7 +454,7 @@ class LaneRuntimeMixin:
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_*.md"):
+        for stale in self._orchestration_root(iteration).glob(LANE_PLAN_GLOB):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
@@ -552,7 +539,7 @@ class LaneRuntimeMixin:
         """Persist planning diagnostics before publishing the executable plan."""
         root = self._orchestration_root(iteration)
         atomic_write_json(
-            root / "context.json",
+            root / ROUND_CONTEXT,
             context.to_prompt_dict(),
         )
         if result.dispatch_plan is not None:

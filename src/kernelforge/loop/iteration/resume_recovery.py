@@ -9,6 +9,7 @@ import copy
 import logging
 
 from kernelforge.loop.agent_relay import apply_relay_keep, apply_relay_search_outcome
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.iteration.best_publication import _require_best_is_keep
 from kernelforge.loop.iteration.iteration_types import (
     DirectionEvidence,
@@ -256,7 +257,7 @@ class ResumeRecoveryMixin:
                 planned,
                 IterationVerdict(
                     iteration=result.iteration,
-                    decision="KEEP",
+                    decision=DecisionLabel.KEEP.value,
                     kept=True,
                     wall_ms=result.wall_ms,
                     commit_hash=result.commit_hash,

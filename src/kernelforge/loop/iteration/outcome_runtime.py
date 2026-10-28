@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.evaluation.scoring import beats_current_best
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.iteration.best_publication import _require_best_is_keep
 from kernelforge.loop.handoffs import IterationHandoff
@@ -30,6 +31,7 @@ from kernelforge.loop.lessons import (
     PrReferenceNote,
     SUMMARY_MIN_SECONDS,
     SessionEnd,
+    SummaryOutcome,
     SessionObservations,
     UNDISPROVEN_CLAIM,
     build_fallback_document,
@@ -44,6 +46,7 @@ from kernelforge.loop.lessons import (
 )
 from kernelforge.loop.merge_candidates import case_spreads, cases_beating_reference
 from kernelforge.loop.run_state import (
+    ITERATION_RESULT,
     LoopStanding,
     RunState,
     apply_iteration,
@@ -62,11 +65,11 @@ log = logging.getLogger(__name__)
 # mean no candidate was ever measured.
 _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
     {
-        "KEEP",
-        "NO_CHANGES",
-        "API_ERROR",
-        "AGENT_ERROR",
-        "ORCHESTRATION_ERROR",
+        DecisionLabel.KEEP.value,
+        DecisionLabel.NO_CHANGES.value,
+        DecisionLabel.API_ERROR.value,
+        DecisionLabel.AGENT_ERROR.value,
+        DecisionLabel.ORCHESTRATION_ERROR.value,
     }
 )
 
@@ -264,7 +267,7 @@ class OutcomeMixin:
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
         return make_event(
-            "iteration_result",
+            ITERATION_RESULT,
             result.iteration,
             decision=resolved_decision,
             plan=(plan or "").strip()[:120] or None,
@@ -430,14 +433,33 @@ class OutcomeMixin:
             disproof=parse_disproof_marker(document),
         )
 
+    async def _request_lesson(self, iteration: int, end_reason: str, summarizer) -> SummaryOutcome:
+        """Ask the session for its record while the campaign still has time for the turn."""
+        if self._time_remaining() < SUMMARY_MIN_SECONDS:
+            # Time to produce the summary, not the loop's session-admission reserve: a campaign that can no
+            # longer admit an implementer session is resumed later, and that session reads this document.
+            return SummaryOutcome(reason="insufficient campaign time to run summarizer")
+        try:
+            return await summarize_iteration(
+                iteration=iteration,
+                end_reason=end_reason,
+                summarizer=summarizer,
+                references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+            )
+        except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
+            log.debug("lessons: summarizer step failed", exc_info=True)
+            return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
+        finally:
+            self._checkpoint_llm_usage()
+
     async def _record_lesson(
         self,
         *,
-        iteration: int,
         result: IterationResult,
         decision: str,
         session_sink: dict,
         diff_summary: str = "",
+        lane_record: SummaryOutcome | None = None,
     ) -> None:
         """Write this iteration's free-form factual session record."""
         store = getattr(self, "lessons", None)
@@ -445,40 +467,21 @@ class OutcomeMixin:
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
-        has_narrative = False
+        iteration = result.iteration
+        # A lane's record was taken in its round. None means this iteration ran the session itself.
+        record = lane_record
+        if record is None:
+            record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
+        if record and store.write(iteration, record.text) is None:
+            record = SummaryOutcome(reason="failed to persist lesson document")
+        has_narrative = bool(record)
         # Narrated by the resumed session itself, as opposed to machine-written by the loop below.
-        agent_narrative = False
-        summary_failure = ""
-        if self._time_remaining() < SUMMARY_MIN_SECONDS:
-            # Gate on whether there is time to PRODUCE the summary, not on the loop's session-admission reserve: a
-            # campaign that runs out of room for another implementer session is resumed later, and that session reads
-            # this document.
-            print("  [lesson] too little time left — recording outcome only")
-            summary_failure = "insufficient campaign time to run summarizer"
+        agent_narrative = has_narrative
+        summary_failure = "" if has_narrative else record.reason
+        if has_narrative:
+            print(f"  [lesson] recorded iter {iteration}: {len(record.text)} chars")
         else:
-            try:
-                outcome = await summarize_iteration(
-                    store=store,
-                    iteration=iteration,
-                    end_reason=result.session_end_reason,
-                    summarizer=session_sink.get("summarize"),
-                    references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
-                )
-                has_narrative = bool(outcome)
-                agent_narrative = has_narrative
-                if has_narrative:
-                    print(f"  [lesson] recorded iter {iteration}: {len(outcome.text)} chars")
-                else:
-                    summary_failure = outcome.reason
-                    print(
-                        f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
-                    )
-            except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
-                summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
-                log.debug("lessons: summarizer step failed", exc_info=True)
-                print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
-            finally:
-                self._checkpoint_llm_usage()
+            print(f"  [lesson] no summary ({record.reason}) — falling back to machine-observed session progress")
 
         if not has_narrative:
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
@@ -622,7 +625,6 @@ class OutcomeMixin:
                         bench_detail=result.bench_detail,
                         snr_db=result.snr_db,
                         vgpr=result.vgpr,
-                        pmc_diagnosis=result.pmc_diagnosis,
                         baseline_wall_ms=self.ic.baseline_wall_ms,
                         best_wall_ms_before=best_before,
                         best_mean_case_speedup_before=best_mean_case_speedup_before,
@@ -636,8 +638,6 @@ class OutcomeMixin:
                         shape={},
                         kernel_source=attempt_source,
                         change_diff=self._full_diff(commit_hash) if commit_hash else attempt_diff,
-                        pmc_full=result.pmc_full,
-                        profile_meta=result.profile_meta,
                         validation_text=validation_text,
                         session_end_reason=result.session_end_reason,
                         turns=result.turns,

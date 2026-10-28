@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.loop.archive import CandidateRecord
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.iteration.attempt_verdict import _defer_termination_signals
 from kernelforge.loop.iteration.iteration_types import (
     IterationResult,
@@ -287,14 +288,17 @@ class KeepCheckpointMixin:
         iteration = int(pending["iteration"])
         existing = self.archive.load_meta(iteration)
         if existing:
-            if existing.get("decision") != "KEEP" or existing.get("commit_hash") != result.commit_hash:
+            if (
+                existing.get("decision") != DecisionLabel.KEEP.value
+                or existing.get("commit_hash") != result.commit_hash
+            ):
                 raise ValueError(f"candidate archive conflicts with pending KEEP iteration {iteration}")
             return
         archived = self.archive.record(
             CandidateRecord(
                 iteration=iteration,
                 commit_hash=result.commit_hash,
-                decision="KEEP",
+                decision=DecisionLabel.KEEP.value,
                 kept=True,
                 validation_passed=True,
                 wall_ms=pending.get("wall_ms"),
@@ -302,8 +306,6 @@ class KeepCheckpointMixin:
                 bench_detail=pending.get("benchmark") or {},
                 snr_db=pending.get("snr_db"),
                 vgpr=pending.get("vgpr"),
-                pmc_diagnosis=result.pmc_diagnosis,
-                profile_meta=result.profile_meta,
                 baseline_wall_ms=pending.get("baseline_wall_ms"),
                 best_wall_ms_before=pending.get("best_wall_ms_before"),
                 best_mean_case_speedup_before=pending.get("best_mean_case_speedup_before"),
@@ -319,7 +321,6 @@ class KeepCheckpointMixin:
                 shape=pending.get("shape") or {},
                 kernel_source=str(pending.get("kernel_source") or ""),
                 change_diff=str(pending.get("patch") or ""),
-                pmc_full=result.pmc_full,
                 validation_text=str(pending.get("validation_text") or ""),
             )
         )

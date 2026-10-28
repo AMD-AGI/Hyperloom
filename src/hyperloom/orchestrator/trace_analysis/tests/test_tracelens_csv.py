@@ -29,6 +29,7 @@ from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_repor
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 
 def _skill_request(tmp_path: Path, output_dir: Path, **fields: object) -> tlr.TraceLensSkillRequest:
@@ -1162,7 +1163,7 @@ def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capt
         output_dir=tmp_path,
         trace_path=trace,
         platform="MI300X",
-        analysis_mode=tlr.tracelens_analysis_mode(framework),
+        analysis_mode=tracelens_analysis_mode(framework),
         capture_folder=capture_dir if capture else None,
     )
 
@@ -3875,6 +3876,31 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
         ),
     )
     assert summary["trace_health_warnings"] == []
+
+
+def test_analysis_mode_xdit_returns_inference():
+    """xDiT uses inference-mode reporting for capture-folder support despite being scriptable."""
+    assert tracelens_analysis_mode("xdit") == "inference"
+    assert tracelens_analysis_mode("xDiT") == "inference"
+    assert tracelens_analysis_mode("  xdit  ") == "inference"
+
+
+def test_analysis_mode_serving_frameworks_return_inference():
+    """Regression guard: sglang / vllm / atom remain ``inference``."""
+    assert tracelens_analysis_mode("sglang") == "inference"
+    assert tracelens_analysis_mode("vllm") == "inference"
+    assert tracelens_analysis_mode("atom") == "inference"
+
+
+def test_analysis_mode_scriptable_framework_stays_default():
+    """Scriptable frameworks (except xDiT) fall back to ``default``."""
+    assert tracelens_analysis_mode("custom") == "default"
+
+
+def test_analysis_mode_unknown_framework_returns_inference():
+    """Unknown frameworks fall back to the default spec (sglang), which is not scriptable."""
+    assert tracelens_analysis_mode("trtllm") == "inference"
+    assert tracelens_analysis_mode("") == "inference"
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.

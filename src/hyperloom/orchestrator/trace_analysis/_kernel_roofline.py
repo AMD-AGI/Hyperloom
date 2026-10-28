@@ -19,7 +19,7 @@ from ._kernel_classification import _FLYDSL_SCAN_BYTES
 # emit the field from one vocabulary (see _roofline_source for the value ladder).
 from ._roofline_source import ANALYTICAL as _RL_ANALYTICAL, PLACEHOLDER as _RL_PLACEHOLDER
 from ._trace_shapes import _dtypes_from_shapes, _shape_call_entries
-from .tracelens_skill_runner import tracelens_analysis_mode
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 
 def default_roofline_fields(candidates: list[dict[str, Any]]) -> None:
