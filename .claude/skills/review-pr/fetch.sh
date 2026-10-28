@@ -45,8 +45,8 @@ printf 'skill: %s\nmodel: %s\n' "$SKILL_TREE" "${ANTHROPIC_MODEL:-${PR_REVIEW_MO
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
 for attempt in 1 2 3 4 5; do
   gh pr view "$PR" --repo "$REPO" \
-    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable \
-    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}' \
+    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable,labels \
+    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}{{range .labels}}{{printf "label: %v\n" .name}}{{end}}' \
     > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
   grep -q '^mergeable: UNKNOWN$' "$WORK/meta.txt" || break
   # A merged or closed PR has no mergeability to compute and stays UNKNOWN for good; only an
@@ -132,6 +132,18 @@ cut -f3- "$WORK/numstat.txt" > "$WORK/files.txt"
 
 grep -E '(^|/)tests/' "$WORK/files.txt" > "$WORK/testfiles.txt" || : > "$WORK/testfiles.txt"
 
+# E3 turns on one number: production lines added minus deleted, src/ outside tests/. Binary rows
+# carry "-" instead of a count and are not arithmetic, so they are excluded and reported separately.
+awk -F'\t' '
+  $1 == "-" { binary++; next }
+  $3 ~ /^src\// && $3 !~ /(^|\/)tests?\// { added += $1; deleted += $2; files++ }
+  END {
+    printf "production files: %d\nadded: %d\ndeleted: %d\nnet: %+d\nbinary excluded: %d\n",
+      files, added, deleted, added - deleted, binary
+  }
+' "$WORK/numstat.txt" > "$WORK/netlines.txt"
+
+
 # The X family's mechanical input, the counterpart of testfiles.txt for the T family. An empty
 # docfiles.txt beside a changed src/ file is the shape X3 fires on, so the emptiness is the signal.
 grep -E '(^|/)docs/|(^|/)prompts/|\.md$|\.rst$' "$WORK/files.txt" > "$WORK/docfiles.txt" \
@@ -157,15 +169,31 @@ gh api --paginate --slurp "repos/$REPO/pulls/$PR/comments" | jq -s '[.[][][]]' >
 gh api --paginate --slurp "repos/$REPO/issues/$PR/comments" | jq -s '[.[][][]]' > "$raw/issue.json"
 
 PR_AUTHOR=$(sed -n 's/^author: //p' "$WORK/meta.txt")
-jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | sort -u | while IFS= read -r login; do
+# jq writes CRLF on some platforms; a login carrying CR matches no author and makes the
+# permission URL below unparseable, which empties comments.txt without failing the fetch.
+# Two shapes cost this block a silent failure already. A bare `perm=$(gh api ...)` trips errexit
+# on any non-zero exit, so the test below it never ran and the fetch died with no message on the
+# 404 it means to accept -- `Copilot`, which GitHub's code review posts under, 404s here. And a
+# loop on the left of a pipe runs in a subshell, where `die` ends only that subshell.
+jq -r '.[].user.login' "$raw"/{reviews,inline,issue}.json | tr -d '\015' | sort -u > "$raw/logins.txt"
+: > "$raw/trusted.txt"
+while IFS= read -r login; do
   if [ "$login" = "$PR_AUTHOR" ] || [ "$login" = 'github-actions[bot]' ]; then
-    echo "$login"
+    printf '%s\n' "$login" >> "$raw/trusted.txt"
     continue
   fi
-  case "$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>/dev/null || true)" in
-    admin | write) echo "$login" ;;
-  esac
-done | jq -Rsc 'split("\n") | map(select(length > 0))' > "$raw/trusted.json"
+  # A 404 is the valid negative: not a collaborator. Any other failure -- a rate limit, a network
+  # drop -- must not read as one, or comments.txt silently loses entries the review is required
+  # to settle, which is the shape the CR strip above already cost once.
+  if perm=$(gh api "repos/$REPO/collaborators/$login/permission" --jq .permission 2>"$raw/perm.err"); then
+    case "$perm" in
+      admin | write) printf '%s\n' "$login" >> "$raw/trusted.txt" ;;
+    esac
+  elif ! grep -q 'HTTP 404' "$raw/perm.err"; then
+    die "cannot resolve $login's permission: $(tr -d '\r' < "$raw/perm.err" | tail -1)"
+  fi
+done < "$raw/logins.txt"
+jq -Rsc 'split("\n") | map(select(length > 0))' < "$raw/trusted.txt" > "$raw/trusted.json"
 
 jq -nr --slurpfile t "$raw/trusted.json" '
   def trusted: select(.user.login | IN($t[0][]));
@@ -227,7 +255,7 @@ if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
     "$REPO" "$OPEN_PRS" "$LISTED_PRS" >> "$WORK/openprs.txt"
 fi
 
-for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
+for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt netlines.txt commits.txt \
   base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt skill.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
