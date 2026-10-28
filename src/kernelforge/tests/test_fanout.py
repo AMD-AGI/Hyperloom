@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.cli import lanes as cli_lanes
+from kernelforge.loop.bootstrap import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import fanout

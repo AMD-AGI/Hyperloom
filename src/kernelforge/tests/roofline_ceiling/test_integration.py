@@ -10,15 +10,15 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pytest
 
 from kernelforge import cli as cli_module
-from kernelforge.cli.forge_loop_command import _make_ceiling_estimator
-from kernelforge.cli.options import _validate_roofline_target
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
+from kernelforge.loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.loop.bootstrap.request import validate_roofline_target
+from kernelforge.loop.bootstrap.run import _make_ceiling_estimator
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
-from kernelforge.roofline_ceiling.command import AnalystAgent
+from kernelforge.roofline_ceiling.standalone import AnalystAgent
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
@@ -298,13 +298,15 @@ def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
 
 
 def test_a_target_above_one_is_refused_because_attainment_cannot_exceed_the_ceiling():
-    with pytest.raises(click.BadParameter, match="cannot exceed 1.0"):
-        _validate_roofline_target(86.0, True)
+    with pytest.raises(InvalidOptionValue, match="cannot exceed 1.0") as refused:
+        validate_roofline_target(86.0, True)
+    assert refused.value.param_hint == "--roofline-target"
 
 
 def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
-    with pytest.raises(click.BadParameter, match="pass --roofline-ceiling on"):
-        _validate_roofline_target(0.86, False)
+    with pytest.raises(InvalidOptionValue, match="pass --roofline-ceiling on") as refused:
+        validate_roofline_target(0.86, False)
+    assert refused.value.param_hint == "--roofline-target"
 
 
 def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
@@ -327,7 +329,7 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
         return SimpleNamespace()
 
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
-    monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
+    monkeypatch.setattr("kernelforge.roofline_ceiling.standalone.resolve_analyst_backend", _resolve)
 
     estimator = _make_ceiling_estimator(
         workspace_dir=".",
@@ -348,7 +350,7 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
 @pytest.mark.parametrize(("deployment", "analyst"), [("bypass", "bypass"), ("read-only", "workspace-write")])
 def test_the_analyst_runs_in_the_deployments_sandbox_widened_only_to_write(monkeypatch, deployment, analyst):
     """Every session honours the deployment's sandbox; the analyst writes its answer, so read-only is widened once."""
-    from kernelforge.roofline_ceiling import command as command_module
+    from kernelforge.roofline_ceiling import standalone as command_module
 
     built = {}
     monkeypatch.setattr(command_module, "create_registered_backend", lambda runtime: built.setdefault("rt", runtime))

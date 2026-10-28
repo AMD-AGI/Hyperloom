@@ -1,27 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry point for `kernelforge forge-fuse`."""
+"""The forge-fuse pipeline: diagnose a decode trace, then locate, author, validate and export a fusion."""
 
 from __future__ import annotations
 
 import contextlib
 import dataclasses
-import json
 import logging
 import shutil
-import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-import click
-
-from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
-from kernelforge.tools.git import git
 from kernelforge.tools.gpu_arch import canon_arch, detect_arch
-from kernelforge.option_groups import option_group
 
 from . import __version__
 from .author import (
@@ -42,27 +35,27 @@ from .campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
-from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
+from .anchor import AnchorReport
 from .diagnose import diagnose_trace
-from .discover import DiscoverySession, DiscoveryTarget, discover_recipes, registered_agent_llm_fn
-from .emit import FusionFiles, _git_tracks, export_artifacts, restore_exported_changes
+from .discovery_stage import _Discovery, _DiscoveryInputs, _discover, _log_located_recipes, _resolve_discover_mode
+from .errors import FuseError, FuseUsageError
+from .emit import FusionFiles, export_artifacts, restore_exported_changes
 from .llm_failure import LlmUnavailableError
-from .locate import FrameworkInstall, build_recipes, resolve_framework_source_file
+from .locate import FrameworkInstall, _framework_repo_root
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
+from .request import FuseAgentOptions, FuseRequest
 from .report import (
-    ANCHOR_REPORT_NAME,
     ANCHOR_RESOLVED_VERDICT,
     LLM_UNAVAILABLE_VERDICT,
     LocatedFusions,
     ManifestSubject,
     RunOutcome,
     build_manifest,
-    write_anchor_report,
     write_manifest,
 )
-from .shapes import load_model_config, resolve_decode_shapes
+from .shapes import load_model_config
 from .validate import DEFAULT_TARGET_SPEEDUP, HarnessKernelRunner, validate_recipe
 from .agent_selection import _agent_timeout_sec, _campaign_agent_provider, _create_agent_backend
 from .compile_pass_claim import ClaimExport, ClaimGate, ClaimServing, _run_single_compile_pass_claim
@@ -93,15 +86,6 @@ def _author_module_dirs(source_files: list[str]) -> list[str]:
         if parent not in dirs:
             dirs.append(parent)
     return dirs
-
-
-def _discovery_root(source_file: str, framework_root: str) -> str:
-    """The directory a discovery session runs in, and repo scope searches within."""
-    return (
-        _framework_repo_root(source_file, framework_root)
-        or framework_root
-        or str(Path(source_file).parent if source_file else Path.cwd())
-    )
 
 
 def _recipe_files(recipes) -> list[str]:
@@ -198,197 +182,7 @@ def _require_run_options(trace_path: str, model_path: str, framework: str, outpu
         if not value
     ]
     if missing:
-        raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
-
-
-def _resolve_discover_mode(fuse_kernel: str, discover_mode: str) -> str:
-    """The discovery mode this run uses, which naming a kernel to fuse around decides."""
-    if fuse_kernel:
-        return "anchored"
-    if discover_mode == "anchored":
-        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
-    return discover_mode
-
-
-@dataclass
-class _Discovery:
-    """What the discovery stage located, and why it located nothing when it did not."""
-
-    recipes: list
-    anchor_report: AnchorReport | None = None
-    llm_error: LlmUnavailableError | None = None
-
-
-@dataclass(frozen=True)
-class _DiscoveryInputs:
-    """What a discovery stage works from: the trace and its diagnosis, the model, the install, scope and agent."""
-
-    trace_path: str
-    model_path: str
-    model_type: str
-    install: FrameworkInstall
-    decode_batch: int
-    attn_tp_size: int
-    diagnosis: Any
-    repo_scope: bool
-    out: Path
-    agent_factory: Any
-
-    def resolve_source(self) -> tuple[dict[str, Any], str]:
-        """The decode shapes and the framework source file the model resolves to."""
-        shapes = resolve_decode_shapes(self.model_path, decode_batch=self.decode_batch, attn_tp_size=self.attn_tp_size)
-        source_file, _source_note = resolve_framework_source_file(
-            self.model_path,
-            self.install.framework,
-            framework_root=self.install.framework_root,
-            model_type=self.model_type,
-        )
-        return shapes, source_file
-
-
-def _discover_anchored(inputs: _DiscoveryInputs, fuse_kernel: str, dry_run: bool) -> _Discovery:
-    """Resolve the named kernel in the trace, then discover fusions anchored on it."""
-    out = inputs.out
-    try:
-        anchor_report = resolve_anchor(inputs.trace_path, KernelAnchor(name=fuse_kernel))
-    except AnchorResolutionError as exc:
-        raise click.UsageError(str(exc)) from exc
-    write_anchor_report(anchor_report, out)
-    log.info(
-        "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
-        anchor_report.category,
-        anchor_report.occurrences,
-        anchor_report.total_us,
-        anchor_report.share * 100,
-        anchor_report.signature,
-        anchor_report.consistency * 100,
-    )
-    for text in anchor_report.warnings:
-        log.warning("anchor: %s", text)
-    # Ahead of the dry-run exit: resolution is the whole point of a dry run here, so the operator sees which
-    # source the launches were selected against before an agent or a GPU is paid for.
-    shapes, source_file = inputs.resolve_source()
-    discovery_root = _discovery_root(source_file, inputs.install.framework_root)
-    if dry_run:
-        log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
-        return _Discovery([], anchor_report)
-    try:
-        discovery_agent = inputs.agent_factory()
-        recipes = discover_anchored_recipes(
-            DiscoveryTarget(
-                model_type=inputs.model_type,
-                install=inputs.install,
-                source_file=source_file,
-                shapes=shapes,
-                repo_scope=inputs.repo_scope,
-                repo_root=discovery_root,
-            ),
-            anchor_report,
-            category_shares=inputs.diagnosis.category_shares,
-            llm_fn=registered_agent_llm_fn(
-                discovery_agent,
-                DiscoverySession(
-                    model=discovery_agent.runtime.model,
-                    workdir=discovery_root,
-                    # Discovery is read-only, so the file it is shown is snapshotted
-                    # and restored. Under repo scope no file is shown and the whole
-                    # tree is off limits, so the session's own read-only spec
-                    # carries that instead.
-                    protected_files=[source_file] if source_file else [],
-                    log_path=str(out / "discovery_llm.txt"),
-                ),
-            ),
-        )
-    except LlmUnavailableError as exc:
-        log.error(
-            "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
-            exc.kind,
-            exc.attempts,
-            exc,
-        )
-        return _Discovery([], anchor_report, exc)
-    return _Discovery(recipes, anchor_report)
-
-
-def _discover_by_llm(inputs: _DiscoveryInputs) -> _Discovery:
-    """Let the model read the launch-bound profile and the real source and propose chains itself.
-
-    Not capped to the template library, unlike ``patterns``.
-    """
-    out = inputs.out
-    shapes, source_file = inputs.resolve_source()
-    try:
-        discovery_agent = inputs.agent_factory()
-        discovery_workdir = _discovery_root(source_file, inputs.install.framework_root)
-        recipes = discover_recipes(
-            inputs.diagnosis,
-            DiscoveryTarget(
-                model_type=inputs.model_type,
-                # The same install build_recipes gets: each proposal is checked against THIS install's compile-pass
-                # config, and that verdict rewrites the pattern id.
-                install=inputs.install,
-                source_file=source_file,
-                shapes=shapes,
-                repo_scope=inputs.repo_scope,
-                repo_root=discovery_workdir,
-            ),
-            inputs.trace_path,
-            llm_fn=registered_agent_llm_fn(
-                discovery_agent,
-                DiscoverySession(
-                    model=discovery_agent.runtime.model,
-                    workdir=discovery_workdir,
-                    protected_files=[source_file] if source_file else [],
-                    log_path=str(out / "discovery_llm.txt"),
-                ),
-            ),
-        )
-    except LlmUnavailableError as exc:
-        # The model was never reached, so this run knows nothing about the kernel.
-        log.error("discovery could not reach the LLM (%s after %d attempt(s)): %s", exc.kind, exc.attempts, exc)
-        return _Discovery([], None, exc)
-    log.info("discovery(llm) proposed %d fusion(s)", len(recipes))
-    return _Discovery(recipes)
-
-
-def _discover(inputs: _DiscoveryInputs, discover_mode: str, fuse_kernel: str, dry_run: bool) -> _Discovery:
-    """Locate the run's fusion recipes the way ``discover_mode`` names."""
-    if discover_mode == "anchored":
-        return _discover_anchored(inputs, fuse_kernel, dry_run)
-    if discover_mode == "llm":
-        return _discover_by_llm(inputs)
-    if inputs.repo_scope:
-        # ``patterns`` matches a fixed template library against the trace and never asks a model anything, so there is
-        # nothing in it that could explore a repository.
-        raise click.UsageError("--repo-scope requires --discover llm or --discover anchored")
-    return _Discovery(
-        build_recipes(
-            inputs.diagnosis, model_path=inputs.model_path, install=inputs.install, decode_batch=inputs.decode_batch
-        )
-    )
-
-
-def _log_located_recipes(discovery: _Discovery, *, dry_run: bool) -> None:
-    """Say what discovery located, and when it located nothing, why -- which is not always a verdict."""
-    if discovery.recipes:
-        log.info(
-            "located %d candidate recipe(s): %s",
-            len(discovery.recipes),
-            ", ".join(f"{r.pattern_id}({r.trigger_share:.2f})" for r in discovery.recipes),
-        )
-    elif discovery.llm_error is not None:
-        log.error(
-            "no fusion recipe located because the LLM was unreachable "
-            "(verdict: %s) — this is NOT a no_opportunity result",
-            LLM_UNAVAILABLE_VERDICT,
-        )
-    elif discovery.anchor_report is not None and dry_run:
-        log.info(
-            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
-            ANCHOR_RESOLVED_VERDICT,
-        )
-    else:
-        log.info("no fusion recipe located (verdict: no_opportunity)")
+        raise FuseUsageError(f"Missing option(s): {', '.join(missing)}.")
 
 
 @dataclass(frozen=True)
@@ -466,52 +260,47 @@ def _run_author_only(authored: list, run: _FusionRun, ab_hint: str) -> int:
     return rc
 
 
-def _echo_run_summary(manifest: dict[str, Any], path: Path, recipes: list, compile_pass_outcome, validation) -> None:
-    """Print the one-line JSON summary a caller reads instead of the manifest.
+def _run_summary(manifest: dict[str, Any], path: Path, recipes: list, compile_pass_outcome, validation) -> dict:
+    """The one-line summary a caller reads instead of the manifest.
 
     A compile_pass run has no kernel-level ValidationResult, so ITS verdict is
     reported rather than a null that reads as "no validation ran".
     """
-    click.echo(
-        json.dumps(
-            {
-                "verdict": manifest["verdict"],
-                "manifest": str(path),
-                "patterns": [r.pattern_id for r in recipes],
-                "speedup": (
-                    compile_pass_outcome.speedup
-                    if compile_pass_outcome is not None
-                    else (validation.kernel_speedup if validation else None)
-                ),
-                "kept": (
-                    compile_pass_outcome.kept
-                    if compile_pass_outcome is not None
-                    else (validation.kept if validation else None)
-                ),
-                "error": manifest["error"],
-                "agent_backend": manifest.get("agent_backend"),
-                "agent_model": manifest.get("agent_model"),
-                "agent_sandbox_mode": manifest.get("agent_sandbox_mode"),
-            }
-        )
-    )
+    return {
+        "verdict": manifest["verdict"],
+        "manifest": str(path),
+        "patterns": [r.pattern_id for r in recipes],
+        "speedup": (
+            compile_pass_outcome.speedup
+            if compile_pass_outcome is not None
+            else (validation.kernel_speedup if validation else None)
+        ),
+        "kept": (
+            compile_pass_outcome.kept if compile_pass_outcome is not None else (validation.kept if validation else None)
+        ),
+        "error": manifest["error"],
+        "agent_backend": manifest.get("agent_backend"),
+        "agent_model": manifest.get("agent_model"),
+        "agent_sandbox_mode": manifest.get("agent_sandbox_mode"),
+    }
 
 
-def _exit_code_for_run(llm_error, loop: Optional[dict[str, Any]]) -> None:
-    """Leave non-zero when the run failed for a reason an exit-code watcher must see.
+def _exit_code_for_run(llm_error, loop: Optional[dict[str, Any]]) -> int:
+    """Non-zero when the run failed for a reason an exit-code watcher must see.
 
     The manifest is the contract, but a run that never reached the model, or one
     whose pipeline never had a chance to fuse anything, must also be visible to
     anything that only watches exit codes.
     """
     if llm_error is not None:
-        raise SystemExit(EXIT_LLM_UNAVAILABLE)
+        return EXIT_LLM_UNAVAILABLE
     if (
         loop is not None
         and not loop["kept"]
         and loop["termination_reason"] in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
     ):
-        raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
+        return EXIT_INFRASTRUCTURE_FAILURE
+    return 0
 
 
 def _settle_single_patch_workspace(run: _FusionRun, top_recipe, exported_ok: bool):
@@ -551,314 +340,101 @@ def _settle_single_patch_workspace(run: _FusionRun, top_recipe, exported_ok: boo
 
 
 @dataclass(frozen=True)
-class HarnessNoiseProbe:
-    """The hidden diagnostic that repeats one kernel-validation harness and reports its variance."""
+class FuseResult:
+    """What one forge-fuse run reports: the one-line summary a caller reads, and the status it leaves with."""
 
-    harness_noise_path: str
-    harness_noise_repeat: int
-    harness_noise_env: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class DecodeSampling:
-    """The decode batch shapes are taken at, and the decode steps the trace captured."""
-
-    decode_batch: int
-    decode_steps: int
+    summary: dict[str, Any]
+    exit_code: int
 
 
-@dataclass(frozen=True)
-class DiscoveryChoice:
-    """How recipes are discovered, and the kernel an anchored discovery fuses around."""
+class _AgentBackendCache:
+    """Create the one agent backend both agent stages share, on first use, and remember the model it resolved."""
 
-    discover_mode: str
-    fuse_kernel: str
+    def __init__(self, agent: FuseAgentOptions) -> None:
+        self._agent = agent
+        self.selected: Any = None
+        self.llm_model = agent.llm_model
 
-
-@dataclass(frozen=True)
-class RunStages:
-    """Which stages run: dry run, authoring, validation, and whether every confirmed pattern is fused at once."""
-
-    dry_run: bool
-    author: bool
-    validate: bool
-    fuse_all_confirmed: bool
-
-
-@dataclass(frozen=True)
-class FuseAgentOptions:
-    """The agent provider, sandbox, model and turn cap for discovery and authoring."""
-
-    agent_backend: str
-    agent_sandbox_mode: str
-    llm_model: Optional[str]
-    max_turns: int
-
-
-@dataclass(frozen=True)
-class SmokeOptions:
-    """The A/B decode lengths, and the extra serving args the smoke launch needs."""
-
-    ab_isl: int
-    ab_osl: int
-    server_extra: str
-
-
-@dataclass(frozen=True)
-class ServingLayout:
-    """How the session shards and sizes the model: TP, attention TP, KV block size and max model length."""
-
-    tp: int
-    attn_tp_size: int
-    block_size: int
-    max_model_len: int
-
-
-@dataclass(frozen=True)
-class FuseRequest:
-    """Every option of one ``forge-fuse`` invocation, grouped by concern."""
-
-    trace_path: str
-    model_path: str
-    framework: str
-    output_dir: str
-    noise: HarnessNoiseProbe
-    framework_root: str
-    repo_scope: bool
-    decode: DecodeSampling
-    discovery: DiscoveryChoice
-    stages: RunStages
-    gpu: str
-    agent: FuseAgentOptions
-    max_recipes: int
-    smoke: SmokeOptions
-    gpu_arch: str
-    layout: ServingLayout
-    verbose: bool
-
-
-@click.command("forge-fuse")
-@click.version_option(version=__version__)
-@option_group(
-    "request",
-    FuseRequest,
-    click.option(
-        "--trace",
-        "trace_path",
-        default="",
-        type=click.Path(),
-        help="Decode kineto trace (*.trace.json[.gz]), captured with CUDA graphs disabled.",
-    ),
-    click.option("--model-path", default="", help="Path to the model directory (must contain config.json)."),
-    click.option(
-        "--framework",
-        default=None,
-        type=click.Choice(["sglang", "vllm", "vllm-aiter"]),
-        help="Target inference framework.",
-    ),
-    click.option(
-        "--output-dir",
-        default="",
-        type=click.Path(),
-        help="Output directory for the manifest + logs.",
-    ),
-    option_group(
-        "noise",
-        HarnessNoiseProbe,
-        click.option(
-            "--harness-noise",
-            "harness_noise_path",
-            default="",
-            hidden=True,
-            help="Diagnostic: repeat one kernel-validation harness and report its variance.",
-        ),
-        click.option(
-            "--harness-noise-repeat",
-            default=20,
-            type=int,
-            hidden=True,
-            help="Diagnostic: how many times to repeat the harness.",
-        ),
-        click.option(
-            "--harness-noise-env",
-            "harness_noise_env",
-            multiple=True,
-            hidden=True,
-            help="Diagnostic: env flag to set for each harness run (repeatable).",
-        ),
-    ),
-    click.option(
-        "--framework-root",
-        default="",
-        help="Explicit framework source root (else auto-detect the installed package).",
-    ),
-    click.option(
-        "--repo-scope/--no-repo-scope",
-        "repo_scope",
-        default=False,
-        help="Give discovery and authoring the whole framework repository instead of one "
-        "resolved model file. Discovery embeds no source and explores the tree with its own "
-        "read/search tools, may return a fusion whose call sites span several files, and "
-        "authoring may edit all of them. Use when the chain is not in the arch-class model "
-        "file and you do not want to name its location.",
-    ),
-    option_group(
-        "decode",
-        DecodeSampling,
-        click.option("--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes."),
-        click.option(
-            "--decode-steps",
-            default=0,
-            type=int,
-            help="Decode steps captured in the trace (to normalize kernels/step).",
-        ),
-    ),
-    option_group(
-        "discovery",
-        DiscoveryChoice,
-        click.option(
-            "--discover",
-            "discover_mode",
-            type=click.Choice(["patterns", "llm", "anchored"]),
-            default="patterns",
-            help="Recipe discovery: 'patterns' (template library), 'llm' (LLM reads trace+source, autonomous), "
-            "or 'anchored' (fuse around the kernel named by --fuse-kernel).",
-        ),
-        click.option(
-            "--fuse-kernel",
-            "fuse_kernel",
-            default="",
-            help="Full GPU kernel name, exactly as the trace spells it. Fusion is then built around "
-            "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
-        ),
-    ),
-    option_group(
-        "stages",
-        RunStages,
-        click.option(
-            "--dry-run",
-            is_flag=True,
-            help="Diagnose + locate only; emit manifest with recipe skeleton (no author/validate).",
-        ),
-        click.option("--author/--no-author", default=True, help="Author the fused kernel via the LLM (non-dry-run)."),
-        click.option("--validate/--no-validate", default=True, help="Run the A/B decode validation (non-dry-run)."),
-        click.option(
-            "--fuse-all-confirmed",
-            is_flag=True,
-            help="Author ALL source-confirmed patterns together (not just the top), and "
-            "A/B all their flags. A compile-pass candidate cannot be authored with "
-            "them, so it is claimed alone and the rest wait for a later round.",
-        ),
-    ),
-    click.option("--gpu", default="0", help="HIP device id for author + A/B."),
-    option_group(
-        "agent",
-        FuseAgentOptions,
-        click.option(
-            "--agent-backend",
-            type=click.Choice(["auto", *AGENT_BACKEND_CHOICES]),
-            default="auto",
-            show_default=True,
-            help="Registered Agent provider for discovery and authoring.",
-        ),
-        click.option(
-            "--agent-sandbox-mode",
-            type=click.Choice(["workspace-write", "read-only", "bypass"]),
-            envvar="FORGE_AGENT_SANDBOX_MODE",
-            default="workspace-write",
-            show_default=True,
-            help="Agent runtime sandbox. Use bypass only when an external boundary already enforces isolation.",
-        ),
-        click.option(
-            "--model",
-            "llm_model",
-            default=None,
-            help="Agent model. Explicit value wins; otherwise uses provider-specific "
-            "$CODEX_MODEL/$CLAUDE_MODEL/$DSH_MODEL, then the registered provider default.",
-        ),
-        click.option("--max-turns", default=100, type=int, help="Max authoring turns."),
-    ),
-    click.option(
-        "--max-recipes",
-        default=0,
-        type=int,
-        help="Cap how many ranked recipes to try. 0 means uncapped: every discovered recipe is considered.",
-    ),
-    option_group(
-        "smoke",
-        SmokeOptions,
-        click.option("--ab-isl", default=512, type=int, help="A/B input length."),
-        click.option("--ab-osl", default=128, type=int, help="A/B output length."),
-        click.option(
-            "--server-extra",
-            default="",
-            help=(
-                "Extra serving args for the smoke launch (e.g. '--kv-cache-dtype fp8'). "
-                "A model whose engine refuses to start without a flag can never reach the "
-                "kernel the smoke exists to exercise."
-            ),
-        ),
-    ),
-    click.option(
-        "--gpu-target",
-        "gpu_arch",
-        default="",
-        help="Canonical GPU arch the author writes for (e.g. gfx950); auto-detected via rocminfo when omitted.",
-    ),
-    option_group(
-        "layout",
-        ServingLayout,
-        click.option(
-            "--tp",
-            default=1,
-            type=int,
-            help="Tensor-parallel size for the serving smoke (must match the session).",
-        ),
-        click.option(
-            "--attn-tp",
-            "attn_tp_size",
-            default=1,
-            type=int,
-            help=(
-                "Attention TP shard used to stamp n_local_heads / n_local_groups "
-                "(default 1; keep 1 under DP-attention even when --tp > 1)."
-            ),
-        ),
-        click.option(
-            "--block-size",
-            "block_size",
-            default=0,
-            type=int,
-            help="vLLM KV --block-size for the serving smoke (0=omit). Required for "
-            "sparse-attention models that reject the default block size.",
-        ),
-        click.option(
-            "--max-model-len",
-            "max_model_len",
-            default=0,
-            type=int,
-            help="Serving-smoke max model / context length (0 uses the smoke default 4096).",
-        ),
-    ),
-    click.option("--verbose", "-v", is_flag=True, help="Verbose logging."),
-)
-def run(request: FuseRequest) -> None:
-    """Diagnose a decode trace and locate a fusion opportunity for the model."""
-    noise = request.noise
-    if noise.harness_noise_path:
-        click.echo(
-            json.dumps(
-                measure_harness_noise(
-                    harness=noise.harness_noise_path,
-                    repeat=noise.harness_noise_repeat,
-                    gpu=request.gpu,
-                    env_flags=noise.harness_noise_env,
-                ),
-                indent=2,
+    def __call__(self) -> Any:
+        if self.selected is not None:
+            return self.selected
+        try:
+            self.selected = _create_agent_backend(
+                self._agent.agent_backend,
+                self.llm_model,
+                self._agent.agent_sandbox_mode,
             )
+        except FuseError:
+            raise
+        except Exception as exc:  # isolation boundary: provider construction, reported as the run's refusal
+            raise FuseError(f"agent backend configuration failed: {type(exc).__name__}: {exc}") from exc
+        self.llm_model = self.selected.runtime.model
+        log.info(
+            "selected Agent backend=%s model=%s",
+            self.selected.name,
+            self.selected.runtime.model,
         )
-        return
+        return self.selected
 
+
+@dataclass(frozen=True)
+class _ManifestPublisher:
+    """Write the run's manifest, as complete as the run has so far got.
+
+    The aggregate is the only thing that points at a keeper, so it cannot wait for every
+    campaign to return: a run killed in between would report REVERT while proven,
+    already-smoked patches sat in the workspace. Called from ``on_keep`` too, it is never
+    missing, only partial, and the end-of-run call overwrites it with the real loop /
+    compile-pass / error fields before any exit.
+    """
+
+    subject: ManifestSubject
+    split: _NominationSplit
+    discovery: _Discovery
+    backend: _AgentBackendCache
+    out: Path
+
+    def __call__(self, outcome: RunOutcome) -> tuple[dict[str, Any], Path]:
+        anchor_report = self.discovery.anchor_report
+        manifest = build_manifest(
+            self.subject,
+            LocatedFusions(
+                recipe=self.split.top_recipe,
+                candidates=self.discovery.recipes,
+                anchor=anchor_report.to_dict() if anchor_report is not None else None,
+            ),
+            outcome,
+        )
+        selected_agent = self.backend.selected
+        if selected_agent is not None:
+            manifest["agent_backend"] = selected_agent.name
+            manifest["agent_model"] = selected_agent.runtime.model
+            manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
+        return manifest, write_manifest(manifest, self.out)
+
+
+def _diagnose(request: FuseRequest) -> Any:
+    """Diagnose the decode trace: how launch-bound it is, and what fusing could gain end to end."""
+    diagnosis = diagnose_trace(
+        request.trace_path, decode_steps=request.decode.decode_steps, decode_batch=request.decode.decode_batch
+    )
+    log.info(
+        "diagnosis: candidate=%s launch_bound_share=%.3f predicted_e2e_gain=%.3f busy_of_wall=%s reason=%s",
+        diagnosis.is_candidate,
+        diagnosis.launch_bound_share,
+        diagnosis.predicted_e2e_gain,
+        diagnosis.busy_fraction_of_wall,
+        diagnosis.reason,
+    )
+    return diagnosis
+
+
+def fuse(request: FuseRequest) -> FuseResult:
+    """Diagnose a decode trace and locate, author and validate a fusion opportunity for the model.
+
+    Raises :class:`FuseUsageError` for an option combination the run cannot honour and :class:`FuseError` for a run
+    that cannot start.
+    """
     trace_path, model_path, framework = request.trace_path, request.model_path, request.framework
     stages, agent = request.stages, request.agent
     _require_run_options(trace_path, model_path, framework, request.output_dir)
@@ -869,42 +445,8 @@ def run(request: FuseRequest) -> None:
     _setup_logging(out, request.verbose)
 
     log.info("forge-fuse %s | framework=%s model=%s", __version__, framework, model_path)
-    selected_agent = None
-    llm_model = agent.llm_model
-
-    def require_agent_backend():
-        """Lazily create and cache the one backend shared by both Agent stages."""
-        nonlocal selected_agent, llm_model
-        if selected_agent is not None:
-            return selected_agent
-        try:
-            selected_agent = _create_agent_backend(
-                agent.agent_backend,
-                llm_model,
-                agent.agent_sandbox_mode,
-            )
-        except click.ClickException:
-            raise
-        except Exception as exc:
-            raise click.ClickException(f"agent backend configuration failed: {type(exc).__name__}: {exc}") from exc
-        llm_model = selected_agent.runtime.model
-        log.info(
-            "selected Agent backend=%s model=%s",
-            selected_agent.name,
-            selected_agent.runtime.model,
-        )
-        return selected_agent
-
-    decode_batch = request.decode.decode_batch
-    diagnosis = diagnose_trace(trace_path, decode_steps=request.decode.decode_steps, decode_batch=decode_batch)
-    log.info(
-        "diagnosis: candidate=%s launch_bound_share=%.3f predicted_e2e_gain=%.3f busy_of_wall=%s reason=%s",
-        diagnosis.is_candidate,
-        diagnosis.launch_bound_share,
-        diagnosis.predicted_e2e_gain,
-        diagnosis.busy_fraction_of_wall,
-        diagnosis.reason,
-    )
+    backend = _AgentBackendCache(agent)
+    diagnosis = _diagnose(request)
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
     inputs = _DiscoveryInputs(
@@ -912,56 +454,41 @@ def run(request: FuseRequest) -> None:
         model_path=model_path,
         model_type=model_type,
         install=FrameworkInstall(framework, request.framework_root),
-        decode_batch=decode_batch,
+        decode_batch=request.decode.decode_batch,
         attn_tp_size=request.layout.attn_tp_size,
         diagnosis=diagnosis,
         repo_scope=request.repo_scope,
         out=out,
-        agent_factory=require_agent_backend,
+        agent_factory=backend,
     )
     discovery = _discover(inputs, discover_mode, fuse_kernel, stages.dry_run)
-    recipes, anchor_report, llm_error = discovery.recipes, discovery.anchor_report, discovery.llm_error
     _log_located_recipes(discovery, dry_run=stages.dry_run)
-    split = _split_nomination(recipes, stages.fuse_all_confirmed)
-
-    def publish(outcome: RunOutcome) -> tuple[dict[str, Any], Path]:
-        """Write the run's manifest, as complete as the run has so far got.
-
-        The aggregate is the only thing that points at a keeper, so it cannot wait for every
-        campaign to return: a run killed in between would report REVERT while proven,
-        already-smoked patches sat in the workspace. Called from ``on_keep`` too, it is never
-        missing, only partial, and the end-of-run call overwrites it with the real loop /
-        compile-pass / error fields before any exit.
-        """
-        manifest = build_manifest(
-            ManifestSubject(framework=framework, model_path=model_path, model_type=model_type, diagnosis=diagnosis),
-            LocatedFusions(
-                recipe=split.top_recipe,
-                candidates=recipes,
-                anchor=anchor_report.to_dict() if anchor_report is not None else None,
-            ),
-            outcome,
-        )
-        if selected_agent is not None:
-            manifest["agent_backend"] = selected_agent.name
-            manifest["agent_model"] = selected_agent.runtime.model
-            manifest["agent_sandbox_mode"] = selected_agent.runtime.sandbox_mode
-        return manifest, write_manifest(manifest, out)
+    split = _split_nomination(discovery.recipes, stages.fuse_all_confirmed)
+    publish = _ManifestPublisher(
+        ManifestSubject(framework=framework, model_path=model_path, model_type=model_type, diagnosis=diagnosis),
+        split,
+        discovery,
+        backend,
+        out,
+    )
 
     outcome = RunOutcome()
     if not stages.dry_run and split.top_recipe is not None:
-        author = AuthorAgent(backend=require_agent_backend, gpu=request.gpu, model=llm_model, max_turns=agent.max_turns)
-        outcome = _run_fusion_stages(request, recipes, split, author, publish)
+        author = AuthorAgent(backend=backend, gpu=request.gpu, model=backend.llm_model, max_turns=agent.max_turns)
+        outcome = _run_fusion_stages(request, discovery.recipes, split, author, publish)
+    llm_error = discovery.llm_error
     manifest, path = publish(
         dataclasses.replace(
             outcome,
-            verdict_override=_verdict_override(llm_error, anchor_report, stages.dry_run),
+            verdict_override=_verdict_override(llm_error, discovery.anchor_report, stages.dry_run),
             error=(llm_error.to_dict() if llm_error is not None else None),
         )
     )
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
-    _echo_run_summary(manifest, path, recipes, outcome.compile_pass, outcome.validation)
-    _exit_code_for_run(llm_error, outcome.loop)
+    return FuseResult(
+        summary=_run_summary(manifest, path, discovery.recipes, outcome.compile_pass, outcome.validation),
+        exit_code=_exit_code_for_run(llm_error, outcome.loop),
+    )
 
 
 def _run_fusion_stages(
@@ -1595,114 +1122,3 @@ def validate_existing_source(
         env_flags=dict.fromkeys(recipe.env_flag.split(), "1"),
     )
     return validate_recipe(recipe, runner, target_speedup=target_speedup)
-
-
-def measure_harness_noise(
-    *,
-    harness: str,
-    repeat: int = 20,
-    gpu: str = "0",
-    env_flags: tuple[str, ...] = (),
-    workdir: str = ".",
-) -> dict[str, object]:
-    """Measure how much the same harness varies on this machine."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    flags = dict.fromkeys(env_flags, "1")
-    speedups: list[float] = []
-    eager: list[float] = []
-    fused: list[float] = []
-    failures = 0
-    for i in range(max(1, repeat)):
-        runner = HarnessKernelRunner(
-            harness_path=harness,
-            workdir=workdir,
-            framework_root=workdir,
-            gpu=gpu,
-            env_flags=flags,
-        )
-        bench = runner.microbench(
-            Recipe(
-                pattern_id="noise-probe",
-                description="",
-                env_flag=" ".join(env_flags),
-                source_file="",
-                source_hints=[],
-                fusion_math="",
-                eager_reference_hint="",
-                shapes={},
-                matched_categories=[],
-                trigger_share=0.0,
-            )
-        )
-        if bench.skipped or not bench.eager_us or not bench.fused_us:
-            failures += 1
-            continue
-        eager.append(float(bench.eager_us))
-        fused.append(float(bench.fused_us))
-        speedups.append(float(bench.eager_us) / float(bench.fused_us))
-        log.info("run %d/%d: %.4fx", i + 1, repeat, speedups[-1])
-
-    report: dict[str, object] = {"runs": repeat, "usable": len(speedups), "failed": failures}
-    if len(speedups) >= 2:
-        mean = statistics.fmean(speedups)
-        sd = statistics.stdev(speedups)
-        cv = sd / mean if mean else 0.0
-        report.update(
-            {
-                "speedup_mean": round(mean, 4),
-                "speedup_stdev": round(sd, 5),
-                "speedup_cv": round(cv, 5),
-                "speedup_min": round(min(speedups), 4),
-                "speedup_max": round(max(speedups), 4),
-                "spread_pct": round((max(speedups) - min(speedups)) / mean * 100.0, 2),
-                "eager_us_mean": round(statistics.fmean(eager), 3),
-                "fused_us_mean": round(statistics.fmean(fused), 3),
-                # How far out the 3% improvement bar sits.
-                "bar_in_sigmas": round(0.03 / (cv * (2**0.5)), 2) if cv else None,
-                "verdict": (
-                    "the 3% bar is within noise"
-                    if cv and 0.03 / (cv * (2**0.5)) < 2.0
-                    else "the 3% bar is outside noise"
-                ),
-            }
-        )
-    return report
-
-
-def _package_root(source_file: str) -> str:
-    """Top install dir containing ``source_file``'s package (site-packages-style root)."""
-    if not source_file:
-        return ""
-    p = Path(source_file).resolve()
-    d = p.parent
-    while (d.parent != d) and (d / "__init__.py").is_file():
-        d = d.parent
-    return str(d)
-
-
-def _framework_repo_root(source_file: str, framework_root: str) -> str:
-    """Repo/install root that patch paths are relative to (for patch export)."""
-    import subprocess
-
-    start = source_file or framework_root
-    if not start:
-        return framework_root or ""
-    start_dir = str(Path(start).parent if Path(start).suffix else start)
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        r = git(
-            "-C",
-            start_dir,
-            "rev-parse",
-            "--show-toplevel",
-            check=False,
-            timeout=30,
-        )
-        if r.returncode == 0:
-            toplevel = r.stdout.strip()
-            if source_file and _git_tracks(toplevel, source_file):
-                return toplevel
-            # Inside a git work tree but the framework file is untracked (venv in a git project): use the package
-            # root, not the project root.
-            return _package_root(source_file) or toplevel or framework_root or ""
-    # Not a git work tree at all (plain pip install).
-    return _package_root(source_file) or framework_root or ""
