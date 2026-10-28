@@ -145,11 +145,12 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
         )
     if inert_env_reads:
         blocks.append(
-            "POSSIBLE CAUSE OF THE INERT BENCH: the prior round measured the "
-            "same throughput as the baseline, as though its change were not "
-            "there, and its diff reads environment variable(s) "
+            "POSSIBLE CAUSE OF THE UNCHANGED BOOT: the prior round reverted "
+            "without serving, and its boot stopped at the same wall with the "
+            "same failure as the boot before it, as though its change were not "
+            "there; its diff reads environment variable(s) "
             + ", ".join(inert_env_reads[:4])
-            + " that nothing set for that bench. Check whether the patched "
+            + " that nothing set for that boot. Check whether the patched "
             "path is switched off by default. This is one lead among others, "
             "not a finding: a read may be an opt-out, a value the code needs "
             "or unrelated to the change."

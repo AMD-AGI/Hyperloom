@@ -17,7 +17,13 @@ from hyperloom.common.coerce import first_text, to_float, to_str_list
 from hyperloom.inference_optimizer import framework_paths
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 
-from ...bringup import load_boot_observation, observation_summary, verdict_of
+from ...bringup import (
+    load_boot_observation,
+    observation_summary,
+    round_advanced,
+    round_outcome_unchanged,
+    verdict_of,
+)
 from ...bringup.persist import LoadedObservation
 from ...enablement.recipe import keep_probe, keep_records
 from ...enablement.recipe.projections import project_launch_evidence
@@ -42,19 +48,34 @@ def _attach_attempt_evidence(verdict: dict[str, Any], attempt: IntegrateAttempt)
     """Add to a verdict what the applied attempt holds and the gate itself cannot see."""
     if attempt.dropped_env_overrides:
         verdict["dropped_env_overrides"] = attempt.dropped_env_overrides
-    # An enablement round that reverted without running booted no further than
-    # the unpatched tree did: whatever the patch wrote, the measurement did not
-    # see it. The env names its diff reads are worth checking then -- one of
-    # them may be a switch nothing turns on -- so they ride along as a lead for
-    # the next round's mandate. A read is not proof of a gate (an opt-out
-    # switch, a write and a plain value read read the same), which is why this
-    # is evidence beside a bench that already happened and not a refusal.
-    if verdict.get("status") != "reverted" or verdict.get("runnable") is not False:
-        return
+
+
+def _inert_round_evidence(
+    attempt: IntegrateAttempt,
+    *,
+    served: bool,
+    before: LoadedObservation,
+    after: LoadedObservation,
+) -> dict[str, Any]:
+    """The env names an inert round's diff reads that nothing armed for its boot.
+
+    A round is inert only on the one outcome that shows its patch changed
+    nothing the boot did: it never served, and the boot stopped at the wall the
+    boot before it stopped at, with the same failure. A revert that served and
+    failed minimal correctness, or that died at another wall, says nothing about
+    whether the patched path was reached, so it carries no such lead and this
+    answers ``{}``.
+
+    One of the names may be a switch nothing turns on, so they ride along as a
+    lead for the next round's mandate. A read is not proof of a gate (an opt-out
+    switch, a write and a plain value read read the same), which is why this is
+    evidence beside a boot that already happened and not a refusal.
+    """
+    if served or not round_outcome_unchanged(before.observation, after.observation):
+        return {}
     armed = {*attempt.extra_envs_applied, *os.environ}
     names = _switch_manifest.unarmed_env_reads(_read_patch_texts(attempt.applied), armed=armed)
-    if names:
-        verdict["inert_round_env_reads"] = names
+    return {"inert_round_env_reads": names} if names else {}
 
 
 def _observation_evidence(half: str, loaded: LoadedObservation) -> dict[str, Any]:
@@ -190,7 +211,6 @@ class EnablementGateMixin:
 
         from hyperloom.common.failure_signature import runnable_decision
 
-        from ...bringup import round_advanced
         from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
@@ -232,6 +252,10 @@ class EnablementGateMixin:
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 **evidence,
+                # Only an inert round -- one whose boot stopped exactly where the
+                # boot before it did -- hands the next mandate the env names its
+                # diff read; every other revert leaves this out.
+                **_inert_round_evidence(attempt, served=served, before=before_loaded, after=after_loaded),
             }
 
         # Accepted: the boot either runs or reached a deeper wall. Both keep the

@@ -21,6 +21,7 @@ from hyperloom.orchestrator.bringup.observe import (
     observe_bringup,
     recorded_verdict,
     round_advanced,
+    round_outcome_unchanged,
     session_root,
     verdict_of,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "recorded_verdict",
     "resolve_trees",
     "round_advanced",
+    "round_outcome_unchanged",
     "session_root",
     "verdict_of",
     "write_boot_observation",

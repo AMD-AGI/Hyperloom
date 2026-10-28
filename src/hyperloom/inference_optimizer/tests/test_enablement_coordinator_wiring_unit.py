@@ -1161,15 +1161,31 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
 
 
 def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkeypatch, tmp_path):
-    """Without the names the next round repeats the patch and measures the same nothing."""
+    """Without the names the next round repeats the patch and hits the same wall."""
     _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
-    assert "POSSIBLE CAUSE OF THE INERT BENCH" in params["notes"]
+    assert "POSSIBLE CAUSE OF THE UNCHANGED BOOT" in params["notes"]
     assert "HL_FUSE_RMSNORM" in params["notes"]
     assert "not a finding" in params["notes"]
+
+
+def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path):
+    """The gate never measures a throughput for a boot that did not serve.
+
+    The note carries the gate's own observation -- no serving, the same wall as
+    the boot before it -- so the next round is not sent after a measurement
+    that was never taken.
+    """
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "same throughput as the baseline" not in params["notes"]
+    assert "same wall with the same failure" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):

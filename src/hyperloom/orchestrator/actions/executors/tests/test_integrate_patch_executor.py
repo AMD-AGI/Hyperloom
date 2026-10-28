@@ -1748,11 +1748,12 @@ async def test_a_patch_that_reads_an_env_name_still_gets_its_bench(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_an_inert_round_hands_on_the_env_names_its_patch_added_a_read_of(tmp_path: Path, monkeypatch):
-    """A round that reverted without running is where an unset switch is worth a look.
+    """A boot that stopped where the one before it stopped is where an unset switch is worth a look.
 
-    The patch was there and the measurement came out as though it were not, so
-    the names ride along for the next mandate to check. They are a lead beside
-    a bench that already happened, not a verdict on the patch.
+    The patch was there and the boot ended at the same wall with the same
+    failure, as though it were not, so the names ride along for the next
+    mandate to check. They are a lead beside a boot that was observed twice,
+    not a verdict on the patch.
     """
     monkeypatch.delenv("HL_TEST_FUSE", raising=False)
 
@@ -1763,6 +1764,54 @@ async def test_an_inert_round_hands_on_the_env_names_its_patch_added_a_read_of(t
     assert result["status"] == "reverted"
     assert result["runnable"] is False
     assert result["inert_round_env_reads"] == ["HL_TEST_FUSE"]
+
+
+@pytest.mark.asyncio
+async def test_a_revert_that_served_hands_on_no_env_names(tmp_path: Path, monkeypatch):
+    """A server that served ran the patched code; its switch is not the lead.
+
+    This round reverts on minimal correctness, not on runnability: the boot got
+    all the way up, so nothing here says the change was never reached.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+    same_wall = boot_log_for(LadderStage.ENGINE_INIT)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=True,
+        enablement_accuracy=0.0,
+        before_log=same_wall,
+        after_log=same_wall,
+        patch_contents=[_SWITCH_GATED_PATCH],
+    )
+
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "inert_round_env_reads" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_revert_at_another_wall_hands_on_no_env_names(tmp_path: Path, monkeypatch):
+    """A boot that ended somewhere else than the one before it did something.
+
+    Where it ended earlier the patch is the likeliest cause, and an unset name
+    it reads explains none of it.
+    """
+    monkeypatch.delenv("HL_TEST_FUSE", raising=False)
+
+    result, _repo = await _run_enablement_integrate(
+        tmp_path,
+        monkeypatch,
+        booted=False,
+        before_log=boot_log_for(LadderStage.GRAPH_CAPTURE),
+        after_log=boot_log_for(LadderStage.ENGINE_INIT),
+        patch_contents=[_SWITCH_GATED_PATCH],
+    )
+
+    assert result["status"] == "reverted"
+    assert result["runnable"] is False
+    assert "inert_round_env_reads" not in result
 
 
 @pytest.mark.asyncio
