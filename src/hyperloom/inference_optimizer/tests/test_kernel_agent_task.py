@@ -637,7 +637,6 @@ async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monk
     monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", _noop)
     monkeypatch.setattr(c.enablement_lane, "pump_enablement_safely", _noop)
     c.phase_machine.pump_table = {ps.PHASE_KERNEL_AGENT: _noop}
-    c._last_maintenance_ts = time.monotonic()
 
     await c.tick(2)
     st.kernel_progress_fingerprint = "fp-b"

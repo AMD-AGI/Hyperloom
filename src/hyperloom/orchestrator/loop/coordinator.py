@@ -22,9 +22,6 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
 
-# Periodic in-process maintenance/reaper cadence (lease reaping + DB retention), in wall-clock seconds.
-MAINTENANCE_INTERVAL_SEC: int = 1800
-
 # Default per-macro-cycle wall-clock window (hours) in cyclic mode.
 DEFAULT_CYCLE_HOURS: float = 24.0
 # Trailing window for the crash-rate emergency stop, in seconds.
@@ -307,9 +304,6 @@ class Coordinator:
         self._stop = asyncio.Event()
         self._stop_classification = ""
         self._tasks_running: list[asyncio.Task] = []
-
-        # Wall-clock stamp of the last maintenance pass (lease reaping + DB retention).
-        self._last_maintenance_ts: float = time.monotonic()
 
         # Pin a per-macro-cycle budget window so per-phase budget fractions apply per cycle.
         if float(self.shared_state.cycle_minutes or 0) <= 0:
@@ -714,11 +708,7 @@ class Coordinator:
         except Exception as exc:
             log.exception("phase advance failed")
             self.record_exception(stage="advance_phase", exc=exc)
-        # Periodic reaper + DB retention; time-gated.
-        now = time.monotonic()
-        if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
-            await self.maintenance.run(tick=self.shared_state.tick)
-            self._last_maintenance_ts = now
+        await self.maintenance.run_due()
         return in_closing
 
     def record_exception(

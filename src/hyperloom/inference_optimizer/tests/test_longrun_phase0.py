@@ -244,7 +244,8 @@ def test_retry_policy_from_env(monkeypatch):
 async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
-    from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.maintenance import MAINTENANCE_INTERVAL_SEC
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
@@ -273,9 +274,51 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
         assert "events_pruned" in summary and "tasks_pruned" in summary
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 1
-        # The wall-clock gate is seeded at construction, so tick 1 of a fresh
-        # session must not already be past the interval.
-        assert time.monotonic() - c._last_maintenance_ts < MAINTENANCE_INTERVAL_SEC
+        # The wall-clock gate is seeded when maintenance is first reached, so
+        # tick 1 of a fresh session must not already be past the interval.
+        assert time.monotonic() - c.maintenance._last_pass_ts < MAINTENANCE_INTERVAL_SEC
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_tick_persists_elapsed_budget_once_the_save_interval_passes(tmp_path, monkeypatch):
+    """A phase step that holds the loop for hours still charges its time to ``state.json`` every interval."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    from hyperloom.inference_optimizer.session.paths import make_session_dir
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.maintenance import STATE_SAVE_INTERVAL_SEC
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from .conftest import seed_target_analysis_marker
+
+    sd = make_session_dir()
+    seed_target_analysis_marker(sd)
+    backends = {
+        "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+        "critic": MockCriticBackend(),
+    }
+    c = Coordinator(sd, backends=backends)
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(c, "reactor_pass", _noop)
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", _noop)
+    monkeypatch.setattr(c.enablement_lane, "pump_enablement_safely", _noop)
+    c.phase_machine.pump_table = {"UNUSED": _noop}
+    try:
+        c.shared_state.save(sd)
+        charged_on_disk = SharedState.load_or_init(sd).elapsed_charged_sec
+        c.shared_state.begin_leg(now_unix=time.time() - 600.0)
+
+        await c.tick(1)
+        assert SharedState.load_or_init(sd).elapsed_charged_sec == charged_on_disk
+
+        c.maintenance._last_state_save_ts -= STATE_SAVE_INTERVAL_SEC
+        await c.tick(1)
+        assert SharedState.load_or_init(sd).elapsed_charged_sec >= charged_on_disk + 600.0
     finally:
         await c.stop()
 
