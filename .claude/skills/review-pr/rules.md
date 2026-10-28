@@ -1232,13 +1232,17 @@ with <encoding defect>, <N> occurrences vs <M> at base`
 **Severity:** blocking
 **Fires when:** always. This rule governs every candidate finding and the shape of the card.
 **The rule:** the PR description's account of the defect and of the fix is not accepted as
-evidence. The changed function is called directly on a constructed case, the matrix of shapes
+evidence. The changed function is called directly on a constructed case; where it cannot be and a
+stand-in runs instead, the stand-in's context is listed against the real one item by item -- the
+shell's `set` options, the position in a pipeline, the redirection target, the interpreter version,
+what is mocked -- because a `die` that aborts a script at top level exits only a subshell in the
+middle of a pipeline, and the conclusion reverses. The matrix of shapes
 the fix must cover is enumerated, and only the tests scoped to the change are run -- CI covers
 the full suite. The published review has two parts: what the PR does and how, then blocking
 issues only. When there are none, that is stated explicitly, with the head commit, the merge
 base, the cases run and the tests run, so the author sees the depth rather than a bare LGTM.
 Non-blocking observations are not appended in any form.
-**Seen in:** PR #1412 -- the review listed what was verified rather than taking the description
+**Seen in:** PR #2227 -- a shell failure was "reproduced" on a hand-written probe that called `die` directly, concluding the script printed a message and continued; the real block was under `set -euo pipefail` where a bare assignment tripped errexit first, so `die` was dead code and the fetch exited 1 in silence. The wrong conclusion reached a commit message and a code comment. PR #1412 -- the review listed what was verified rather than taking the description
 at face value; PR #1420 ran four cases through the real `_seal_repository` on a repository a
 killed session had left on `forge/controller/dead-1`.
 **Not a finding when:** n/a -- this is a precondition for writing the card, not a finding.

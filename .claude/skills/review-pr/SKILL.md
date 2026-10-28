@@ -182,8 +182,10 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 
 1. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
    comment and the prompt assert? Every number, flag name, path and default in the description must
-   be greppable in the head tree. A number you cannot trace to an output is `[unverified]` and is
-   never repeated as fact.
+   be greppable in the head tree; a number you cannot trace to an output is `[unverified]` and is
+   never repeated as fact. A command or an artifact name the diff adds to an instruction — a rule's
+   evidence step, a prompt, a runbook — is run here, once, and its output read: a step naming the
+   wrong artifact or a deprecated form prints nothing and fails silently forever.
 2. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
    reachable, will it ever fire, does it convert a failed measurement, a failed patch apply or a
    failed artifact write into a plausible-looking value? A fail-closed gate that coalesces a
