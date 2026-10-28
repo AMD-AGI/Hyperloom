@@ -185,6 +185,7 @@ def _validate_framework_against_sources(task: KernelRewriteTask) -> None:
 def publish_staged_task(
     layout: ControllerLayout,
     staged_dir: str | Path,
+    decode_batch_sizes: frozenset[int] = frozenset(),
 ) -> TaskPublicationResult:
     """Validate one staged task, pin its repo HEAD, and publish it atomically."""
     unresolved_source = Path(staged_dir).expanduser()
@@ -214,9 +215,7 @@ def publish_staged_task(
         payload["base_commit"] = _repo_head(Path(repo_root_raw).expanduser().resolve())
         payload["driver_path"] = "driver.py"
         task = parse_task_payload(
-            payload,
-            task_dir=source,
-            enforce_directory_identity=False,
+            payload, task_dir=source, enforce_directory_identity=False, decode_batch_sizes=decode_batch_sizes
         )
         _validate_task_sources_at_base(task)
         _validate_framework_against_sources(task)
@@ -326,6 +325,7 @@ def publish_complete_staged_tasks(
     quiescent_sec: float = PUBLISH_QUIESCENT_SEC,
     now: Callable[[], float] = time.time,
     refused: dict[str, float] | None = None,
+    decode_batch_sizes: frozenset[int] = frozenset(),
 ) -> tuple[TaskPublicationResult, ...]:
     """Publish every staged task that is complete and no longer being written."""
     root = layout.agent_staging_root
@@ -351,7 +351,7 @@ def publish_complete_staged_tasks(
             if refused is not None:
                 refused[entry.name] = newest
             continue
-        result = publish_staged_task(layout, entry)
+        result = publish_staged_task(layout, entry, decode_batch_sizes)
         if result.published:
             log.info("published operator task %s from %s", result.operator_id, entry.name)
         else:

@@ -578,7 +578,7 @@ function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::_
 function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_task_result 87
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 82
 function-lines src/kernelforge/kernel_rewrite_controller/task.py::parse_task_payload 55
-function-lines src/kernelforge/kernel_rewrite_controller/task_publisher.py::publish_staged_task 68
+function-lines src/kernelforge/kernel_rewrite_controller/task_publisher.py::publish_staged_task 66
 function-lines src/kernelforge/knowledge/kb_store/identity/warmstart_rank.py::rank_fallback_identities 53
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 95
 function-lines src/kernelforge/knowledge/kb_store/record_store.py::KBStoreRewriteRecords.materialize 67

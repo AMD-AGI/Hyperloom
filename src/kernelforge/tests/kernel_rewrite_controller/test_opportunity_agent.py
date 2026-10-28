@@ -48,13 +48,30 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, _git(repo, "rev-parse", "HEAD")
 
 
-def _handoff(tmp_path: Path):
+def _handoff(tmp_path: Path, trace_evidence: str = "# Trace Evidence\n"):
     root = tmp_path / "handoff"
     root.mkdir()
     (root / "workload.md").write_text("# Workload\n", encoding="utf-8")
     (root / "serving-context.md").write_text("# Serving Context\n", encoding="utf-8")
-    (root / "trace-evidence.md").write_text("# Trace Evidence\n", encoding="utf-8")
+    (root / "trace-evidence.md").write_text(trace_evidence, encoding="utf-8")
     return read_handoff(root)
+
+
+_OBSERVED_VERIFY_BS2_BS3 = (
+    "# Trace Evidence\n\n## Observed Decode Classes\n\n"
+    "- `VERIFY bs=2`: 3 step(s), 60.0% of decode steps\n"
+    "- `VERIFY bs=3`: 2 step(s), 40.0% of decode steps\n"
+)
+_VERIFY_BS10_REFUSAL = (
+    "invalid staged task: decode shape case(s) 'verify_bs10' at bs=10 use a batch size the trace never ran: "
+    "the observed decode batch sizes are 2, 3 (Observed Decode Classes in trace-evidence.md). Give every "
+    "decode case one of those batch sizes, or drop the case."
+)
+
+
+def _set_shape_cases(draft: Path, cases: list) -> None:
+    payload = json.loads((draft / "task.json").read_text(encoding="utf-8"))
+    (draft / "task.json").write_text(json.dumps({**payload, "shape_cases": cases}), encoding="utf-8")
 
 
 def _write_staged_task(staging_root: Path, repo: Path) -> str:
@@ -629,6 +646,54 @@ def test_hookless_resume_republication_clears_a_corrected_refusal(
     assert len(backend.resumed) == 1
     assert result.status == ANALYSIS_STATUS_COMPLETED
     assert result.published_task_count == 1
+
+
+def test_a_draft_with_a_decode_batch_size_the_trace_never_ran_is_refused(tmp_path: Path) -> None:
+    repo, _commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+
+    def _stage(staging: Path) -> None:
+        _write_staged_task(staging, repo)
+        _set_shape_cases(staging / "draft", [{"name": "verify_bs10", "phase": "decode", "batch_size": 10}])
+
+    agent = OpportunityAnalysisAgent(backend=_Backend(_stage), timeout_sec=10, max_turns=20)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path, _OBSERVED_VERIFY_BS2_BS3), layout=layout))
+
+    assert result.published_task_count == 0
+    assert [rejected["reason"] for rejected in result.rejected_tasks] == [_VERIFY_BS10_REFUSAL]
+
+
+def test_hookless_resume_names_the_unobserved_decode_batch_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _commit = _repo(tmp_path)
+    layout = ControllerLayout(tmp_path / "output")
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_BASE_SEC", "0")
+    observed_case = [{"name": "verify_bs3", "phase": "decode", "batch_size": 3}]
+
+    def _stage(staging: Path) -> None:
+        _write_staged_task(staging, repo)
+        _set_shape_cases(staging / "draft", [{"name": "verify_bs10", "phase": "decode", "batch_size": 10}])
+
+    backend = _HooklessResumableBackend(
+        _stage,
+        on_resume=lambda staging: _set_shape_cases(staging / "draft", observed_case),
+    )
+    agent = OpportunityAnalysisAgent(backend=backend, timeout_sec=30, max_turns=5)
+
+    result = asyncio.run(agent.run(handoff=_handoff(tmp_path, _OBSERVED_VERIFY_BS2_BS3), layout=layout))
+
+    assert len(backend.resumed) == 1
+    assert f"- draft: {_VERIFY_BS10_REFUSAL}\n" in backend.resumed[0]
+    assert result.published_task_count == 1
+    (task_dir,) = [path for path in layout.tasks_root.iterdir() if not path.name.startswith(".")]
+    assert json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["shape_cases"] == observed_case
+
+
+def test_the_prompt_bounds_decode_cases_to_the_observed_batch_sizes() -> None:
+    assert "Observed Decode Classes section of\n   trace-evidence.md" in _system_prompt()
 
 
 def test_hookless_resume_stops_when_the_analysis_deadline_is_exhausted(
