@@ -110,18 +110,20 @@ def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         session_remaining_to_deadline_sec,
     )
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import RoundWatch, run_with_session_kill
 
     worker_env = _merge_worker_env(bench_round.env)
     proc = run_with_session_kill(
         bench_round.cmd,
         env=worker_env,
         cwd=bench_round.cwd,
-        timeout=bench_round.timeout,
-        silence_timeout_sec=bench_round.silence_timeout_sec,
-        server_log_path=bench_round.server_log_path,
-        server_already_ready=bench_round.server_already_ready,
-        session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+        watch=RoundWatch(
+            timeout=bench_round.timeout,
+            silence_timeout_sec=bench_round.silence_timeout_sec,
+            server_log_path=bench_round.server_log_path,
+            server_already_ready=bench_round.server_already_ready,
+            session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
+        ),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -132,7 +134,7 @@ class RayExecutionBackend:
     def __init__(self) -> None:
         self._ensured = False
 
-    def ensure(self, num_gpus: int | None = None, log_path: Path | None = None) -> None:
+    def ensure(self, num_gpus: int | None = None) -> None:
         """Ensure a Ray cluster is up and this process is connected."""
         if self._ensured:
             return
@@ -142,16 +144,16 @@ class RayExecutionBackend:
         )
 
         resolved = _resolve_head_num_gpus(num_gpus)
-        ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
-        quiet_ray_init(num_gpus=resolved, log_path=log_path)
+        ensure_ray_cluster(num_gpus=resolved)
+        quiet_ray_init(num_gpus=resolved)
         self._ensured = True
 
-    def restart_local_head(self, log_path: Path | None = None) -> None:
+    def restart_local_head(self) -> None:
         """Replace the local head with one that declares ``serving_slot`` and reconnect to it."""
         from ._ray_runtime import restart_local_head_with_serving_slot
 
         self._ensured = False
-        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None), log_path=log_path)
+        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None))
         self._ensured = True
 
 

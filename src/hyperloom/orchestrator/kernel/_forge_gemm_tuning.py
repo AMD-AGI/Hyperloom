@@ -15,6 +15,9 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom.common.coerce import optional_positive_int
+from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
+
 from . import forge_gemm_tuning
 from ..actions.executors._kernel_agent_tool import HandlerResult, _run_subprocess, _shape_tool_result
 from ._aiter_tuner_support import _align_forge_shapes_for_aiter, _write_fmoe_untuned_csv_from_log
@@ -29,7 +32,6 @@ from ._forge_gemm_probe import (
 from ._forge_lane_budget import (
     _gemm_tuning_timeout_sec,
     _gemm_tuning_workspace,
-    _positive_int,
     _priced_gemm_lane,
     _unfunded_lane_skip,
 )
@@ -43,6 +45,7 @@ from ._forge_shapes import (
 from ._integrate_payload import _requested_framework, _requested_setting
 from .serving_log_evidence import resolve_forge_server_log, _tokens_from_serving_log
 from ._shape_capture import (
+    SuppliedShapes,
     _capture_vllm_tunableop_shapes,
     _reuse_vllm_block_fp8_roofline_shapes,
     _vllm_block_fp8_profile_capture_required,
@@ -175,9 +178,8 @@ def _requested_existing_file(payload: dict, key: str) -> str:
 
 
 def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
-    from hyperloom.common.model_paths import resolve_serving_model_path
+    from hyperloom.common.model_paths import resolve_local_model_dir, resolve_serving_model_path
     from hyperloom.common.visible_devices import detect_gpu_count
-    from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
     workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -255,8 +257,7 @@ def _profiled_block_fp8_shapes(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input),
         dry_run=bool(payload.get("dry_run")),
     ):
         return sources
@@ -281,12 +282,12 @@ async def _captured_forge_shapes(
     priced_lane: Any,
 ) -> tuple[_ForgeShapeSources, HandlerResult | None]:
     sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    supplied = SuppliedShapes(shapes_json=sources.shapes_json, tunableop_input=sources.tunableop_input)
     block_fp8_capture = _vllm_block_fp8_profile_capture_required(
         framework=run.framework,
         precision=run.precision,
         quant_type=run.quant_type,
-        shapes_json=sources.shapes_json,
-        tunableop_input=sources.tunableop_input,
+        supplied=supplied,
         dry_run=bool(payload.get("dry_run")),
     )
     # Keyed on the routed framework: a run handed to the AITER tuner family has
@@ -296,8 +297,7 @@ async def _captured_forge_shapes(
         _vllm_dense_shape_capture_required(
             framework=run.tuning_framework,
             model_path=run.model_dir,
-            shapes_json=sources.shapes_json,
-            tunableop_input=sources.tunableop_input,
+            supplied=supplied,
             dry_run=bool(payload.get("dry_run")),
         )
         and not block_fp8_capture
@@ -306,9 +306,12 @@ async def _captured_forge_shapes(
         return sources, None
     # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
     lane_after_capture = await priced_lane(
-        has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
-        has_shapes_json=block_fp8_capture,
-        has_tunableop_input=tunableop_capture,
+        evidence=RoutingEvidence(
+            kernel_signature_log=run.server_log or None,
+            has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
+            has_shapes_json=block_fp8_capture,
+            has_tunableop_input=tunableop_capture,
+        )
     )
     if lane_after_capture is None:
         return sources, _unfunded_lane_skip(LANE_GEMM)
@@ -537,18 +540,19 @@ async def _run_forge_gemm_tuning(
             precision=run.precision,
             quant_type=run.quant_type,
             tunableop_input=str(payload.get("tunableop_input") or "").strip(),
-            **_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+            aiter_routing=_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
         ),
     )
     priced_gemm_lane = functools.partial(
         _priced_gemm_lane,
         state,
         model_path=run.model_dir,
-        framework=run.tuning_framework,
-        precision=run.precision,
-        quant_type=run.quant_type,
-        gpu_type=run.gpu_type,
-        kernel_signature_log=run.server_log,
+        target=RoutingTarget(
+            framework=run.tuning_framework,
+            precision=run.precision,
+            quant_type=run.quant_type,
+            gpu_type=run.gpu_type,
+        ),
     )
 
     sources = await _forge_shape_sources(state, payload, run)
@@ -558,9 +562,12 @@ async def _run_forge_gemm_tuning(
     sources = sources._replace(shapes_manifest=await _forge_dense_shape_manifest(state, payload, run, sources))
 
     gemm_lane = await priced_gemm_lane(
-        has_untuned_csv=bool(sources.untuned_csv),
-        has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
-        has_tunableop_input=bool(sources.tunableop_input),
+        evidence=RoutingEvidence(
+            kernel_signature_log=run.server_log or None,
+            has_untuned_csv=bool(sources.untuned_csv),
+            has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+            has_tunableop_input=bool(sources.tunableop_input),
+        )
     )
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
@@ -576,7 +583,7 @@ async def _run_forge_gemm_tuning(
         )
         sources = sources._replace(shapes_json=aligned_shapes)
 
-    requested_tuners = _positive_int(payload.get("max_tuners"))
+    requested_tuners = optional_positive_int(payload.get("max_tuners"), 0)
     tuner_ceiling = 0 if str(payload.get("tuner") or "").strip() else (requested_tuners or gemm_lane.max_targets)
     result = await _invoke_forge_gemm_tune(
         _forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout
@@ -612,8 +619,8 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     ephemeral ``runs/gemm_tuning`` workspace, which would be cleaned away and
     defeat the cross-environment recipe-portability this exists for.
 
-    Best-effort: on any error the env is returned unchanged (never breaks the KEEP).
-    Returns ``(extra_envs, source_snapshot_dir)``.
+    A failed durable copy raises; a failed snapshot keeps the copy and returns no
+    snapshot dir. Returns ``(extra_envs, source_snapshot_dir)``.
     """
     # Below model_configs/, out of reach of aiter's non-recursive auto-merge glob.
     _FORGE_DURABLE_SUBDIR = "hyperloom"
@@ -643,35 +650,33 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     # Step 1 -- commit durable copies + env repoints. This is what makes the
     # KEEP survive: each CSV lands in aiter's config dir and the env points
     # there instead of the ephemeral tuner workspace.
-    try:
-        import importlib.util
+    import importlib.util
 
-        spec = importlib.util.find_spec("aiter")
-        if spec is None or not spec.origin:
-            return extra_envs, ""
-        aiter_pkg = Path(spec.origin).resolve().parent
-        updated = dict(extra_envs)
-        rel_paths: list[str] = []
-        for env_key, rel, src_path in pending:
-            dst = aiter_pkg / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src_path, dst)
-            updated[env_key] = str(dst)
-            rel_paths.append(rel)
-    except Exception:
-        log.exception("forge gemm CSV durable-copy failed; keeping workspace path")
+    spec = importlib.util.find_spec("aiter")
+    if spec is None or not spec.origin:
         return extra_envs, ""
+    aiter_pkg = Path(spec.origin).resolve().parent
+    updated = dict(extra_envs)
+    rel_paths: list[str] = []
+    for env_key, rel, src_path in pending:
+        dst = aiter_pkg / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst)
+        updated[env_key] = str(dst)
+        rel_paths.append(rel)
 
     # Step 2 -- recipe-portability snapshot. Separate best-effort concern: a
     # snapshot failure must NOT discard the copy + repoint committed above.
     snap_dir = ""
     try:
-        from ..source_snapshot import snapshot_source_layer
+        from ..source_snapshot import SourceLayer, snapshot_source_layer
 
         snap = snapshot_source_layer(
-            framework_root=aiter_pkg,
-            base_sha=None,
-            rel_paths=rel_paths,
+            SourceLayer(
+                framework_root=aiter_pkg,
+                base_sha=None,
+                rel_paths=rel_paths,
+            ),
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
             provenance="kernelforge.gemm_tune",
             extra={
@@ -680,6 +685,6 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             },
         )
         snap_dir = str((snap or {}).get("snapshot_dir") or "")
-    except Exception:
+    except OSError:
         log.exception("forge gemm CSV snapshot failed; durable copy + repoint kept")
     return updated, snap_dir

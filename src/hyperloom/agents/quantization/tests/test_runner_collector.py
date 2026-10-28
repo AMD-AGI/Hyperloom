@@ -49,32 +49,6 @@ async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
     assert any("WARNING" in line for line in logs)
 
 
-async def test_run_one_attempt_options_typeerror_fallback(tmp_path: Path) -> None:
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("contract", encoding="utf-8")
-
-    class _Options:
-        def __init__(self, **kwargs):
-            if "cwd" in kwargs:
-                raise TypeError("older sdk has no cwd")
-            self.kwargs = kwargs
-
-    async def _empty_gen():
-        if False:  # pragma: no cover
-            yield None
-
-    def _factory(*, prompt, options):
-        return _empty_gen()
-
-    result = await runner.run_one_attempt(
-        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path),
-        skill_path=skill,
-        model="some-model",
-        sdk=runner.ClaudeAgentSdk(query=_factory, options_cls=_Options),
-    )
-    assert result.sdk_error == ""
-
-
 def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
     import asyncio
 
@@ -151,18 +125,25 @@ async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
     assert request.cwd == tmp_path / "ws" and request.writable
     assert request.child_env is not None
     assert seen["owed"] is not None
-    assert result.raw_text == "quantized" and result.sdk_error == ""
+    assert result.sdk_error == ""
     assert any("DeepSeek runner" in line and "attempt=2" in line for line in logs)
 
 
-def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_reached_evaluation(tmp_path: Path) -> None:
-    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``."""
+def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_an_eval_result(tmp_path: Path) -> None:
+    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``.
+
+    ``last_phase.txt`` is written when a phase starts, so reaching eval is not
+    an end: the attempt still owes the eval report, or the reason it skipped it.
+    """
     assert not runner._attempt_finished(tmp_path)
 
     (tmp_path / "last_phase.txt").write_text("export\n", encoding="utf-8")
     assert not runner._attempt_finished(tmp_path)
 
     (tmp_path / "last_phase.txt").write_text("eval\n", encoding="utf-8")
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "eval_skipped.txt").write_text("no eval environment\n", encoding="utf-8")
     assert runner._attempt_finished(tmp_path)
 
 

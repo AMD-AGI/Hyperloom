@@ -9,6 +9,8 @@ from kernelforge.gemm_tune.router import (
     _detect_1stage_from_log,
     _normalize_quant_type,
     _resolve_quant_type,
+    RoutingEvidence,
+    RoutingTarget,
     select_tuners,
 )
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
@@ -98,7 +100,15 @@ def test_sglang_moe_per_token_1stage_log_skips(tmp_path):
     log.write_text("using 1stage default\n")
     profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
     specs = select_tuners(
-        profile, framework="sglang", precision="bf16", quant_type="per_token", kernel_signature_log=str(log)
+        profile,
+        RoutingTarget(
+            framework="sglang",
+            precision="bf16",
+            quant_type="per_token",
+        ),
+        RoutingEvidence(
+            kernel_signature_log=str(log),
+        ),
     )
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert not fmoe.should_run and "1-stage" in fmoe.skip_reason
@@ -106,14 +116,14 @@ def test_sglang_moe_per_token_1stage_log_skips(tmp_path):
 
 def test_sglang_moe_per_token_no_1stage_runs():
     profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-    specs = select_tuners(profile, framework="sglang", precision="bf16", quant_type="per_token")
+    specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="bf16", quant_type="per_token"))
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert fmoe.should_run
 
 
 def test_sglang_moe_unsupported_combo_skips():
     profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-    specs = select_tuners(profile, framework="sglang", precision="int8", quant_type="awq")
+    specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="int8", quant_type="awq"))
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert not fmoe.should_run and "Unsupported" in fmoe.skip_reason
 
@@ -121,13 +131,15 @@ def test_sglang_moe_unsupported_combo_skips():
 # ── vllm dense paths ─────────────────────────────────────────────────────────
 def test_vllm_dense_with_tunableop_input():
     profile = _profile(is_moe=False)
-    specs = select_tuners(profile, framework="vllm", precision="bf16", has_tunableop_input=True)
+    specs = select_tuners(
+        profile, RoutingTarget(framework="vllm", precision="bf16"), RoutingEvidence(has_tunableop_input=True)
+    )
     names = [s.name for s in specs if s.should_run]
     assert "vllm_dense_tunableop" in names
 
 
 def test_vllm_dense_only_no_input_skips():
     profile = _profile(is_moe=False)
-    specs = select_tuners(profile, framework="vllm", precision="bf16")
+    specs = select_tuners(profile, RoutingTarget(framework="vllm", precision="bf16"))
     dense = [s for s in specs if s.name == "vllm_dense_tunableop"][0]
     assert not dense.should_run and "TunableOp" in dense.skip_reason

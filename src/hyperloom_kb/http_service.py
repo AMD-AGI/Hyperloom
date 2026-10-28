@@ -1150,8 +1150,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             shutil.copyfileobj(stream, self.wfile)
         self._answered = (int(HTTPStatus.OK), size)
 
-    def _dispatch_files(self, app: ExperienceHTTPService, path: str) -> bool:
-        """Serve the file routes; ``False`` when ``path`` is none of them."""
+    def _dispatch_transfer(self, app: ExperienceHTTPService, path: str) -> bool:
+        """Serve push, pull, rebind and the file routes they move files over; ``False`` for any other path."""
 
         if self.command == _POST and path == _FILES_MISSING:
             body = self._body()
@@ -1166,6 +1166,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write(HTTPStatus.OK, app.put_file(sha256, self._length(MAX_FILE_BYTES), cast(BinaryIO, self.rfile)))
         elif self.command == _GET and path.startswith(_FILES_PREFIX):
             self._send_file(*app.held_file(path.removeprefix(_FILES_PREFIX)))
+        elif self.command == _POST and path == "/v1/push":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.push())
+        elif self.command == _POST and path == "/v1/pull":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref"}))
+            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
+        elif self.command == _POST and path == "/v1/rebind":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.rebind())
         else:
             return False
         return True
@@ -1228,20 +1238,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if self._dispatch_state(app, parsed.path, query) or self._dispatch_files(app, parsed.path):
-            return
-        if self.command == _POST and parsed.path == "/v1/push":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.push())
-            return
-        if self.command == _POST and parsed.path == "/v1/pull":
-            body = self._body()
-            _reject_unknown(body, frozenset({"schema_ref"}))
-            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
-            return
-        if self.command == _POST and parsed.path == "/v1/rebind":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.rebind())
+        if self._dispatch_state(app, parsed.path, query) or self._dispatch_transfer(app, parsed.path):
             return
         if self.command == _POST and parsed.path == "/v1/read":
             self._write(HTTPStatus.OK, app.read(_read_query(self._body())))
@@ -1254,7 +1251,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if experience.id != parsed.path.removeprefix(prefix):
                 raise HTTPServiceError("Experience path id differs from payload")
             declaration = body.get("declaration")
-            context = current_request.get() or RequestContext("")
+            context = current_request.get()
             self._write(
                 HTTPStatus.OK,
                 app.write(

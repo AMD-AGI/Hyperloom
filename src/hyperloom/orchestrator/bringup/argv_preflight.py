@@ -156,6 +156,19 @@ class ArgvVerdict:
 
 
 @dataclass(frozen=True)
+class ArgvRepair:
+    """One argv's claim on its single drop-only repair.
+
+    Attributes:
+        digest: This argv's digest, the key a repair is recorded under.
+        spent: Digests of argvs that have already used their one repair.
+    """
+
+    digest: str = ""
+    spent: Container[str] = ()
+
+
+@dataclass(frozen=True)
 class ProbeTarget:
     """Where a probe program runs.
 
@@ -274,7 +287,7 @@ def _resolve_probe_interpreter(framework: str) -> str:
     """Return the interpreter the capability probes use for ``framework``."""
     # Deferred: the resolution ladder lives beside the grid runner, whose
     # package imports the executors this module's callers live in.
-    from hyperloom.orchestrator.actions.executors._grid_runner import _resolve_probe_python
+    from hyperloom.orchestrator.actions.executors._benchmark_interpreter import _resolve_probe_python
 
     return _resolve_probe_python(framework)
 
@@ -346,9 +359,7 @@ def check_server_argv(
     argv: Sequence[str],
     text: str,
     launch_env: Mapping[str, str],
-    repaired: Container[str] = (),
-    digest: str = "",
-    probe: ProbeFn | None = None,
+    repair: ArgvRepair = ArgvRepair(),
 ) -> ArgvVerdict:
     """Decide whether the installed framework will accept ``argv``.
 
@@ -357,16 +368,13 @@ def check_server_argv(
         argv: The sealed argv the server would receive.
         text: That argv as the argument string, for the drop repair.
         launch_env: The environment the benchmark subprocess is launched with.
-        repaired: Digests of argvs that have already used their one repair.
-        digest: This argv's digest, the key recorded against ``repaired``.
-        probe: Subprocess shim, injected by tests.
+        repair: This argv's repair key and the keys already spent.
 
     Returns:
         ArgvVerdict: The verdict, and the argv that should now launch.
     """
     from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
-    probe = probe if probe is not None else _default_probe
     name = framework.strip().lower()
     parser_source = parser_source_for(name)
     if not parser_source:
@@ -392,10 +400,10 @@ def check_server_argv(
 
     if not serving or not probe_interpreter:
         return _unavailable(INTERPRETER_UNPROVEN, "could not resolve both the probe and the serving interpreter")
-    serving_id, serving_why = _identity(ProbeTarget(serving, launch_env, probe), name)
+    serving_id, serving_why = _identity(ProbeTarget(serving, launch_env), name)
     if serving_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"serving interpreter: {serving_why}")
-    probe_target = ProbeTarget(probe_interpreter, launch_env, probe)
+    probe_target = ProbeTarget(probe_interpreter, launch_env)
     probe_id, probe_why = _identity(probe_target, name)
     if probe_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"probe interpreter: {probe_why}")
@@ -430,7 +438,7 @@ def check_server_argv(
         # The parser rejected a value, not a name. Choosing a replacement would
         # be the harness guessing what the framework meant.
         return _invalid(VALUE_REJECTED, detail)
-    if not digest or digest in repaired:
+    if not repair.digest or repair.digest in repair.spent:
         # No repair without a key to record it under: an unrecordable repair is
         # one the composer can trigger again every round, which is a loop, not
         # a repair.
@@ -462,7 +470,7 @@ def check_server_argv(
         argv=tuple(tokens),
         text=repaired_text,
         dropped=flags,
-        repaired_digest=digest,
+        repaired_digest=repair.digest,
     )
 
 
@@ -514,6 +522,7 @@ __all__ = [
     "PRODUCER",
     "SERVING_PYTHON_ENV",
     "UNAVAILABLE",
+    "ArgvRepair",
     "ArgvVerdict",
     "Probe",
     "ProbeTarget",

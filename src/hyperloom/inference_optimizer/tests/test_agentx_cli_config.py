@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
+    LaunchLayer,
 )
 from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, load_benchmark
 
@@ -100,7 +101,9 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert args.enable_conc_sweep is False
     assert agentx_enabled()
     assert default_baseline_config() == source
-    candidate = materialize_benchmark_config(source, tmp_path / "round", extra_envs={"TEST_SERVER_KNOB": "2"})
+    candidate = materialize_benchmark_config(
+        source, tmp_path / "round", launch=LaunchLayer(extra_envs={"TEST_SERVER_KNOB": "2"})
+    )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == ["--disable-custom-all-reduce"]
     assert launch["env"] == {"TEST_SERVER_KNOB": "2"}
@@ -271,19 +274,25 @@ def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
 
 def test_operator_argument_can_be_ablated(tmp_path, monkeypatch):
     _, source = _launch(tmp_path, monkeypatch, "--server-args=--cuda-graph-max-bs 256")
-    candidate = materialize_benchmark_config(source, tmp_path / "ablate", remove_args=["--cuda-graph-max-bs"])
+    candidate = materialize_benchmark_config(
+        source, tmp_path / "ablate", launch=LaunchLayer(remove_args=["--cuda-graph-max-bs"])
+    )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["append_args"] == launch["remove_args"] == []
 
 
 def test_operator_env_can_be_removed_or_replaced_by_a_candidate(tmp_path, monkeypatch):
     _, source = _launch(tmp_path, monkeypatch, "--extra-env", "TEST_SERVER_KNOB=1")
-    candidate = materialize_benchmark_config(source, tmp_path / "removed", unset_envs=["TEST_SERVER_KNOB"])
+    candidate = materialize_benchmark_config(
+        source, tmp_path / "removed", launch=LaunchLayer(unset_envs=["TEST_SERVER_KNOB"])
+    )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert "TEST_SERVER_KNOB" not in launch["env"]
     assert launch["unset_env"] == ["TEST_SERVER_KNOB"]
     candidate = materialize_benchmark_config(
-        source, tmp_path / "replaced", unset_envs=["TEST_SERVER_KNOB"], extra_envs={"TEST_SERVER_KNOB": "2"}
+        source,
+        tmp_path / "replaced",
+        launch=LaunchLayer(unset_envs=["TEST_SERVER_KNOB"], extra_envs={"TEST_SERVER_KNOB": "2"}),
     )
     launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
     assert launch["env"]["TEST_SERVER_KNOB"] == "2"

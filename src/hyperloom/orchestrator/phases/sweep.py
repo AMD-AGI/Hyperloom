@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from typing import TYPE_CHECKING, Any
-from ..state.task_registry import TERMINAL_STATES, Task
+from ..kernel import kernel_decisions
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
@@ -81,7 +83,7 @@ class SweepPhase(CoordinatorCollaborator):
         # anything on top; the recovery halts the session if it cannot.
         await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
-        if state.has_keep_pending_integrate:
+        if kernel_decisions.has_keep_pending_integrate(state):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
@@ -126,7 +128,7 @@ class SweepPhase(CoordinatorCollaborator):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,
@@ -225,12 +227,14 @@ class SweepPhase(CoordinatorCollaborator):
         attempt = 0
         while True:
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind="conc_sweep",
-                params=params,
-                requires_lanes=lanes,
-                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
-                lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
-                dispatch_class="coordinator",
+                TaskSpec(
+                    kind="conc_sweep",
+                    params=params,
+                    requires_lanes=lanes,
+                    idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                    lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
+                    dispatch_class="coordinator",
+                )
             )
             if not (was_existing and task.state in TERMINAL_STATES):
                 return task, was_existing

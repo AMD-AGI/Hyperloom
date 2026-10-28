@@ -31,10 +31,9 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
 )
 from hyperloom.orchestrator.bus.resource_lock import (
-    ResourceLockManager,
     SqliteLeaseBackend,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -269,7 +268,7 @@ async def test_integrate_handler_materializes_persisted_agentx_mode(
         "accuracy_metric": "exact_match,strict-match",
     }
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         seen["shared_state"] = executor.shared_state
         seen["benchmark"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         workspace = output_dir / "benchmark_sglang_e2e"
@@ -358,7 +357,7 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, *, config_path, output_dir, **_kwargs):
+    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
         benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
@@ -570,7 +569,6 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
         reference,
         candidate,
         config_path=str(base_yaml),
-        budget_minutes=1,
     )
 
     assert verdict is not None
@@ -618,7 +616,7 @@ async def test_gemm_paired_materializes_each_frozen_recipe_controls(
 async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     session_dir, tmp_path, monkeypatch, output, total, intvty, stack, accuracy_outcome, decision
 ):
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -631,9 +629,9 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     # AgentX currently falls back to one round; admit its script only in this
     # test to exercise deferred double-run scheduling, not enable AgentX reuse.
     monkeypatch.setattr(
-        _server_lifecycle,
+        benchmark_backend,
         "MAGPIE_BUILTIN_SCRIPTS",
-        _server_lifecycle.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
+        benchmark_backend.MAGPIE_BUILTIN_SCRIPTS | {"aiperf_client.sh"},
     )
     base_yaml = tmp_path / "base.yaml"
     _write_baseline_yaml(base_yaml)
@@ -666,7 +664,7 @@ async def test_integrate_handler_double_run_schedules_accuracy_on_graded_keep(
     rounds = []
     measured = {}
 
-    async def _benchmark(executor, *, config_path, output_dir, **_kwargs):
+    async def _benchmark(executor, _attempt, *, config_path, output_dir, **_kwargs):
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         bench = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
         rounds.append((output_dir.name, bench))
@@ -2478,15 +2476,17 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.stop()
 
     db = SqliteConnection(tmp_path_helper(session_dir))
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, session_dir=session_dir)
     sub.register_executor("report", ReportExecutor())
 
-    task = await tr.create(
-        kind="report",
-        params={"session_dir": str(session_dir)},
-        idempotency_key="rep-1",
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="report",
+            params={},
+            idempotency_key="rep-1",
+        ),
     )
     res = await sub.run_task(task)
     db.close()
@@ -2518,24 +2518,3 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
 def tmp_path_helper(session_dir: Path) -> Path:
     """Point ReportExecutor's SqliteConnection at the session's DB."""
     return session_dir / "storage" / "coordinator.db"
-
-
-@pytest.mark.asyncio
-async def test_report_executor_failed_when_session_dir_unresolvable(tmp_path, monkeypatch):
-    """An unresolvable session_dir yields a structured failure, not a crash."""
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "noses"))
-    db = SqliteConnection(tmp_path / "x.db")
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
-    tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
-    sub.register_executor("report", ReportExecutor())
-    task = await tr.create(
-        kind="report",
-        params={},
-        idempotency_key="rep-fail-1",
-    )
-    res = await sub.run_task(task)
-    db.close()
-    assert res.state == "succeeded"
-    assert res.result["status"] == "failed"
-    assert "session_dir" in res.result.get("error", "")

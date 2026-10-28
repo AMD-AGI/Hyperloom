@@ -66,8 +66,8 @@ def conc_pair_comparison(
         speedup = ot / bt if bt is not None and bt > 0 and ot is not None and ot > 0 else None
         # ``graded_axes_of`` is what normalises the sweep's ``total_token_throughput`` onto GRADED_TOTAL, so the
         # guard cannot read a differently-named axis as an absent one.
-        base_axes = graded_axes_of(b) if guard_axis else {}
-        opt_axes = graded_axes_of(o) if guard_axis else {}
+        base_axes = graded_axes_of(b)
+        opt_axes = graded_axes_of(o)
         guard_holds: bool | None = None
         if base_axes.get(guard_axis) and opt_axes.get(guard_axis):
             guard_holds = holds_within_band(opt_axes, base_axes, guard_axis, noise_pct=guard_noise_pct)

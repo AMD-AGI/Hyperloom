@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT, VERDICT_KEEP
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.inference_optimizer.session.session_paths import (
     reports_dir,
@@ -52,31 +53,15 @@ def test_degraded_mode_section_empty():
     assert rp._format_degraded_mode_section({}) == []
 
 
-def test_format_md_shows_validated_gain_when_timestamp_missing():
-    md = rp._format_md(
-        {
-            "session_id": "s1",
-            "model_name": "m",
-            "model_path": "/models/m",
-            "stop_reason": "sweep_done",
-            "max_minutes": 360,
-            "report_generated_at": "2026-06-23T00:00:00+00:00",
-            "baseline_tput": 100.0,
-            "current_best": {"action": "warm_replay", "tput": 136.146},
-            "cumulative_gain_validated": 36.146,
-            "cumulative_gain_validated_ts": "",
-            "cumulative_gain_validated_stack_len": 1,
-            "optimization_stack_len": 1,
-            "crash_count": 0,
-            "pruned_families": [],
-            "event_counts_by_topic": {},
-            "highlights": [],
-        }
-    )
-
-    assert "cumulative_gain_val : `36.15%`" in md
-    assert "ts=<missing>" in md
-    assert "never validated" not in md
+_OUTPUT_COMPARISON = dict(
+    objective=GRADED_OUTPUT,
+    reference=100.0,
+    candidate=100.0,
+    gain_pct=0.0,
+    comparable=True,
+    degrade_reason="",
+    verdict=VERDICT_KEEP,
+)
 
 
 # ---- _extract_executive_summary ----
@@ -198,32 +183,6 @@ def test_explain_stop_reason_unknown_is_empty():
     assert rp._explain_stop_reason("") == ""
 
 
-def test_format_md_renders_stop_explanation():
-    md = rp._format_md(
-        {
-            "session_id": "s",
-            "model_name": "m",
-            "model_path": "/m",
-            "stop_reason": "target_reached",
-            "stop_reason_explanation": "Target reached: the run stopped once the goal was met.",
-            "max_minutes": 60,
-            "report_generated_at": "t0",
-            "framework": "sglang",
-            "current_best": {},
-            "baseline_tput": 100.0,
-            "cumulative_gain_validated": 0.0,
-            "cumulative_gain_validated_stack_len": 0,
-            "optimization_stack_len": 0,
-            "crash_count": 0,
-            "pruned_families": [],
-            "event_counts_by_topic": {},
-            "highlights": [],
-        }
-    )
-    assert "Why it stopped" in md
-    assert "Target reached" in md
-
-
 # ---- stop_reason explanation vocabulary coverage ----
 def test_every_stop_reason_vocab_member_has_explanation():
     from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB
@@ -262,6 +221,7 @@ def _summary_without_platform(**extra) -> dict:
         "pruned_families": [],
         "event_counts_by_topic": {},
         "highlights": [],
+        "performance_comparison": _OUTPUT_COMPARISON,
     }
     base.update(extra)
     return base

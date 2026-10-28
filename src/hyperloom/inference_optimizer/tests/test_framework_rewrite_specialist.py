@@ -290,9 +290,9 @@ class _Tasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):
+    async def create_or_return_existing(self, spec):
         """Record the dispatch and return a fresh-task sentinel."""
-        self.created.append(kwargs)
+        self.created.append(vars(spec))
         from types import SimpleNamespace
 
         return SimpleNamespace(task_id=f"t-{len(self.created)}", state="queued"), False

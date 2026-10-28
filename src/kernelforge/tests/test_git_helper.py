@@ -14,7 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools.git import DEFAULT_TIMEOUT_SEC, GitError, git, git_bytes, git_async
+from kernelforge.tools import git as git_module
+from kernelforge.tools.git import (
+    DEFAULT_TIMEOUT_SEC,
+    GitError,
+    git,
+    git_async,
+    git_bytes,
+    git_checkout_branch,
+    git_head,
+)
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -170,3 +179,45 @@ def test_a_file_that_did_not_exist_is_published_owner_only(tmp_path):
     atomic_write_bytes(fresh, b"{}\n")
 
     assert stat.S_IMODE(fresh.stat().st_mode) == 0o600
+
+
+def test_git_head_names_the_commit_head_resolves_to(tmp_path):
+    root = _repo(tmp_path)
+
+    assert git_head(root) == git("rev-parse", "HEAD", cwd=root).stdout.strip()
+
+
+@pytest.mark.parametrize("unborn", [True, False])
+def test_git_head_is_empty_when_head_resolves_to_no_commit(tmp_path, unborn):
+    """An unborn branch prints a bare ``HEAD`` on stdout; that is not a commit."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    if unborn:
+        git("init", "--quiet", cwd=target)
+
+    assert git_head(target) == ""
+
+
+def test_git_checkout_branch_creates_then_reuses_the_branch(tmp_path):
+    root = _repo(tmp_path)
+    trunk = git("branch", "--show-current", cwd=root).stdout.strip()
+
+    assert "Switched to a new branch" in git_checkout_branch(root, "kernel-agent-optimize")
+    git("checkout", trunk, cwd=root)
+    assert "Switched to branch" in git_checkout_branch(root, "kernel-agent-optimize")
+    assert git("branch", "--show-current", cwd=root).stdout.strip() == "kernel-agent-optimize"
+
+
+def test_git_checkout_branch_without_a_branch_does_nothing(tmp_path):
+    assert git_checkout_branch(_repo(tmp_path), "") == ""
+
+
+def test_git_checkout_branch_reports_rather_than_raises(monkeypatch, tmp_path):
+    root = _repo(tmp_path)
+    assert git_checkout_branch(tmp_path / "missing", "b")
+
+    def _no_git(*_args, **_kwargs):
+        raise OSError("git missing")
+
+    monkeypatch.setattr(git_module, "git", _no_git)
+    assert git_checkout_branch(root, "b").startswith("checkout failed:")

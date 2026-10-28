@@ -8,10 +8,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES
+from hyperloom.common.overlay import is_safe_path_entry
 
 log = logging.getLogger(__name__)
 
@@ -30,16 +30,6 @@ def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
     envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
 
 
-def is_safe_path_entry(entry: str) -> bool:
-    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
-    return (
-        bool(entry)
-        and ":" not in entry
-        and ".." not in Path(entry).parts
-        and not any(c in entry for c in ("\n", "\r", "\x00"))
-    )
-
-
 # Reserved keys carried by dedicated override fields; never accepted via runtime_env.
 _RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
 
@@ -52,31 +42,19 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
     path_prefix = str(override.get("path_prefix") or "").strip()
     if path_prefix:
         prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
-    if entrypoint_bin:
-        if is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
-    if pp_prefix:
-        if is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
-    # the inherited value.
-    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
-    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
+    # Each list prepends in reverse so its first entry wins, and a later row lands ahead of earlier ones
+    # (pythonpath_prefixes ahead of pythonpath_prefix).
+    for var, entries, label in (
+        ("PATH", _coerce_prefix_list(str(override.get("entrypoint_bin_dir") or "")), "entrypoint_bin_dir"),
+        ("PYTHONPATH", _coerce_prefix_list(str(override.get("pythonpath_prefix") or "")), "pythonpath_prefix"),
+        ("PYTHONPATH", _coerce_prefix_list(override.get("pythonpath_prefixes")), "pythonpath entry"),
+        ("LD_LIBRARY_PATH", _coerce_prefix_list(override.get("ld_library_path_prefix")), "ld_library_path entry"),
+    ):
+        for entry in reversed(entries):
+            if is_safe_path_entry(entry):
+                prepend_launch_path(envs, var, entry)
+            else:
+                log.warning("apply_runtime_override: dropping unsafe %s %r", label, entry)
     _runtime_env = override.get("runtime_env")
     if isinstance(_runtime_env, dict):
         for raw_k, raw_v in _runtime_env.items():
@@ -89,10 +67,9 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
                 log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
                 continue
             envs[key] = str(raw_v)
-    for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
-        if val:
-            envs[f"HYPERLOOM_{key.upper()}"] = val
+    framework_python = str(override.get("framework_python") or "").strip()
+    if framework_python:
+        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = framework_python
     # runtime_python_exe takes priority over framework_python as the launch interpreter.
     rpe = str(override.get("runtime_python_exe") or "").strip()
     if rpe:

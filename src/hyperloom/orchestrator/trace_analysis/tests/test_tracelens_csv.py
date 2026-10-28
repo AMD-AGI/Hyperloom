@@ -29,6 +29,7 @@ from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_repor
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 
 def _skill_request(tmp_path: Path, output_dir: Path, **fields: object) -> tlr.TraceLensSkillRequest:
@@ -1099,6 +1100,55 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     )
 
 
+def test_a_failed_sdk_orchestrator_is_the_error_the_run_reports(tmp_path, monkeypatch, capsys):
+    """The run's failure names what the orchestrator raised, not a missing analysis.json."""
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    monkeypatch.setattr(tla, "_reject_capture_only_input", lambda *_args: None)
+    monkeypatch.setattr(
+        tla,
+        "_probe_gpu_kernels",
+        lambda files: tla._KernelProbe(analysed=files[0], kernel_event_count=1, probed=[files[0].name], spent_bytes=0),
+    )
+    monkeypatch.setattr(
+        tla,
+        "_check_tracelens_checkout",
+        lambda *_args: tla._TraceLensCheckout(root=tmp_path, internal_root=None, skill=tmp_path / "SKILL.md"),
+    )
+    monkeypatch.setattr(tla, "_gpu_arch_json", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        tla,
+        "_run_trace_split",
+        lambda *_args: (trace, {"chunks_extracted": 1, "chunks_by_mode": {}}),
+    )
+    monkeypatch.setattr(tla, "write_run_config", lambda **_kwargs: None)
+
+    async def _sdk_fails(*_args, **_kwargs):
+        raise ConnectionError("model endpoint refused the connection")
+
+    monkeypatch.setattr(tla, "run_tracelens_skill", _sdk_fails)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input",
+            str(trace),
+            "--workspace-path",
+            str(tmp_path / "workspace"),
+            "--use-llm-orchestrator",
+        ],
+    )
+
+    rc = tla.main()
+    result = json.loads(capsys.readouterr().out)
+    assert (rc, result["status"], result["error"]) == (
+        1,
+        "failed",
+        "ConnectionError: model endpoint refused the connection",
+    )
+
+
 @pytest.mark.parametrize(
     ("framework", "capture", "expected_mode"),
     [("vllm", True, "inference"), ("custom", False, "default")],
@@ -1113,7 +1163,7 @@ def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capt
         output_dir=tmp_path,
         trace_path=trace,
         platform="MI300X",
-        analysis_mode=tlr.tracelens_analysis_mode(framework),
+        analysis_mode=tracelens_analysis_mode(framework),
         capture_folder=capture_dir if capture else None,
     )
 
@@ -1470,7 +1520,6 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
         return CodexSessionResult(
             text="wrote analysis.md",
             usage={"input_tokens": 11, "output_tokens": 7, "reasoning_output_tokens": 900},
-            thread_id="thread-123",
         )
 
     def _no_claude_query(**_kwargs):
@@ -3827,6 +3876,31 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
         ),
     )
     assert summary["trace_health_warnings"] == []
+
+
+def test_analysis_mode_xdit_returns_inference():
+    """xDiT uses inference-mode reporting for capture-folder support despite being scriptable."""
+    assert tracelens_analysis_mode("xdit") == "inference"
+    assert tracelens_analysis_mode("xDiT") == "inference"
+    assert tracelens_analysis_mode("  xdit  ") == "inference"
+
+
+def test_analysis_mode_serving_frameworks_return_inference():
+    """Regression guard: sglang / vllm / atom remain ``inference``."""
+    assert tracelens_analysis_mode("sglang") == "inference"
+    assert tracelens_analysis_mode("vllm") == "inference"
+    assert tracelens_analysis_mode("atom") == "inference"
+
+
+def test_analysis_mode_scriptable_framework_stays_default():
+    """Scriptable frameworks (except xDiT) fall back to ``default``."""
+    assert tracelens_analysis_mode("custom") == "default"
+
+
+def test_analysis_mode_unknown_framework_returns_inference():
+    """Unknown frameworks fall back to the default spec (sglang), which is not scriptable."""
+    assert tracelens_analysis_mode("trtllm") == "inference"
+    assert tracelens_analysis_mode("") == "inference"
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.

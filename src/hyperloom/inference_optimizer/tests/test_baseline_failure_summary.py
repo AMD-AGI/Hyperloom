@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.orchestrator.actions.executors import report
 from hyperloom.orchestrator.actions.executors.report import (
     _build_failure_summary,
     _build_summary_dict,
@@ -14,7 +17,7 @@ from hyperloom.orchestrator.actions.executors.report import (
     _is_benign_failure_text,
     _partition_benign_lines,
 )
-from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
 
 _BENIGN_WARN = (
     "[WARN] Error: [Errno 2] No such file or directory: '/app/.../transformers/models/cohere2/modeling_cohere2.py'"
@@ -56,11 +59,7 @@ def _failed_state(
     if workspace is not None:
         result["workspace"] = workspace
     state.record_action_attempt(
-        action="baseline",
-        task_id=task_id,
-        status="failed",
-        decision="no_promote",
-        result=result,
+        action="baseline", attempt=ActionAttempt(task_id=task_id, status="failed", decision="no_promote", result=result)
     )
     state.record_action_failure(
         action="baseline",
@@ -107,6 +106,16 @@ def test_failure_summary_from_server_init_dead_attempt():
     assert fs["last_attempt_id"] == "baseline-1"
 
 
+def test_failure_summary_build_error_is_not_reported_as_no_failed_attempt(monkeypatch):
+    def _broken_headline(text):
+        raise TypeError("headline picker broke")
+
+    monkeypatch.setattr(report, "_pick_failure_headline", _broken_headline)
+    state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
+    with pytest.raises(TypeError, match="headline picker broke"):
+        _build_failure_summary(state)
+
+
 def test_failure_summary_mixed_error_keeps_real_root_cause():
     """A benign WARN mixed with a real fault must NOT wipe the real root cause."""
     state = _failed_state(error_class="subprocess_nonzero", error=_MIXED_STDERR)
@@ -147,10 +156,12 @@ def test_failure_summary_picks_latest_failed_attempt():
     # A later, more severe attempt.
     state.record_action_attempt(
         action="baseline",
-        task_id="attempt-new",
-        status="failed",
-        decision="no_promote",
-        result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
+        attempt=ActionAttempt(
+            task_id="attempt-new",
+            status="failed",
+            decision="no_promote",
+            result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
+        ),
     )
     fs = _build_failure_summary(state)
     assert fs is not None

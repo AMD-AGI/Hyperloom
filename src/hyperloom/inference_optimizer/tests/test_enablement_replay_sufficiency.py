@@ -1413,22 +1413,22 @@ def test_a_recorded_decision_reads_back_as_the_producer_wrote_it():
     assert read_status({"replay_sufficiency": recorded}) == recorded
 
 
-def test_new_keys_do_not_change_the_r1a_projections():
+def test_kept_patches_and_setup_reach_the_recipe_steps():
     from hyperloom.orchestrator.enablement.recipe.section import collect_enablement as collect
 
     out = collect(
         Path("/tmp/sess"),
         {
-            "enablement_attempts": 1,
-            "enablement_kept_patches": ["/tmp/sess/patches/001.patch"],
-            "enablement_setup_commands": ["pip install -e ."],
-            "enablement_framework_root": "/sgl-workspace/sglang",
+            "enablement": {
+                "kept_patches": ["/tmp/sess/patches/001.patch"],
+                "setup_commands": ["pip install -e ."],
+                "framework_root": "/sgl-workspace/sglang",
+            }
         },
-        [],
     )
-    assert out["kept_patches"] == ["patches/001.patch"]
-    assert out["setup_commands"] == ["pip install -e ."]
-    assert out["framework_root"] == "/sgl-workspace/sglang"
+    steps = {st["kind"]: st for st in out["recipe_steps"]}
+    assert steps["patch"]["path"] == "patches/001.patch"
+    assert steps["setup"]["cmd"] == "pip install -e ."
     assert out["replay_sufficiency"]["status"] == "insufficient"
 
 
@@ -1470,15 +1470,14 @@ def test_framework_outside_the_marker_table_has_no_observable_binding(tmp_path):
 
 
 def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path):
-    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import RequestedLaunch, build_launch_evidence
 
     config = tmp_path / "materialized.yaml"
     config.write_text("benchmark:\n  framework: vllm\n  model: /models/b\n", encoding="utf-8")
     log = _log(tmp_path, "server.log", "INFO vllm serve /models/b --tensor-parallel-size 4\n")
     evidence = build_launch_evidence(
-        config_path=config,
+        RequestedLaunch(config, "vllm"),
         actual_server_log=log,
-        framework="vllm",
         slot=tmp_path,
     )
     assert evidence["observed_model_binding"]["model_digest"] == evidence["requested_model_digest"]
@@ -1523,7 +1522,7 @@ def test_resolved_packages_reports_version_and_record_digest():
 def _collect(state):
     from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 
-    return collect_enablement(Path("/tmp/sess"), {"enablement": {"attempts": 1, **state}}, [])
+    return collect_enablement(Path("/tmp/sess"), {"enablement": {"last_specialist_task_id": "spec-1", **state}})
 
 
 def test_closure_status_is_unverified_while_a_closure_reason_stands():

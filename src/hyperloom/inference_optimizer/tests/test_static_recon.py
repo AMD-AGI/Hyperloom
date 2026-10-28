@@ -215,66 +215,25 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
 _SEED_PAYLOAD = {"recon": {"bridge_candidates": [{"id": "g1", "predicate_file": "a.py", "why_disabled_here": "w"}]}}
 
 
-def _dispatch_stub(session_dir):
-    """A stand-in carrying what the static-recon enqueue touches, with a task registry that mints a fresh row."""
-
-    async def _warm(params):
-        return None
-
-    async def _create(**kwargs):
-        return SimpleNamespace(task_id="t-recon"), False
-
-    state = SharedState(session_id="t", model_name="m")
-    state.static_recon_enabled = True
-    return SimpleNamespace(
-        shared_state=state,
-        session_dir=session_dir,
-        tasks=SimpleNamespace(create_or_return_existing=_create),
-        _coord=SimpleNamespace(
-            specialist_dispatch=SimpleNamespace(warm_specialist_params=_warm),
-            gpu_lanes=SimpleNamespace(framework_authoring_lanes_ttl=lambda params, base_ttl_sec: ([], base_ttl_sec)),
-        ),
-    )
-
-
 def _consume_site(session_dir):
     stub = _stub_coord(session_dir)
     return stub.shared_state, lambda: InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
 
 
-def _enqueue_site(session_dir):
-    stub = _dispatch_stub(session_dir)
-    return stub.shared_state, lambda: asyncio.run(
-        InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s")
-    )
-
-
-_SAVE_SITES = {
-    "consume": (
-        _consume_site,
-        lambda state: [g["canonical_id"] for g in state.gaps] == ["gap.static_recon.g1"],
-    ),
-    "enqueue": (_enqueue_site, lambda state: state.static_recon_runs == 1),
-}
-
-
-@pytest.mark.parametrize("site", _SAVE_SITES)
-def test_static_recon_save_os_error_is_logged_and_the_bookkeeping_stays(tmp_path, monkeypatch, caplog, site):
-    make, kept = _SAVE_SITES[site]
-    state, run = make(tmp_path)
+def test_static_recon_save_os_error_is_logged_and_the_bookkeeping_stays(tmp_path, monkeypatch, caplog):
+    state, run = _consume_site(tmp_path)
     err = OSError("disk full")
     monkeypatch.setattr(state, "save", _raiser(err))
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
         run()
 
-    assert kept(state)
+    assert [g["canonical_id"] for g in state.gaps] == ["gap.static_recon.g1"]
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
 
 
-@pytest.mark.parametrize("site", _SAVE_SITES)
-def test_static_recon_save_serialization_defect_propagates(tmp_path, monkeypatch, site):
-    state, run = _SAVE_SITES[site][0](tmp_path)
+def test_static_recon_save_serialization_defect_propagates(tmp_path, monkeypatch):
+    state, run = _consume_site(tmp_path)
     monkeypatch.setattr(state, "save", _raiser(TypeError("not JSON serializable")))
 
     with pytest.raises(TypeError, match="not JSON serializable"):

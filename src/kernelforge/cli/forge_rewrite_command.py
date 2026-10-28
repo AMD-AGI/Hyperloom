@@ -216,7 +216,7 @@ class RewriteRequest:
     option_group(
         "port",
         PortOptions,
-        click.option("--model", default=None, help="LLM model (overrides CLAUDE_MODEL / CODEX_MODEL)"),
+        click.option("--model", default=None, help="LLM model (overrides CLAUDE_MODEL / CODEX_MODEL / DSH_MODEL)"),
         click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)"),
         click.option(
             "--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up"

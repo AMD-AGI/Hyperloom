@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import time
@@ -22,6 +23,8 @@ from hyperloom.common.env_safety import specialist_run_as
 from .conftest import init_git_repo, make_fake_claude
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
@@ -660,7 +663,6 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     workspace.mkdir()
     process_log = workspace / "process.log"
     process_log.write_text("start\n", encoding="utf-8")
-    heartbeat_file = workspace / "heartbeat.json"  # never written
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=1.0,
@@ -679,7 +681,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
     writer = asyncio.create_task(_keep_streaming())
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -699,7 +701,6 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
-    heartbeat_file = workspace / "heartbeat.json"
 
     cfg = SpecialistSubprocessConfig(
         heartbeat_stale_seconds=0.5,
@@ -723,7 +724,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
+        ReapWatch(workspace=workspace, done_files=()),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -763,7 +764,7 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-base"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-base"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )
@@ -784,9 +785,7 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
     loop = asyncio.create_task(
         disp._reap_loop(
             proc,
-            ReapWatch(
-                workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-live"
-            ),
+            ReapWatch(workspace=workspace, done_files=(), task_id="task-live"),
             deadline=Deadline.after(0.3),
             started=time.monotonic(),
         )
@@ -817,7 +816,7 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
     started = time.monotonic()
     outcome = await disp._reap_loop(
         proc,
-        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-mine"),
+        ReapWatch(workspace=workspace, done_files=(), task_id="task-mine"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
     )
@@ -877,27 +876,17 @@ class _FakeGpuSpecialistLease:
         self.alive = True
         self.stopped = False
 
-    def start_async(
-        self,
-        cmd,
-        *,
-        env=None,
-        cwd=None,
-        log_path=None,
-        env_mode="merge",
-        stdin_path=None,
-    ) -> None:
+    def start_async(self, launch) -> None:
         # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
         # immediately on the next tick.
         self.started = {
-            "cmd": cmd,
-            "cwd": cwd,
-            "log_path": log_path,
-            "env_mode": env_mode,
-            "stdin_path": stdin_path,
+            "cmd": launch.cmd,
+            "cwd": launch.cwd,
+            "log_path": launch.log_path,
+            "stdin_path": launch.stdin_path,
         }
-        self.env = dict(env or {})
-        Path(log_path).write_text("stream-json log line\n", encoding="utf-8")
+        self.env = dict(launch.env or {})
+        Path(launch.log_path).write_text("stream-json log line\n", encoding="utf-8")
         # Graceful done — the reaper harvests this and exits.
         (self._workspace / "specialist_done.json").write_text(json.dumps({"proposal_set": []}), encoding="utf-8")
         self.alive = False
@@ -972,6 +961,84 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
     assert result.exit_code == 0
+
+
+class _RayActorError(Exception):
+    """Stand-in for ``ray.exceptions.RayActorError``; ray is not a test dependency."""
+
+
+class _InfeasibleGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.fault = RayInfeasibleError("ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested")
+        raise self.fault
+
+
+class _DeadActorGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.started = {"cmd": launch.cmd}
+
+    def poll_started(self) -> int | None:
+        self.fault = _RayActorError("The actor died unexpectedly before finishing this task.")
+        raise self.fault
+
+
+@pytest.mark.parametrize(
+    ("lease_cls", "message", "error"),
+    [
+        (
+            _InfeasibleGpuLease,
+            "specialist GPU actor submit failed: ",
+            "failed to submit specialist GPU actor: "
+            "RayInfeasibleError('ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested')",
+        ),
+        (
+            _DeadActorGpuLease,
+            "specialist GPU actor start failed: ",
+            "specialist GPU actor start failed: "
+            "_RayActorError('The actor died unexpectedly before finishing this task.')",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lease_cls,
+    message,
+    error,
+):
+    workspace = tmp_path / "ws"
+    lease = lease_cls(workspace)
+    monkeypatch.setattr(
+        subprocess_.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=subprocess_.log.name):
+        result = await SpecialistSubprocessDispatcher(
+            config=SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+        ).run(
+            SpecialistSpawn(
+                task_id="t-gpu-fail",
+                workspace=workspace,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="sys",
+                user_prompt="usr",
+                disallowed_tools=frozenset(),
+                max_turns=1,
+                deadline=Deadline.after(60.0),
+                gpu_lease=lease,
+            )
+        )
+
+    assert (result.done_payload, result.exit_code, result.elapsed_seconds) == (None, None, 0.0)
+    assert result.process_log_path == str(workspace / "process.log")
+    assert result.error == error
+    (record,) = [r for r in caplog.records if r.getMessage().startswith(message)]
+    assert record.exc_info[1] is lease.fault
 
 
 @pytest.mark.asyncio

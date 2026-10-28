@@ -13,7 +13,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
+    ROUTE_GEAK,
+    make_kernel_recorder,
+    record_geak_attempts,
+)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelExit
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -213,7 +218,7 @@ async def test_geak_acceptance_requires_native_retention(
             "graded_comparison_rejected",
             "rebench_did_not_beat_current_best",
         }
-    recorder.finish(tput_after=state.current_best["tput"])
+    recorder.finish(KernelExit(tput_after=state.current_best["tput"]))
     if lane == "2b":
         event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
         rebench = event["ext"]["rebench"]
@@ -339,7 +344,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     if journey_missing:
         Path(result["kernel_journey_path"]).unlink()
     if closed:
-        recorder.finish(tput_after=110.0)
+        recorder.finish(KernelExit(tput_after=110.0))
 
     async def fresh_replay(**_kwargs):
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
@@ -357,7 +362,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert not state.kernel_integrate_attempts
-    recorder.finish(tput_after=110.0)
+    recorder.finish(KernelExit(tput_after=110.0))
     event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert event["ext"]["outcome"]["delivered"] == []
     assert event["ext"]["geak"]["rebench"]["final_status"] == "no_promote"
@@ -370,7 +375,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert integrated_count(event["ext"]) == 0
     restored = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK, resumed=True)
     assert restored is not None
-    restored.record_geak_attempts(journey)
+    record_geak_attempts(event=restored.event_id, journey=journey)
     refreshed = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert integrated_count(refreshed["ext"]) == 0
     assert settled_e2e(refreshed["ext"])["decision"] == "REVERT"

@@ -6,30 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors._gpu_pin import (
-    _parse_server_arg_value,
-    _resolve_serving_fidelity,
-)
-
-
-def test_parse_space_and_equals_forms() -> None:
-    args = "--no-enable-prefix-caching --block-size 64 --max-model-len 2248 --gpu-memory-utilization=0.9"
-    assert _parse_server_arg_value(args, "--max-model-len") == "2248"
-    assert _parse_server_arg_value(args, "--gpu-memory-utilization") == "0.9"
-    assert _parse_server_arg_value(args, "--block-size") == "64"
-
-
-def test_parse_absent_and_valueless_and_empty() -> None:
-    assert _parse_server_arg_value("--a 1", "--missing") is None
-    assert _parse_server_arg_value("--flag", "--flag") is None
-    assert _parse_server_arg_value("", "--flag") is None
-    assert _parse_server_arg_value("--x 1", "") is None
-
-
-def test_parse_quoted_value_survives_shlex() -> None:
-    args = '--compilation-config=\'{"cudagraph_mode":"FULL"}\' --max-model-len 4096'
-    assert _parse_server_arg_value(args, "--max-model-len") == "4096"
-    assert _parse_server_arg_value(args, "--compilation-config") == '{"cudagraph_mode":"FULL"}'
+from hyperloom.orchestrator.actions.executors._gpu_pin import _resolve_serving_fidelity
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +42,18 @@ def test_resolve_omits_unresolved_knobs() -> None:
     out = _resolve_serving_fidelity(baseline_server_args="--gpu-memory-utilization 0.9", state_max_model_len=0)
     assert out == {"mem_fraction": 0.9}
     assert "max_model_len" not in out
+
+
+def test_resolve_repeated_flag_takes_last_value() -> None:
+    """The server's argparse keeps the last occurrence, so the handoff must forward that one."""
+    args = "--max-model-len 4096 --gpu-memory-utilization 0.8 --max-model-len 8192 --gpu-memory-utilization=0.9"
+    out = _resolve_serving_fidelity(baseline_server_args=args, state_max_model_len=0)
+    assert out == {"max_model_len": 8192, "mem_fraction": 0.9}
+
+
+def test_resolve_survives_unbalanced_quote() -> None:
+    out = _resolve_serving_fidelity(baseline_server_args='--max-model-len 4096 "unbalanced', state_max_model_len=0)
+    assert out == {"max_model_len": 4096}
 
 
 def test_resolve_ignores_malformed_values() -> None:

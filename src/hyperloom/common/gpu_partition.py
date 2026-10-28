@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from .gpu_identity import gpu_board
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,15 @@ class PartitionLayout:
         mem = f", {self.gib_per_partition:.0f} GiB" if self.gib_per_partition else ""
         source = "" if self.probed else " (derived)"
         return f"{self.mode} ({self.partitions} x {self.cu_per_partition} CU{mem}){source}"
+
+
+@dataclass(frozen=True)
+class PartitionModel:
+    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
+
+    model_path: str | None = None
+    precision: str | None = None
+    shared_state: Any = None
 
 
 def parse_mode(raw: str | None) -> str:
@@ -243,12 +252,12 @@ def layout_for(
         )
 
     # Fallback: derive from the board's total.
-    identity = AMD_GPU_DISPATCH_IDENTITIES.get(str(gpu_type or "").strip().lower())
-    if identity is None:
+    board = gpu_board(gpu_type)
+    if board is None:
         raise PartitionError(
             f"cannot size {canonical} partitions: GPU {gpu_type!r} reported no CU count and is not in the board table"
         )
-    cu_total = identity[1]
+    cu_total = board.compute_units
     if cu_total % partitions:
         # Flooring here would be silent and then fatal much later: partition devices are selected by matching this
         # exact CU count, so a floored value matches nothing and the benchmark reports "mode did not take effect" --
@@ -349,6 +358,7 @@ __all__ = [
     "PARTITION_TOTAL_STREAMS_ENV",
     "PartitionError",
     "PartitionLayout",
+    "PartitionModel",
     "fits_in_partition",
     "layout_for",
     "observe_partition",

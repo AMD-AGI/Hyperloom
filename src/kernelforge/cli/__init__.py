@@ -64,3 +64,13 @@ def _register_roofline_ceiling() -> None:
 
 
 _register_roofline_ceiling()
+
+
+def _register_export_runs() -> None:
+    """Attach the run-log exporter under `export-runs`; it imports the log readers only when it runs."""
+    from kernelforge.run_export.command import export_runs
+
+    main.add_command(export_runs, name="export-runs")
+
+
+_register_export_runs()

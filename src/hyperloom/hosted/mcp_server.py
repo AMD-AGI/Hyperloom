@@ -20,9 +20,10 @@ tokens. The service keeps one opaque cursor per token for it, starts it empty, a
 that carries the block has been written to the client.
 
 Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the campaign's
-``HYPERLOOM_MCP_TOKEN``; every other token was issued by this server to one specialist and dies with
-:meth:`McpServer.revoke`. Issued tokens are kept as digests only, compared in constant time, and a token is never
-written to a log or an error message.
+MCP token, which the caller reads from :class:`~hyperloom.hosted.host_info.HostInfo` and passes in
+:class:`McpServerConfig`; every other token was issued by this server to one specialist and dies with
+:meth:`McpServer.revoke_specialist`. Issued tokens are kept as digests only, compared in constant time, and a token
+is never written to a log or an error message.
 """
 
 from __future__ import annotations
@@ -35,9 +36,9 @@ import hmac
 import inspect
 import json
 import logging
-import os
 import secrets
 import threading
+import traceback
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -58,9 +59,6 @@ TOKEN_KINDS = frozenset({HOST_KIND, SPECIALIST_KIND})
 MAX_BODY_BYTES = 1 << 20
 MIN_TOKEN_LENGTH = 16
 SESSION_HEADER = "Mcp-Session-Id"
-ENV_HOST = "HYPERLOOM_MCP_HOST"
-ENV_PORT = "HYPERLOOM_MCP_PORT"
-ENV_TOKEN = "HYPERLOOM_MCP_TOKEN"
 
 _ERR_PARSE = -32700
 _ERR_INVALID_REQUEST = -32600
@@ -135,18 +133,11 @@ class RegisteredTool:
 
 @dataclass(frozen=True)
 class McpServerConfig:
+    """Plain values from the caller; a hosted run takes ``port`` and ``host_token`` from its ``HostInfo``."""
+
     host: str = "127.0.0.1"
     port: int = 0
     host_token: str = ""
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> McpServerConfig:
-        source = os.environ if env is None else env
-        return cls(
-            host=source.get(ENV_HOST, "127.0.0.1"),
-            port=int(source.get(ENV_PORT, "0")),
-            host_token=source.get(ENV_TOKEN, ""),
-        )
 
 
 def _digest(token: str) -> bytes:
@@ -210,8 +201,11 @@ class _ReplyNotes:
             note = self._annotator(call, self._now)
             if inspect.isawaitable(note):
                 note = await note
-        except Exception as exc:  # noqa: BLE001 - a failing annotator must not take the tool's reply with it
-            logger.warning("reply annotator failed: %s", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - isolation boundary: one reply annotation; the cursor stays put
+            # The stack only: the message may carry a token.
+            logger.warning(
+                "reply annotator failed: %s\n%s", type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return None
         self._now = note.cursor
         return note
@@ -380,8 +374,10 @@ class McpServer:
             raise
         except ToolError as exc:
             return _tool_result(self.scrub(str(exc), presented), is_error=True)
-        except Exception as exc:  # noqa: BLE001 - a failing tool is a tool error, not a transport error
-            logger.warning("tool %s failed: %s", name, type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - isolation boundary: one tool call, answered as a tool error
+            logger.warning(
+                "tool %s failed: %s\n%s", name, type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return _tool_result(self.scrub(f"{type(exc).__name__}: {exc}", presented), is_error=True)
         text = outcome if isinstance(outcome, str) else json.dumps(outcome, default=str)
         return _tool_result(text, is_error=False)
@@ -425,8 +421,10 @@ class McpServer:
             return _rpc_error(request_id, _ERR_PARAMS, str(exc))
         except ToolForbidden as exc:
             return _rpc_error(request_id, _ERR_FORBIDDEN, str(exc))
-        except Exception as exc:  # noqa: BLE001 - convert failures to JSON-RPC
-            logger.warning("request failed: %s", type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - outermost per-request boundary: a JSON-RPC internal error
+            logger.warning(
+                "request failed: %s\n%s", type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__))
+            )
             return _rpc_error(request_id, _ERR_INTERNAL, self.scrub(f"{type(exc).__name__}: {exc}", presented))
         return {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
 
@@ -454,8 +452,12 @@ class McpServer:
             while not done.wait(self._heartbeat_seconds):
                 try:
                     hook()
-                except Exception as exc:  # noqa: BLE001 - a failing beat must not break the call
-                    logger.warning("heartbeat beat failed: %s", type(exc).__name__)
+                except Exception as exc:  # noqa: BLE001 - outermost heartbeat thread: a failing beat must not break the call
+                    logger.warning(
+                        "heartbeat beat failed: %s\n%s",
+                        type(exc).__name__,
+                        "".join(traceback.format_tb(exc.__traceback__)),
+                    )
 
         thread = threading.Thread(target=beat, name="hyperloom-mcp-heartbeat", daemon=True)
         thread.start()

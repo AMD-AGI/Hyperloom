@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import logging
 from dataclasses import asdict
+
+import pytest
 
 from kernelforge.loop import task_preparer_prompts
 from kernelforge.loop import task_preflight
@@ -92,6 +96,38 @@ def test_passing_stage_records_nothing(monkeypatch, tmp_path):
     assert result.ok
     assert result.diagnostics == {}
     assert result.detail_report() == result.summary()
+
+
+@pytest.mark.parametrize("stage", ["correctness", "bench"])
+def test_a_stage_whose_driver_cannot_be_spawned_fails_with_its_stack(monkeypatch, tmp_path, caplog, stage):
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('noop')\n")
+    spawn = OSError(errno.EMFILE, "Too many open files")
+
+    async def _correctness(**kwargs):
+        if stage == "correctness":
+            raise spawn
+        return {"passed": True, "snr_db": 48.0, "message": "PASS"}
+
+    async def _bench(_run, **kwargs):
+        if stage == "bench":
+            raise spawn
+        return {"success": True, "median_ms": 1.0, "case_times": {"case-1": 1.0}, "message": "ok"}
+
+    monkeypatch.setattr(task_preflight, "test_correctness", _correctness)
+    monkeypatch.setattr(task_preflight, "bench_wallclock", _bench)
+    with caplog.at_level(logging.WARNING, logger=task_preflight.log.name):
+        result = asyncio.run(
+            task_preflight._preflight_async(driver.as_posix(), task_preflight.DriverContract(snr_threshold=30.0), 1, 2)
+        )
+
+    assert (result.ok, result.correctness_ok, result.bench_ok) == (False, stage == "bench", stage == "correctness")
+    assert result.reasons == [f"{stage} run raised OSError: [Errno 24] Too many open files"]
+    assert list(result.diagnostics) == [stage]
+    assert result.diagnostics[stage].startswith("Traceback (most recent call last):\n")
+    assert result.diagnostics[stage].endswith("OSError: [Errno 24] Too many open files\n")
+    (record,) = [r for r in caplog.records if r.getMessage().startswith(f"preflight {stage} run raised: ")]
+    assert record.exc_info[1] is spawn
 
 
 def test_retry_prompt_shows_the_traceback():

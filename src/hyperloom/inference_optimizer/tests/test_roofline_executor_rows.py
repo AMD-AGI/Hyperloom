@@ -525,7 +525,7 @@ async def test_under_the_graph_capture_override_a_capture_marker_is_a_plain_fail
 
 
 @pytest.mark.asyncio
-async def test_the_n26_retry_reissues_the_initial_request_with_only_the_mode_and_markers_added(tmp_path, monkeypatch):
+async def test_the_n26_retry_reissues_the_initial_request_with_only_the_mode_changed(tmp_path, monkeypatch):
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
     payloads: list[dict[str, Any]] = []
@@ -541,12 +541,7 @@ async def test_the_n26_retry_reissues_the_initial_request_with_only_the_mode_and
     initial, retry = payloads
     assert initial["roofline_arm"] == "current_best"
     assert initial["roofline_output_name"] == "kernel_roofline_current.json"
-    assert retry == {
-        **initial,
-        "steady_state_mode": "decode_only",
-        "_n26_auto_retry": True,
-        "_n26_retry_from_mode": "mixed",
-    }
+    assert retry == {**initial, "steady_state_mode": "decode_only"}
 
 
 @pytest.mark.asyncio

@@ -627,6 +627,7 @@ def _fake_container_fs(monkeypatch, *, present=(), cgroup=_HOST_CGROUP_V2):
             raise OSError(f"unreadable: {self._path}")
 
     monkeypatch.setattr(preflight, "Path", _Node)
+    monkeypatch.setattr(provenance, "_PID1_CGROUP", _Node("/proc/1/cgroup"))
     monkeypatch.setattr(provenance, "_read_first_line", lambda _p: "")
 
 

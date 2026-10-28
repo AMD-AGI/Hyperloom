@@ -176,7 +176,13 @@ def extract_last_json_with_key(
     return _last(_qualifying(chain(fenced, (text,)), required_key))
 
 
+def extract_last_json_matching(text: str, required_key: str, bare_re: re.Pattern[str]) -> dict[str, Any] | None:
+    """Return the last JSON object carrying ``required_key`` among *text*'s fenced blocks, then its ``bare_re`` matches."""
+    return extract_first_json_with_key(text, required_key, bare_re, last=True)
+
+
 __all__ = [
+    "extract_last_json_matching",
     "extract_first_json_with_key",
     "extract_last_json_with_key",
     "read_json",

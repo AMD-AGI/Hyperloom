@@ -46,6 +46,12 @@ DEFAULT_MIN_WORTH = 0.0
 # Ranking treats an unknown score as worse than the lowest real one (0.0).
 _UNKNOWN_WORTH = -1.0
 
+# Once candidates exist, the only failures left to report are these two.
+_DISCOVERY_FAILURE_LOG = {
+    REASON_CONTRACT_ERROR: (logging.ERROR, "contract error"),
+    REASON_SERVICE_UNREACHABLE: (logging.WARNING, "request failed"),
+}
+
 
 class PRState(str, Enum):
     """Where a PR stands; ``closed`` means closed without being merged."""
@@ -435,6 +441,11 @@ class SearchLimits:
     candidate_cap: int = 0
 
 
+def _explicit_or_env(value: float, name: str, default: float, kind: type) -> float:
+    """The caller's non-zero value, else the environment's, else the default."""
+    return value or kind(os.environ.get(name) or default)
+
+
 def discover(
     client: PRMonitorClient,
     context: PRQueryContext,
@@ -446,13 +457,10 @@ def discover(
     """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings."""
     if context.reason:
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
-    top_k = limits.top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
-    candidate_cap = limits.candidate_cap or int(
-        os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP) or DEFAULT_CANDIDATE_CAP
-    )
+    top_k = _explicit_or_env(limits.top_k, "PR_KB_TOP_K", DEFAULT_TOP_K, int)
+    candidate_cap = _explicit_or_env(limits.candidate_cap, "PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP, int)
     if deadline is None:
-        budget = budget_sec or float(os.environ.get("PR_KB_BUDGET_SEC", "30") or 30)
-        deadline = time.monotonic() + budget
+        deadline = time.monotonic() + _explicit_or_env(budget_sec, "PR_KB_BUDGET_SEC", 30, float)
     stats: dict[str, Any] = {"http_calls": 0, "fallback_used": False}
 
     candidates, failure_reason = _collect_candidates(client, context, deadline=deadline, stats=stats)
@@ -502,11 +510,9 @@ def discover(
     stats["relevance_dropped"] = len(kept) - len(relevant)
     ranked = rank_references(relevant, components_of_interest=interest)
     stats["surfaced"] = len(ranked)
-    if failure_reason == REASON_CONTRACT_ERROR:
-        log.error("pr-monitor contract error during discovery for %s", context.repo)
-    elif failure_reason == REASON_SERVICE_UNREACHABLE:
-        log.warning("pr-monitor request failed during discovery for %s", context.repo)
     if failure_reason:
+        level, what = _DISCOVERY_FAILURE_LOG[failure_reason]
+        log.log(level, "pr-monitor %s during discovery for %s", what, context.repo)
         stats["degraded_reason"] = failure_reason
     if not ranked:
         return SearchOutcome(reason=failure_reason or REASON_NO_CANDIDATE, stats=stats)

@@ -18,7 +18,7 @@ from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES
+from ..state.task_registry import TERMINAL_STATES, TaskSpec
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -205,8 +205,6 @@ def apply_critic_grid_filter(
     params["grid"] = stamped_grid
     if approved_variant_names is None:
         return True
-    original_grid_len = len([v for v in original_grid if isinstance(v, dict)])
-    params["critic_filtered_count"] = max(0, original_grid_len - len(stamped_grid))
     return bool(stamped_grid)
 
 
@@ -235,11 +233,14 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
     if not proposal_msg_id or not task_id:
         return
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
     phase_event.record_proposal_outcome(
-        proposal_msg_id=str(proposal_msg_id),
-        materialized=True,
-        task_id=str(task_id),
+        ProposalOutcome(
+            proposal_msg_id=str(proposal_msg_id),
+            materialized=True,
+            task_id=str(task_id),
+        )
     )
 
 
@@ -375,12 +376,14 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         for attempt in range(_MAX_IDEMPOTENCY_ATTEMPTS):
             idempotency_key = raw_key if attempt == 0 else f"{raw_key}-retry{attempt}"
             task, was_existing = await self.tasks.create_or_return_existing(
-                kind=pending.action_name,
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
+                TaskSpec(
+                    kind=pending.action_name,
+                    params=params,
+                    idempotency_key=idempotency_key,
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
+                    dispatch_class="llm",
+                )
             )
             if not was_existing:
                 break
@@ -439,13 +442,6 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 await self._record_materialize_skipped(pending, "critic_filter_empty_grid")
                 _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
                 return False
-        if action == "profile":
-            # Stamp the server config that produced this trace.
-            inject_stack_base_params(params, self.shared_state)
-        if action == "sweep":
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
         if action == "explore":
             self.inject_explore_runtime_params(params)
             self.credit_predictor_proposals(params)

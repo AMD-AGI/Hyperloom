@@ -17,6 +17,8 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
     DEFAULT_HARDWARE_SLUG,
     DEFAULT_MODEL_SLUG,
     DEFAULT_PRECISION_SLUG,
+    KbTopology,
+    RecipeIdentity,
     detect_framework_version,
     kb_hardware_slug,
     recipe_canonical_id,
@@ -26,11 +28,13 @@ from hyperloom.inference_optimizer.recipe_snapshot_constants import (
 def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
     """``inference:{model}:{hw}:{fw}:{fwver}:{precision}:{model_type}:{arch}`` — eight segments."""
     cid = recipe_canonical_id(
-        model="Qwen3-30B-A3B",
-        hardware="MI355X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="Qwen3-30B-A3B",
+            hardware="MI355X",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     assert cid == "inference:qwen3-30b-a3b:mi355x:sglang:unknown_model_type:unknown_arch:0.4.5:fp8"
     assert cid.split(":") == [
@@ -47,11 +51,13 @@ def test_canonical_id_shape_is_mhfvp_with_inference_prefix() -> None:
 
 def test_canonical_id_lowercases_every_component() -> None:
     cid = recipe_canonical_id(
-        model="DEEPSEEK-R1",
-        hardware="MI300X",
-        framework_name="VLLM",
-        framework_version="0.6.0+ROCM",
-        precision="BF16",
+        RecipeIdentity(
+            model="DEEPSEEK-R1",
+            hardware="MI300X",
+            framework_name="VLLM",
+            framework_version="0.6.0+ROCM",
+            precision="BF16",
+        )
     )
     assert cid.startswith("inference:")
     parts = cid.split(":")[1:]
@@ -62,18 +68,22 @@ def test_canonical_id_lowercases_every_component() -> None:
 def test_canonical_id_basenames_path_style_model() -> None:
     """A path-style ``--model`` must converge on the same canonical_id as the bare name."""
     cid_path = recipe_canonical_id(
-        model="/path/models/Qwen3-30B-A3B",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="/path/models/Qwen3-30B-A3B",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     cid_bare = recipe_canonical_id(
-        model="Qwen3-30B-A3B",
-        hardware="mi355x",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
+        RecipeIdentity(
+            model="Qwen3-30B-A3B",
+            hardware="mi355x",
+            framework_name="sglang",
+            framework_version="0.4.5",
+            precision="fp8",
+        )
     )
     assert cid_path == cid_bare
 
@@ -83,17 +93,19 @@ def test_canonical_id_is_keyword_only() -> None:
     # Splat a runtime-built arg list to keep the positional drift a runtime check.
     bad_positional_args = ["m", "h", "f", "v", "p"]
     with pytest.raises(TypeError):
-        recipe_canonical_id(*bad_positional_args)  # type: ignore[misc]
+        RecipeIdentity(*bad_positional_args)  # type: ignore[misc]
 
 
 def test_canonical_id_normalises_whitespace_and_slashes() -> None:
     """Whitespace and embedded ``/`` inside any slug become ``_``."""
     cid = recipe_canonical_id(
-        model="A B",
-        hardware="mi 355x",
-        framework_name="sg lang",
-        framework_version="0.4 5",
-        precision="fp 8",
+        RecipeIdentity(
+            model="A B",
+            hardware="mi 355x",
+            framework_name="sg lang",
+            framework_version="0.4 5",
+            precision="fp 8",
+        )
     )
     assert cid == "inference:a_b:mi_355x:sg_lang:unknown_model_type:unknown_arch:0.4_5:fp_8"
 
@@ -105,11 +117,13 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
     )
 
     cid = recipe_canonical_id(
-        model="",
-        hardware="",
-        framework_name="",
-        framework_version="",
-        precision="",
+        RecipeIdentity(
+            model="",
+            hardware="",
+            framework_name="",
+            framework_version="",
+            precision="",
+        )
     )
     assert cid == (
         f"inference:"
@@ -126,11 +140,13 @@ def test_canonical_id_substitutes_defaults_for_each_empty_component() -> None:
 def test_canonical_id_treats_whitespace_only_as_empty() -> None:
     """Whitespace-only is logically empty — must fall back to the default slug."""
     cid = recipe_canonical_id(
-        model="   ",
-        hardware="\t",
-        framework_name="",
-        framework_version="\n",
-        precision="",
+        RecipeIdentity(
+            model="   ",
+            hardware="\t",
+            framework_name="",
+            framework_version="\n",
+            precision="",
+        )
     )
     assert DEFAULT_MODEL_SLUG in cid
     assert DEFAULT_HARDWARE_SLUG in cid
@@ -145,11 +161,13 @@ def test_canonical_id_partial_defaults_keep_explicit_components() -> None:
     )
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="",
-        framework_name="sglang",
-        framework_version="",
-        precision="fp8",
+        RecipeIdentity(
+            model="m",
+            hardware="",
+            framework_name="sglang",
+            framework_version="",
+            precision="fp8",
+        )
     )
     parts = cid.split(":")
     assert parts == [
@@ -168,12 +186,14 @@ def test_canonical_id_defaults_empty_architecture_list() -> None:
     from hyperloom.inference_optimizer.recipe_snapshot_constants import DEFAULT_ARCHITECTURES_SLUG
 
     cid = recipe_canonical_id(
-        model="m",
-        hardware="h",
-        framework_name="sglang",
-        architectures=[],
-        framework_version="v",
-        precision="p",
+        RecipeIdentity(
+            model="m",
+            hardware="h",
+            framework_name="sglang",
+            architectures=[],
+            framework_version="v",
+            precision="p",
+        )
     )
     assert cid.split(":")[5] == DEFAULT_ARCHITECTURES_SLUG
 
@@ -259,20 +279,22 @@ def test_detect_framework_version_strips_dunder_version_whitespace(
 def test_kb_hardware_slug_single_node_unchanged() -> None:
     """Single-node KB keys must stay byte-for-byte identical to pre-infera runs."""
     gpu = "MI300X"
-    assert kb_hardware_slug(gpu, nodes=1) == gpu
+    assert kb_hardware_slug(gpu, KbTopology(nodes=1)) == gpu
     # Cluster kwargs are all ignored when nodes < 2, and the default shape (dense, whole card) adds nothing.
     assert (
         kb_hardware_slug(
             gpu,
-            nodes=1,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=2,
-            pd_decode_nodes=1,
-            tp=8,
-            ep=1,
-            partition_mode="SPX",
-            backend="rayjob",
+            KbTopology(
+                nodes=1,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=2,
+                pd_decode_nodes=1,
+                tp=8,
+                ep=1,
+                partition_mode="SPX",
+                backend="rayjob",
+            ),
         )
         == gpu
     )
@@ -280,12 +302,14 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
 
 def test_kb_hardware_slug_separates_a_divided_card_from_a_whole_one() -> None:
     """SPX and CPX share a GPU type but are different machines; the key has to say so."""
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="CPX") == "MI300X_cpx"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="DPX") == "MI300X_dpx"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="QPX") == "MI300X_qpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="CPX")) == "MI300X_cpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="DPX")) == "MI300X_dpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, partition_mode="QPX")) == "MI300X_qpx"
     # The mode also suffixes inside a cluster key, after the formation and before the backend.
     assert (
-        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=8, partition_mode="CPX", backend="rayjob")
+        kb_hardware_slug(
+            "MI300X", KbTopology(nodes=2, gpus_per_node=8, tp=8, ep=8, partition_mode="CPX", backend="rayjob")
+        )
         == "MI300X_ws16_tp8_ep8_cpx_rayjob"
     )
 
@@ -293,34 +317,36 @@ def test_kb_hardware_slug_separates_a_divided_card_from_a_whole_one() -> None:
 def test_kb_hardware_slug_treats_the_default_shape_as_no_shape() -> None:
     """Anything that would re-key a historical row has to be omitted, not encoded."""
     # One partition IS the whole card, so SPX must be indistinguishable from a mode nobody published.
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="SPX") == "MI300X"
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="") == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="SPX")) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="")) == "MI300X"
     # A mode this build does not know is not a licence to invent a key for it.
-    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="TPX") == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, partition_mode="TPX")) == "MI300X"
     # tp is deliberately NOT encoded single-node: almost every run sets it, so it would move the whole corpus.
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8)) == "MI300X"
 
 
 def test_kb_hardware_slug_encodes_single_node_expert_parallelism() -> None:
     """``ep`` is fixed at launch and invalidates a config across splits, whatever the node count."""
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8) == "MI300X_ep8"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8, partition_mode="CPX") == "MI300X_ep8_cpx"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=8)) == "MI300X_ep8"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=8, partition_mode="CPX")) == "MI300X_ep8_cpx"
     # Dense is the default, so ep<=1 stays silent and keeps the historical key.
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=1) == "MI300X"
-    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=0) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=1)) == "MI300X"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=1, tp=8, ep=0)) == "MI300X"
 
 
 def test_kb_hardware_slug_multi_node_adds_topology_suffix() -> None:
     """Contrast: multi-node encodes world_size (and PD split when disaggregated)."""
-    assert kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8) == "MI300X_ws16"
+    assert kb_hardware_slug("MI300X", KbTopology(nodes=2, gpus_per_node=8)) == "MI300X_ws16"
     assert (
         kb_hardware_slug(
             "MI300X",
-            nodes=2,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=1,
-            pd_decode_nodes=1,
+            KbTopology(
+                nodes=2,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=1,
+                pd_decode_nodes=1,
+            ),
         )
         == "MI300X_ws16_pd1p1d"
     )
@@ -332,11 +358,13 @@ def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
     assert (
         kb_hardware_slug(
             "MI325X",
-            nodes=2,
-            gpus_per_node=2,
-            tp=4,
-            ep=4,
-            backend="rayjob",
+            KbTopology(
+                nodes=2,
+                gpus_per_node=2,
+                tp=4,
+                ep=4,
+                backend="rayjob",
+            ),
         )
         == "MI325X_ws4_tp4_ep4_rayjob"
     )
@@ -344,18 +372,21 @@ def test_kb_hardware_slug_encodes_formation_and_backend() -> None:
     assert (
         kb_hardware_slug(
             "MI300X",
-            nodes=2,
-            gpus_per_node=8,
-            pd_mode="disaggregated",
-            pd_prefill_nodes=1,
-            pd_decode_nodes=1,
-            tp=8,
-            ep=8,
-            backend="infera",
+            KbTopology(
+                nodes=2,
+                gpus_per_node=8,
+                pd_mode="disaggregated",
+                pd_prefill_nodes=1,
+                pd_decode_nodes=1,
+                tp=8,
+                ep=8,
+                backend="infera",
+            ),
         )
         == "MI300X_ws16_pd1p1d_tp8_ep8_infera"
     )
     # ep==1 (no expert parallelism) is omitted; tp still encoded.
     assert (
-        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob") == "MI300X_ws16_tp8_rayjob"
+        kb_hardware_slug("MI300X", KbTopology(nodes=2, gpus_per_node=8, tp=8, ep=1, backend="rayjob"))
+        == "MI300X_ws16_tp8_rayjob"
     )

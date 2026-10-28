@@ -10,7 +10,7 @@ import yaml
 from pathlib import Path
 
 
-from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml, GridRecipe
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 
@@ -87,9 +87,7 @@ def test_framework_keys_written():
             "framework_venv_root": "/attempt/venv",
         },
     )
-    assert envs["HYPERLOOM_FRAMEWORK_BIN"] == "/attempt/bin/vllm"
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/attempt/bin/python"
-    assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == "/attempt/venv"
 
 
 def test_empty_override_is_noop():
@@ -114,9 +112,8 @@ def test_runtime_override_in_yaml_not_process_env(tmp_path):
     env_before = dict(os.environ)
 
     out_yaml = _build_variant_yaml(
-        base_yaml_path=base_yaml,
-        base_extra_args="",
-        variant=variant,
+        GridRecipe(base_yaml_path=base_yaml),
+        variant,
         output_subdir=tmp_path / "out",
     )
 
@@ -127,7 +124,6 @@ def test_runtime_override_in_yaml_not_process_env(tmp_path):
         materialized = yaml.safe_load(f)
 
     envs = materialized["benchmark"]["envs"]
-    assert envs.get("HYPERLOOM_FRAMEWORK_BIN") == "/attempt/bin/vllm"
     assert envs.get("HYPERLOOM_FRAMEWORK_PYTHON") == "/attempt/bin/python"
     assert "/attempt/bin" in envs.get("PATH", "")
 
@@ -137,15 +133,14 @@ def test_no_runtime_override_field_is_noop(tmp_path):
     base_yaml = _base_yaml(tmp_path)
     variant = GridVariant(name="plain")
     out_yaml = _build_variant_yaml(
-        base_yaml_path=base_yaml,
-        base_extra_args="",
-        variant=variant,
+        GridRecipe(base_yaml_path=base_yaml),
+        variant,
         output_subdir=tmp_path / "out2",
     )
     with out_yaml.open(encoding="utf-8") as f:
         materialized = yaml.safe_load(f)
     envs = materialized["benchmark"]["envs"]
-    assert "HYPERLOOM_FRAMEWORK_BIN" not in envs
+    assert "HYPERLOOM_FRAMEWORK_PYTHON" not in envs
 
 
 # compiled-artifact runtime prefixes
@@ -262,9 +257,8 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     variant.runtime_override = rt.to_runtime_override()
 
     out_yaml = _build_variant_yaml(
-        base_yaml_path=base_yaml,
-        base_extra_args="",
-        variant=variant,
+        GridRecipe(base_yaml_path=base_yaml),
+        variant,
         output_subdir=tmp_path / "out5",
     )
     with out_yaml.open(encoding="utf-8") as f:

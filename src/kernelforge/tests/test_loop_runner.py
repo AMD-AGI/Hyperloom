@@ -28,6 +28,8 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
+from kernelforge.loop.lessons import SummaryOutcome
+from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
 from kernelforge.loop.round_budget import (
     ADMISSION_SESSION_SEC,
@@ -58,13 +60,9 @@ from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
 )
-from kernelforge.loop.runner import (
-    IterationConfig,
-    IterationLoop,
-    IterationResult,
-    WindowGain,
-)
-from kernelforge.evaluation.scoring import passes_keep_threshold
+from kernelforge.loop.iteration.iteration_types import WindowGain
+from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.evaluation.scoring import GateScoring, passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -93,6 +91,18 @@ from kernelforge.orchestrator.specialists import (
     SpecialistPool,
 )
 from kernelforge.tracker import ExperimentTracker
+from kernelforge.loop.iteration import attempt_verdict
+from kernelforge.loop.iteration import campaign_runtime
+from kernelforge.loop.iteration import iteration_phases
+from kernelforge.loop.iteration import keep_checkpoint
+from kernelforge.loop.iteration import lane_runtime
+from kernelforge.loop.iteration import locked_run
+from kernelforge.loop.iteration import outcome_runtime
+from kernelforge.loop.iteration import round_admission
+from kernelforge.loop.iteration import best_publication
+from kernelforge.loop.fanout import LaneResult
+from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
+from kernelforge.tests.conftest import patch_iteration_name, silence_jit_rebuild
 
 
 # The stand-in for "budget is not what this test is about". It has to clear the
@@ -137,7 +147,7 @@ def _make_loop(
         capture_output=True,
     )
 
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
 
     config = IterationConfig(
         kernel_file=str(kernel),
@@ -194,7 +204,7 @@ def test_working_tree_diff_failure_is_not_treated_as_empty(tmp_path, monkeypatch
     def _unreadable_index(*_args, **_kwargs):
         raise GitError(128, ["git", "diff"], "", "fatal: unable to read index")
 
-    monkeypatch.setattr(runner_module, "git", _unreadable_index)
+    patch_iteration_name(monkeypatch, "git", _unreadable_index)
 
     with pytest.raises(GitError, match="unable to read index"):
         loop._working_tree_diff()
@@ -278,7 +288,7 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         kernel_source=kernel.read_text(),
     )
 
-    assert set(pending) == runner_module.PENDING_KEEP_FIELDS
+    assert set(pending) == keep_checkpoint.PENDING_KEEP_FIELDS
     assert pending["changed_files"] == ["kernel.py"]
     assert set(pending["publication_changed_files"]) == {"driver.py", "kernel.py"}
     assert "prior kept optimization" in pending["publication_patch"]
@@ -477,7 +487,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="kept",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 3)
+    outcome_runtime.pin_iteration(loop.run_state, 3)
 
     for iteration in range(4, 14):
         loop._record_iteration_outcome(
@@ -493,7 +503,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="newer",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 14)
+    outcome_runtime.pin_iteration(loop.run_state, 14)
 
     assert while_best == [3, 7, 8, 9, 10, 11, 12, 13]
     assert loop.run_state.pinned_iterations == [7, 8, 9, 10, 11, 12, 13, 14]
@@ -569,7 +579,7 @@ def _stackable_workspace(loop, workspace, *, candidates=2):
         (22, "line_22 = 22", "line_22 = 122", "prefill"),
         (33, "line_33 = 33", "line_33 = 133", "decode"),
     )[:candidates]
-    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    loop.archive = campaign_runtime.CandidateArchive(str(workspace), loop.ic.kernel_file)
     kernel = workspace / "kernel.py"
     width = max(line for line, *_rest in edits) + 1
     kernel.write_text("\n".join(f"line_{n} = {n}" for n in range(width)) + "\n")
@@ -620,7 +630,7 @@ def _lane_agent_factory(edits):
     """An agent that writes the edit its lane was assigned, in that lane's copy."""
 
     def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt):
+        async def agent(_kernel_file, prompt, session_sink=None):
             path = Path(lane_dir) / "kernel.py"
             for plan, (old, new) in edits.items():
                 if plan in prompt:
@@ -636,7 +646,7 @@ def _recording_lane_factory(seen):
     """A lane agent that records everything the round handed it."""
 
     def factory(lane_dir, serialized_driver):
-        async def agent(kernel_file, prompt):
+        async def agent(kernel_file, prompt, session_sink=None):
             seen.append(
                 {
                     "lane_dir": lane_dir,
@@ -677,6 +687,89 @@ async def test_a_lane_is_told_to_run_the_serialized_driver(tmp_path, monkeypatch
     assert "not a hang" in seen[0]["prompt"]
     assert "tune the prefill epilogue" in seen[0]["prompt"]
     assert [item.plan for item in loop._lane_queue] == ["tune the prefill epilogue"]
+
+
+def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeypatch):
+    """The record turn resumes the real session inside the round.
+
+    Moving it to after ``run_lanes`` returns deletes the lane copy first, and
+    the guard then fails the resume before the session can answer.
+    """
+    from kernelforge.cli import lanes as cli_lanes
+    from kernelforge.config import Config
+    from kernelforge.orchestrator import agent as agent_module
+    from kernelforge.tests.test_claude_resume import _FakeOptions, _backend
+
+    loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2)
+    loop.ic = replace(loop.ic, lanes=2)
+    _stub_measurement(monkeypatch, [2.0, 2.0])
+
+    def create_backend(_runtime, **_kwargs):
+        async def query(prompt, options):
+            cwd = Path(options.kwargs["cwd"])
+            lane = cwd.name
+            if options.kwargs.get("resume"):
+                text = f"lane {lane} widened the loads"
+            else:
+                kernel = cwd / "kernel.py"
+                kernel.write_text(kernel.read_text().replace("return 1", "return 2"))
+                text = "PLAN: widen the loads\nSUBMIT_CANDIDATE"
+            session_id = f"sess-{lane}"
+            yield SimpleNamespace(content=[], subtype="init", session_id=session_id)
+            yield SimpleNamespace(
+                content=[SimpleNamespace(text=text)],
+                total_cost_usd=0.0,
+                subtype="success",
+                num_turns=2,
+                session_id=session_id,
+            )
+
+        backend = _backend([], {})
+        backend._query = query
+        backend._options_type = _FakeOptions
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", create_backend)
+    config = Config(workspace=str(workspace), agent_backend="claude", agent_model="claude-test", agent_precheck=False)
+    factory = cli_lanes._make_lane_agent_factory(
+        make_agent=agent_module.make_agent_fn,
+        config=config,
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "driver.py"),
+            source_files=[str(workspace / "kernel.py")],
+        ),
+        setup=agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize the kernel."),
+            session=agent_module.SessionOptions(agent_backend="claude"),
+        ),
+    )
+
+    async def _plan(*, iteration, lanes=1, **_kwargs):
+        loop._last_lane_plans = ["tune prefill", "tune decode"]
+        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("# Optimization plan\ntune prefill\n")
+        return plan_path, ""
+
+    monkeypatch.setattr(loop, "_run_orchestration", _plan)
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=factory,
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    lessons = workspace / "forge_experiments" / "lessons"
+    first = (lessons / "iter_001.md").read_text()
+    second = (lessons / "iter_002.md").read_text()
+    assert first.startswith("lane 1 widened the loads")
+    assert second.startswith("lane 2 widened the loads")
+    assert "(no agent summary)" not in first + second
 
 
 async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypatch):
@@ -777,6 +870,39 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
     assert fanned_out == [1]
 
 
+def test_the_loop_hides_its_output_folder_from_git(tmp_path, monkeypatch):
+    """The workspace ignores nothing of its own, yet git lists nothing the loop wrote under forge_experiments."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+
+    assert (workspace / "forge_experiments" / ".gitignore").read_text() == "*\n"
+    assert any(path.name != ".gitignore" for path in (workspace / "forge_experiments").rglob("*") if path.is_file())
+    listed = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "forge_experiments" not in listed.stdout
+
+
+def test_a_session_is_handed_what_its_gate_scores_against(tmp_path, monkeypatch):
+    """The pristine per-case times and the current best reach the session's gate as one value."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 2.0})
+    seen: list[GateScoring] = []
+
+    async def agent(_kernel_path, _history, session_sink, gate_scoring):
+        seen.append(gate_scoring)
+        session_sink["plan"] = "inspect only"
+        return "No source change was needed."
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+
+    assert seen == [GateScoring({"case": 2.0}, 1.0)]
+
+
 def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=False):
     """Stand in for planning, recording every round an iteration is charged for."""
 
@@ -855,7 +981,7 @@ def test_lanes_that_produced_nothing_do_not_buy_the_round_again(tmp_path, monkey
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -876,11 +1002,11 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monke
 
     async def _rejected_candidates(**_kwargs):
         return [
-            runner_module.LaneResult(lane_id="1", plan="a", diff=tampered),
-            runner_module.LaneResult(lane_id="2", plan="b", diff=tampered),
+            LaneResult(lane_id="1", plan="a", diff=tampered),
+            LaneResult(lane_id="2", plan="b", diff=tampered),
         ]
 
-    monkeypatch.setattr(runner_module, "run_lanes", _rejected_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _rejected_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -900,7 +1026,7 @@ def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(tmp_path, mo
     async def _no_room(**_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_room)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -1204,7 +1330,7 @@ async def test_a_lane_infrastructure_failure_falls_back_to_one_session(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_room)
 
     await loop._fan_out_round(
         iteration=3,
@@ -1227,7 +1353,7 @@ async def test_a_programming_error_in_a_fan_out_round_is_not_swallowed(
         raise TypeError("session() got an unexpected keyword argument")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _wrong_call)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _wrong_call)
 
     with pytest.raises(TypeError):
         await loop._fan_out_round(
@@ -1248,7 +1374,7 @@ async def test_lane_copies_are_made_beside_the_workspace(tmp_path, monkeypatch):
         seen["driver"] = driver
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _capture)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _capture)
 
     await loop._fill_lane_queue(agent_factory=None, lane_plans=["a", "b"])
 
@@ -1261,7 +1387,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
 
     def factory(_lane_dir, _serialized_driver):
-        async def agent(_kernel_file, _prompt):
+        async def agent(_kernel_file, _prompt, session_sink=None):
             return None
 
         return agent
@@ -1311,7 +1437,7 @@ def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
         workspace,
         lambda: driver.write_text("import time\nprint('bypass')\n"),
     )
-    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tamper", diff=diff)]
 
     assert loop._take_lane_candidate() is None
     assert loop._lane_queue == []
@@ -1337,7 +1463,7 @@ def test_a_lane_candidate_that_renames_the_driver_away_is_rejected(
         )
 
     diff = _diff_of(workspace, _rename)
-    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="move it aside", diff=diff)]
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="move it aside", diff=diff)]
 
     assert loop._take_lane_candidate() is None
     assert driver.is_file()
@@ -1359,8 +1485,8 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
         canonical_driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
-    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
-    monkeypatch.setattr(runner_module, "is_protected_path", lambda *_args, **_kwargs: False)
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tamper", diff=diff)]
+    patch_iteration_name(monkeypatch, "is_protected_path", lambda *_args, **_kwargs: False)
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)
@@ -1373,7 +1499,7 @@ def test_a_tainted_workspace_driver_stops_the_lane_path(tmp_path, monkeypatch):
     loop.ic = replace(loop.ic, canonical_driver_sha256=hashlib.sha256(b"other").hexdigest())
     kernel = workspace / "kernel.py"
     diff = _diff_of(workspace, lambda: kernel.write_text("def kernel():\n    return 2\n"))
-    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tune it", diff=diff)]
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tune it", diff=diff)]
 
     with pytest.raises(ValueError, match="driver integrity"):
         loop._take_lane_candidate()
@@ -1386,7 +1512,7 @@ async def test_a_queued_candidate_that_no_longer_applies_is_dropped(
     """Its tree moved underneath it; re-deriving it is the Implementer's job."""
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     loop._lane_queue = [
-        runner_module.LaneResult(
+        campaign_runtime.LaneResult(
             lane_id="1",
             plan="stale",
             diff="--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-absent\n+edited\n",
@@ -1432,7 +1558,7 @@ def test_a_queued_candidate_survives_a_keep_that_only_moved_its_context(
         check=True,
         capture_output=True,
     )
-    loop._lane_queue = [runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
     taken = loop._take_lane_candidate()
 
@@ -1472,7 +1598,7 @@ def test_a_queued_candidate_that_edits_the_same_lines_is_still_dropped(
         check=True,
         capture_output=True,
     )
-    loop._lane_queue = [runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
+    loop._lane_queue = [campaign_runtime.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
     assert loop._take_lane_candidate() is None
     assert kernel.read_text() == "def kernel():\n    y = 55\n    return y\n"
@@ -1546,7 +1672,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_candidates)
 
     asyncio.run(
         loop.run(
@@ -1579,7 +1705,7 @@ def _three_candidate_workspace(loop, workspace):
     of the same cases as 2 from the other end of the file, so (1, 3) is the pair
     left once (1, 2) is out and it stages cleanly.
     """
-    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    loop.archive = campaign_runtime.CandidateArchive(str(workspace), loop.ic.kernel_file)
     kernel = workspace / "kernel.py"
     kernel.write_text("\n".join(f"line_{n} = {n}" for n in range(12)) + "\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True)
@@ -1840,7 +1966,7 @@ def _stalled_loop_behind_a_full_queue(
     )
     kernel = workspace / "kernel.py"
     loop._lane_queue = [
-        runner_module.LaneResult(
+        campaign_runtime.LaneResult(
             lane_id=str(lane),
             plan=f"tune line {line}",
             diff=_diff_of(
@@ -2029,7 +2155,7 @@ def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, iterations=2)
     loop._lane_queue.insert(
         0,
-        runner_module.LaneResult(
+        campaign_runtime.LaneResult(
             lane_id="surface",
             plan="tune the driver",
             diff=_diff_of(
@@ -2235,7 +2361,7 @@ def test_keep_expires_active_supervisor_ruling(tmp_path, monkeypatch):
     loop.best_wall_ms = 0.8
     loop.best_mean_case_speedup = 1.25
     loop._supervisor_ruling = "Continue the previous stall direction."
-    ruling_path = runner_module.latest_supervisor_ruling_path(str(workspace))
+    ruling_path = latest_supervisor_ruling_path(str(workspace))
     ruling_path.parent.mkdir(parents=True, exist_ok=True)
     ruling_path.write_text(loop._supervisor_ruling)
     result = IterationResult(
@@ -2333,8 +2459,8 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
 
         return _wrapped
 
-    monkeypatch.setattr(runner_module, "admit_round", _spy(admit_round))
-    monkeypatch.setattr(runner_module, "admit_dispatch", _spy(admit_dispatch))
+    monkeypatch.setattr(round_admission, "admit_round", _spy(admit_round))
+    monkeypatch.setattr(round_admission, "admit_dispatch", _spy(admit_dispatch))
 
     # Halfway between "clears each bound on its own" and "covers their sum".
     between = 0.5 * (clears_both + stacked)
@@ -2391,10 +2517,10 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(attempt_verdict, "run_validation_pipeline", fake_validation)
+    patch_iteration_name(monkeypatch, "measure_wallclock", fake_benchmark)
+    monkeypatch.setattr(attempt_verdict, "check_registers", fake_registers)
+    silence_jit_rebuild(monkeypatch)
 
     loop = object.__new__(IterationLoop)
     loop.ic = SimpleNamespace(
@@ -2419,8 +2545,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._baseline_case_times = {"small": 1.0, "large": 1.0}
     loop._best_case_times = {"small": 1.0, "large": 1.0}
     loop._case_times = {}
-    loop._last_pmc_diagnosis = ""
-    loop._last_pmc_full = ""
     loop.config = SimpleNamespace(gpu_target="gfx942")
     # No round is open around these iterations, so the measurement they run is
     # charged to nothing -- which is also what a drain iteration does.
@@ -2943,7 +3067,7 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     holders = _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
     sessions: list[int] = []
 
     async def agent(kernel_path, history, session_sink):
@@ -2990,7 +3114,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=20)
     _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
 
     asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
 
@@ -4027,7 +4151,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
         session_sink["plan"] = plans[attempt]
         observed_modes.append(loop.run_state.search_mode)
         if attempt == 1:
-            session_sink["end_reason"] = runner_module.EXHAUSTED_END_REASON
+            session_sink["end_reason"] = iteration_phases.EXHAUSTED_END_REASON
             return "agent session ended with an API error"
         return "No source change was needed."
 
@@ -4099,7 +4223,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
         observed_modes.append(loop.run_state.search_mode)
         observed_streaks.append(loop._consecutive_no_changes(loop.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)))
         if 1 <= len(loop.results) <= 5:
-            session_sink["end_reason"] = runner_module.EXHAUSTED_END_REASON
+            session_sink["end_reason"] = iteration_phases.EXHAUSTED_END_REASON
             return "agent session ended with an API error"
         return "No source change was needed."
 
@@ -5223,7 +5347,7 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
         )
     )
     ruling = "# Supervisor Ruling\n\nIgnore the earlier hard-floor conclusion; fused merge was not tested."
-    ruling_path = runner_module.latest_supervisor_ruling_path(str(workspace))
+    ruling_path = latest_supervisor_ruling_path(str(workspace))
     ruling_path.parent.mkdir(parents=True, exist_ok=True)
     ruling_path.write_text(ruling)
     loop.config = SimpleNamespace(
@@ -5378,8 +5502,8 @@ def test_baseline_crash_reports_the_driver_failure_not_the_output_format(
 ):
     """A crashed driver must be diagnosed by its own exit code and output."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner_module,
+    patch_iteration_name(
+        monkeypatch,
         "measure_wallclock",
         _static_bench(
             {
@@ -5405,8 +5529,8 @@ def test_baseline_crash_reports_the_driver_failure_not_the_output_format(
 def test_baseline_timeout_reports_the_timeout(tmp_path, monkeypatch, capsys):
     """A timed-out driver reports no output tail, only its verdict."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner_module,
+    patch_iteration_name(
+        monkeypatch,
         "measure_wallclock",
         _static_bench({"success": False, "message": "TIMEOUT after 300s"}),
     )
@@ -5425,8 +5549,8 @@ def test_baseline_without_case_lines_names_the_missing_contract(
 ):
     """A driver that ran but reported no per-case timings is a distinct fault."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner_module,
+    patch_iteration_name(
+        monkeypatch,
         "measure_wallclock",
         _static_bench(
             {
@@ -5453,8 +5577,8 @@ def test_baseline_without_aggregate_line_is_not_silent(
 ):
     """A missing aggregate must be reported, not returned as a bare ``None``."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner_module,
+    patch_iteration_name(
+        monkeypatch,
         "measure_wallclock",
         _static_bench(
             {
@@ -5487,7 +5611,7 @@ def test_baseline_case_coverage_drift_names_the_cases(
             "message": ("MEASUREMENT CASE COVERAGE MISMATCH: expected=['case_001', 'case_002'], got=['case_001']"),
         }
 
-    monkeypatch.setattr(runner_module, "measure_wallclock", bench)
+    patch_iteration_name(monkeypatch, "measure_wallclock", bench)
 
     assert asyncio.run(loop._measure_baseline()) is None
 
@@ -5562,7 +5686,7 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     exactly that harmless divergence.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.best_publisher = campaign_runtime.BestResultPublisher(str(workspace))
     head = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
         KeepIdentity(
@@ -5618,8 +5742,8 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
 ):
     """A manifest that names a different commit is exactly what reconcile repairs."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
-    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    loop.best_publisher = campaign_runtime.BestResultPublisher(str(workspace))
+    loop.archive = campaign_runtime.CandidateArchive(str(workspace), loop.ic.kernel_file)
     stale_commit = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
         KeepIdentity(
@@ -5684,8 +5808,8 @@ def test_resume_publication_diff_failure_degrades_persistence_without_propagatin
     caplog,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
-    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    loop.best_publisher = campaign_runtime.BestResultPublisher(str(workspace))
+    loop.archive = campaign_runtime.CandidateArchive(str(workspace), loop.ic.kernel_file)
     base_commit = loop._git("rev-parse", "HEAD").strip()
     (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
     best_commit = loop._git_commit("best candidate")
@@ -5699,16 +5823,16 @@ def test_resume_publication_diff_failure_degrades_persistence_without_propagatin
         source="iteration",
     )
     failure = GitError(128, ["git", "diff"], "", "fatal: bad object")
-    real_git = runner_module.git
+    real_git = best_publication.git
 
     def fail_publication_diff(*args, **kwargs):
         if args == ("diff", base_commit, best_commit, "--", "."):
             raise failure
         return real_git(*args, **kwargs)
 
-    monkeypatch.setattr(runner_module, "git", fail_publication_diff)
+    monkeypatch.setattr(best_publication, "git", fail_publication_diff)
 
-    with caplog.at_level("WARNING", logger=runner_module.__name__):
+    with caplog.at_level("WARNING", logger=best_publication.log.name):
         loop._reconcile_best_publication()
 
     assert loop.persistence_degraded is True
@@ -5795,7 +5919,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         histories.append(history)
         if agent_calls == 1:
             loop._supervisor_ruling = stale_ruling
-            ruling_path = runner_module.latest_supervisor_ruling_path(str(workspace))
+            ruling_path = latest_supervisor_ruling_path(str(workspace))
             ruling_path.parent.mkdir(parents=True, exist_ok=True)
             ruling_path.write_text(stale_ruling)
         session_sink["plan"] = "repeat candidate"
@@ -5825,7 +5949,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
     assert "Mode: DIVERSIFY" in histories[1]
     assert stale_ruling not in histories[1]
     assert loop._supervisor_ruling == ""
-    assert not runner_module.latest_supervisor_ruling_path(str(workspace)).exists()
+    assert not locked_run.latest_supervisor_ruling_path(str(workspace)).exists()
 
 
 def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
@@ -6282,7 +6406,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
         capture_output=True,
         text=True,
     ).stdout
-    publisher = runner_module.BestResultPublisher(str(workspace))
+    publisher = campaign_runtime.BestResultPublisher(str(workspace))
     manifest = publisher.publish(
         KeepIdentity(
             campaign_id="warm-start:kernelforge-exp/op/run",
@@ -6410,7 +6534,7 @@ def test_keep_archive_failure_retains_pending_journal(
         return
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
-    monkeypatch.setattr(runner_module.CandidateArchive, "record", fail_record)
+    monkeypatch.setattr(campaign_runtime.CandidateArchive, "record", fail_record)
 
     asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
@@ -6428,7 +6552,7 @@ def test_recovered_keep_archive_none_retains_pending_journal(
     monkeypatch,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.archive = runner_module.CandidateArchive(
+    loop.archive = campaign_runtime.CandidateArchive(
         str(workspace),
         loop.ic.kernel_file,
     )
@@ -6443,7 +6567,7 @@ def test_recovered_keep_archive_none_retains_pending_journal(
     monkeypatch.setattr(loop.archive, "record", lambda _record: None)
 
     with pytest.raises(RuntimeError, match="recover candidate archive"):
-        loop._archive_pending_keep(pending, "committed-hash")
+        loop._archive_pending_keep(pending, loop._pending_keep_result(pending, "committed-hash"))
 
     assert loop._pending_keep_path.is_file()
 
@@ -6566,7 +6690,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
-    experiment_count = len(first.tracker.list_experiments())
+    experiment_count = len(persisted_experiments(first.tracker.dir))
     bad_config = replace(first.ic, **{field_name: field_value})
 
     mismatched = IterationLoop(
@@ -6581,7 +6705,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
         )
 
     assert state_path.read_bytes() == before
-    assert len(first.tracker.list_experiments()) == experiment_count
+    assert len(persisted_experiments(first.tracker.dir)) == experiment_count
 
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):
@@ -6784,6 +6908,73 @@ async def _fake_summarizer(_prompt: str) -> str:
     return "tried three tile shapes\n- [worse] BLOCK_N 128 | 0.94x"
 
 
+def test_record_lesson_writes_a_carried_lane_lesson_without_asking(tmp_path, monkeypatch, capsys):
+    """The lane already answered, in its round. An answer without a record is the machine fallback, naming why."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+    asked = {"n": 0}
+
+    async def counting(_prompt: str) -> str:
+        asked["n"] += 1
+        return "should not run"
+
+    asyncio.run(
+        loop._record_lesson(
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": counting,
+            },
+            lane_record=SummaryOutcome(text="lane 2 widened the loads"),
+        )
+    )
+    asyncio.run(
+        loop._record_lesson(
+            result=_lesson_result(iteration=4),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": counting,
+                "findings": "compile error: invalid cast",
+            },
+            lane_record=SummaryOutcome(reason="session replied with no text"),
+        )
+    )
+
+    assert asked["n"] == 0
+    assert store.read(3).startswith("lane 2 widened the loads")
+    assert store.read(4).startswith("(no agent summary)")
+    assert "session replied with no text" in capsys.readouterr().out
+
+
+async def test_a_lane_without_a_record_names_why_in_its_lesson(tmp_path, monkeypatch, capsys):
+    """A provider that cannot resume the lane session leaves a reason, and the queue carries it into the lesson."""
+    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+
+    await loop._fill_lane_queue(
+        agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+        lane_plans=["tune prefill"],
+    )
+    queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))["candidates"]
+    loop._lane_queue = []
+    loop._restore_lane_queue()
+    lane = loop._take_lane_candidate()
+    await loop._record_lesson(
+        result=_lesson_result(iteration=1),
+        decision="REVERT_PERF",
+        session_sink={"session_started": True, "plan": lane.plan},
+        diff_summary=loop._diff_summary_from_diff(lane.diff),
+        lane_record=lane.lesson,
+    )
+
+    assert [entry["lesson_reason"] for entry in queued] == ["provider cannot resume the session"]
+    assert lane.lesson == SummaryOutcome(reason="provider cannot resume the session")
+    assert "Summary unavailable: provider cannot resume the session" in store.read(1)
+    assert "[lesson] no summary (provider cannot resume the session)" in capsys.readouterr().out
+
+
 def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
     """Both authors land in one document: the session's, then the loop's."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
@@ -6792,7 +6983,6 @@ def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -6816,7 +7006,6 @@ def test_record_lesson_falls_back_to_gate_findings(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=4,
             result=_lesson_result(iteration=4),
             decision="REVERT_PERF",
             session_sink={
@@ -6842,7 +7031,6 @@ def test_record_lesson_outcome_only_records_machine_verdict(tmp_path, monkeypatc
 
     asyncio.run(
         loop._record_lesson(
-            iteration=4,
             result=_lesson_result(iteration=4),
             decision="REVERT_PERF",
             # Nothing to summarize and nothing observed: no narrative is possible.
@@ -6874,7 +7062,6 @@ def test_record_lesson_scopes_the_negative_to_the_measured_suite(tmp_path, monke
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -6908,7 +7095,6 @@ def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -6950,7 +7136,6 @@ def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(tmp_path, m
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -6978,7 +7163,6 @@ def test_record_lesson_keeps_a_restricted_lanes_scope(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7001,7 +7185,6 @@ def test_record_lesson_says_when_no_premise_was_recorded(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7032,7 +7215,6 @@ def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(tmp_pa
     store = _attach_lessons(loop, workspace)
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7107,7 +7289,6 @@ def test_a_pin_that_moved_to_a_sibling_file_is_not_reported_as_dropped(tmp_path,
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7135,7 +7316,6 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(tmp
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7168,7 +7348,6 @@ def test_an_iteration_that_measured_no_negative_is_not_reopenable(tmp_path, monk
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7198,7 +7377,6 @@ def test_an_in_session_gate_rejection_is_a_measured_negative(tmp_path, monkeypat
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="NO_CHANGES",
             session_sink={
@@ -7246,7 +7424,6 @@ def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(tmp_p
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7280,7 +7457,6 @@ def test_a_document_without_the_marker_is_unknown_not_negative_free(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7314,7 +7490,6 @@ def test_a_record_that_never_answered_the_disproof_question_says_so(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7337,7 +7512,6 @@ def test_the_loops_own_negative_overrides_a_record_that_claims_none(tmp_path, mo
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7363,7 +7537,6 @@ def test_a_crash_is_a_measured_negative(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(crashed=True, validation_passed=False, mean_case_speedup=None),
             decision="CRASH",
             session_sink={
@@ -7401,7 +7574,6 @@ def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(tmp_pa
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(kept=True, mean_case_speedup=1.2),
             decision="KEEP",
             session_sink={
@@ -7432,7 +7604,6 @@ def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(tmp_path, 
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7464,7 +7635,6 @@ def test_an_unscored_case_is_not_recorded_as_a_case_that_was_measured(tmp_path, 
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7521,7 +7691,6 @@ def test_a_scope_that_cannot_be_written_says_so(tmp_path, monkeypatch, capsys):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7548,7 +7717,6 @@ def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatc
 
     asyncio.run(
         loop._record_lesson(
-            iteration=3,
             result=_lesson_result(),
             decision="REVERT_PERF",
             session_sink={
@@ -7598,7 +7766,6 @@ def test_record_lesson_skips_an_empty_iteration(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=5,
             result=_lesson_result(iteration=5),
             decision="NO_CHANGES",
             session_sink={"session_started": False, "summarize": None},
@@ -7618,7 +7785,6 @@ def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(tmp_path, monkey
 
     asyncio.run(
         loop._record_lesson(
-            iteration=10,
             result=_lesson_result(
                 iteration=10,
                 session_end_reason="turn_cap",
@@ -7653,7 +7819,6 @@ def test_record_lesson_uses_progress_when_no_diff_summary_is_unavailable(tmp_pat
 
     asyncio.run(
         loop._record_lesson(
-            iteration=11,
             result=_lesson_result(
                 iteration=11,
                 session_end_reason="turn_cap",
@@ -7692,7 +7857,6 @@ def test_record_lesson_without_an_agent_session(tmp_path, monkeypatch):
 
     asyncio.run(
         loop._record_lesson(
-            iteration=6,
             result=_lesson_result(iteration=6),
             decision="KEEP",
             session_sink={},
@@ -7716,7 +7880,6 @@ def test_record_lesson_skips_the_summarizer_with_no_time_left(tmp_path, monkeypa
 
     asyncio.run(
         loop._record_lesson(
-            iteration=7,
             result=_lesson_result(iteration=7),
             decision="REVERT_PERF",
             session_sink={
@@ -7746,7 +7909,6 @@ def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(tmp_path
 
     asyncio.run(
         loop._record_lesson(
-            iteration=9,
             result=_lesson_result(iteration=9),
             decision="REVERT_PERF",
             session_sink={
@@ -7768,7 +7930,6 @@ def test_record_lesson_survives_a_failing_summarizer(tmp_path, monkeypatch, caps
 
     asyncio.run(
         loop._record_lesson(
-            iteration=8,
             result=_lesson_result(iteration=8),
             decision="CRASH",
             session_sink={
@@ -7802,7 +7963,6 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, mon
     monkeypatch.setattr(store, "write", fail_first_write)
     asyncio.run(
         loop._record_lesson(
-            iteration=12,
             result=_lesson_result(iteration=12),
             decision="REVERT_VALIDATION",
             session_sink={
@@ -7826,7 +7986,7 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, mon
 
 
 def test_decision_label_matches_every_outcome():
-    from kernelforge.loop.runner import _decision_label
+    from kernelforge.loop.iteration.iteration_types import _decision_label
 
     assert _decision_label(_lesson_result(crashed=True)) == "CRASH"
     assert (
@@ -7908,9 +8068,9 @@ def _stub_measurement(monkeypatch, walls):
     async def fake_registers(**_kwargs):
         return {"success": False}
 
-    monkeypatch.setattr(runner_module, "run_validation_pipeline", fake_validation)
-    monkeypatch.setattr(runner_module, "measure_wallclock", fake_bench)
-    monkeypatch.setattr(runner_module, "check_registers", fake_registers)
+    monkeypatch.setattr(attempt_verdict, "run_validation_pipeline", fake_validation)
+    patch_iteration_name(monkeypatch, "measure_wallclock", fake_bench)
+    monkeypatch.setattr(attempt_verdict, "check_registers", fake_registers)
 
 
 def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypatch):
@@ -8174,18 +8334,18 @@ def _kept_result() -> IterationResult:
 def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
     """A loop with the durable state ``run`` would have opened, before any iteration."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.best_publisher = campaign_runtime.BestResultPublisher(str(workspace))
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = loop.state_store.load()
     loop.experiment = None
     if running:
-        runner_module.start_session(loop.run_state)
+        locked_run.start_session(loop.run_state)
     return loop
 
 
 def _site_full_diff(tmp_path, monkeypatch, failure):
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    patch_iteration_name(monkeypatch, "git", _raiser(failure))
     return loop._full_diff("c0ffee")
 
 
