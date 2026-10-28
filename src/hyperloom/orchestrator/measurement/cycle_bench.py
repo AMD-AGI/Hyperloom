@@ -20,6 +20,12 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from hyperloom.common.env import env_bool
+
+#: Operator switch for the cycle screen (default off): switched patches are admitted dormant and screened by
+#: cycle-bench batches instead of each taking a replay round.
+CYCLE_BENCH_ENV = "HYPERLOOM_CYCLE_BENCH"
+
 VERDICT_PASS = "pass"
 VERDICT_NEUTRAL = "neutral"
 VERDICT_REGRESS = "regress"
@@ -41,6 +47,11 @@ DECODE_LINE = re.compile(
     r"TP0.*Decode batch, #running-req: (\d+),.*accept len: ([\d.]+).*"
     r"gen throughput \(token/s\): ([\d.]+), #queue-req: (\d+)"
 )
+
+
+def cycle_bench_enabled() -> bool:
+    """Whether the operator switched the cycle screen on; off, switched patches are benched as before."""
+    return env_bool(CYCLE_BENCH_ENV)
 
 
 def bench_argv(argv: Sequence[str], *, port: int) -> list[str]:
@@ -136,6 +147,7 @@ def screen_verdict(gain_pct: float, *, regress_pct: float) -> str:
 
 
 __all__ = [
+    "CYCLE_BENCH_ENV",
     "Bands",
     "DECODE_LINE",
     "STATUS_SCREENED",
@@ -147,6 +159,7 @@ __all__ = [
     "batch_weights",
     "bench_argv",
     "bench_env",
+    "cycle_bench_enabled",
     "decode_cycles_ms",
     "screen_verdict",
     "weighted_gain_pct",

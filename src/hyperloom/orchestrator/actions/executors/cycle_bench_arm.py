@@ -23,19 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
 from hyperloom.orchestrator.measurement import cycle_bench as cb
-from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, decode_cycles_ms
+from hyperloom.orchestrator.measurement.cycle_bench import DECODE_LINE, cycle_bench_enabled, decode_cycles_ms
 
 from ._integrate_vocabulary import ATTRIBUTION_CYCLE_PENDING
 from .bypass_engine import wait_for_server_ready
 from .bypass_runner import _launch_server, _terminate_server
 
 log = logging.getLogger(__name__)
-
-#: Operator switch for the cycle screen (default off): switched patches are admitted dormant and screened by
-#: cycle-bench batches instead of each taking a replay round.
-CYCLE_BENCH_ENV = "HYPERLOOM_CYCLE_BENCH"
 
 #: Explore task param carrying a cycle-bench batch: ``[{"name": ..., "envs": {...}}]`` per candidate.
 CYCLE_ARMS_PARAM = "cycle_arms"
@@ -175,11 +170,6 @@ _UNSEEN_PATHS = (
 def cycle_bench_sees(files: list[str]) -> bool:
     """Whether every file a patch touches runs inside the steady decode the cycle bench measures."""
     return not any(marker in f"/{path}" for path in files for marker in _UNSEEN_PATHS)
-
-
-def cycle_bench_enabled() -> bool:
-    """Whether the operator switched the cycle screen on; off, switched patches are benched as before."""
-    return env_bool(CYCLE_BENCH_ENV)
 
 
 def screen_open(state: Any) -> bool:
