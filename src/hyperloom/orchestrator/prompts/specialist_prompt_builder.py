@@ -1367,13 +1367,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
-    owned = inp.roofline_evidence.get("owned_module") or {}
-    if owned.get("group"):
-        rows.append(f"- module group: `{owned['group']}` (no other specialist works it while you run)")
-        if owned.get("rows"):
-            rows[-1] += "; its decode time per step:"
-            rows.extend(["", *map(str, owned["rows"])])
-    rows.extend(_mandate_run_status(inp))
+    rows.extend([*_owned_module_rows(inp), *_mandate_run_status(inp)])
 
     rows.extend(
         [
@@ -1419,6 +1413,17 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
             rows.append(f"  - {ref} [{status}]{gain_str}{why_str}")
 
     return rows
+
+
+def _owned_module_rows(inp: SpecialistPromptInputs) -> list[str]:
+    """§0's module group the dispatch owns, with its row of the module table when one was read."""
+    owned = inp.roofline_evidence.get("owned_module") or {}
+    if not owned.get("group"):
+        return []
+    line = f"- module group: `{owned['group']}` (no other specialist works it while you run)"
+    if not owned.get("rows"):
+        return [line]
+    return [f"{line}; its decode time per step:", "", *map(str, owned["rows"])]
 
 
 def _mandate_run_status(inp: SpecialistPromptInputs) -> list[str]:
