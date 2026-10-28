@@ -189,9 +189,14 @@ def test_a_killed_sealed_sandbox_cannot_be_reused(harness) -> None:
         sb.write_file("/in/spec.json", b"{}")
 
 
+#: How long an ended sandbox may stay visible: the service reaps expired sandboxes on a 30 s sweep, and deleting the
+#: sandbox's workload takes a second or two more, so up to about 32 s; 35 s leaves a margin over that bound.
+_TIMEOUT_REAP_SEC = 35
+
+
 def test_timeout_ends_the_sandbox(harness) -> None:
     sb = harness.provider.create(harness.dev_template, role="dev", timeout_sec=1, metadata={})
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + _TIMEOUT_REAP_SEC
     while time.monotonic() < deadline:
         try:
             sb.info()
