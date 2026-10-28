@@ -496,6 +496,7 @@ class IterationPhasesMixin:
                 else self._build_orchestration_context()
             )
         )
+        context = self._with_plan_review(iteration, context)
         try:
             result = await orchestration_service.run(
                 context,
@@ -510,6 +511,7 @@ class IterationPhasesMixin:
             self._checkpoint_llm_usage()
 
         self._record_probe_hazard(iteration, result)
+        self._charge_plan_review(result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
         self._persist_orchestration_result(iteration, context, result)
         plan_path = self._persist_lane_plans(

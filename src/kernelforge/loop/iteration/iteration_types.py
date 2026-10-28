@@ -12,6 +12,7 @@ from typing import Any, NamedTuple
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.lessons import SummaryOutcome
+from kernelforge.loop.plan_critic_policy import PlanCriticMode
 from kernelforge.tools.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.loop.run_state import IterationVerdict
 from kernelforge.loop.search_actors import SearchActorPool
@@ -116,6 +117,8 @@ class IterationConfig:
     # is measured on its own. 1 keeps the single fused plan and single session this loop has always run; fan-out also
     # needs an ``agent_factory``, because a session is bound to its workspace.
     lanes: int = 1
+    # Which rounds send their plans to the plan critic, for a campaign that built one (``FORGE_PLAN_CRITIC``).
+    plan_critic_mode: PlanCriticMode = PlanCriticMode.ALWAYS
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
