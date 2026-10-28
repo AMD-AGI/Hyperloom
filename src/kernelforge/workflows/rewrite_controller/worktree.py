@@ -21,7 +21,7 @@ from kernelforge.workflows.rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.workflows.rewrite_controller.paths import ControllerLayout
 from kernelforge.utils.git import GitError, git
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
-from kernelforge.workflows.forge_loop.campaign.workspace_files import hide_forge_loop_output
+from kernelforge.workflows.forge_loop.api import hide_forge_loop_output
 from kernelforge.utils.editable_repo import (
     RepoLock,
     acquire_repo_lock,

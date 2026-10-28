@@ -32,7 +32,9 @@ from kernelforge.workflows.forge_loop.campaign.path_ownership import (
     is_producer_owned_path,
     runtime_gitignore_globs,
 )
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.campaign.reporting import BestResultPublisher
+from kernelforge.workflows.forge_loop.campaign.workspace_files import hide_forge_loop_output
 from kernelforge.workflows.forge_loop.roles.agent import (
     ImplementerSetup,
     ImplementerTask,
@@ -82,6 +84,7 @@ def parse_forge_loop_result(output: str) -> dict[str, Any] | None:
 __all__ = [
     "ATTEMPT_ROOT_DIR",
     "BestResultPublisher",
+    "ExperimentTracker",
     "ForgeLoopError",
     "ForgeLoopRequest",
     "ForgeLoopUsageError",
@@ -94,6 +97,7 @@ __all__ = [
     "SessionOptions",
     "TaskPreparationFailed",
     "format_forge_loop_result",
+    "hide_forge_loop_output",
     "forge_loop_command",
     "is_producer_owned_path",
     "make_agent_fn",

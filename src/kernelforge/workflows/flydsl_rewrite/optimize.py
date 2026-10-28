@@ -21,9 +21,13 @@ from typing import Callable
 
 from kernelforge.utils.git import git
 from kernelforge.config import Config
-from kernelforge.workflows.forge_loop.api import RESULT_SENTINEL, forge_loop_command, parse_forge_loop_result
+from kernelforge.workflows.forge_loop.api import (
+    RESULT_SENTINEL,
+    ExperimentTracker,
+    forge_loop_command,
+    parse_forge_loop_result,
+)
 from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
-from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
 log = logging.getLogger(__name__)
 

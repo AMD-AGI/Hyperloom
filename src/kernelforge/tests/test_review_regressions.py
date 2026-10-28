@@ -11,7 +11,7 @@ from kernelforge.config.resources import resource_path
 
 from kernelforge.tests.conftest import PACKAGE_ROOT
 
-LOOP = PACKAGE_ROOT / "loop"
+LOOP = PACKAGE_ROOT / "workflows" / "forge_loop"
 
 
 def _calls_in_runner(name: str) -> int:

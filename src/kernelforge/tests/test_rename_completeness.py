@@ -94,7 +94,7 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
 
 # The fourth move: ``kernelforge.llm`` dissolved into the packages that own each of its modules -- the gateway into
 # ``kernelforge.agent_backends``, git and process reaping into ``kernelforge.utils``, the edit policy into
-# ``kernelforge.workspace``.
+# ``kernelforge.config``.
 _LLM_PATTERN = re.compile(r"\bkernelforge[./]llm\b")
 
 _LLM_ALLOWED: tuple[tuple[str, str, str], ...] = (
@@ -219,7 +219,7 @@ def test_no_stray_llm_package_references() -> None:
     ]
     assert not stray, (
         "references to kernelforge.llm, whose modules now live in kernelforge.agent_backends, "
-        "kernelforge.utils and kernelforge.workspace:\n  " + "\n  ".join(stray[:40])
+        "kernelforge.utils and kernelforge.config:\n  " + "\n  ".join(stray[:40])
     )
 
 
