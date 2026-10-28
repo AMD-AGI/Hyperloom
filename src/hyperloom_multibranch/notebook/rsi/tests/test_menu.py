@@ -23,6 +23,7 @@ from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.menu import (
+    GAIN_PRIOR_COMMITS,
     HOT_OP_SHARE_PCT,
     MENU_ITEMS,
     MENU_LOG,
@@ -104,6 +105,24 @@ def test_after_the_ranked_families_a_line_explores_the_least_tried_with_the_most
     exploring = menu.items[MENU_ITEMS]
     assert exploring.family == far and exploring.exploring and menu.items[-1].untried
     assert exploring.render().startswith("to explore, weak far · parameter tuning · config: commit odds 0.")
+
+
+def test_a_gain_is_drawn_toward_the_usual_gain_as_little_as_its_commits_weigh(snapshot: NotebookSnapshot) -> None:
+    plain = {Family(f"plain {n}", Mechanism.TUNING, CONFIG): FamilyStat(10.0, 5.0, (4.0,)) for n in range(3)}
+    far = Family("far gain", Mechanism.TUNING, CONFIG)
+    assert snapshot.profile is not None
+    quiet = dataclasses.replace(
+        snapshot, records=(), profile=dataclasses.replace(snapshot.profile, roofline_ceiling={})
+    )
+    evidence = MenuEvidence({**plain, far: FamilyStat(0.75, 0.25, (80.0,))}, {})
+
+    menu = direction_menu(quiet, "s1", "c1", evidence, metric=METRIC)
+
+    found = {item.family: item for item in menu.items}
+    # The usual gain is the median of every commit's, +4%; one commit a quarter as like this session's moves it little.
+    assert found[far].gain_pct == pytest.approx((0.25 * 80.0 + GAIN_PRIOR_COMMITS * 4.0) / (0.25 + GAIN_PRIOR_COMMITS))
+    assert found[far].gain_pct == pytest.approx(19.2)
+    assert found[Family("plain 0", Mechanism.TUNING, CONFIG)].gain_pct == pytest.approx(4.0)
 
 
 def _tested(*families: Family) -> MenuEvidence:
