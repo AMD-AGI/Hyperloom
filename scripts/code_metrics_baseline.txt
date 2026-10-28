@@ -620,7 +620,7 @@ module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1346
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2052
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1591
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 1679
-module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4051
+module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4049
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1735
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1384
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1335

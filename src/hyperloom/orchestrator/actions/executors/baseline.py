@@ -90,9 +90,7 @@ from ._subprocess_kill import (
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
-from ._accuracy_gate import (
-    materialized_run_eval_disabled,
-)
+from ._accuracy_gate import materialized_run_eval_disabled, post_ready_sec_without_eval
 
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
@@ -2759,7 +2757,7 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         affordable, evidence = self._measure_round_affordable(
             warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
-            warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
+            warmup_post_ready_sec=post_ready_sec_without_eval(warmup_result),
             ctx_extra=getattr(attempt.ctx, "extra", None) or {},
         )
         if affordable:
