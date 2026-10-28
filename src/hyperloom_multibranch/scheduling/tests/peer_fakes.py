@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -104,7 +104,12 @@ SessionStep = Callable[[str], Awaitable[None]]
 
 
 class _HoldingExecutor(ThreadPoolExecutor):
-    """A default executor whose every job holds a :class:`VirtualClock` until the job is done."""
+    """A default executor whose every job holds a :class:`VirtualClock` until the loop has the job's outcome.
+
+    The loop is handed a future of its own, completed before the release is queued, so the release reaches the loop
+    behind the outcome. Released when the thread ends instead, a thread descheduled between the two would leave the
+    clock free while its awaiter has not resumed, and virtual time could run past a deadline in between.
+    """
 
     def __init__(self, time: VirtualClock, loop: asyncio.AbstractEventLoop) -> None:
         super().__init__()
@@ -113,9 +118,23 @@ class _HoldingExecutor(ThreadPoolExecutor):
 
     def submit(self, fn: Callable[..., object], /, *args: object, **kwargs: object) -> Future[object]:
         self._time.hold()
-        future = super().submit(fn, *args, **kwargs)
-        future.add_done_callback(lambda _: self._loop.call_soon_threadsafe(self._time.release))
-        return future
+        handed: Future[object] = Future()
+        job = super().submit(fn, *args, **kwargs)
+        job.add_done_callback(lambda ended: self._hand_over(ended, handed))
+        return handed
+
+    def _hand_over(self, job: Future[object], handed: Future[object]) -> None:
+        try:
+            # A cancelled awaiter has cancelled ``handed``; the job's outcome is then nobody's.
+            with contextlib.suppress(InvalidStateError):
+                if job.cancelled():
+                    handed.cancel()
+                elif (error := job.exception()) is not None:
+                    handed.set_exception(error)
+                else:
+                    handed.set_result(job.result())
+        finally:
+            self._loop.call_soon_threadsafe(self._time.release)
 
 
 class VirtualClock:
