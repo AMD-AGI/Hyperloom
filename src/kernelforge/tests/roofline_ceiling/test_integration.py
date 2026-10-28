@@ -127,10 +127,17 @@ def test_the_ceiling_never_reaches_the_keep_decision():
 
 def test_one_reader_loads_the_ceiling_for_the_whole_loop():
     """One loader means one thing to audit if the invariant above ever bends."""
-    from kernelforge.loop import runner as runner_module
+    import importlib
 
-    source = inspect.getsource(runner_module)
-    assert source.count("from kernelforge.roofline_ceiling.report import read_report") == 1
+    from kernelforge.loop import iteration
+
+    loaders = sum(
+        inspect.getsource(importlib.import_module(f"kernelforge.loop.iteration.{name}")).count(
+            "from kernelforge.roofline_ceiling.report import read_report"
+        )
+        for name in iteration.ITERATION_MODULES
+    )
+    assert loaders == 1, "the loop reads the ceiling through one loader"
     assert "read_report" in inspect.getsource(IterationLoop._ceiling)
     # Every other user goes through that loader rather than the filesystem.
     for method in (
@@ -447,7 +454,7 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
 
 def test_the_progress_is_logged_with_each_iteration_header():
     source = inspect.getsource(IterationLoop._open_iteration)
-    header_at = source.index('f"--- Iteration {iteration} "')
+    header_at = source.index("print(iteration_header(")
 
     assert header_at < source.index("self._render_roofline_progress()")
 

@@ -1508,7 +1508,7 @@ def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatc
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     def _boom(*_args, **_kwargs):
-        raise RuntimeError("truncated report")
+        raise ValueError("truncated report")
 
     monkeypatch.setattr(_ev, "aggregate_probe_dir", _boom)
     executor = ProfileExecutor()

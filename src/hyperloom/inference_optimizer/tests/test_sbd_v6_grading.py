@@ -35,7 +35,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     baseline_event_id,
     make_baseline_recorder,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
 from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import (
     SECTION as METADATA_SECTION,
     snapshot_metadata,
@@ -383,7 +383,7 @@ def test_a_fully_graded_ledger_reports_no_finding(tmp_path):
 def _record_baseline(**axes: Any) -> None:
     """Record an anchoring baseline the way a dispatched measurement does."""
     recorder = make_baseline_recorder(
-        make_sink(baseline_event_id("prelude", 0), producer=BASELINE_PRODUCER),
+        EventSink(baseline_event_id("prelude", 0), producer=BASELINE_PRODUCER),
         BaselineRequest(
             task_id="t-1",
             task_kind="baseline",

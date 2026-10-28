@@ -9,10 +9,11 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-#: Bump the major on any field removal or meaning change; consumers gate on it.
+#: Bump the major on a removal or meaning change of a required key; consumers gate on it.
 #: 1.1.0 adds ``reason_class`` to every entry (additive; readers of 1.0.0 are
-#: unaffected).
-SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
+#: unaffected). 1.2.0 drops the optional ``confidence`` and ``rejected_value``
+#: keys, which no producer filled.
+SOURCE_RESOLUTION_SCHEMA_VERSION = "1.2.0"
 
 #: Canonical artifact name, relative to the analysis run directory.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
@@ -135,48 +136,26 @@ class SourceResolutionEntry:
     kernel_id: str
     name: str
     gpu_pct: float
+    reason_class: str
     source_file: str = ""
     source_line: int | None = None
     source_function: str = ""
     method: str = METHOD_UNRESOLVED
-    confidence: float | None = None
     reason: str = ""
-    rejected_value: str = ""
-    previous_source_file: str = ""
-    previous_method: str = ""
-    reason_class: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Build the on-disk entry with every required key present."""
-        gpu_pct = self.gpu_pct
-        if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
-            safe_gpu_pct = 0.0
-        else:
-            safe_gpu_pct = float(gpu_pct)
-        entry = {
+        return {
             "kernel_id": str(self.kernel_id or ""),
             "name": str(self.name or ""),
-            "gpu_pct": safe_gpu_pct,
+            "gpu_pct": float(self.gpu_pct) if is_finite_number(self.gpu_pct) else 0.0,
             "source_file": str(self.source_file or ""),
             "source_line": self.source_line if isinstance(self.source_line, int) else None,
             "source_function": str(self.source_function or ""),
             "method": str(self.method or METHOD_UNRESOLVED),
-            "confidence": self.confidence,
             "reason": str(self.reason or ""),
-            "rejected_value": str(self.rejected_value or ""),
-            # Derived from the caller's verdict when not supplied, so an entry is never written without a class a
-            # consumer can act on.
-            "reason_class": str(self.reason_class or "")
-            or classify_skip_reason(
-                reusable=bool(self.source_file),
-                skip_reason=self.reason,
-                source_file=self.source_file,
-            ),
+            "reason_class": str(self.reason_class),
         }
-        if self.previous_source_file:
-            entry["previous_source_file"] = str(self.previous_source_file)
-            entry["previous_method"] = str(self.previous_method or "")
-        return entry
 
 
 def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -194,7 +173,7 @@ def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
             located += 1
             continue
         gpu_pct = entry.get("gpu_pct")
-        if isinstance(gpu_pct, (int, float)) and not isinstance(gpu_pct, bool) and math.isfinite(float(gpu_pct)):
+        if is_finite_number(gpu_pct):
             undispatchable_gpu_pct += float(gpu_pct)
         if reason_class in UNSALVAGEABLE_REASON_CLASSES:
             unsalvageable += 1
@@ -252,9 +231,6 @@ def _entry_problems(index: int, entry: Any, seen_ids: set[str]) -> list[str]:
     if reason_class and reason_class not in KNOWN_REASON_CLASSES:
         problems.append(f"entries[{index}] has unknown reason_class {reason_class!r}")
     problems.extend(_source_file_problems(index, entry, method))
-    confidence = entry.get("confidence")
-    if confidence is not None and not (is_finite_number(confidence) and 0.0 <= float(confidence) <= 1.0):
-        problems.append(f"entries[{index}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]")
     return problems
 
 

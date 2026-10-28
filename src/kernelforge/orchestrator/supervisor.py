@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -77,21 +76,23 @@ class SupervisorInteraction:
     reply: str
     backend: str
     model: str
+    failure: str = ""
 
 
 def _persist_interaction(workspace: str, interaction: SupervisorInteraction) -> None:
-    """Save one supervisor intervention (prompt + reply) for later inspection."""
+    """Save one supervisor intervention (prompt + reply, or why it failed) for later inspection."""
     iteration, reason, reply = interaction.iteration, interaction.reason, interaction.reply
     system, user, backend, model = interaction.system, interaction.user, interaction.backend, interaction.model
     try:
         d = Path(workspace) / "forge_experiments" / "supervisor"
         d.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        reply_txt = (
-            reply
-            if reply and reply.strip()
-            else "(empty — the supervisor returned no directions, e.g. a backend failure)"
-        )
+        if interaction.failure:
+            reply_txt = f"(failed — {interaction.failure})"
+        elif reply and reply.strip():
+            reply_txt = reply
+        else:
+            reply_txt = "(empty — the supervisor returned no directions)"
         body = (
             f"# Supervisor intervention — iteration {iteration}\n\n"
             f"- timestamp: {ts}\n"
@@ -249,7 +250,43 @@ def make_supervisor_fn(
             gpu_target,
             evidence_context=evidence_context,
         )
-        reply = ""
+
+        async def run_once(user_prompt: str, deadline: float) -> str:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            # One budget drives both, so the backend's own deadline always fires before the outer watchdog.
+            session_budget = max(1, math.ceil(min(float(timeout_sec), remaining)))
+            result = await asyncio.wait_for(
+                selected_backend.run(
+                    AgentRunSpec(
+                        system_prompt=_SUPERVISOR_ROLE,
+                        user_prompt=user_prompt,
+                        role="supervisor",
+                        cwd=workspace,
+                        writable=False,
+                        timeout_sec=session_budget,
+                        tool_policy=AgentToolPolicy(
+                            read=True,
+                            search=True,
+                            write=False,
+                            shell=False,
+                            max_turns=SUPERVISOR_MAX_TURNS,
+                            thinking_budget_tokens=(SUPERVISOR_THINKING_BUDGET),
+                        ),
+                        protected_globs=["*"],
+                    ),
+                    usage=usage,
+                ),
+                timeout=watchdog_timeout_sec(session_budget),
+            )
+            if is_api_failure(result):
+                detail = (
+                    result.stderr_tail or result.end_reason or "supervisor backend failed before producing an answer"
+                )
+                raise SupervisorBackendFailure(detail)
+            return result.text or ""
+
         try:
             if selected_backend is None:
                 selected_backend = create_registered_backend(runtime)
@@ -259,58 +296,23 @@ def make_supervisor_fn(
                     "backend_model",
                     selected_backend.runtime.model,
                 )
-            deadline = time.monotonic() + timeout_sec
-
-            async def run_once(user_prompt: str) -> str:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise asyncio.TimeoutError
-                # One budget drives both, so the backend's own deadline always fires before the outer watchdog.
-                session_budget = max(1, math.ceil(min(float(timeout_sec), remaining)))
-                result = await asyncio.wait_for(
-                    selected_backend.run(
-                        AgentRunSpec(
-                            system_prompt=_SUPERVISOR_ROLE,
-                            user_prompt=user_prompt,
-                            role="supervisor",
-                            cwd=workspace,
-                            writable=False,
-                            timeout_sec=session_budget,
-                            tool_policy=AgentToolPolicy(
-                                read=True,
-                                search=True,
-                                write=False,
-                                shell=False,
-                                max_turns=SUPERVISOR_MAX_TURNS,
-                                thinking_budget_tokens=(SUPERVISOR_THINKING_BUDGET),
-                            ),
-                            protected_globs=["*"],
-                        ),
-                        usage=usage,
-                    ),
-                    timeout=watchdog_timeout_sec(session_budget),
-                )
-                if is_api_failure(result):
-                    detail = (
-                        result.stderr_tail
-                        or result.end_reason
-                        or "supervisor backend failed before producing an answer"
-                    )
-                    raise SupervisorBackendFailure(detail)
-                return result.text or ""
-
-            reply = await run_once(task)
-        except Exception as exc:  # noqa: BLE001 - supervisor is best-effort
-            backend_name = selected_backend.name if selected_backend is not None else runtime.provider
-            reply = ""
-            log.warning("supervisor %s call failed: %s", backend_name, exc)
-            print(
-                f"  [supervisor] {backend_name} call failed ({exc}) — skipping",
-                file=sys.stderr,
-                flush=True,
+            reply = await run_once(task, time.monotonic() + timeout_sec)
+        except Exception as error:
+            # Every attempt leaves its record, a failed one included; the runner's boundary records the error.
+            _persist_interaction(
+                workspace,
+                SupervisorInteraction(
+                    iteration,
+                    reason,
+                    _SUPERVISOR_ROLE,
+                    task,
+                    "",
+                    backend=selected_backend.name if selected_backend is not None else runtime.provider,
+                    model=selected_backend.runtime.model if selected_backend is not None else runtime.model,
+                    failure=f"{type(error).__name__}: {error}",
+                ),
             )
-        backend_name = selected_backend.name if selected_backend is not None else runtime.provider
-        backend_model = selected_backend.runtime.model if selected_backend is not None else runtime.model
+            raise
         _persist_interaction(
             workspace,
             SupervisorInteraction(
@@ -319,8 +321,8 @@ def make_supervisor_fn(
                 _SUPERVISOR_ROLE,
                 task,
                 reply,
-                backend=backend_name,
-                model=backend_model,
+                backend=selected_backend.name,
+                model=selected_backend.runtime.model,
             ),
         )
         return reply

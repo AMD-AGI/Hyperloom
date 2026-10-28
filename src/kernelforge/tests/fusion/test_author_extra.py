@@ -384,7 +384,7 @@ def test_registered_author_reraises_an_interrupt_after_a_workspace_verdict(
     if outcome == "guard_defect":
 
         def broken_enforce(self):
-            raise RuntimeError("guard defect")
+            raise OSError("guard defect")
 
         monkeypatch.setattr(author._AuthorWorkspaceGuard, "enforce", broken_enforce)
 

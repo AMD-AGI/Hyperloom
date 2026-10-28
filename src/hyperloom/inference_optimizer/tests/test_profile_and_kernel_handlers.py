@@ -19,6 +19,7 @@ import pytest
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.cli import parser as cli_parser
+from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
 from .conftest import seed_integrate_verdict, seed_kernel_keep
@@ -92,7 +93,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     )
 
     assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
-    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -1749,9 +1750,7 @@ def test_atom_disables_cuda_graphs_with_its_own_flag():
 
 def test_server_args_env_name_atom():
     """atom maps to EXTRA_ATOM_ARGS (the atom branch sits before vllm to avoid substring collisions)."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import (
-        server_args_env_name,
-    )
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     assert server_args_env_name("atom") == "EXTRA_ATOM_ARGS"
     assert server_args_env_name("ATOM") == "EXTRA_ATOM_ARGS"
@@ -1977,7 +1976,7 @@ def test_profile_executor_merges_current_best_envs(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
+async def test_roofline_executor_skips_when_framework_atom(monkeypatch, tmp_path):
     """FRAMEWORK=atom attempts the normal roofline profile sub-step."""
     from hyperloom.orchestrator.actions.executors.roofline import (
         RooflineExecutor,
@@ -2001,7 +2000,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
         requires_lanes=[],
         lease_ttl_sec=0,
     )
-    ctx = SimpleNamespace(task=task, lease=None, extra=None)
+    ctx = SimpleNamespace(task=task, lease=None, extra={"session_dir": str(tmp_path)})
 
     result = await rexec(ctx)
     assert result["status"] == "failed"
@@ -3514,7 +3513,7 @@ def test_record_trace_analyze_persists_task_groups(session_dir):
         artifact="/tmp/k004.py",
         task_group_key="k004",
     )
-    assert state.untried_hot_reusable_kernels() == [], (
+    assert kd.untried_hot_reusable_kernels(state) == [], (
         "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
     )
 

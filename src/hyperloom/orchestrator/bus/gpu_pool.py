@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from typing import Any
 
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, parse_device_list
 
@@ -197,6 +199,35 @@ class SpecialistGpuPool:
                 f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 params,
             )
+
+    async def release_execution(self, lease: GpuLease | None, specialist_lease: Any, task_id: str) -> bool:
+        """Return an execution's slot, and report whether its worker confirmed cleanup.
+
+        The answer is evidence for the execution's terminal row, not an admission
+        decision: the task it belongs to is over either way, so the slot goes back
+        even when the specialist's close cannot confirm it -- or raises, which is
+        why the pool release sits in a ``finally``.
+
+        Args:
+            lease: The pool lease the execution was admitted on.
+            specialist_lease: The Ray specialist lease to close, if the execution had one.
+            task_id: The task the slot was held for, for the log line.
+
+        Returns:
+            Whether the worker confirmed that its physical cleanup finished.
+        """
+        confirmed = True
+        try:
+            if specialist_lease is not None:
+                closed = await asyncio.to_thread(specialist_lease.close)
+                if closed is not True:
+                    log.warning(
+                        "gpu pool: task=%s GPU cleanup unconfirmed; returning the slot and recording it", task_id
+                    )
+                    confirmed = False
+        finally:
+            await self.release(lease)
+        return confirmed
 
 
 __all__ = [

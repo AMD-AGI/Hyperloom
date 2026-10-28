@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 )
 from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...kernel import kernel_decisions
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
 
@@ -38,14 +39,6 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     if session_dir is None:
         return 0
     return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
-
-
-def _safe_call(state: Any, method: str, default: Any) -> Any:
-    """Call a zero-arg SharedState helper, returning ``default`` when it is absent."""
-    fn = getattr(state, method, None)
-    if not callable(fn):
-        return default
-    return fn()
 
 
 # Benign upstream WARN fragments that must never be promoted as the ``baseline_failed`` headline; the full text still
@@ -162,56 +155,49 @@ def _build_failure_summary(
     """Surface the real terminal error on ``baseline_failed``."""
     if str(getattr(state, "stop_reason", "") or "") != "baseline_failed":
         return None
-    try:
-        attempt = _last_failed_baseline_attempt(state)
-        if attempt is None:
-            return None
-
-        error_class = str(attempt.get("error_class") or "unknown")
-        raw_error = str(attempt.get("error_excerpt") or "")
-        kept_lines, suppressed = _partition_benign_lines(raw_error)
-        error_text = "\n".join(kept_lines).strip()
-
-        server_log_abs = _resolve_attempt_server_log(attempt)
-        # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
-        if not error_text and server_log_abs is not None:
-            from ._subprocess_kill import server_log_death_excerpt
-
-            excerpt = server_log_death_excerpt(str(server_log_abs))
-            if excerpt:
-                error_text = excerpt.strip()
-                if error_class in ("", "unknown"):
-                    error_class = "server_init_dead"
-        if not error_text:
-            error_text = "(no terminal error captured; see logs)"
-
-        root_cause = _pick_failure_headline(error_text)
-        server_log_rel: str | None = None
-        if server_log_abs is not None:
-            if session_dir is not None:
-                try:
-                    server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
-                except ValueError:
-                    server_log_rel = str(server_log_abs)
-            else:
-                server_log_rel = str(server_log_abs)
-
-        summary: dict[str, Any] = {
-            "root_cause": root_cause[:500],
-            "root_cause_type": _classify_root_cause_type(error_class, error_text),
-            "error_class": error_class,
-            "last_attempt_id": str(attempt.get("task_id") or ""),
-            "server_log": server_log_rel,
-        }
-        if suppressed:
-            summary["suppressed_benign"] = suppressed[:5]
-        return summary
-    except Exception:
-        log.warning(
-            "report_executor: failed to build failure_summary",
-            exc_info=True,
-        )
+    attempt = _last_failed_baseline_attempt(state)
+    if attempt is None:
         return None
+
+    error_class = str(attempt.get("error_class") or "unknown")
+    raw_error = str(attempt.get("error_excerpt") or "")
+    kept_lines, suppressed = _partition_benign_lines(raw_error)
+    error_text = "\n".join(kept_lines).strip()
+
+    server_log_abs = _resolve_attempt_server_log(attempt)
+    # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
+    if not error_text and server_log_abs is not None:
+        from ._subprocess_kill import server_log_death_excerpt
+
+        excerpt = server_log_death_excerpt(str(server_log_abs))
+        if excerpt:
+            error_text = excerpt.strip()
+            if error_class in ("", "unknown"):
+                error_class = "server_init_dead"
+    if not error_text:
+        error_text = "(no terminal error captured; see logs)"
+
+    root_cause = _pick_failure_headline(error_text)
+    server_log_rel: str | None = None
+    if server_log_abs is not None:
+        if session_dir is not None:
+            try:
+                server_log_rel = server_log_abs.relative_to(session_dir).as_posix()
+            except ValueError:
+                server_log_rel = str(server_log_abs)
+        else:
+            server_log_rel = str(server_log_abs)
+
+    summary: dict[str, Any] = {
+        "root_cause": root_cause[:500],
+        "root_cause_type": _classify_root_cause_type(error_class, error_text),
+        "error_class": error_class,
+        "last_attempt_id": str(attempt.get("task_id") or ""),
+        "server_log": server_log_rel,
+    }
+    if suppressed:
+        summary["suppressed_benign"] = suppressed[:5]
+    return summary
 
 
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
@@ -267,21 +253,11 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Search / phase plateaus and completions.
     "sweep_done": "SWEEP finished the concurrency ladder.",
     "sweep_failed": "The concurrency sweep reached a failed terminal result.",
-    "optimize_no_more_leverage": (
-        "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
-    ),
-    "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
-    # Retired reason names, kept so a report over an archived session still explains what it is reading. Some no longer
-    # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
-    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
-    "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": (
         "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain, or every steering "
         "direction is saturated."
     ),
-    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
-    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
     "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",
@@ -354,73 +330,28 @@ def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
 
 
 def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
-    """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
-    lines: list[str] = []
-    comparison = summary.get("performance_comparison")
-    if comparison is not None:
-        from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
+    """Render the recorded performance comparison."""
+    from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
 
-        # Read the family, not one percentile: the graded axis is the median while the session marker still names
-        # the tail, and pinning either one here prints the wrong mode for the other.
-        graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
-        lines.extend(["## Performance comparison", ""])
-        lines.append(f"- objective           : `{comparison['objective']}`")
-        lines.append(f"- reference           : `{comparison['reference']:.1f}`")
-        lines.append(f"- candidate           : `{comparison['candidate']:.1f}`")
-        gain = comparison["gain_pct"]
-        gain_text = f"{gain:+.2f}%" if gain is not None else "unavailable"
-        lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
-        lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
-        if comparison["degrade_reason"]:
-            lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
-        lines.append(f"- verdict             : `{comparison['verdict']}`")
-        lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
-        if graded_on_intvty:
-            lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
-            lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
-        return lines
-
-    from hyperloom.common.gain_math import gain_pct
-    from hyperloom.common.perf_metric import (
-        GRADED_INTVTY,
-        INTVTY_V1,
-        intvty_grading_enabled,
-        intvty_of,
-        parse_intvty_noise_pct,
-        perf_snapshot_from_mapping,
-        total_tput_of,
-    )
-
-    baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
-    if not baseline:
-        return lines
-    cb = summary.get("current_best") or {}
-    cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.extend(["## AgentX perf (interactivity objective, per-chip tput guard)", ""])
-    lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
-    lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
-    if cb_snap:
-        lines.append(f"- current_best intvty : `{intvty_of(cb_snap):.1f}` tok/s/user")
-        lines.append(f"- current_best total  : `{total_tput_of(cb_snap):.1f}` tok/s")
-        gain = gain_pct(intvty_of(cb_snap), intvty_of(baseline))
-        if gain is not None:
-            lines.append(f"- intvty gain (graded): `{gain:+.2f}%`")
-        tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
-        if tput_gain is not None:
-            lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (diagnostic, neither objective nor guard)")
-    grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
-    objective = str(grading.get("objective") or "").strip()
-    if objective == GRADED_INTVTY:
-        noise_pct = grading.get("noise_pct")
-        band = float(noise_pct) if isinstance(noise_pct, (int, float)) else parse_intvty_noise_pct()
-        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{band:.1f}%`)")
-    elif objective:
-        lines.append(f"- grading mode        : `{objective}`")
-    else:
-        if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-            lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
-        else:
-            lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+    comparison = summary["performance_comparison"]
+    # Read the family, not one percentile: the graded axis is the median while the session marker still names
+    # the tail, and pinning either one here prints the wrong mode for the other.
+    graded_on_intvty = comparison["objective"] in INTVTY_OBJECTIVES
+    lines = ["## Performance comparison", ""]
+    lines.append(f"- objective           : `{comparison['objective']}`")
+    lines.append(f"- reference           : `{comparison['reference']:.1f}`")
+    lines.append(f"- candidate           : `{comparison['candidate']:.1f}`")
+    gain = comparison["gain_pct"]
+    gain_text = f"{gain:+.2f}%" if gain is not None else "unavailable"
+    lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
+    lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
+    if comparison["degrade_reason"]:
+        lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
+    lines.append(f"- verdict             : `{comparison['verdict']}`")
+    lines.append(f"- grading mode        : `{INTVTY_V1 if graded_on_intvty else GRADED_OUTPUT}`")
+    if graded_on_intvty:
+        lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
+        lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
     return lines
 
 
@@ -502,10 +433,10 @@ def _build_summary_dict(
         "cumulative_gain_validated_ts": state.cumulative_gain_validated_ts,
         "cumulative_gain_validated_stack_len": state.cumulative_gain_validated_stack_len,
         "optimization_stack_len": len(state.optimization_stack or []),
-        # Honesty annotations: surface unfinished/unvalidated work; read defensively for partial-state stubs.
-        "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
-        "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
-        "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
+        # Honesty annotations: surface unfinished/unvalidated work.
+        "has_unvalidated_keeps": state.optimization_stack_has_unvalidated_keeps(),
+        "untried_hot_reusable_kernels": kernel_decisions.untried_hot_reusable_kernels(state),
+        "pending_keep_kernels": kernel_decisions.pending_keep_kernel_ids(state),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
@@ -1102,7 +1033,7 @@ def _write_kernel_opt_summary(
         with out_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
         return out_path
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, TypeError, ValueError) as exc:
         log.warning(
             "report_executor: failed to write kernel_optimization_summary.json: %s",
             exc,
@@ -1231,10 +1162,7 @@ class ReportExecutor:
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the report-generation action for the given context."""
-        session_dir = self._resolve_session_dir(ctx)
-        if session_dir is None:
-            return {"status": "failed", "error": "report_executor: could not resolve session_dir"}
-
+        session_dir = Path(ctx.extra["session_dir"])
         params = ctx.task.params or {}
         from hyperloom.inference_optimizer.session.session_paths import reports_dir
 
@@ -1303,7 +1231,7 @@ class ReportExecutor:
                 output_dir=output_dir,
                 state=state,
             )
-        except Exception:
+        except (ValueError, TypeError, AttributeError, KeyError):
             log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
         if conc_sweep_curve_png is not None:
             try:
@@ -1326,21 +1254,6 @@ class ReportExecutor:
             "md_path": str(md_path),
             "summary": summary,
         }
-
-    def _resolve_session_dir(self, ctx) -> Path | None:
-        """Best-effort session_dir resolution."""
-        extra = getattr(ctx, "extra", None) or {}
-        if extra.get("session_dir"):
-            return Path(extra["session_dir"])
-        params = ctx.task.params or {}
-        if params.get("session_dir"):
-            return Path(params["session_dir"])
-        from hyperloom.inference_optimizer.session.paths import session_dir as _sd
-
-        candidate = _sd()
-        if candidate.exists() and (candidate / "state.json").exists():
-            return candidate
-        return None
 
 
 report_executor = ReportExecutor()

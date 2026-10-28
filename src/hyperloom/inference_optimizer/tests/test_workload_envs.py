@@ -68,7 +68,6 @@ def _clear_env(monkeypatch):
         "XDIT_QUALITY_REF_WRITE",
         "HYPERLOOM_QUALITY_REF",
         "HYPERLOOM_QUALITY_REF_WRITE",
-        "XDIT_MODEL_ARG",
         "XDIT_MODEL_ROOT",
         "XDIT_ATTENTION_BACKEND",
     ):
@@ -168,6 +167,23 @@ def test_materialize_aggregated_leaves_lm_eval_default(tmp_path, monkeypatch):
     _write(src)
     bench = _materialize(src, tmp_path / "out")
     assert "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in bench["envs"]
+
+
+def test_materialize_fails_when_the_pd_topology_cannot_be_resolved(tmp_path, monkeypatch):
+    # An unresolved topology must not leave a PD run's lm_eval on token-id prompts, which reads accuracy 0.
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("MAGPIE_EVAL_TOKENIZED_REQUESTS", raising=False)
+    from hyperloom.inference_optimizer.multi_node._internal.topology_file import TopologyHandoffError
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    def _unreadable_handoff():
+        raise TopologyHandoffError("topology hand-off file is not valid JSON")
+
+    monkeypatch.setattr(mne, "resolve_kb_topology", _unreadable_handoff)
+    src = tmp_path / "base.yaml"
+    _write(src)
+    with pytest.raises(TopologyHandoffError, match="topology hand-off file is not valid JSON"):
+        _materialize(src, tmp_path / "out")
 
 
 # ---- _visible_gpu_count ---------------------------------------------------
@@ -658,7 +674,7 @@ def test_quality_ref_baseline_establishes(monkeypatch, tmp_path):
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == "/ref/q.png"
 
 
-_XDIT_ONLY_ENVS = ("XDIT_MODEL_ARG", "XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
+_XDIT_ONLY_ENVS = ("XDIT_MODEL_ROOT", "XDIT_ATTENTION_BACKEND")
 
 
 def test_custom_baseline_gets_no_xdit_only_envs(monkeypatch, tmp_path):
@@ -681,7 +697,6 @@ def test_xdit_baseline_still_gets_xdit_only_envs(monkeypatch, tmp_path):
     monkeypatch.setenv("XDIT_MODEL_ROOT", "/models")
     src = _write(tmp_path / "cfg.yaml", framework="xdit", envs={})
     bench = _materialize(src, tmp_path / "out", options=we.MaterializeOptions(establish_quality_ref=True))
-    assert bench["envs"]["XDIT_MODEL_ARG"] == "name"
     assert bench["envs"]["XDIT_MODEL_ROOT"] == "/models"
     assert bench["envs"]["XDIT_ATTENTION_BACKEND"] == "aiter"
 

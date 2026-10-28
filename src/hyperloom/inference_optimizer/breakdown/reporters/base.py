@@ -112,15 +112,6 @@ def stop_target_text(objective: Any) -> str:
     return ", ".join(label for t in targets or [target] if (label := _target_label(t)))
 
 
-def measured_ms(value: Any) -> float | None:
-    """A latency reading in milliseconds, or ``None`` when the round measured none.
-
-    A workload that measures no request latency records ``0``, which is not a real reading.
-    """
-    ms = to_float(value)
-    return ms if ms is not None and ms > 0 else None
-
-
 def outcome_of(breakdown: Any) -> dict[str, Any]:
     """The session result block.
 
@@ -237,7 +228,7 @@ def render_section(
     """Run one renderer so a failing section costs itself, not the report."""
     try:
         return fn(breakdown)
-    except Exception as exc:
+    except Exception as exc:  # isolation boundary: one report section renderer
         log.exception("report section %s failed to render", section_id)
         return RenderedSection(
             section_id=section_id,

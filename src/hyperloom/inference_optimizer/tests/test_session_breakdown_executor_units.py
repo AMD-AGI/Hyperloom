@@ -27,51 +27,7 @@ def session_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class TestResolveSessionDir:
-    def test_extra_session_dir_wins(self, tmp_path):
-        ctx = _ctx(extra={"session_dir": str(tmp_path)})
-        assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == tmp_path
-
-    def test_params_session_dir_used(self, tmp_path):
-        ctx = _ctx(params={"session_dir": str(tmp_path)})
-        assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == tmp_path
-
-    def test_fallback_path_returned_when_manifest_present(
-        self,
-        session_dir,
-        monkeypatch,
-    ):
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            lambda: session_dir,
-        )
-        ctx = _ctx()
-        assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) == session_dir
-
-    def test_fallback_returns_none_without_manifest(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            lambda: tmp_path,
-        )
-        ctx = _ctx()
-        assert sb.SessionBreakdownExecutor._resolve_session_dir(ctx) is None
-
-
 class TestExecutor:
-    @pytest.mark.asyncio
-    async def test_failed_when_no_session_dir(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(
-            "hyperloom.inference_optimizer.session.paths.session_dir",
-            lambda: tmp_path,
-        )
-        result = await sb.SessionBreakdownExecutor()(_ctx())
-        assert result["status"] == "failed"
-        assert "session_dir" in result["error"]
-
     @pytest.mark.asyncio
     async def test_writer_error_propagates(self, monkeypatch, session_dir):
         def boom(*args, **kwargs):

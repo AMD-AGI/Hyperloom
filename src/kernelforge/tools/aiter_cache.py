@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_json
 
 
 _OWNER_FILE = ".forge_cache_owner.json"
@@ -52,10 +52,6 @@ class AiterCacheIsolation:
     owner_pid: int
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_text(path, json.dumps(payload, sort_keys=True))
-
-
 def configure_aiter_cache_isolation(
     experiments_dir: Path,
     *,
@@ -82,7 +78,7 @@ def configure_aiter_cache_isolation(
     _seed_flydsl_cache(flydsl_cache_dir)
     owner_file = cache_root / _OWNER_FILE
     owner_pid = os.getpid()
-    _atomic_write_json(
+    atomic_write_json(
         owner_file,
         {
             "owner_pid": owner_pid,
@@ -291,7 +287,7 @@ def activate_aiter_cache_for_sources(
     owner_pid = os.getpid()
     now = time.time()
     existing_owner = _read_owner(owner_file)
-    _atomic_write_json(
+    atomic_write_json(
         owner_file,
         {
             "owner_pid": owner_pid,

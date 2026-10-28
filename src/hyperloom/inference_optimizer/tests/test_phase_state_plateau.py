@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
+from hyperloom.orchestrator.kernel import kernel_decisions
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
@@ -340,9 +341,9 @@ def test_kernel_holds_while_work_pending_keep():
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
-def test_kernel_holds_while_work_pending_untried_hot_kernel():
+def test_kernel_holds_while_work_pending_untried_hot_kernel(monkeypatch):
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.untried_hot_reusable_kernels = lambda: ["k017"]
+    monkeypatch.setattr(kernel_decisions, "untried_hot_reusable_kernels", lambda state: ["k017"])
 
     assert kernel_work_pending(state) is True
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
@@ -373,11 +374,11 @@ def test_a_hot_kernel_a_backend_patched_stops_holding_kernel():
 
 
 @pytest.mark.parametrize("status", ["no_gain", "timeout"])
-def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
+def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, monkeypatch):
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.kernel_optimizer = "geak"
     state.geak_result = {"status": status}
-    state.untried_hot_reusable_kernels = lambda: ["k017"]
+    monkeypatch.setattr(kernel_decisions, "untried_hot_reusable_kernels", lambda state: ["k017"])
 
     assert kernel_work_pending(state) is False
     out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))

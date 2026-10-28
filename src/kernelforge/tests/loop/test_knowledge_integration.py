@@ -238,19 +238,6 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     assert consumer.read_text() == "new\n"
 
 
-def test_git_checkout_branch_creates_and_switches_branch(tmp_path):
-    repo = _init_repo(tmp_path)
-
-    out = integ.git_checkout_branch(str(repo), "kernel-agent-optimize")
-    assert "Switched to a new branch" in out
-    assert _run(["git", "branch", "--show-current"], repo) == "kernel-agent-optimize"
-
-    _run(["git", "checkout", "master"], repo)
-    out = integ.git_checkout_branch(str(repo), "kernel-agent-optimize")
-    assert "Switched to branch" in out
-    assert _run(["git", "branch", "--show-current"], repo) == "kernel-agent-optimize"
-
-
 def test_kb_read_status_is_compact_and_stable():
     status = integ.kb_read_status(
         {
@@ -1489,3 +1476,71 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
     # Still says which failure happened, and cannot grow past the cap.
     assert reason.startswith("KBStoreError: ")
     assert len(reason) == MAX_READ_ERROR_LENGTH
+
+
+def _experience_write_reason(monkeypatch, tmp_path, config, failure) -> str:
+    from kernelforge.knowledge.kb_store import writer
+
+    monkeypatch.setattr(writer, "_write_run_experience_impl", failure)
+    status = writer.write_run_experience(
+        config=config,
+        kernel=LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="triton", workspace=str(tmp_path)),
+        outcome=writer.RunOutcome(
+            experiment_id="exp",
+            gpu_target="gfx950",
+            baseline_wall_ms=None,
+            best_wall_ms=None,
+            cumulative_diff="",
+            digest="",
+        ),
+    )
+    return status["reason"]
+
+
+def _warm_start_reason(monkeypatch, tmp_path, config, failure) -> str:
+    monkeypatch.setattr(integ, "_WarmStartAttempt", failure)
+    warm = integ.kb_warmstart(
+        config=config,
+        kernel=LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="triton", workspace=str(tmp_path)),
+        harness=WarmStartHarness(driver="driver.py"),
+    )
+    return warm["read_error"]
+
+
+def _rewrite_read_reason(monkeypatch, tmp_path, config, failure) -> str:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(runner, "try_flydsl_kb_warmstart", failure)
+    target = SimpleNamespace(spec=SimpleNamespace(flydsl_kernel=str(tmp_path / "kernel.py")), config=config)
+    return runner._RewriteKb(target=target, enabled=True).read(source_case_ms={}, search_stop_unix=0.0).read_error
+
+
+@pytest.mark.parametrize(
+    ("site", "logger_name"),
+    [
+        (_experience_write_reason, "kernelforge.knowledge.kb_store.writer"),
+        (_warm_start_reason, "kernelforge.loop.knowledge_integration"),
+        (_rewrite_read_reason, "kernelforge.rewrite_by_flydsl.runner"),
+    ],
+    ids=["experience_write", "warm_start", "rewrite_read"],
+)
+def test_a_kb_failure_logs_its_sanitized_reason_and_stack(monkeypatch, tmp_path, caplog, site, logger_name):
+    """The log carries the sanitized reason, the type and the frames, and never the credential."""
+    import logging
+
+    from kernelforge.knowledge.kb_store.errors import sanitize_read_error
+
+    token = "kb-store-secret-9f3c"
+    message = f"https://forge:{token}@kb.example failed (sent Bearer {token})"
+
+    def failure(*_args, **_kwargs):
+        raise record_store.KBStoreError(message)
+
+    caplog.set_level(logging.DEBUG)
+    reason = site(monkeypatch, tmp_path, _kb_store_config(tmp_path, token), failure)
+
+    assert reason == sanitize_read_error(record_store.KBStoreError(message), secrets=(token,))
+    (record,) = [record for record in caplog.records if record.name == logger_name]
+    assert record.args[:2] == (reason, "KBStoreError")
+    assert "in failure\n    raise record_store.KBStoreError(message)" in record.getMessage()
+    assert [record.getMessage() for record in caplog.records if token in record.getMessage()] == []

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -507,6 +508,35 @@ def test_driver_main_writes_result_json(monkeypatch, tmp_path):
     assert rc == 0
     data = json.loads((root / "result.json").read_text())
     assert data["ok"] is True
+
+
+def test_driver_main_records_a_recipe_that_raises_in_result_json(monkeypatch, tmp_path, caplog):
+    root = tmp_path / "attempt"
+    root.mkdir()
+    (root / "plan.json").write_text(json.dumps(_aiter_action(ref="v0.1.0").to_state()), encoding="utf-8")
+
+    from hyperloom.orchestrator.enablement.runtime import targeted_build as tb
+
+    full = OSError(28, "No space left on device")
+
+    def _recipe_whose_log_write_fails(action, attempt_root, **kw):
+        raise full
+
+    monkeypatch.setattr(tb, "run_aiter_build", _recipe_whose_log_write_fails)
+    with caplog.at_level(logging.WARNING, logger=tb.log.name):
+        rc = _driver_main(["--attempt-root", str(root)])
+
+    assert rc == 1
+    data = json.loads((root / "result.json").read_text())
+    assert (data["ok"], data["attempt_root"], data["failure_class"], data["failure_summary"], data["error"]) == (
+        False,
+        str(root),
+        "compile_error",
+        "recipe raised: OSError(28, 'No space left on device')",
+        "OSError(28, 'No space left on device')",
+    )
+    (record,) = [r for r in caplog.records if r.getMessage().startswith("targeted build driver: recipe raised: ")]
+    assert record.exc_info[1] is full
 
 
 def test_driver_main_missing_plan_writes_error(tmp_path):

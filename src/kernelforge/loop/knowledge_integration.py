@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,12 +24,13 @@ from kernelforge.workspace.edit_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from kernelforge.tools.git import git, git_bytes
+from kernelforge.tools.git import git, git_bytes, git_head
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
+from kernelforge.loop.loop_log import kb_write_line
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -42,7 +44,7 @@ from kernelforge.evaluation.benchmark.runner import (
     aggregate_benchmark_measurements,
     calculate_measurement_case_speedups,
 )
-from kernelforge.loop.jit_rebuild import JitRebuildUnavailable
+from kernelforge.evaluation.jit_rebuild import JitRebuildUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -60,42 +62,6 @@ class WarmStartRollbackError(RuntimeError):
 # The final warm-start implementation uses the more specific restore name while the CLI recovery boundary keeps the
 # established rollback exception contract.
 WarmStartRestoreError = WarmStartRollbackError
-
-
-def git_head(workspace_dir: str) -> str:
-    """Return the current HEAD sha of ``workspace_dir`` (empty on failure)."""
-    try:
-        return git("rev-parse", "HEAD", cwd=workspace_dir, check=False).stdout.strip()
-    except OSError:
-        return ""
-
-
-def git_checkout_branch(workspace_dir: str, branch: str) -> str:
-    """Create/switch to the loop branch before any warm-start edits."""
-    if not branch:
-        return ""
-    try:
-        exists = (
-            git(
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}",
-                cwd=workspace_dir,
-                check=False,
-            ).returncode
-            == 0
-        )
-        r = git(
-            "checkout",
-            *(() if exists else ("-b",)),
-            branch,
-            cwd=workspace_dir,
-            check=False,
-        )
-        return (r.stdout + "\n" + r.stderr).strip()
-    except OSError as e:
-        return f"checkout failed: {e}"
 
 
 def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
@@ -676,7 +642,7 @@ def _apply_candidate_patch(
 
 def _force_jit_rebuild(workspace_dir, kernel, source_files) -> None:
     """Invalidate the artifacts of the sources the applied patch just changed."""
-    from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
+    from kernelforge.evaluation.jit_rebuild import force_jit_rebuild_for_changes
 
     force_jit_rebuild_for_changes(
         workspace_dir,
@@ -927,7 +893,7 @@ def _try_apply_candidate(sol: dict, trial: _CandidateField, *, pre_untracked) ->
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
-    except Exception as exc:  # scoring is third-party; worktree is discarded
+    except Exception as exc:  # isolation boundary: one KB warm-start candidate; worktree is discarded
         log.warning("warm-start candidate probe failed: %s", exc, exc_info=True)
         _git_discard_worktree(
             workspace_dir,
@@ -1321,15 +1287,17 @@ def kb_warmstart(
         return attempt.final_result()
     except WarmStartRestoreError:
         raise
-    except Exception as e:  # noqa: BLE001 - warm-start must never break the run
+    except Exception as e:  # noqa: BLE001 - isolation boundary: the run's KB warm-start; it cold-starts instead
         from kernelforge.knowledge.kb_store.errors import (
             kb_store_secrets,
             sanitize_read_error,
         )
 
         error = sanitize_read_error(e, secrets=kb_store_secrets(config))
-        # Sanitized message only: a raw traceback would carry the KB store credentials.
-        log.warning("KB warm-start failed: %s", error)
+        # Sanitized reason and stack frames only: the raw message may carry the KB store credentials.
+        log.warning(
+            "KB warm-start failed: %s (%s)\n%s", error, type(e).__name__, "".join(traceback.format_tb(e.__traceback__))
+        )
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,
@@ -1432,10 +1400,7 @@ def write_experience_to_kb(
         summary_override=summary_override,
         usage=usage,
     )
-    if status.get("written"):
-        print(f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True)
-    else:
-        print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
+    print(kb_write_line(status), flush=True)
     return status
 
 

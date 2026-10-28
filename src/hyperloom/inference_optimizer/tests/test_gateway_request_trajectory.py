@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from hyperloom.common import llm_config
@@ -131,25 +132,33 @@ async def test_a_streamed_completion_reads_id_and_usage_off_its_chunks(tmp_path)
     assert attributes["stop_reason"] == "stop"
 
 
-def test_an_anthropic_messages_post_is_one_request(tmp_path):
-    body = {
-        "id": "msg_01",
-        "model": "claude-x",
-        "content": [{"type": "text", "text": "ok"}],
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 5, "output_tokens": 3, "cache_read_input_tokens": 90},
-    }
-    resp = SimpleNamespace(status_code=200, json=lambda: body)
-    client = SimpleNamespace(post=lambda *_a, **_k: resp)
-    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
-        result = llm_config.anthropic_messages(client, component="breakdown", model="claude-x", max_tokens=8)
+def test_an_anthropic_messages_reply_is_one_streamed_request(tmp_path):
+    usage = {"input_tokens": 5, "output_tokens": 0, "cache_read_input_tokens": 90}
+    events = (
+        {"type": "message_start", "message": {"id": "msg_01", "model": "claude-x", "content": [], "usage": usage}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    )
+    body = b"".join(b"data: " + json.dumps(event).encode() + b"\n\n" for event in events)
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, content=body))
+    with httpx.Client(base_url="https://gateway.test", transport=transport) as client:
+        with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
+            result = llm_config.anthropic_messages(client, component="breakdown", model="claude-x", max_tokens=8)
 
     assert result.text == "ok"
     (row,) = _requests(tmp_path)
     attributes = row["attributes"]
     assert attributes["message_id"] == "msg_01"
     assert attributes["protocol"] == hooks.PROTOCOL_ANTHROPIC_MESSAGES
-    assert (attributes["input_tokens"], attributes["cache_read_input_tokens"]) == (5, 90)
+    assert attributes["timing_source"] == tt.TIMING_HTTP_STREAM
+    assert attributes["ttft_ms"] is not None
+    assert (attributes["input_tokens"], attributes["output_tokens"], attributes["cache_read_input_tokens"]) == (
+        5,
+        3,
+        90,
+    )
     assert attributes["cache_creation_input_tokens"] == 0
 
 
@@ -200,7 +209,7 @@ def test_specialist_log_requests_are_one_row_per_message_id(tmp_path):
         ],
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="specialist", task_id="t-1", parent_span_id="call-1"):
-        assert re_.record_stream_json_requests(log) == 2
+        re_.record_stream_json_requests(log)
 
     first, second = _requests(tmp_path)
     assert [r["attributes"]["message_id"] for r in (first, second)] == ["m1", "m2"]

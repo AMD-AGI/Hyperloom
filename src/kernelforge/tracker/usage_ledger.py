@@ -62,8 +62,8 @@ class UsageLedgerFile:
         """Record this process's totals so far. Never raises: accounting must not end a run."""
         try:
             self._publish(totals)
-        except Exception as error:  # noqa: BLE001 - a ledger write must never break the caller
-            log.debug("usage ledger publish skipped (%s: %s)", type(error).__name__, error)
+        except Exception as error:  # outermost accounting sink: a ledger write must never break the caller
+            log.debug("usage ledger publish skipped (%s: %s)", type(error).__name__, error, exc_info=True)
 
     def _publish(self, totals: dict[str, Any]) -> None:
         delta = self._delta(totals)

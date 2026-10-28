@@ -19,6 +19,7 @@ from kernelforge.orchestrator.analysis import (
 )
 from kernelforge.tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
 from kernelforge.tests.test_loop_runner import _make_loop
+from kernelforge.loop.iteration import campaign_runtime
 
 
 def test_resume_recovery_rejects_gap_before_pending_keep(tmp_path, monkeypatch):
@@ -81,7 +82,7 @@ def test_keep_archive_failure_is_non_fatal_and_clears_pending_journal(
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(
-        runner_module.CandidateArchive,
+        campaign_runtime.CandidateArchive,
         "record",
         lambda _archive, _record: (_ for _ in ()).throw(OSError("simulated archive failure")),
     )

@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.coerce import (
     text_or_none as _text,
     to_float as _float_or_none,
@@ -107,18 +108,9 @@ class KernelRewriteRun:
     lane: LaneRunFields
     kernel_id: str
     kernel_name: str = ""
-    dispatched: bool = True
     backends_tried: Any = None
     adopted_backend: str = ""
-    skip_reason: str = ""
-    task_group: str = ""
     speedup: Any = None
-    baseline_us: Any = None
-    candidate_us: Any = None
-    compile_status: str = ""
-    correctness: Any = None
-    artifact_path: str = ""
-    trace_analyze_ref: str = ""
 
     def row(self) -> dict[str, Any]:
         """The lane row this rewrite persists as."""
@@ -126,18 +118,9 @@ class KernelRewriteRun:
             **self.lane.row(SOURCE_KERNEL_REWRITE),
             "kernel_id": str(self.kernel_id or ""),
             "kernel_name": _text(self.kernel_name),
-            "dispatched": bool(self.dispatched),
             "backends_tried": [str(item) for item in _as_list(self.backends_tried)],
             "adopted_backend": _text(self.adopted_backend),
-            "skip_reason": _text(self.skip_reason),
-            "task_group": _text(self.task_group),
             "speedup": _float_or_none(self.speedup),
-            "baseline_us": _float_or_none(self.baseline_us),
-            "candidate_us": _float_or_none(self.candidate_us),
-            "compile_status": _text(self.compile_status),
-            "correctness": self.correctness if isinstance(self.correctness, bool) else None,
-            "artifact_path": _text(self.artifact_path),
-            "trace_analyze_ref": _text(self.trace_analyze_ref),
         }
 
 
@@ -411,11 +394,8 @@ class GeakRebenchAttempt:
 
     attempt_id: str
     source_kind: str = SOURCE_GEAK_AUTHORED_KERNEL
-    source_ref: str | None = None
     idempotency_key: str | None = None
     task_id: str | None = None
-    dispatched_at: str | None = None
-    settled_at: str | None = None
     base_tput: float | None = None
     measured_tput: float | None = None
     decision: str | None = None
@@ -430,21 +410,16 @@ class GeakRebenchAttempt:
         verified = _as_dict(self.engagement)
         base = _float_or_none(self.base_tput)
         measured = _float_or_none(self.measured_tput)
-        delta = None
-        if base is not None and measured is not None and base > 0:
-            delta = round((measured - base) / base * 100.0, 4)
+        gain = None if base is None or measured is None else incremental_gain_pct(measured, base)
         return {
             "attempt_id": str(self.attempt_id or ""),
             "source_kind": str(self.source_kind),
             "ledger": LEDGER_GEAK,
-            "source_ref": _text(self.source_ref),
             "idempotency_key": _text(self.idempotency_key),
             "task_id": _text(self.task_id),
-            "dispatched_at": _text(self.dispatched_at),
-            "settled_at": _text(self.settled_at),
             "base_tput": base,
             "measured_tput": measured,
-            "delta_pct": delta,
+            "delta_pct": None if gain is None else round(gain, 4),
             "decision": _text(self.decision),
             "decision_reason": _text(self.decision_reason),
             "status": _text(self.status),

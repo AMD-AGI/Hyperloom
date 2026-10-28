@@ -42,7 +42,7 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 
 from . import _reuse as reuse
 from ._projection import ProjectionRequest, projection_enabled, route_variants
-from ._remeasure import _is_noop_filter_exempt
+from ._remeasure import _is_config_replay_variant
 from ._screen import screen_enabled, screen_variants
 from .._grid_base import GridVariant
 from .._grid_runner import GridRecipe, _build_variant_yaml
@@ -253,10 +253,9 @@ async def prefilter_variants(
 ) -> Prefiltered:
     """Run the enabled filters over ``variants`` on ``stack``.
 
-    A revalidation round, a config replay and a resumed revalidation re-measure a config on purpose, so none of
-    them is ever filtered.
+    A revalidation round and a config replay re-measure a config on purpose, so neither is ever filtered.
     """
-    protected = {gv.name for gv in variants if revalidation or _is_noop_filter_exempt(gv)}
+    protected = {gv.name for gv in variants if revalidation or _is_config_replay_variant(gv)}
     candidates = [gv for gv in variants if gv.name not in protected]
     if not candidates or not (reuse.reuse_enabled() or screen_enabled() or projection_enabled()):
         return Prefiltered(list(variants))

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -508,7 +508,6 @@ def baseline_writer(native_benchmark, monkeypatch, tmp_path):
     monkeypatch.setattr(coord.gap_refresh, "refresh_gaps", AsyncMock())
     monkeypatch.setattr(writer, "drain_queued_baselines", AsyncMock())
     monkeypatch.setattr(writer, "_should_run_prelude_bootstrap", lambda _tput: False)
-    monkeypatch.setattr(coord.shared_state, "record_baseline_roofline_ceiling", Mock())
     return writer, _PromoteOutcome(verdict=Verdict.RECORDED)
 
 

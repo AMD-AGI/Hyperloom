@@ -266,7 +266,7 @@ class _AnalysisSession:
                 log.warning("opportunity analysis resume failed: %s", exc)
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
-            except Exception as exc:
+            except Exception as exc:  # isolation boundary: one resume turn; its drafts still merge below
                 log.exception("opportunity analysis resume failed")
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
@@ -607,7 +607,7 @@ class OpportunityAnalysisAgent:
                 except asyncio.CancelledError:
                     if status != ANALYSIS_STATUS_TIMED_OUT:
                         raise
-                except Exception as error:  # agent backend failure is not enumerable
+                except Exception as error:  # isolation boundary: the analysis session; published tasks still dispatch
                     log.warning("opportunity analysis session failed: %s", error, exc_info=True)
                     status = ANALYSIS_STATUS_FAILED
                     reason = f"opportunity analysis failed: {error}"
@@ -720,8 +720,8 @@ def run_opportunity_analysis(
             max_turns=config.max_turns if config is not None else 500,
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
-    except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
-        log.warning("opportunity analysis setup failed: %s", error)
+    except Exception as error:  # isolation boundary: the analysis phase; tasks it published still dispatch
+        log.warning("opportunity analysis setup failed: %s", error, exc_info=True)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

@@ -8,6 +8,8 @@ import importlib.util
 import types
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.kernel import _forge_gemm_tuning as forge_gemm_tuning
 
 
@@ -96,6 +98,23 @@ def test_persist_aiter_not_importable_falls_back(tmp_path, monkeypatch):
     assert out == extra and snap == ""  # unchanged; never breaks KEEP
 
 
+def test_persist_copy_failure_is_not_reported_as_aiter_absent(tmp_path, monkeypatch):
+    aiter_pkg = _fake_aiter(monkeypatch, tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = ws / "tuned.csv"
+    src.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
+
+    def _read_only_config_tree(src_path, dst):
+        raise PermissionError(f"[Errno 13] Permission denied: '{dst}'")
+
+    monkeypatch.setattr(forge_gemm_tuning.shutil, "copy2", _read_only_config_tree)
+    extra = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": str(src)}
+    with pytest.raises(PermissionError, match="Permission denied"):
+        forge_gemm_tuning._persist_forge_gemm_csv_durably(extra, model_path="/m/x", session_dir=ws)
+    assert list((aiter_pkg / "configs" / "model_configs" / "hyperloom").iterdir()) == []
+
+
 def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
     # A snapshot failure must NOT discard the durable copy + env repoint that were already committed (that is what
     # makes the KEEP survive replay).
@@ -108,7 +127,7 @@ def test_persist_snapshot_failure_keeps_copy_and_repoint(tmp_path, monkeypatch):
     import hyperloom.orchestrator.source_snapshot as ss
 
     def _boom(layer, **kwargs):
-        raise RuntimeError("snapshot dest not writable")
+        raise PermissionError("snapshot dest not writable")
 
     monkeypatch.setattr(ss, "snapshot_source_layer", _boom)
 

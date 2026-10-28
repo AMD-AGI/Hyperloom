@@ -47,34 +47,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_report_resolves_session_dir_from_env(tmp_path, monkeypatch):
-    """ReportExecutor resolves session_dir from $USER_DATA_PATH."""
-    sd = tmp_path / "real-session"
-    sd.mkdir()
-    state = SharedState(session_id=sd.name, model_name="qwen3-8b", baseline_tput=800.0, cumulative_gain_validated=2.5)
-    state.save(sd)
-    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-
-    storage_dir = sd / "storage"
-    storage_dir.mkdir()
-    SqliteConnection(storage_dir / "coordinator.db").close()
-
-    monkeypatch.setenv("USER_DATA_PATH", str(sd))
-
-    class _Ctx:
-        task = Task(
-            task_id="t-1", kind="report", params={}, requires_lanes=(), state="running", idempotency_key="report-test-1"
-        )
-        lease = None
-        extra: dict = {}
-
-    out = await ReportExecutor()(_Ctx())
-    assert out["status"] == "succeeded", out
-    assert "json_path" in out and Path(out["json_path"]).exists()
-    assert "md_path" in out and Path(out["md_path"]).exists()
-
-
-@pytest.mark.asyncio
 async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
     """ctx.extra['session_dir'] beats env var (in-process Coordinator wins)."""
     sd = tmp_path / "ctx-session"

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -391,6 +391,91 @@ class TestTheErrorMeasure:
         torch = pytest.importorskip("torch")
         ref = torch.full((64, 64), 1.0)
         assert dp.mean_error(ref * 1.2, ref) > dp.MAX_MOE_MEAN_ERROR
+
+
+class TestARaiseStaysWithItsShapeOrCandidate:
+    """A raise in one shape's operands or one candidate is that unit's verdict, logged with its stack."""
+
+    _FAULT = "HIP error: an illegal memory access was encountered"
+
+    @staticmethod
+    def _records(caplog, prefix: str) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.name == dp.__name__ and r.getMessage().startswith(prefix)]
+
+    @staticmethod
+    def _steered(adapter, monkeypatch) -> list:
+        monkeypatch.setattr(adapter, "_gfx", lambda: "gfx950")
+        monkeypatch.setattr(adapter, "_cu_num", lambda: 256)
+        monkeypatch.setattr(adapter, "_torch", staticmethod(_FakeTorch))
+        monkeypatch.setattr(adapter, "_hidden", lambda _shape, seed: seed)
+        pointed: list = []
+        monkeypatch.setattr(adapter, "_point_at", pointed.append)
+        return pointed
+
+    def test_operands_aiter_cannot_build_fail_the_baseline_of_that_shape(self, monkeypatch, tmp_path, caplog):
+        codegen = tmp_path / "csrc" / "ck_gemm_moe_2stages_codegen"
+        codegen.mkdir(parents=True)
+        (codegen / "gemm_moe_tune.py").write_text("", encoding="utf-8")
+        (tmp_path / "aiter").mkdir()
+        aiter = ModuleType("aiter")
+        aiter.__file__ = str(tmp_path / "aiter" / "__init__.py")
+        aiter.ActivationType = SimpleNamespace(Swiglu="swiglu")
+        aiter.QuantType = SimpleNamespace(per_1x32="per_1x32")
+        oom = RuntimeError("HIP out of memory. Tried to allocate 2.00 GiB")
+
+        def generate_data_2stages(*_args):
+            raise oom
+
+        tune = ModuleType("gemm_moe_tune")
+        tune.FmoeTuner = SimpleNamespace(generate_data_2stages=generate_data_2stages)
+        monkeypatch.setitem(sys.modules, "aiter", aiter)
+        monkeypatch.setitem(sys.modules, "gemm_moe_tune", tune)
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        with dp._FusedMoeAdapter() as adapter:
+            pointed = self._steered(adapter, monkeypatch)
+            monkeypatch.setattr(adapter, "_torch", lambda: SimpleNamespace(bfloat16="bf16", float4_e2m1fn_x2="fp4"))
+            with caplog.at_level(logging.INFO, logger=dp.__name__):
+                with pytest.raises(ValueError, match="^tier3: no fused-MoE baseline could be built for "):
+                    adapter.make_baseline(_SHAPE)
+
+            assert adapter._operands == {_SHAPE: None}
+            assert pointed == [adapter._baseline_csv]
+        (record,) = self._records(caplog, "tier3: cannot build fused-MoE operands for ")
+        assert record.exc_info[1] is oom
+
+    def test_a_candidate_whose_kernel_raises_is_not_dispatched_and_aiter_is_pointed_back(self, monkeypatch, caplog):
+        fault = RuntimeError(self._FAULT)
+
+        def run():
+            raise fault
+
+        with dp._FusedMoeAdapter() as adapter:
+            pointed = self._steered(adapter, monkeypatch)
+            monkeypatch.setattr(adapter, "_call", lambda _shape, _hidden: run)
+            with caplog.at_level(logging.INFO, logger=dp.__name__):
+                assert adapter.make_dispatch(_SHAPE)(_CAND) is None
+
+            assert pointed == [adapter._workdir / "candidate.csv", adapter._baseline_csv]
+        (record,) = self._records(caplog, f"tier3: fused-MoE candidate {_KN1}/{_KN2} raised: ")
+        assert record.exc_info[1] is fault
+
+    def test_a_candidate_whose_correctness_run_raises_is_rejected(self, monkeypatch, caplog):
+        fault = RuntimeError(self._FAULT)
+
+        def run():
+            raise fault
+
+        with dp._FusedMoeAdapter() as adapter:
+            pointed = self._steered(adapter, monkeypatch)
+            monkeypatch.setattr(adapter, "_call", lambda _shape, _hidden: run)
+            adapter._in_play[_SHAPE] = _CAND
+            with caplog.at_level(logging.INFO, logger=dp.__name__):
+                assert adapter.make_correctness(_SHAPE)(run) is False
+
+            assert pointed == [adapter._baseline_csv]
+        (record,) = self._records(caplog, "tier3: fused-MoE correctness check raised, rejecting: ")
+        assert record.levelno == logging.WARNING
+        assert record.exc_info[1] is fault
 
 
 class _FakeTorch:

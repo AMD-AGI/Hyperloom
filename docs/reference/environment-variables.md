@@ -368,7 +368,7 @@ require no configuration.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
-decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
+decided that — in a versioned schema (`schema_version`, currently `1.2.0`), so
 consumers and triage read a contract rather than candidate internals.
 
 ---
@@ -667,8 +667,8 @@ in the round's `skipped_dup` with a reason (`measured_revert_before`,
 `projection_outranked`). It is not journaled or written to the tested ledger,
 so a later round may propose it again.
 
-No filter ever drops a variant in a stack-revalidation round, a config replay
-(`geak_revalidate`), or a resumed revalidation (`resume_stack_revalidate`).
+No filter ever drops a variant in a stack-revalidation round or a config replay
+(`geak_revalidate`).
 
 Boolean switches below are on for `1`, `true`, `yes` or `on`
 (case-insensitive) and off for anything else. A malformed number falls back to

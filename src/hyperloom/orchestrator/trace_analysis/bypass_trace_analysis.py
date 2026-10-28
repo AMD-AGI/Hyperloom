@@ -569,8 +569,8 @@ def _write_diffusion_roofline(
         _diff_path = run_dir / "diffusion_roofline.json"
         atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
         return str(_diff_path)
-    except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
-        log.warning("diffusion roofline sidecar failed: %s", exc)
+    except Exception as exc:  # isolation boundary: the scriptable-run sidecar, whose path is then left empty
+        log.warning("diffusion roofline sidecar failed: %s", exc, exc_info=True)
         return None
 
 
@@ -641,8 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
-        except Exception as exc:  # noqa: BLE001 — never abort the pipeline
-            log.warning("bypass trace analysis failed: %s", exc)
+        except Exception as exc:  # outermost CLI main: the failure is carried as analysis_degraded in the result
+            log.warning("bypass trace analysis failed: %s", exc, exc_info=True)
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(
         {

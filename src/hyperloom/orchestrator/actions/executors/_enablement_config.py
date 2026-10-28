@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.failure_signature import CapabilityGap, FailureSignature
+from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, FailureSignature
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_server_args,
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 DEFAULT_SWITCH_OFF_PARITY_BAND_PCT = 2.0
 
 
-def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
+def _enablement_gap(params: dict[str, Any]) -> FailureSignature | None:
     """The round's capability gap, when it calls for code the stack lacks.
 
     Read from the verdict the round was dispatched on; None for a round that
@@ -42,8 +42,8 @@ def _enablement_gap(params: dict[str, Any]) -> CapabilityGap | None:
     raw = params.get("enablement_failure_signature")
     if not isinstance(raw, dict) or not raw:
         return None
-    gap = CapabilityGap.from_signature(FailureSignature.from_dict(raw))
-    return gap if gap.requires_code_acquisition else None
+    signature = FailureSignature.from_dict(raw)
+    return signature if signature.kind != RESOURCE_CONSTRAINT else None
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,8 @@ from ._kernel_roofline import (
     kernel_roofline_path_for_run,
 )
 from ._trace_inputs import TraceInputs
-from .tracelens_skill_runner import aggregate_by_source_function, tracelens_analysis_mode
+from .tracelens_skill_runner import aggregate_by_source_function
+from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +324,7 @@ def _write_diffusion_roofline(run_dir: Path, tracelens_dir: Path, args: argparse
         )
     except FileNotFoundError as exc:
         print(f"[diffusion_roofline] skipped: {exc}")
-    except Exception as exc:  # noqa: BLE001 - best-effort sidecar
+    except (OSError, EOFError, ValueError, csv.Error) as exc:
         log.warning("diffusion roofline sidecar failed: %s", exc)
         print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
     return diffusion_roofline_path
@@ -354,6 +356,6 @@ def _attach_analytic_ceiling(diff_report: dict[str, Any], args: argparse.Namespa
                 _actual_us = diff_report["totals"]["sigma_actual_kernel_us"]
                 if _est.get("ideal_ms") and _actual_us > 0:
                     diff_report["analytic_within_pct"] = round(_est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2)
-    except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
-        log.warning("diffusion analytic ceiling failed: %s", _exc)
+    except Exception as _exc:  # isolation boundary: the analytic ceiling, recorded as analytic_ceiling_error
+        log.warning("diffusion analytic ceiling failed: %s", _exc, exc_info=True)
         diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"

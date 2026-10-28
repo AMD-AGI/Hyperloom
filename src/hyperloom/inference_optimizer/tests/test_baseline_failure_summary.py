@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.orchestrator.actions.executors import report
 from hyperloom.orchestrator.actions.executors.report import (
     _build_failure_summary,
     _build_summary_dict,
@@ -101,6 +104,16 @@ def test_failure_summary_from_server_init_dead_attempt():
     assert fs["root_cause_type"] == "oom"
     assert "out of memory" in fs["root_cause"].lower()
     assert fs["last_attempt_id"] == "baseline-1"
+
+
+def test_failure_summary_build_error_is_not_reported_as_no_failed_attempt(monkeypatch):
+    def _broken_headline(text):
+        raise TypeError("headline picker broke")
+
+    monkeypatch.setattr(report, "_pick_failure_headline", _broken_headline)
+    state = _failed_state(error_class="server_init_dead", error=_SERVER_LOG_OOM)
+    with pytest.raises(TypeError, match="headline picker broke"):
+        _build_failure_summary(state)
 
 
 def test_failure_summary_mixed_error_keeps_real_root_cause():

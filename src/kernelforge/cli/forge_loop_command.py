@@ -57,7 +57,6 @@ from kernelforge.loop.knowledge_integration import (
     ExperiencePublication,
     WarmStartHarness,
     WarmStartRollbackError,
-    git_head,
     kb_reference_program_md,
     kb_read_status,
     kb_warmstart,
@@ -66,18 +65,20 @@ from kernelforge.loop.knowledge_integration import (
 )
 from kernelforge.loop.recovery import (
     CallerRecovery,
-    atomic_write_json,
     load_published_best,
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, warm_start_improvement_flags
+from kernelforge.tools.durable_io import atomic_write_json
+from kernelforge.tools.git import git_head
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.loop.campaign_setup import CampaignResolution
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.loop.iteration.iteration_types import IterationConfig
+    from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
@@ -388,8 +389,8 @@ class _RunReporter:
                 ),
                 usage=self.run.usage,
             )
-        except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
-            log.warning("experience KB publication failed for %s: %s", commit, e)
+        except Exception as e:  # isolation boundary: one checkpoint's experience publication
+            log.warning("experience KB publication failed for %s: %s", commit, e, exc_info=True)
             status = {"written": False, "reason": f"error:{e!r}"}
         _record_remote_publication_result(
             self.remote_publication,
@@ -1755,8 +1756,7 @@ def forge_loop(request: ForgeLoopRequest):
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
     _isolate_aiter_cache(config.experiments_dir, request.artifacts.aiter_cache_max_gb, source_files_list)
 
-    from kernelforge.loop.runner import LoopAgents, LoopCallbacks
-    from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.iteration.iteration_types import IterationConfig, LoopAgents, LoopCallbacks
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions

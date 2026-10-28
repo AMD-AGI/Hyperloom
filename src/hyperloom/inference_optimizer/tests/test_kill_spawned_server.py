@@ -28,7 +28,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     _LogCursor,
     _scan_server_log_increment,
     kill_my_spawned_server,
-    new_session_kwargs,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -36,8 +35,22 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 
-@pytest.mark.parametrize("text", [True, False])
-def test_capture_partial_utf8_records_bytes_before_newline(text):
+class _FakeCapture:
+    """A capture whose child wrote ``out`` and ``err`` and nothing the watchdog could see arrive."""
+
+    last_activity_at = None
+
+    def __init__(self, out: str = "", err: str = "") -> None:
+        self._captured = (out, err)
+
+    def note_output(self) -> None:
+        pass
+
+    def finish(self) -> tuple[str, str]:
+        return self._captured
+
+
+def test_capture_partial_utf8_records_bytes_before_newline():
     from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 
     proc = subprocess.Popen(
@@ -49,7 +62,7 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    capture = sk._StreamCapture(proc, text=text)
+    capture = sk._StreamCapture(proc)
     capture.start()
     try:
         deadline = time.monotonic() + 0.35
@@ -59,8 +72,8 @@ def test_capture_partial_utf8_records_bytes_before_newline(text):
         assert proc.poll() is None
         proc.wait(timeout=5)
         stdout, stderr = capture.finish()
-        assert stdout == ("€" if text else b"\xe2\x82\xac")
-        assert stderr == ("" if text else b"")
+        assert stdout == "€"
+        assert stderr == ""
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -151,7 +164,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             waited.append(now[0])
             now[0] += timeout
             raise subprocess.TimeoutExpired(self.args, timeout)
@@ -171,6 +184,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
                 ),
             ),
             recorders=sk._RecorderFanout([]),
+            capture=_FakeCapture(),
         )
     assert now[0] == expected
     assert 599.0 in waited
@@ -192,7 +206,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
         def poll(self):
             return None
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             now[0] += timeout
             if gate == "cancel" and now[0] >= 4:
                 scope.cancel(reason="test")
@@ -219,6 +233,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
             ),
             cancel_scope=scope,
             recorders=sk._RecorderFanout([recorder]),
+            capture=_FakeCapture(),
         )
     assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
     recorder.note_phase.assert_called_once_with("measured", 0)
@@ -232,11 +247,11 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
         def poll(self):
             return 7
 
-        def communicate(self):
-            return "finished", ""
-
     out = sk._communicate_with_watchdog(
-        Proc(), sk._WatchedRound(sk.RoundWatch(timeout=0, session_deadline_sec=-1)), recorders=sk._RecorderFanout([])
+        Proc(),
+        sk._WatchedRound(sk.RoundWatch(timeout=0, session_deadline_sec=-1)),
+        recorders=sk._RecorderFanout([]),
+        capture=_FakeCapture("finished"),
     )
     assert out == ("finished", "")
 
@@ -308,7 +323,7 @@ def test_kill_my_spawned_server_handles_already_exited():
         [sys.executable, "-c", "import sys; sys.exit(0)"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     proc.wait(timeout=10)
     kill_my_spawned_server(proc)
@@ -345,7 +360,7 @@ def test_kill_my_spawned_server_sigterm_then_sigkill_for_ignorer():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     # Let the child install its SIGTERM handler before we signal.
     time.sleep(0.3)
@@ -422,7 +437,7 @@ def test_kill_my_spawned_server_reaps_grandchildren():
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     pid_file = Path("/tmp/hyperloom_test_grandchild.pid")
     try:
@@ -515,7 +530,7 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
         [sys.executable, str(script)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **new_session_kwargs(),
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 5.0

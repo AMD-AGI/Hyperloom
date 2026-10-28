@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.token_usage import uncached_input_tokens
+from hyperloom.common.token_usage import openai_usage_counts, uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles.claude_requests import (
     TIMING_STREAM,
     ClaudeRequestTracker,
 )
-from hyperloom.orchestrator.roles.critic_agent import CriticAgentBackend
+from hyperloom.orchestrator.roles.critic_agent import _accumulate_usage
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 
@@ -160,9 +160,7 @@ async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_
     backend = cl.ClaudeBackend(
         sdk_query_factory=_query,
         sdk_options_cls=_FakeOptions,
-        api_key_env="UNSET_KEY_ENV_FOR_TEST",
         model="claude-x",
-        capture_turn_diagnostics=True,
     )
     with tt.trajectory_scope(session_dir=tmp_path, component="orchestration", call_id="c-7"):
         result = await backend.run("hello")
@@ -171,8 +169,6 @@ async def test_claude_backend_streams_partials_and_shares_the_scope_call_id(tmp_
     assert result.metadata["call_id"] == "c-7"
     requests = [r for r in tt.load_events(tmp_path) if r["event_type"] == tt.EVENT_LLM_REQUEST]
     assert [(r["status"], r["attributes"]["output_tokens"]) for r in requests] == [(tt.STATUS_COMPLETED, 40)]
-    diag_types = {m["type"] for m in backend.get_turn_diagnostic()["messages"]}
-    assert diag_types == {"AssistantMessage", "ResultMessage"}
 
 
 def _heartbeat() -> Intent:
@@ -215,8 +211,9 @@ def test_critic_openai_usage_reports_cached_tokens_separately():
         completion_tokens=50,
         prompt_tokens_details=SimpleNamespace(cached_tokens=800),
     )
-    CriticAgentBackend._accumulate_usage(acc, usage)
-    CriticAgentBackend._accumulate_usage(acc, SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+    second = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+    _accumulate_usage(acc, openai_usage_counts(usage), usage)
+    _accumulate_usage(acc, openai_usage_counts(second), second)
     assert acc["input_tokens"] == 200 + 10
     assert acc["cache_read_input_tokens"] == 800
     assert acc["output_tokens"] == 55

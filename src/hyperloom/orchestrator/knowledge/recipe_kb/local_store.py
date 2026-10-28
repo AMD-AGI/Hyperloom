@@ -49,32 +49,6 @@ _COUNTED_COLLECTIONS: tuple[str, ...] = (
 )
 
 
-# Order_by whitelist accepted by :meth:`LocalRecipeStore.search`.
-_ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
-    "updated_at DESC": ("updated_at", True),
-    "updated_at ASC": ("updated_at", False),
-    "created_at DESC": ("created_at", True),
-    "created_at ASC": ("created_at", False),
-    "version DESC": ("version", True),
-    "version ASC": ("version", False),
-}
-
-
-@dataclass(frozen=True)
-class RecipeFilters:
-    """Metric, recency and ordering terms of a recipe search, beside its label match.
-
-    Attributes:
-        metric_filters: Per-metric ``min`` / ``max`` bounds a row must satisfy.
-        updated_since: ISO timestamp a row must have been updated at or after.
-        order_by: One of the ``_ORDER_BY_KEYS`` spellings.
-    """
-
-    metric_filters: dict[str, Any] | None = None
-    updated_since: str | None = None
-    order_by: str = "updated_at DESC"
-
-
 @dataclass(frozen=True)
 class RecipeUpsert:
     """The producer-side fields of one recipe row, before ``put_recipe`` normalises and versions it."""
@@ -310,8 +284,7 @@ class LocalRecipeStore:
                     replaced_by=upsert.provenance,
                 )
 
-            # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
-            # on-disk shape.
+            # ``Recipe.from_dict`` normalises every list field into the on-disk shape.
             payload_dict: dict[str, Any] = {
                 "canonical_id": upsert.canonical_id,
                 "version": new_version,
@@ -326,15 +299,15 @@ class LocalRecipeStore:
                 "best_throughput": float(upsert.best_throughput),
                 # No projection: these rows are stored as the Coordinator wrote them, so a field it adds arrives
                 # without a schema here to teach. ``Recipe.from_dict`` rejects an unusable ``extra_envs`` / ``gain_pct``.
-                "what_worked": _coerce_dicts(upsert.what_worked),
-                "what_failed": _coerce_dicts(upsert.what_failed),
-                "remaining_gaps": _normalise_str_dicts(upsert.remaining_gaps, ("description", "metrics")),
-                "pitfalls": _normalise_str_dicts(upsert.pitfalls, ("description", "severity")),
-                "lessons": _normalise_lessons(upsert.lessons),
+                "what_worked": upsert.what_worked,
+                "what_failed": upsert.what_failed,
+                "remaining_gaps": upsert.remaining_gaps,
+                "pitfalls": upsert.pitfalls,
+                "lessons": upsert.lessons,
                 "last_profiled": upsert.last_profiled
                 or (str(live.get("last_profiled") or "") if isinstance(live, dict) else ""),
                 "stack_fingerprint": dict(upsert.stack_fingerprint or {}),
-                "sessions": _normalise_sessions(upsert.sessions),
+                "sessions": upsert.sessions,
                 "authority": upsert.authority,
                 "confidence": float(upsert.confidence),
                 "evidence_refs": list(upsert.evidence_refs or []),
@@ -361,44 +334,15 @@ class LocalRecipeStore:
         }
 
     # get_recipe
-    def get_recipe(
-        self,
-        *,
-        canonical_id: str,
-        version: int | None = None,
-    ) -> dict[str, Any] | None:
-        """Read live recipe (``version=None``) or an archived version."""
+    def get_recipe(self, *, canonical_id: str) -> dict[str, Any] | None:
+        """Read the live recipe row."""
         if not canonical_id:
             raise ValueError("get_recipe requires a non-empty canonical_id")
-        if version is None:
-            return _read_json(self._live_path(canonical_id))
-        # Live version requested explicitly → serve from live.
-        live = _read_json(self._live_path(canonical_id))
-        if isinstance(live, dict) and int(live.get("version", 0)) == int(version):
-            return live
-        archive = _read_json(
-            self._history_version_path(canonical_id, int(version)),
-        )
-        if archive is None:
-            return None
-        # Return the snapshot (the historical Recipe row) so callers see the same shape as a live read.
-        snapshot = archive.get("snapshot") if isinstance(archive, dict) else None
-        return dict(snapshot) if isinstance(snapshot, dict) else None
+        return _read_json(self._live_path(canonical_id))
 
     # search
-    def search(
-        self,
-        *,
-        label_match: dict[str, Any] | None = None,
-        limit: int = 50,
-        filters: RecipeFilters = RecipeFilters(),
-    ) -> list[dict[str, Any]]:
-        """Filter live recipes by labels / metrics / updated_at."""
-        if filters.order_by not in _ORDER_BY_KEYS:
-            raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {filters.order_by!r}",
-            )
-        sort_key, descending = _ORDER_BY_KEYS[filters.order_by]
+    def search(self, *, label_match: dict[str, Any] | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the live recipes matching ``label_match``, newest first, truncated to ``limit``."""
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
 
         rows: list[dict[str, Any]] = []
@@ -422,16 +366,11 @@ class LocalRecipeStore:
             payload.setdefault("canonical_id", cid)
             if not _matches_labels(payload, label_match or {}):
                 continue
-            if not _matches_metrics(payload, filters.metric_filters or {}):
-                continue
-            if not _matches_updated_since(payload, filters.updated_since):
-                continue
             rows.append(payload)
 
-        rows.sort(
-            key=lambda r: _coerce_sort_value(r.get(sort_key), sort_key),
-            reverse=descending,
-        )
+        # Newest first before truncating, so the rows that survive ``limit`` are the latest; a row without
+        # ``updated_at`` sorts last instead of failing the comparison.
+        rows.sort(key=lambda r: str(r.get("updated_at") or ""), reverse=True)
         return rows[:clamped_limit]
 
 
@@ -498,162 +437,12 @@ def _normalize_arch_to_slug(value: Any) -> str:
     return str(value or "").strip().lower().replace("/", "_").replace(" ", "_")
 
 
-def _matches_metrics(
-    payload: dict[str, Any],
-    metric_filters: dict[str, Any],
-) -> bool:
-    """Numeric range filter against arbor-shape metric fields."""
-    if not metric_filters:
-        return True
-    for key, bounds in metric_filters.items():
-        # Shorthand alias: ``throughput`` resolves to ``best_throughput``.
-        lookup_key = "best_throughput" if key in ("throughput", "best_throughput") else key
-        if lookup_key not in payload:
-            return False
-        try:
-            value = float(payload[lookup_key])
-        except (TypeError, ValueError):
-            return False
-        if isinstance(bounds, dict):
-            lo = bounds.get("min")
-            hi = bounds.get("max")
-        else:
-            # Scalar shorthand → equality.
-            lo = hi = bounds
-        if lo is not None:
-            try:
-                if value < float(lo):
-                    return False
-            except (TypeError, ValueError):
-                return False
-        if hi is not None:
-            try:
-                if value > float(hi):
-                    return False
-            except (TypeError, ValueError):
-                return False
-    return True
-
-
-def _matches_updated_since(
-    payload: dict[str, Any],
-    updated_since: str | None,
-) -> bool:
-    """Test whether a row was updated at or after a bound."""
-    if not updated_since:
-        return True
-    raw = payload.get("updated_at") or ""
-    return str(raw) >= str(updated_since)
-
-
-def _coerce_sort_value(value: Any, key: str) -> Any:
-    """Stable sort coercion for the order_by whitelist."""
-    if key == "version":
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-    return str(value or "")
-
-
-# put_recipe input normalisation — accept dataclass OR dict for every list.
-def _coerce_dict(item: Any) -> dict[str, Any] | None:
-    """Return ``item`` as a dict, or ``None`` when it cannot be coerced."""
-    from dataclasses import is_dataclass, asdict
-
-    if item is None:
-        return None
-    if isinstance(item, dict):
-        return item
-    if is_dataclass(item):
-        return asdict(item)
-    if hasattr(item, "to_dict") and callable(item.to_dict):
-        out = item.to_dict()
-        return out if isinstance(out, dict) else None
-    return None
-
-
 def _collection_counts(row: dict[str, Any] | None) -> dict[str, int]:
     """Count the entries in each list-valued knowledge field of a recipe row."""
     out: dict[str, int] = {}
     for key in _COUNTED_COLLECTIONS:
         value = row.get(key) if isinstance(row, dict) else None
         out[key] = len(value) if isinstance(value, list) else 0
-    return out
-
-
-def _coerce_dicts(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce each item to a dict, dropping entries that are not row-shaped at all."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is not None:
-            out.append(d)
-    return out
-
-
-def _normalise_str_dicts(items: list[Any] | None, keys: tuple[str, ...]) -> list[dict[str, Any]]:
-    """Coerce each item to ``{k: str(d.get(k) or "")}`` for *keys*; skip uncoercible entries."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        out.append({k: str(d.get(k) or "") for k in keys})
-    return out
-
-
-def _normalise_lessons(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce lessons into arbor ``{statement, measured_impact}`` dicts."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        out.append(
-            {
-                "statement": str(d.get("statement") or ""),
-                # Free-form; keep verbatim instead of str()-ing a dict.
-                "measured_impact": d.get("measured_impact") or "",
-            }
-        )
-    return out
-
-
-def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
-    """Coerce session records into the arbor session dict shape."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        d = _coerce_dict(it)
-        if d is None:
-            continue
-        try:
-            tput_before = float(d.get("throughput_before") or 0.0)
-        except (TypeError, ValueError):
-            tput_before = 0.0
-        try:
-            tput_after = float(d.get("throughput_after") or 0.0)
-        except (TypeError, ValueError):
-            tput_after = 0.0
-        try:
-            gain_pct = float(d.get("gain_pct") or 0.0)
-        except (TypeError, ValueError):
-            gain_pct = 0.0
-        try:
-            stack_len = int(d.get("stack_len") or 0)
-        except (TypeError, ValueError):
-            stack_len = 0
-        out.append(
-            {
-                "date": str(d.get("date") or ""),
-                "throughput_before": tput_before,
-                "throughput_after": tput_after,
-                "actions_taken": list(d.get("actions_taken") or []),
-                "session_id": str(d.get("session_id") or ""),
-                "gain_pct": gain_pct,
-                "stack_len": stack_len,
-            }
-        )
     return out
 
 

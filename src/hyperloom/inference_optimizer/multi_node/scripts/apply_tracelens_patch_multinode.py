@@ -517,7 +517,7 @@ def main() -> int:
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - outermost CLI main: the Ray fan-out, reported as failed JSON
         _log(f"ray fan-out aborted:\n{traceback.format_exc().rstrip()}")
         print(
             json.dumps(

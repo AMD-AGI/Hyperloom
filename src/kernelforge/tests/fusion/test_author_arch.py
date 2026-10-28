@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from kernelforge.fusion.author import AuthorBrief, _arch_phrase, build_author_prompt, build_multi_author_prompt
-from kernelforge.fusion.gpu_arch import canon_arch
 
 RECIPE = {
     "pattern_id": "residual_add_rmsnorm",
@@ -19,18 +18,6 @@ RECIPE = {
     "shapes": {"hidden_size": 4096},
     "matched_categories": ["add", "rmsnorm"],
 }
-
-
-# --- arch normalization ---------------------------------------------------- #
-def test_canon_arch_folds_marketing_names_and_rejects_unknown():
-    assert canon_arch("gfx942") == "gfx942"
-    assert canon_arch("GFX950") == "gfx950"
-    assert canon_arch("MI300X") == "gfx942"
-    assert canon_arch("mi355x") == "gfx950"
-    assert canon_arch("AMD Instinct MI355X") == "gfx950"
-    # Unresolvable arch must be empty: naming the wrong ISA is worse than naming none at all.
-    assert canon_arch("") == ""
-    assert canon_arch("some-new-gpu") == ""
 
 
 # --- prompt wording -------------------------------------------------------- #

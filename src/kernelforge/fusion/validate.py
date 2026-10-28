@@ -783,8 +783,8 @@ def serving_smoke_verdict(
         if is_vllm:
             return _vllm_decode_verdict(live, load, timeout_s, metrics)
         return _sglang_decode_verdict(live, env, load, timeout_s)
-    except Exception as e:  # noqa: BLE001 — a harness error is a soft-fail, never a crash.
-        log.warning("serving smoke harness error: %s", e)
+    except Exception as e:  # isolation boundary: one recipe's serving smoke
+        log.warning("serving smoke harness error: %s", e, exc_info=True)
         return SmokeVerdict(
             False,
             f"serving smoke harness error: {type(e).__name__}: {e}",
@@ -851,43 +851,6 @@ _TRITON_BUILD_MARKERS = (
 _MAMBA_MARKERS = ("mamba", "causal_conv1d", "selective_scan", "ssm", "hybrid")
 
 
-def snr_db(reference: Sequence[float], test: Sequence[float]) -> Optional[float]:
-    """Signal-to-noise ratio in dB between a reference and a test signal.
-
-    ``SNR = 10 * log10( sum(ref^2) / sum((ref - test)^2) )``. Higher is better; a
-    bit-exact match returns ``+inf``. This is the parity metric of choice because
-    bf16 storage with fp32 accumulation is NOT bit-exact — a strict ``allclose``
-    would reject numerically correct kernels, whereas the shared SNR gate accepts
-    them (fused vs eager parity typically lands at 35-60 dB).
-
-    Returns ``None`` when the inputs are empty or length-mismatched (the caller
-    treats a ``None`` metric as "no data", not as a pass).
-    """
-    ref = list(reference)
-    tst = list(test)
-    if not ref or len(ref) != len(tst):
-        return None
-    signal = sum(r * r for r in ref)
-    noise = sum((r - t) * (r - t) for r, t in zip(ref, tst))
-    if noise <= 0.0:
-        return math.inf
-    if signal <= 0.0:
-        return 0.0
-    return 10.0 * math.log10(signal / noise)
-
-
-def max_abs_err(reference: Sequence[float], test: Sequence[float]) -> Optional[float]:
-    """Maximum absolute elementwise error between reference and test.
-
-    Returns ``None`` on empty / length-mismatched inputs.
-    """
-    ref = list(reference)
-    tst = list(test)
-    if not ref or len(ref) != len(tst):
-        return None
-    return max(abs(r - t) for r, t in zip(ref, tst))
-
-
 @dataclass
 class CompileOutcome:
     """Result of the compile/import + JIT gate (gate a)."""
@@ -903,8 +866,7 @@ class ParitySample:
 
     ``snr_db`` is the primary metric; ``max_abs_err`` is the rtol fallback used
     only when ``snr_db`` is unavailable. A runner computes these ON-DEVICE (where
-    the tensors live) so only the scalars cross the boundary; :func:`snr_db` /
-    :func:`max_abs_err` are exposed for runners (and tests) to compute them.
+    the tensors live) so only the scalars cross the boundary.
     """
 
     snr_db: Optional[float] = None

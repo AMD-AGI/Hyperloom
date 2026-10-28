@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import time
@@ -22,6 +23,8 @@ from hyperloom.common.env_safety import specialist_run_as
 from .conftest import init_git_repo, make_fake_claude
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+from hyperloom.orchestrator.actions.executors._ray_serving import RayInfeasibleError
 
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
@@ -880,7 +883,6 @@ class _FakeGpuSpecialistLease:
             "cmd": launch.cmd,
             "cwd": launch.cwd,
             "log_path": launch.log_path,
-            "env_mode": launch.env_mode,
             "stdin_path": launch.stdin_path,
         }
         self.env = dict(launch.env or {})
@@ -959,6 +961,84 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
     assert result.exit_code == 0
+
+
+class _RayActorError(Exception):
+    """Stand-in for ``ray.exceptions.RayActorError``; ray is not a test dependency."""
+
+
+class _InfeasibleGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.fault = RayInfeasibleError("ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested")
+        raise self.fault
+
+
+class _DeadActorGpuLease(_FakeGpuSpecialistLease):
+    def start_async(self, launch) -> None:
+        self.started = {"cmd": launch.cmd}
+
+    def poll_started(self) -> int | None:
+        self.fault = _RayActorError("The actor died unexpectedly before finishing this task.")
+        raise self.fault
+
+
+@pytest.mark.parametrize(
+    ("lease_cls", "message", "error"),
+    [
+        (
+            _InfeasibleGpuLease,
+            "specialist GPU actor submit failed: ",
+            "failed to submit specialist GPU actor: "
+            "RayInfeasibleError('ray_cluster_infeasible: cluster has 0 GPU(s), 1 requested')",
+        ),
+        (
+            _DeadActorGpuLease,
+            "specialist GPU actor start failed: ",
+            "specialist GPU actor start failed: "
+            "_RayActorError('The actor died unexpectedly before finishing this task.')",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_gpu_actor_that_cannot_launch_fails_the_specialist_with_its_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lease_cls,
+    message,
+    error,
+):
+    workspace = tmp_path / "ws"
+    lease = lease_cls(workspace)
+    monkeypatch.setattr(
+        subprocess_.subprocess,
+        "Popen",
+        lambda *_a, **_k: pytest.fail("gpu_lease path must not spawn locally"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=subprocess_.log.name):
+        result = await SpecialistSubprocessDispatcher(
+            config=SpecialistSubprocessConfig(poll_interval_seconds=0.05)
+        ).run(
+            SpecialistSpawn(
+                task_id="t-gpu-fail",
+                workspace=workspace,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="sys",
+                user_prompt="usr",
+                disallowed_tools=frozenset(),
+                max_turns=1,
+                deadline=Deadline.after(60.0),
+                gpu_lease=lease,
+            )
+        )
+
+    assert (result.done_payload, result.exit_code, result.elapsed_seconds) == (None, None, 0.0)
+    assert result.process_log_path == str(workspace / "process.log")
+    assert result.error == error
+    (record,) = [r for r in caplog.records if r.getMessage().startswith(message)]
+    assert record.exc_info[1] is lease.fault
 
 
 @pytest.mark.asyncio

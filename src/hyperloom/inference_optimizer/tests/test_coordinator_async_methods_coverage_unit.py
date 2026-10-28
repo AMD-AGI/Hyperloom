@@ -377,7 +377,7 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
     await coord.writeback.promote_to_shared_state(
         "explore",
         {
-            "winners": [{"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0}],
+            "winners": [{"name": "v0", "fingerprint": "fp-v0", "extra_server_args": "--tp 1", "tput": 900.0}],
             "best_variant": {"name": "v0", "extra_server_args": "--tp 1", "tput": 900.0},
             "output_throughput": 900.0,
             "round_id": "r1",
@@ -527,7 +527,10 @@ async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_dige
     async def _warm(_params):
         return None
 
-    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
+    def _undecodable_journal(*_a, **_k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "journal unreadable")
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _undecodable_journal)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
     monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
     monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
@@ -552,9 +555,7 @@ def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) 
 
 
 @pytest.mark.parametrize("failing", ["load_hints", "load_competitor_target"])
-def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
-    coord: Coordinator, monkeypatch, caplog, failing: str
-) -> None:
+def test_priors_match_advisory_failure_propagates(coord: Coordinator, monkeypatch, failing: str) -> None:
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
@@ -563,11 +564,8 @@ def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
     monkeypatch.setattr(rh, failing, _unreadable("hints unreadable"))
     coord.shared_state.target_advisory_enabled = True
 
-    with caplog.at_level("ERROR"):
-        block = coord.conversation._priors_match_advisory_block()
-
-    assert block == ""
-    assert _error_messages(caplog) == ["Coordinator: priors-match advisory failed"]
+    with pytest.raises(RuntimeError, match="hints unreadable"):
+        coord.conversation._priors_match_advisory_block()
 
 
 # -- advisory blocks -------------------------------------------------------

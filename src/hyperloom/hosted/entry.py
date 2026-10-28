@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
@@ -57,6 +58,7 @@ STOP_REQUEST_REASON = "signal"
 DEFAULT_MCP_HOST = "127.0.0.1"
 RETURNCODE_REFUSED = 2
 ENCODING = "utf-8"
+_DURABLE = WriteOptions(fsync=True)
 _USAGE = "usage: hyperloom hosted run"
 
 
@@ -221,7 +223,7 @@ def _prepare_session_dir(spec: CampaignSpec, info: HostInfo) -> Path:
     """Create the run's session directory and say where it is, before anything else can fail."""
     session_dir = hosted_session_dir(spec.model_path, info.run_created_at, info.run_id)
     session_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(info.state_dir / SESSION_FILE, {"session_dir": str(session_dir)})
+    atomic_write_json(info.state_dir / SESSION_FILE, {"session_dir": str(session_dir)}, options=_DURABLE)
     return session_dir
 
 
@@ -296,14 +298,4 @@ def _stop_reason(session_dir: Path) -> str | None:
 
 
 def _write_exit(state_dir: Path, *, final: bool, returncode: int, **details: object) -> None:
-    _write_json(state_dir / EXIT_FILE, {"final": final, "returncode": returncode, **details})
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    """Write *payload* so that a reader sees the old file or the whole new one, never half."""
-    tmp = path.with_name(f".{path.name}.tmp")
-    with open(tmp, "w", encoding=ENCODING) as handle:
-        json.dump(payload, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    atomic_write_json(state_dir / EXIT_FILE, {"final": final, "returncode": returncode, **details}, options=_DURABLE)

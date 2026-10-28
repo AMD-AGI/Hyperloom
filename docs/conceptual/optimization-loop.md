@@ -282,6 +282,24 @@ serving card power throttled for at least 10% of the phase is listed in
 throttled share and mean clock: its throughput was set by the power cap, not by
 its clock limit. This is only reported; nothing changes the cards.
 
+Node Power Management (MI350 series) holds the node to its own limit by
+lowering every card's power, and the cards' throttle accumulators do not count
+that: on an MI350X node held to 2600 W, every card ran near 430 W against a
+1000 W cap with a `power_throttle_fraction` under 1%. So while NPM is enabled,
+each sample also reads the node's power and the limit firmware enforces on it
+(`board/node_power` and `board/cur_node_power_limit` in sysfs; amdgpu publishes
+them on one card of an XGMI hive, so on one card of an MI350 node, and on every
+card of a node without a hive), and `gpu_power.json` carries a `node` block: `limit_w`
+(unread when the limit changed during the phase), `avg_power_w`, `max_power_w`,
+`samples` and `limited_fraction`, the share of samples at 99% of the limit or
+above. A held node reads at its limit, or above it once every card is down at
+its minimum power. When that share is at least 10%, the round logs a warning
+naming the limit and the share. The block is `null` on a node without NPM or
+with it disabled. Failed reads, and a reading that reports NPM enabled with no
+limit, are counted in `node_query_errors`. Where
+the node limit equals the sum of the cards' caps (8000 W against eight 1000 W
+caps), both limits are reached together and both are reported.
+
 The optimizer never changes power settings during a session. The power cap, the
 DPM performance level and the graphics clock's maximum (sclk) decide how much of
 the card's throughput is available at what power, so they are part of the

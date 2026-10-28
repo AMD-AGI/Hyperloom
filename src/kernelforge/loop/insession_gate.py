@@ -26,7 +26,7 @@ from kernelforge.workspace.edit_policy import (
 )
 from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
-from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
+from kernelforge.evaluation.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -768,8 +768,9 @@ class InSessionGate:
 
         try:
             reason = self._protected_changes()
-        except Exception as error:  # noqa: BLE001 - scan failure is fail-closed
+        except Exception as error:  # noqa: BLE001 - isolation boundary: one session's protected-integrity scan
             reason = f"protected integrity scan failed: {type(error).__name__}: {error}"
+            self._log(f"{reason}\n{traceback.format_exc().rstrip()}")
         self.integrity_reason = reason
         self.integrity_violation = bool(reason)
         self.integrity_verdict = "violation" if reason else "clean"
