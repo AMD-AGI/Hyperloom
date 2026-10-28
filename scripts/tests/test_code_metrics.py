@@ -199,6 +199,17 @@ def test_a_unit_copied_to_two_places_is_not_a_move(repo: Repo) -> None:
     assert f"{NEW}: 2" in report
 
 
+def test_a_copy_of_a_unit_still_over_at_its_old_place_is_new(repo: Repo) -> None:
+    base = repo.change("src/old.py", "src/new.py")
+    repo.base = [cc("src/old.py", "f", 30)]
+    repo.findings = [cc("src/old.py", "f", 30), cc("src/new.py", "f", 30)]
+    code, report = repo.gate("--base-ref", base)
+    assert code == 1
+    assert f"{NEW}: 1" in report
+    assert "| `src/new.py:3` `f` | Cyclomatic complexity | 30 | fails > 20 |" in section(report, NEW)
+    assert section(report, IMPROVED) == ""
+
+
 def test_duplication_is_compared_with_the_base_like_every_other_dimension(repo: Repo) -> None:
     dup = "duplicated-lines"
     base = repo.change("src/a.py")
@@ -1166,8 +1177,12 @@ def test_the_base_is_the_tree_at_the_merge_base_measured_with_this_trees_config(
     (tmp_path / "src/a.py").write_text("base = 1\n", encoding="utf-8")
     (tmp_path / "src/tests/test_a.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "docs.md").write_text("not in scope\n", encoding="utf-8")
+    # A committed file an ignore rule names is measured in this tree, so the base measures it too.
+    (tmp_path / "src/.gitignore").write_text("gen.py\n", encoding="utf-8")
+    (tmp_path / "src/gen.py").write_text("x = 1\n", encoding="utf-8")
     git("init", "-q")
     git("add", "-A")
+    git("add", "-f", "src/gen.py")
     git("commit", "-q", "-m", "base")
     (tmp_path / "src/a.py").write_text("head = 1\n", encoding="utf-8")
     (tmp_path / "src/new.py").write_text("x = 1\n", encoding="utf-8")
@@ -1184,7 +1199,8 @@ def test_the_base_is_the_tree_at_the_merge_base_measured_with_this_trees_config(
     monkeypatch.setattr(code_metrics, "measure", measure)
     # ``scripts`` is a root this commit does not have: the base is the roots it has.
     assert code_metrics.measure_base(tmp_path, "HEAD", config) == {"measured": True}
-    assert seen == {"files": (["src/a.py"], ["src/tests/test_a.py"]), "a": "base = 1\n", "docs": False}
+    assert collect.list_files(tmp_path, config.roots, config.exclude)[0] == ["src/a.py", "src/gen.py", "src/new.py"]
+    assert seen == {"files": (["src/a.py", "src/gen.py"], ["src/tests/test_a.py"]), "a": "base = 1\n", "docs": False}
     # A base the tree cannot be read from is "could not run", not a failed verdict.
     with pytest.raises(collect.ToolError, match=r"^git ls-tree -z --name-only exited 128: fatal: "):
         code_metrics.measure_base(tmp_path, "0" * 40, config)

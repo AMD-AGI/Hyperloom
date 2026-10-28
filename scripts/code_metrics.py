@@ -341,8 +341,10 @@ def measure_base(root: Path, since: str, config: Config) -> dict[Key, Finding]:
                 ["git", "-C", str(root), "--literal-pathspecs", "archive", "--format=tar", since, "--", *roots]
             )
             _checked(["tar", "-x", "-C", work], tar)
-        # ``list_files`` reads the scope from git; every extracted file is an untracked one.
-        _checked(["git", "-C", work, "init", "-q"])
+        # ``list_files`` reads the scope from git: track every extracted file, so no ignore rule drops one.
+        in_work = ["git", "-C", work]
+        _checked([*in_work, "init", "-q"])
+        _checked([*in_work, "add", "-A", "-f"])
         return measure(Path(work), config, Units(Path(work)))
 
 
