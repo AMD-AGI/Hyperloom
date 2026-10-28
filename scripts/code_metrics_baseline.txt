@@ -231,7 +231,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_ru
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_warmup_throughput 57
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 56
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_variant_filter.py::apply_compatibility_filter 56
-function-lines src/hyperloom/orchestrator/actions/executors/_integrate_apply.py::ApplyStageMixin._stage_apply 106
+function-lines src/hyperloom/orchestrator/actions/executors/_integrate_apply.py::ApplyStageMixin._stage_apply 96
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_bench.py::BenchStageMixin._bench_patch 101
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._enablement_keep_records 86
 function-lines src/hyperloom/orchestrator/actions/executors/_integrate_enablement_gate.py::EnablementGateMixin._gate_enablement 136
