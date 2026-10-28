@@ -1001,7 +1001,7 @@ class SpecialistSubprocessDispatcher:
             "--output-format",
             cfg.output_format,
             "--verbose",
-            # Unattended: any mode that prompts stops the Bash heartbeat, and the run is reaped as stale.
+            # Unattended: a permission prompt waits with no output and no tool running, so the run is reaped as stale.
             # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
             "bypassPermissions",

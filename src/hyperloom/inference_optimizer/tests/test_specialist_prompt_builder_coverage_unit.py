@@ -211,6 +211,20 @@ def test_gpu_autonomy_block_and_auto_retry():
     assert "port 8888" not in sys_p
 
 
+def test_output_protocol_leaves_liveness_to_the_runner():
+    """The runner decides liveness from the CLI's own output, so the prompt asks for no heartbeat."""
+    sys_p, _ = build_specialist_prompts(_rich_inputs())
+    assert "- ``residual_questions`` carries to the next specialist round.\n\nHard cap: at most" in sys_p
+
+
+def test_auto_retry_notice_asks_only_for_scoped_work():
+    sys_p, _ = build_specialist_prompts(_rich_inputs(auto_retry_reason="timeout on prior attempt"))
+    assert (
+        "Scope your investigation so you reach a single ``specialist_done`` within ``max_turns`` this time: prefer "
+        "fewer, higher-confidence probes, and avoid long-running shell that risks the same timeout."
+    ) in sys_p
+
+
 def test_no_gpu_iron_rule_retains_serving_port_boundary():
     inp = _rich_inputs(allocated_gpu_ids=())
     sys_p, _ = build_specialist_prompts(inp)
