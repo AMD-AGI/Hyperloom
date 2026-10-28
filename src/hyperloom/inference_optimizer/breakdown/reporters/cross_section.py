@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.coerce import to_float, to_int, to_mapping
@@ -47,10 +47,6 @@ class GlobalFacts:
     # "stack_ledger" | "unattributed" | "unattributed (stack listed for
     # reference, not verified as KEEP)" | "missing"
     attribution_method: str
-
-    def as_prompt_dict(self) -> dict[str, Any]:
-        """Serialize the fact pack to a plain dict for the LLM prompt."""
-        return asdict(self)
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:

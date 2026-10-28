@@ -23,27 +23,30 @@ from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.inference_optimizer.grid_server_args import (
     compact_json_server_args,
+    compose_server_args,
     dedup_vllm_server_args,
     remove_server_args,
 )
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.actions.executors._grid_variant_filter import _parse_skip_spec
+from hyperloom.orchestrator.actions.executors._benchmark_runtime import apply_runtime_benchmark_overrides
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import (
+    _MN_BACKENDS_PRIORITY,
+    _MN_PARAMS_PRIORITY,
+    _parse_skip_spec,
+    apply_user_skip_list,
+    reorder_grid_for_multi_node,
+    resolve_skip_spec,
+)
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
-    _MN_BACKENDS_PRIORITY,
-    _MN_PARAMS_PRIORITY,
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
     VariantResult,
     _build_variant_yaml,
     _run_magpie,
-    apply_runtime_benchmark_overrides,
-    apply_user_skip_list,
-    reorder_grid_for_multi_node,
-    resolve_skip_spec,
     run_grid,
     MagpieRound,
     GridRecipe,
@@ -2420,12 +2423,12 @@ class TestRemoveServerArgsPreservesJson:
             {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
             {"base_extra_args": base, "args_mode": "replace"},
         ):
-            out = _grid_runner.compose_server_args(**kwargs)
+            out = compose_server_args(**kwargs)
             assert _blob(out, "--compilation-config") == json.loads(cc)
             assert _blob(out, "--speculative-config") == json.loads(sc)
         # Removing the JSON flag and supplying a variant replacement.
         repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
-        out = _grid_runner.compose_server_args(
+        out = compose_server_args(
             inherited_args=base,
             remove_args=["--compilation-config"],
             variant_extra_args=f"--compilation-config {repl}",
@@ -2533,18 +2536,18 @@ class TestServerArgTokenizerOnTheSyntheticPath:
     def test_a_plain_synthetic_arg_string_round_trips(self, monkeypatch):
         self._off(monkeypatch)
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
-        assert _grid_runner.compose_server_args(base_extra_args=args) == args
+        assert compose_server_args(base_extra_args=args) == args
 
     def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
         """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
         assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
         self._off(monkeypatch)
-        out = _grid_runner.compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
+        out = compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
         assert out == "--quantization fp8 --max-num-seqs 512"
 
     def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):

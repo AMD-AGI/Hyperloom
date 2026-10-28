@@ -13,6 +13,8 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
+from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -250,7 +252,7 @@ class _RenderMixin:
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
         elif geak_pending_status in GEAK_DROPPED_STATUSES:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
-        elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
+        elif geak_revalidation_status in REBENCH_FAILED_STATUSES and not geak_in_stack:
             # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
             # verdicts and stay silent here.
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
@@ -712,10 +714,11 @@ class _RenderMixin:
         snap = cached.get("roofline_snapshot_id", "?")
         gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
         gain_str = "?" if gain is None else f"{gain:.2f}"
+        show_analysis_md = qualified_context_tool_name("show_analysis_md")
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
             "full report not inlined; see profiler_digest above or call the "
-            "show_analysis_md context tool for the verbatim analysis.md.)"
+            f"{show_analysis_md} context tool for the verbatim analysis.md.)"
         )
 
     def _format_profiler_digest(self) -> str:

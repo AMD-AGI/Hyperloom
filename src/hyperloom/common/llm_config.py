@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import AbstractContextManager, AsyncExitStack, ExitStack
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -20,6 +21,7 @@ from hyperloom.common.llm_attribution import gateway_selected as _gateway_select
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 from hyperloom.common.llm_headers import expand_env_refs, parse_custom_headers
 from hyperloom.common.llm_request_hooks import (
+    AnthropicStream,
     PROTOCOL_ANTHROPIC_MESSAGES,
     PROTOCOL_OPENAI_CHAT,
     RequestObservation,
@@ -602,7 +604,7 @@ def get_anthropic_client(
         **_anthropic_client_kwargs(
             env=env,
             timeout=timeout,
-        ),
+        )
     )
 
 
@@ -617,7 +619,7 @@ def get_async_anthropic_client(
         **_anthropic_client_kwargs(
             env=env,
             timeout=timeout,
-        ),
+        )
     )
 
 
@@ -794,7 +796,8 @@ class AnthropicMessageResult:
 class AnthropicCompletionRequest:
     """One single-shot Anthropic completion: the Messages body and the time budget it may take.
 
-    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    ``timeout_s`` bounds the whole call on both transports. ``timeout`` is the HTTP client's (``timeout_s`` when unset):
+    it bounds connecting and each wait for the next event of the streamed reply, not the reply as a whole.
     """
 
     model: str
@@ -817,24 +820,25 @@ class AnthropicCompletionRequest:
 
 
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
-    """Build the ``post`` keyword carrying the attribution header, if any."""
+    """Build the request keyword carrying the attribution header, if any."""
     headers = _headers_for(component, operation)
     return {"headers": headers} if headers else {}
 
 
-def _anthropic_message_body(resp: object) -> dict[str, object]:
-    """Check one Messages response for failure and return its JSON object."""
-    status = int(getattr(resp, "status_code", 200) or 200)
-    if status >= 400:
-        detail = str(getattr(resp, "text", ""))[:200]
-        raise RuntimeError(f"anthropic messages status={status} body={detail}")
-    try:
-        body = resp.json()  # type: ignore[attr-defined]
-    except ValueError as exc:
-        raise RuntimeError(f"anthropic messages returned a non-JSON body: {exc!r}") from exc
-    if not isinstance(body, dict):
-        raise RuntimeError(f"anthropic messages returned a non-object JSON body: {type(body).__name__}")
-    return body
+def _observed_messages(
+    component: str, operation: str, params: Mapping[str, object]
+) -> AbstractContextManager[RequestObservation]:
+    return observed_request(
+        protocol=PROTOCOL_ANTHROPIC_MESSAGES,
+        component=component,
+        operation=operation,
+        model=params.get("model"),
+        streamed=True,
+    )
+
+
+def _anthropic_failure(status: int, body: bytes) -> RuntimeError:
+    return RuntimeError(f"anthropic messages status={status} body={body.decode(errors='replace')[:200]}")
 
 
 def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult:
@@ -845,9 +849,8 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
     )
 
 
-def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
-    """Fold one Messages response onto ``observation``, then flatten it."""
-    body = _anthropic_message_body(resp)
+def _observe_anthropic(observation: RequestObservation, body: Mapping[str, object]) -> AnthropicMessageResult:
+    """Fold one Messages reply body onto ``observation``, then flatten it."""
     result = _anthropic_body_result(body)
     observation.update(
         response_id=body.get("id"),
@@ -858,32 +861,42 @@ def _observe_anthropic(observation: RequestObservation, resp: object) -> Anthrop
     return result
 
 
-def _post_anthropic_messages(client: object, params: dict[str, object], tag: dict[str, object]) -> object:
-    """POST the Messages request, dialling again while the connection never came up."""
+def _dial_anthropic_messages(
+    dial: ExitStack, client: object, params: dict[str, object], tag: dict[str, object]
+) -> object:
+    """Open the Messages stream, dialling again while the connection never came up."""
     # httpx re-dials only on its unproxied branch, so the re-dial lives here instead, where both routes pass.
     connect_failures = _anthropic_connect_failures()
     delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
-            return client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+            return dial.enter_context(client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag))  # type: ignore[union-attr]
         except connect_failures:
             time.sleep(delay)
             delay *= 2
     # The last dial speaks for itself: its failure reaches the caller.
-    return client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+    return dial.enter_context(client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag))  # type: ignore[union-attr]
 
 
-async def _apost_anthropic_messages(client: object, params: dict[str, object], tag: dict[str, object]) -> object:
-    """Async twin of :func:`_post_anthropic_messages`."""
+async def _adial_anthropic_messages(
+    dial: AsyncExitStack, client: object, params: dict[str, object], tag: dict[str, object]
+) -> object:
+    """Async twin of :func:`_dial_anthropic_messages`."""
     connect_failures = _anthropic_connect_failures()
     delay = _ANTHROPIC_CONNECT_BACKOFF_S
+    body = {**params, "stream": True}
     for _ in range(ANTHROPIC_CONNECT_RETRIES):
         try:
-            return await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+            return await dial.enter_async_context(
+                client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+            )
         except connect_failures:
             await asyncio.sleep(delay)
             delay *= 2
-    return await client.post(_ANTHROPIC_MESSAGES_PATH, json=params, **tag)  # type: ignore[union-attr]
+    return await dial.enter_async_context(
+        client.stream("POST", _ANTHROPIC_MESSAGES_PATH, json=body, **tag)  # type: ignore[union-attr]
+    )
 
 
 def anthropic_messages(
@@ -891,16 +904,23 @@ def anthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
-    """POST one Anthropic Messages request; returns text, stop_reason and usage."""
+    """POST one Anthropic Messages request and read its reply as server-sent events; returns text, stop_reason and
+    usage. A streamed reply starts while it is written, so a gateway that cuts a request whose reply has not come does
+    not cut a long one; ``timeout_s`` bounds the whole reply."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        # Inside the observation: the re-dials belong to the one request the ledger records.
-        resp = _post_anthropic_messages(client, params, tag)
-        return _observe_anthropic(observation, resp)
+    # Inside the observation: the re-dials belong to the one request the ledger records.
+    with _observed_messages(component, operation, params) as observation:
+        stream = AnthropicStream(observation, None if timeout_s is None else time.monotonic() + timeout_s)
+        with ExitStack() as dial:
+            resp = _dial_anthropic_messages(dial, client, params, tag)
+            if resp.status_code >= 400:
+                raise _anthropic_failure(resp.status_code, resp.read())
+            for chunk in resp.iter_bytes():
+                stream.feed(chunk)
+        return _observe_anthropic(observation, stream.finish())
 
 
 async def aanthropic_messages(
@@ -908,15 +928,24 @@ async def aanthropic_messages(
     *,
     component: str = "",
     operation: str = "",
+    timeout_s: float | None = None,
     **params: object,
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_messages`; see it for the full contract."""
     tag = _attribution_tag_kwargs(component, operation)
-    with observed_request(
-        protocol=PROTOCOL_ANTHROPIC_MESSAGES, component=component, operation=operation, model=params.get("model")
-    ) as observation:
-        resp = await _apost_anthropic_messages(client, params, tag)
-        return _observe_anthropic(observation, resp)
+
+    async def read() -> AnthropicMessageResult:
+        with _observed_messages(component, operation, params) as observation:
+            stream = AnthropicStream(observation)
+            async with AsyncExitStack() as dial:
+                resp = await _adial_anthropic_messages(dial, client, params, tag)
+                if resp.status_code >= 400:
+                    raise _anthropic_failure(resp.status_code, await resp.aread())
+                async for chunk in resp.aiter_bytes():
+                    stream.feed(chunk)
+            return _observe_anthropic(observation, stream.finish())
+
+    return await asyncio.wait_for(read(), timeout_s)
 
 
 # Single-shot Anthropic transports. "http" is the Messages API; "sdk" drives the Claude CLI, the only channel that
@@ -996,7 +1025,13 @@ def anthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return anthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def aanthropic_completion(
@@ -1022,7 +1057,13 @@ async def aanthropic_completion(
         env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
     )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
+        return await aanthropic_messages(
+            http_client,
+            component=component,
+            operation=operation,
+            timeout_s=request.timeout_s,
+            **request.http_params(),
+        )
 
 
 async def astream_chat_completion_text(

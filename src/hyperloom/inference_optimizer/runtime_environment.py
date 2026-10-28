@@ -8,10 +8,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES
+from hyperloom.common.overlay import is_safe_path_entry
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +28,6 @@ def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
     base = envs[var] if var in envs else os.environ.get(var)
     parts = [*entries, *str(base or "").strip().split(os.pathsep)]
     envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
-
-
-def is_safe_path_entry(entry: str) -> bool:
-    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
-    return (
-        bool(entry)
-        and ":" not in entry
-        and ".." not in Path(entry).parts
-        and not any(c in entry for c in ("\n", "\r", "\x00"))
-    )
 
 
 # Reserved keys carried by dedicated override fields; never accepted via runtime_env.
@@ -77,10 +67,9 @@ def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> No
                 log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
                 continue
             envs[key] = str(raw_v)
-    for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
-        if val:
-            envs[f"HYPERLOOM_{key.upper()}"] = val
+    framework_python = str(override.get("framework_python") or "").strip()
+    if framework_python:
+        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = framework_python
     # runtime_python_exe takes priority over framework_python as the launch interpreter.
     rpe = str(override.get("runtime_python_exe") or "").strip()
     if rpe:

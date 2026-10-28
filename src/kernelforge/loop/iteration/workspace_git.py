@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
-from kernelforge.loop.jit_rebuild import tracked_source_changes
+from kernelforge.evaluation.jit_rebuild import tracked_source_changes
 from kernelforge.loop.new_path_allowlist import matches_commit_new_paths
 from kernelforge.tools.git import git, git_bytes
 from kernelforge.workspace.edit_policy import is_protected_path

@@ -10,8 +10,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.coerce import first_text
+from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -429,7 +429,7 @@ class PerfGateMixin:
                     "because the patch was shown to be non-inert"
                 ),
             }
-        delta_pct = (float(parity_tput) - base_tput) / base_tput * 100.0
+        delta_pct = gain_pct_or_zero(float(parity_tput), base_tput)
         if abs(delta_pct) > band_pct:
             return {
                 "ran": True,

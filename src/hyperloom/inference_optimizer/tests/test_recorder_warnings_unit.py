@@ -20,10 +20,8 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 
 
 @pytest.fixture(autouse=True)
-def _forget_earlier_notes():
-    rw.reset_for_tests()
-    yield
-    rw.reset_for_tests()
+def _forget_earlier_notes(monkeypatch):
+    monkeypatch.setattr(rw, "_seen", set())
 
 
 def test_a_lost_write_is_parked_where_the_export_reads_it(tmp_path):
@@ -91,7 +89,6 @@ def test_recorder_parks_a_spool_failure(tmp_path, caplog):
     from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 
     rec = Recorder(tmp_path / "parts", producer="test")
-    rec.parts_dir.mkdir(parents=True, exist_ok=True)
 
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
@@ -109,7 +106,6 @@ def test_a_projection_bug_in_record_raises(tmp_path):
     from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
 
     rec = Recorder(tmp_path / "parts", producer="test")
-    rec.parts_dir.mkdir(parents=True, exist_ok=True)
 
     def _boom(*_args, **_kwargs):
         raise TypeError("shape changed")

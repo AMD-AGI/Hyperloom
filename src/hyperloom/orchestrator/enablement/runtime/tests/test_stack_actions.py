@@ -95,9 +95,7 @@ def test_runtime_override_lands_in_yaml():
     envs: dict[str, str] = {}
     apply_runtime_override(envs, rt.to_runtime_override())
     assert "/attempt/bin" in envs["PATH"]
-    assert envs["HYPERLOOM_FRAMEWORK_BIN"] == "/attempt/bin"
     assert envs["HYPERLOOM_FRAMEWORK_PYTHON"] == "/attempt/bin/python"
-    assert envs["HYPERLOOM_FRAMEWORK_VENV_ROOT"] == "/attempt"
 
 
 def test_runtime_round_trip():

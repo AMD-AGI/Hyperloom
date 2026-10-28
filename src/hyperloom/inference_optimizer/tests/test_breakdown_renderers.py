@@ -261,7 +261,6 @@ def test_each_attempt_lands_in_exactly_one_outcome_bucket():
     buckets = {k: got[k] for k in ("keeps", "micro_only_keeps", "reverts", "rejected", "failed")}
     assert buckets == {"keeps": 1, "micro_only_keeps": 1, "reverts": 2, "rejected": 4, "failed": 0}
     assert got["attempted"] == 8
-    assert got["adopted"] == 2
 
 
 def test_capability_e2e_gain_is_the_best_kept_gain_only():

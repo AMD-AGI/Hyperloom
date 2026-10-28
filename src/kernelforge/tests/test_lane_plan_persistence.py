@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.loop.fanout import LaneResult
+from kernelforge.loop.iteration import lane_runtime
 from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationConfig, IterationLoop
@@ -653,7 +654,7 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypa
     def _no_room(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr("kernelforge.loop.recovery.atomic_write_json", _no_room)
+    monkeypatch.setattr(lane_runtime, "atomic_write_json", _no_room)
 
     loop._persist_lane_queue()
 

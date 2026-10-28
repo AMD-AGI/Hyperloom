@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from hyperloom.common.coerce import text_or_none, to_float, to_unix
+from hyperloom.common.coerce import optional_positive_float, text_or_none, to_float, to_unix
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
@@ -46,12 +46,6 @@ _MODEL_INFO_KEYS = ("model_type", "attention_type", "num_hidden_layers", "num_ex
 _KERNEL_KEYS = ("name", "gpu_pct", "efficiency_percent", "arithmetic_intensity", "kernel_category")
 
 
-def _positive(value: Any) -> float | None:
-    """A rate or a ceiling, which is absent unless positive."""
-    out = to_float(value)
-    return out if out is not None and out > 0 else None
-
-
 def _bound(value: Any) -> str | None:
     """A bound label, lower-cased; ``unknown`` is dropped because the predictor renders ``<label>-bound``."""
     text = str(value or "").strip().lower()
@@ -65,8 +59,8 @@ def _profile_age_sec(trace: dict[str, Any]) -> int | None:
 
 def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """Roofline ceilings plus what the perf model added; ``None`` without either ceiling."""
-    mem = _positive(snapshot.get("roofline_mem_ceiling_tok_per_sec"))
-    cmp_ = _positive(snapshot.get("roofline_cmp_ceiling_tok_per_sec"))
+    mem = optional_positive_float(snapshot.get("roofline_mem_ceiling_tok_per_sec"))
+    cmp_ = optional_positive_float(snapshot.get("roofline_cmp_ceiling_tok_per_sec"))
     if mem is None and cmp_ is None:
         return None
     perfmodel = snapshot.get("perfmodel_breakdown")
@@ -76,10 +70,10 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         "roofline_mem_ceiling_tok_per_sec": mem,
         "roofline_cmp_ceiling_tok_per_sec": cmp_,
         "roofline_bound_kind": _bound(snapshot.get("roofline_bound_kind")),
-        "achieved_tok_per_sec": _positive(snapshot.get("achieved_tok_per_sec")),
+        "achieved_tok_per_sec": optional_positive_float(snapshot.get("achieved_tok_per_sec")),
         "gap_to_roofline_pct": to_float(snapshot.get("gap_to_roofline_pct")),
-        "hbm_bw_gbps": _positive(perfmodel.get("hbm_bw_gbps")),
-        "peak_achievable_tflops": _positive(perfmodel.get("peak_achievable_tflops")),
+        "hbm_bw_gbps": optional_positive_float(perfmodel.get("hbm_bw_gbps")),
+        "peak_achievable_tflops": optional_positive_float(perfmodel.get("peak_achievable_tflops")),
         "n_ops_total": len(ops) if ops else None,
         "n_ops_memory_bound": sum(str(op.get("bound") or "").lower() == "memory" for op in ops) if ops else None,
     }
@@ -148,7 +142,7 @@ def _stack(state: SessionView) -> list[dict[str, Any]]:
             {
                 "candidate_extra_server_args": text_or_none(step.get("candidate_extra_server_args")),
                 "extra_envs": dict(envs) if isinstance(envs, dict) and envs else None,
-                "tput": _positive(step.get("tput")),
+                "tput": optional_positive_float(step.get("tput")),
             }
         )
     return out
@@ -197,9 +191,9 @@ def build_request(
             "phase_elapsed_seconds": round(budget.elapsed_sec, 1),
         },
         "performance": {
-            "baseline_tput": _positive(state.baseline_tput),
+            "baseline_tput": optional_positive_float(state.baseline_tput),
             # Candidates are graded against the champion once the stack is non-empty.
-            "current_best_tput": _positive(best.get("tput")),
+            "current_best_tput": optional_positive_float(best.get("tput")),
             "cumulative_gain_validated": to_float(state.cumulative_gain_validated),
             # Decays with the macro-cycle and doubles on multi-node.
             "keep_threshold_pct": budget.keep_threshold_pct,
