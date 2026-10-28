@@ -358,10 +358,10 @@ def test_session_start_masks_extra_env_pins_the_cli_exported(monkeypatch):
     # The CLI serializes --extra-env into one JSON var whose name carries no marker; each pin is masked by its own name.
     import os
 
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_EXTRA_ENV", raising=False)
-    cli._export_operator_launch_shape(
+    launch_shape._export_operator_launch_shape(
         server_args="",
         extra_env={
             "HF_TOKEN": "hf_plaintextvalue",
