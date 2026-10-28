@@ -282,6 +282,7 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     assert "a launch cut short, lost or stopped included" in prompt
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
+    assert "plus the card time any lease holds outside the tests" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
     assert (
         "scheduler_llm_usd is what your own calls, the patch resolver's and the rule gate's fix critic's cost" in prompt

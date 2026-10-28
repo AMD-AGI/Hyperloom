@@ -10,7 +10,7 @@ it started, past the deadline and the hard stop if need be, so its reserve is th
 bound on it. CLOSE keeps nothing before the deadline: the deadline plus the CLOSE grace is the hard stop, and a FINAL
 that ends later leaves CLOSE one CLOSE grace from its end. The constants are re-declared because their owners are
 modules this package must not import; each names its source. A GPU-hour budget keeps FINAL the main flow's share:
-EXPLORE ends once the tests have used the rest of it.
+EXPLORE ends once the tests' GPU time plus the card time any lease holds has used the rest of it.
 """
 
 from __future__ import annotations
@@ -42,8 +42,9 @@ def budget_seconds(max_hours: float) -> float:
 
 
 def explore_gpu_seconds(max_gpu_hours: float) -> float:
-    """The GPU seconds the session's tests may use before EXPLORE ends: ``--max-gpu-hours`` less FINAL's share,
-    ``math.inf`` when it is 0. FINAL is not cut when it uses more than its share."""
+    """The GPU seconds the session may use before EXPLORE ends, tests' GPU time plus card time any lease holds:
+    ``--max-gpu-hours`` less FINAL's share, ``math.inf`` when it is 0. FINAL is not cut when it uses more than its
+    share."""
 
     if not max_gpu_hours:
         return math.inf

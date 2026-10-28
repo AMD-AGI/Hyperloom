@@ -55,6 +55,7 @@ from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import (
+    LeaseStart,
     LlmUsage,
     NotebookSnapshot,
     PendingCandidate,
@@ -66,6 +67,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
     Conclusion,
     LearningKind,
+    LeaseKind,
     LineageKind,
     QuarantineAction,
     UsageSource,
@@ -235,6 +237,11 @@ CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 #: A GPU-hour budget the baseline on the root alone uses up.
 TINY_GPU_HOURS = 0.01
+#: A GPU-hour budget the session's tests, FINAL's included, never use up, and the card time a lease of
+#: :data:`LEASED_CARDS` cards held through a few judge calls of :data:`LEASED_JUDGE_INTERVAL_SECONDS` does.
+LEASED_GPU_HOURS = 1.0
+LEASED_CARDS = 4
+LEASED_JUDGE_INTERVAL_SECONDS = 120.0
 #: An LLM budget one specialist launch of :data:`LAUNCH_USD` uses up.
 SMALL_LLM_USD = 2.5
 LAUNCH_USD = 3.0
@@ -1050,6 +1057,39 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
     spend = _judge_state(opening)["spend"]
     assert spend["gpu_hours_used"] == round(baseline_seconds / MB_SECONDS_PER_HOUR, 3) > 0
     assert spend["explore_gpu_hours"] == round(explore_gpu_seconds(TINY_GPU_HOURS) / MB_SECONDS_PER_HOUR, 3)
+
+
+async def test_card_time_a_lease_holds_ends_explore_on_the_gpu_hours_and_final_still_runs(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(
+        SETTINGS, max_gpu_hours=LEASED_GPU_HOURS, judge_interval_seconds=LEASED_JUDGE_INTERVAL_SECONDS
+    )
+
+    async def hold_cards(branch: str) -> None:
+        cards = tuple(range(LEASED_CARDS))
+        lease = LeaseStart(
+            f"{branch}-dev", branch, branch, LeaseKind.DEV, LEASED_CARDS, stage.time.now(), gpu_ids=cards
+        )
+        await stage.handle(Role.TOOLBOX).record_lease_start(lease)
+
+    stage.steps = {"b01": hold_cards}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GPU_HOURS_EXHAUSTED, "", 0)
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).explore_end(START, 0.0)
+    [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
+    assert float(str(final_phase["at"])) < explore_end
+    assert outcome.final is not None and outcome.final.chosen is not None
+    snapshot = await stage.handle(Role.OBSERVER).snapshot()
+    assert snapshot.gpu_hours < explore_gpu_seconds(LEASED_GPU_HOURS) / MB_SECONDS_PER_HOUR
+
+    # A steering call made while the lease was open was shown its card time, on b01's row and in the session's spend.
+    steering = _judge_state(_judge_prompts(stage)[-1])
+    [b01] = [row for row in steering["branches"] if row["branch"] == "b01"]
+    spent = sum(row["gpu_seconds"] + row["held_card_seconds"] for row in steering["branches"])
+    assert b01["held_card_seconds"] > 0
+    assert steering["spend"]["gpu_hours_used"] == round(spent / MB_SECONDS_PER_HOUR, 3)
 
 
 async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_that_still_runs_final(

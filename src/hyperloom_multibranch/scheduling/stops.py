@@ -47,7 +47,8 @@ TOOLBOX_CLOSE_SECONDS = 10.0
 
 class SessionStopReason(str, Enum):
     TIME_EXHAUSTED = "time_exhausted"
-    #: The tests used the GPU hours ``--max-gpu-hours`` leaves EXPLORE; FINAL still runs.
+    #: Tests' GPU time plus card time any lease holds used the GPU hours ``--max-gpu-hours`` leaves EXPLORE; FINAL
+    #: still runs.
     GPU_HOURS_EXHAUSTED = "gpu_hours_exhausted"
     #: The specialists' recorded LLM spend reached ``--max-llm-usd``; FINAL still runs.
     LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"

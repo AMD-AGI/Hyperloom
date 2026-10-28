@@ -10,8 +10,9 @@ requests; ``agentx`` takes ``--ep``, 1 when not given, and ``inferencex`` refuse
 model in the image ``HYPERLOOM_ACTIVE_IMAGE_REF`` names, and a ``--model`` that is a directory is recorded by its
 resolved path, which its benchmark pins. An operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than
 ``--workload``, or that names a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
-``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
-FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
+``--max-gpu-hours`` caps the GPU hours the session uses, tests' GPU time plus card time any lease holds: EXPLORE ends
+with ``gpu_hours_exhausted`` once only FINAL's share is left, and FINAL still runs.
+``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
 ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
 the price sheet, cached tokens at cache rates: a specialist launch's calls from its log when the launch ends, a launch
 cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
@@ -259,7 +260,10 @@ def _add_budget_options(run: argparse.ArgumentParser) -> None:
         "--max-gpu-hours",
         type=float,
         default=0.0,
-        help="GPU hours the session's tests may use; EXPLORE ends when FINAL's share is all that is left; 0 = none.",
+        help=(
+            "GPU hours the session may use, tests' GPU time plus card time any lease holds;"
+            " EXPLORE ends when FINAL's share is all that is left; 0 = none."
+        ),
     )
     run.add_argument(
         "--max-llm-usd",

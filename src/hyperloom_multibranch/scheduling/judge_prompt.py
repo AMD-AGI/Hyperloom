@@ -140,8 +140,11 @@ max_parallel_tests cap, and under the tests the measurement cards leave room for
 branch holds takes cards away from. A branch opened now makes progress only while it is above 0, and runs at its full
 K only while it is at least that K.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
-result, a failed one and the baseline measured on the root commit included; a test taken back before its result is
-not in it, and neither are the measurements the PRELUDE run that built the root commit made on its own.
+result, a failed one and the baseline measured on the root commit included, plus the card time any lease holds outside
+the tests (an autonomous branch's sandbox, a dev sandbox or a tool's job), an open lease up to now; a test taken back
+before its result is not in it, and neither are the measurements the PRELUDE run that built the root commit made on its
+own. A branch's gpu_seconds is the GPU time of its own tests and its held_card_seconds the card time the leases charged
+to it held.
 explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its share, or null when GPU hours are not
 limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
 there whatever you decide. prelude_gpu_hours_upper_bound is at most the GPU time the PRELUDE run used on its own: its
