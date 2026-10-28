@@ -13,13 +13,14 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import cycle_bench_arm as cba
 from hyperloom.orchestrator.measurement import cycle_bench as cb
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 _WEIGHTS = {1: 0.5, 2: 0.5}
 _BANDS = cb.Bands(batch_pct=1.0, per_bs_pct=3.0, regress_pct=1.5)
 
 
 def _arm(c1: float, c2: float, error: str = "") -> cba.ArmResult:
-    return cba.ArmResult(cycle_ms={1: c1, 2: c2}, accept_len={1: 3.6, 2: 3.6}, error=error)
+    return cba.ArmResult(cycle_ms={1: c1, 2: c2}, error=error)
 
 
 def test_candidates_are_graded_against_the_mean_of_two_agreeing_bases():
@@ -198,7 +199,7 @@ def test_a_base_off_the_previous_base2_twice_refuses_the_batch_before_its_candid
     assert summary["reason"] == "the switched-off tree runs -3.00% against the previous batch's base2"
 
 
-def _referenced_state(tmp_path: Path, reference: dict | None, stack: list) -> SimpleNamespace:
+def _referenced_state(tmp_path: Path, reference: dict | None, stack: list) -> SharedState:
     decode = "[t TP0] Decode batch, #running-req: 1, #token: 1, accept len: 3.60, gen throughput (token/s): 300.00, #queue-req: 0"
     state = _workspace(tmp_path, decode, {"effective_argv": ["x"]})
     state.cycle_reference = reference
@@ -231,7 +232,7 @@ def test_the_session_batch_reads_the_baselines_launch_log_corpus_and_vocabulary(
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text(json.dumps({"vocab_size": 154880}), encoding="utf-8")
-    state = SimpleNamespace(
+    state = SharedState(
         baseline_workspace=str(tmp_path / "baseline"),
         model_path=str(model),
         agentx_corpus_shape={"isl": {"p50": 108000}},
@@ -322,7 +323,7 @@ def test_a_batch_with_no_weighted_batch_size_grades_nothing():
     assert (summary["valid"], summary["verdicts"]) == (False, {})
 
 
-def _workspace(tmp_path: Path, log: str, launch: dict) -> SimpleNamespace:
+def _workspace(tmp_path: Path, log: str, launch: dict) -> SharedState:
     workspace = tmp_path / "baseline" / "benchmark_sglang_1"
     workspace.mkdir(parents=True)
     (workspace / "agentx_server_launch.json").write_text(json.dumps(launch), encoding="utf-8")
@@ -330,7 +331,7 @@ def _workspace(tmp_path: Path, log: str, launch: dict) -> SimpleNamespace:
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text(json.dumps({"vocab_size": 100}), encoding="utf-8")
-    return SimpleNamespace(
+    return SharedState(
         baseline_workspace=str(tmp_path / "baseline"), model_path=str(model), agentx_corpus_shape={"isl": {"p50": 10}}
     )
 
@@ -342,14 +343,13 @@ def test_a_session_batch_refuses_a_baseline_log_with_no_decode_line(tmp_path):
         cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
 
 
-@pytest.mark.parametrize("state", [None, SimpleNamespace(baseline_workspace="", model_path="/m")])
-def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path, monkeypatch, state):
+def test_a_session_batch_refuses_a_session_without_a_baseline_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "stray").mkdir()
     (tmp_path / "stray" / "agentx_server_launch.json").write_text("{}", encoding="utf-8")
 
     with pytest.raises(FileNotFoundError, match="no baseline workspace"):
-        cba.session_batch(state, [], out_dir=tmp_path / "o", port=1)
+        cba.session_batch(SharedState(model_path="/m"), [], out_dir=tmp_path / "o", port=1)
 
 
 def test_a_session_batch_runs_the_current_best_stack_once_a_round_moved_it(tmp_path):

@@ -116,8 +116,8 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
 
     Until a round moves the current best that is the baseline's; after, the kept stack is what a candidate joins.
     """
-    best = str((getattr(state, "current_best", None) or {}).get("workspace") or "")
-    root = best or str(getattr(state, "baseline_workspace", "") or "")
+    best = str((state.current_best or {}).get("workspace") or "")
+    root = best or state.baseline_workspace
     if not root:
         raise FileNotFoundError("the session has no baseline workspace to take the bench launch from")
     launch_file = next(iter(sorted(Path(root).rglob("agentx_server_launch.json"))), None)
@@ -125,12 +125,12 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
         where = "the current best" if best else "the baseline workspace"
         raise FileNotFoundError(f"no agentx_server_launch.json under {where} {root}")
     launch = json.loads(launch_file.read_text(encoding=_ENCODING))
-    log_path = _weighting_log(launch_file.parent, str(getattr(state, "baseline_workspace", "") or ""))
+    log_path = _weighting_log(launch_file.parent, state.baseline_workspace)
     weights = cb.batch_weights(log_path.read_text(encoding=_ENCODING, errors="ignore").splitlines(), grid=BATCH_GRID)
     if not weights:
         raise ValueError(f"no decode line in {log_path} to weight batch sizes by")
     config = json.loads((Path(str(state.model_path)) / "config.json").read_text(encoding=_ENCODING))
-    isl = (getattr(state, "agentx_corpus_shape", None) or {}).get("isl") or {}
+    isl = (state.agentx_corpus_shape or {}).get("isl") or {}
     return BatchSpec(
         argv=list(launch["effective_argv"]),
         env={**(launch.get("runtime_environment") or {}), **(launch.get("effective_env") or {})},
@@ -148,8 +148,8 @@ def session_batch(state: Any, candidates: list[tuple[str, dict[str, str]]], *, o
 
 def _attribution_bs(state: Any, weights: dict[int, float]) -> int:
     """The heaviest batch size when a kept round moved the stack and no capture describes it yet, else 0."""
-    stack_len = len(getattr(state, "optimization_stack", None) or [])
-    held = getattr(state, "last_attribution_trace", None) or {}
+    stack_len = len(state.optimization_stack or [])
+    held = state.last_attribution_trace or {}
     if not stack_len or held.get("stack_len") == stack_len:
         return 0
     return max(weights, key=lambda bs: weights[bs])
@@ -174,18 +174,13 @@ def cycle_bench_sees(files: list[str]) -> bool:
 
 def screen_open(state: Any) -> bool:
     """Whether a switched patch may be admitted dormant now: the screen is on and open, and the stack has a reference."""
-    return (
-        cycle_bench_enabled()
-        and state is not None
-        and not getattr(state, "cycle_screen_refused", "")
-        and _reference(state) is not None
-    )
+    return cycle_bench_enabled() and not state.cycle_screen_refused and _reference(state) is not None
 
 
 def _reference(state: Any) -> dict[int, float] | None:
     """The previous valid batch's base2 cycle, when it ran the stack the session holds now."""
-    ref = getattr(state, "cycle_reference", None) or {}
-    if not ref or int(ref.get("stack_len", -1)) != len(getattr(state, "optimization_stack", None) or []):
+    ref = state.cycle_reference or {}
+    if not ref or int(ref.get("stack_len", -1)) != len(state.optimization_stack or []):
         return None
     return {int(bs): float(ms) for bs, ms in (ref.get("cycle_ms") or {}).items()} or None
 
@@ -258,7 +253,7 @@ def summarize_batch(
             continue
         gain = cb.weighted_gain_pct(mean, arm.cycle_ms, weights)
         verdict = cb.screen_verdict(gain, regress_pct=bands.regress_pct)
-        verdicts[name] = {"verdict": verdict, "gain_pct": round(gain, 3), "accept_len": arm.accept_len}
+        verdicts[name] = {"verdict": verdict, "gain_pct": round(gain, 3)}
     return {"valid": True, "base_gap_pct": round(gap, 3), "verdicts": verdicts}
 
 
@@ -284,12 +279,9 @@ class ArmSpec:
 
 @dataclass
 class ArmResult:
-    """What one arm measured: cycle medians per batch size, the acceptance it ran at, and why it is unusable."""
+    """What one arm measured: cycle medians per batch size, and why it is unusable."""
 
     cycle_ms: dict[int, float] = field(default_factory=dict)
-    accept_len: dict[int, float] = field(default_factory=dict)
-    samples: dict[int, int] = field(default_factory=dict)
-    boot_s: float | None = None
     error: str = ""
     attribution_trace: str = ""
 
@@ -303,14 +295,12 @@ def run_arm(spec: ArmSpec) -> ArmResult:
     spec.out_dir.mkdir(parents=True, exist_ok=True)
     log_path = spec.out_dir / _SERVER_LOG
     result = ArmResult()
-    started = time.monotonic()
     proc = _launch_server(spec.argv, spec.env, log_path)
     try:
         url = f"http://127.0.0.1:{spec.port}"
         if not wait_for_server_ready(url, timeout_s=spec.boot_timeout_s, server_exited=lambda: proc.poll() is not None):
             result.error = "server did not become ready"
             return result
-        result.boot_s = round(time.monotonic() - started, 1)
         rng = random.Random(spec.seed)
         for bs in spec.batch_sizes:
             window = _hold_steady_decode(url, log_path, _prompts(rng, spec, bs), spec)
@@ -319,8 +309,6 @@ def run_arm(spec: ArmSpec) -> ArmResult:
                 result.error = f"no steady decode at bs={bs}"
                 return result
             result.cycle_ms[bs] = statistics.median(cycles)
-            result.samples[bs] = len(cycles)
-            result.accept_len[bs] = _mean_accept(window, bs)
         if spec.attribution_bs:
             result.attribution_trace = _capture_attribution(url, log_path, spec, rng)
         return result
@@ -433,11 +421,6 @@ def _wait_steady(log_path: Path, since: int, bs: int, *, timeout_s: float) -> bo
             return True
         time.sleep(2.0)
     return False
-
-
-def _mean_accept(lines: list[str], bs: int) -> float:
-    values = [float(m[2]) for m in map(DECODE_LINE.search, lines) if m and int(m[1]) == bs and int(m[4]) == 0]
-    return round(statistics.mean(values), 4) if values else 0.0
 
 
 def _read_lines(path: Path) -> list[str]:
