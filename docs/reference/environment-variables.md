@@ -776,11 +776,13 @@ Primary switch (default **off**) for live Langfuse trace push.
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
   packager also copies `reports/trace/*.jsonl` and, with the loose mode on by
-  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under `/workspace`
-  for the Claw sync. If a session might contain customer code or secrets, define
-  an explicit retention + access-control policy for both the Langfuse project
-  and the `/workspace` package destination, and consider disabling live push
-  or loose packaging for those runs.
+  default (`HYPERLOOM_SESSION_PACKAGE_LOOSE`), drops them under the package
+  destination `HYPERLOOM_SESSION_PACKAGE_DEST`: `/workspace` for the Claw sync when
+  it is unset, and `<session dir>/archive/` (mode 0700, on the shared storage) in
+  a hosted run, where the entry sets it whatever the host passed. If a session might
+  contain customer code or secrets, define an explicit retention + access-control
+  policy for both the Langfuse project and the package destination, and consider
+  disabling live push or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap**: Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
   live run re-emits the out-of-process children onto the same trace and can
