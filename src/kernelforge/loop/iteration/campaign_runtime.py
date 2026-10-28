@@ -17,7 +17,7 @@ from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.handoffs import HandoffStore
 from kernelforge.loop.iteration.iteration_types import IterationResult
-from kernelforge.loop.jit_rebuild import force_jit_rebuild
+from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
 from kernelforge.loop.lessons import LessonStore
 from kernelforge.loop.reporting import BestResultPublisher
 from kernelforge.loop.run_state import (
