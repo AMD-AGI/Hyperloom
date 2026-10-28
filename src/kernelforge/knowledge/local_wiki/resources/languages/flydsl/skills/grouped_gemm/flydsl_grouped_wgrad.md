@@ -81,9 +81,9 @@ carried name must flatten to IR values, i.e. be a DSL value or a list/tuple/dict
 
 ## 3. K tails: let the descriptor zero them, except where it cannot
 - **Token-outer operands (tensorwise, bf16).** Fold `m_start · OUT` into the 64-bit descriptor base and bound
-  `num_records` to `max(M_g · OUT − tile_offset, 0)`: reads past the group's last row return zero, so the last
-  chunk or tail needs no predicate (`_wgrad_rebase`, FP8:2072-2085; FP8:3443-3451). The clamp at zero is what
-  keeps an empty group legal (`flydsl_grouped_group_mapping.md` §8).
+  `num_records` to `max(M_g · OUT − tile_offset, 0)`: reads past the group's last row return zero, so the last chunk
+  or tail needs no predicate (`_wgrad_rebase`, FP8:2072-2085; FP8:3443-3451). The clamp at zero is what keeps an
+  empty group legal (`flydsl_grouped_group_mapping.md` §7–§8).
 - **Token-inner operands (MX, `[OUT, M_total]`).** A record count bounds the whole row band, not a row's token
   range, so a tile that runs past its group reads the next group's real tokens and accumulates them. Pad each
   group to the K block (128 tokens in MX8) so the step count is exact (MX8:1481), and guard the last chunk at
@@ -185,8 +185,9 @@ fires; the trigger is the deepest group. Determinism by fixed-order reduce is th
   launch that cut nothing exits at once. *(field)* ~4 µs on a balanced load, 46–75 µs when it folds.
 - **Scratch for CUDA graphs.** Keep it persistent per (shape, device) and size it for the deepest geometry any
   candidate can pick, so replay sees fixed addresses (`_wgrad_split_ws`, FP8:3758-3775).
-- **What it buys.** *(field)* One expert with 99.8% of the tokens: gate_up 3024 → 2389 µs (21% less time), down
-  1381 → 1298 µs (6%); balanced unchanged (down) or 2.7% faster (gate_up). BGrad SNR 52.8 dB with the reduce live.
+- **What it buys.** *(field)* One expert with 99.8% of the tokens: gate_up 3024 → 2389 µs (21% less time), down 1381
+  → 1298 µs (6%); balanced unchanged (down) or 2.7% faster (gate_up). SNR of the weight gradient (BGrad) 52.8 dB
+  with the reduce live.
 - **Every output format keeps the split.** Tight C and an fp32 accumulator need bands at C's pitch and dtype and a
   reduce vector the store can issue: 8 fp32 lanes are 256 bits, beyond `buffer_store_dwordx4`, so FP8 halves the
   vector for fp32 (FP8:3989).

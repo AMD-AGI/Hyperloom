@@ -118,9 +118,9 @@ quadrants' MFMAs and LDS reads are dead. Pick the variant with a scalar branch o
   MFMAs plus one g2s group kept the spill count at 0. Check the spill count after adding any variant.
 - **Deleting the dead half's g2s: lower `vmcnt` by the number deleted, when those loads are the youngest in
   flight.** The in-flight allowance is "loads issued per iteration minus the earliest group".
-  - *(field)* MXFP4 whole loop: `vmcnt(WLV − n_deleted)` on the half-N body, +3.8% geomean, +4.7% worst
-    config. MXFP8 NT (all pools prefetched two iterations ahead, the deleted pool issued last): drain 6 → 4,
-    the down configs 0.985 → 1.005 against the reference.
+  - *(field)* MXFP4 whole loop: `vmcnt(WLV − n_deleted)`, `WLV` being the full body's allowance, on the half-N body,
+    +3.8% geomean, +4.7% worst config. MXFP8 NT (all pools prefetched two iterations ahead, the deleted pool issued
+    last): drain 6 → 4, the down configs 0.985 → 1.005 against the reference.
   - *(field)* The same surgery on MXFP8 wgrad, where the deleted pool is one iteration ahead and issued first:
     0.09% slower.
   - *(field)* fp8 NN dgrad (8 waves): the reduced counts raced at K = 1024. Keeping the loads and deleting only
@@ -159,8 +159,9 @@ pass and on the token histogram:
   cells, 7 of 8 in the same direction); re-tiling it to quarter-N gained another 0.67–1.09 points per NT cell.
 
 ## 6. Short tiles: where grouped loses to dense
-Fit `T_tile = F + n · P` from a K sweep (`../gemm/flydsl_gemm_grid_pricing.md` §6; its pitfalls:
-`../gemm/flydsl_gemm_attribution.md` §7). For grouped kernels the answer has been the same every time:
+Fit `T_tile = F + n · P` from a K sweep, n K iterations at P each (`../gemm/flydsl_gemm_grid_pricing.md` §6, which
+writes it `a · n_kblocks + F`; its pitfalls: `../gemm/flydsl_gemm_attribution.md` §7). For grouped kernels the
+answer has been the same every time:
 - *(field)* MXFP4 grouped: P = 1.565 µs per K phase against 1.59 µs derived from the dense MXFP4 kernel's
   5405 TF/s. The steady state ran at dense speed; the whole loss against dense was in F = 7.81 µs per tile.
 - *(field)* MXFP8 NT against the fastest fp8 wgrad: 6192 tiles of 23 K iterations against 1008 of 134; F was

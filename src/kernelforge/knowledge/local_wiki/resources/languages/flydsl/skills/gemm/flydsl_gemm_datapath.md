@@ -258,12 +258,12 @@ There are two ways to get an operand into MFMA order without a runtime shuffle:
 
 ## 11. MX scales
 
-- **Pack four E8M0 bytes per dword.** The scaled MFMA picks a byte with `op_sel` (`scale_opsel(k, pack) =
-  k % pack`, GH:114). The field is 2 bits, so 4 is a hardware limit. What packing buys depends on whether the
-  scale loads are exposed. *(field)* In a dense per-K loop that already prefetched its scales one step ahead,
-  a probe that reused the k = 0 scales put the scale cost at about 0; packing there paid only together with a
-  scale-group prefetch, and neither alone closed the gap. Where the scale loads were exposed (a grouped
-  variable-K wgrad), packing four per dword paid (`../grouped_gemm/flydsl_grouped_lowprec.md` §3).
+- **Pack four E8M0 bytes per dword.** The scaled MFMA picks a byte with `op_sel` (`scale_opsel(k, pack) = k % pack`,
+  GH:114). The field is 2 bits, so 4 is a hardware limit. What packing buys depends on whether the scale loads are
+  exposed. *(field)* In a dense per-K loop that already prefetched its scales one step ahead, a probe that reused
+  the k = 0 scales put the scale cost at about 0, so packing had nothing to recover there. Where the scale loads
+  were exposed (a grouped variable-K wgrad), packing four per dword paid
+  (`../grouped_gemm/flydsl_grouped_lowprec.md` §3).
 - **A wrong `op_sel` silently scales by another K block's exponent.** Probes with `randn`-derived scales
   cannot see it, because all exponents are similar. Use random exponents in the correctness probe.
 - **Scales can skip LDS.** Turbo's MXFP4 loads them with `buffer_load_dwordx4` straight into pinned VGPRs

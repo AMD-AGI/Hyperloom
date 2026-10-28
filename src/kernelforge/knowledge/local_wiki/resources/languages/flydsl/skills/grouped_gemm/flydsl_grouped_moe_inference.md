@@ -38,9 +38,9 @@ sources:
 
 > The one card on inference MoE expert GEMMs: tokens are sorted by expert into blocks of tile-M rows, and each
 > workgroup runs one (M-block, N-block) of one expert — stage 1 is gate + up with the activation, stage 2 the down
-> projection with the routing weights. FlyDSL facts are for v0.3.2 (`kernels/moe/`). Numbers marked *(field)* are
-> measured values from a4w4 MoE kernels of this family at decode batch sizes; use them for direction and order
-> of magnitude. Which kernel aiter dispatches and its tuned database are in
+> projection with the routing weights. FlyDSL facts are for v0.3.2 (`kernels/moe/`); "BM" in its code is tile-M.
+> Numbers marked *(field)* are measured values from a4w4 MoE kernels of this family at decode batch sizes; use
+> them for direction and order of magnitude. Which kernel aiter dispatches and its tuned database are in
 > `../../../../framework/aiter/skills/optimize/aiter_levers/aiter_moe_pipeline.md` (A4W4 on FlyDSL:
 > `aiter_flydsl_libtype.md` beside it). Training grouped GEMMs (variable-K wgrad, group offsets) are the rest of
 > this package (`INDEX.md`).
@@ -64,8 +64,9 @@ sources:
 and an fp4 re-quantization of the intermediate; its MXFP4-out stage 2 is persistent. `moe_2stage_a16wmix` uses a
 K=16 MFMA path on gfx942 and K=32 on gfx950.
 
-`mxfp_moe` uses its own sorting contract (`cumsum` plus `m_indices`, `__init__.py:4-17`). FlyDSL also ships a
-fused dispatch + GEMMs + combine kernel (`kernels/mega_moe/`) and a gfx1250 MoE kernel; neither is covered here.
+`mxfp_moe` uses its own sorting contract (`cumsum` plus `m_indices`, `__init__.py:4-17`). CShuffle is the epilogue
+that stages C through LDS to reshuffle it into wide, coalesced stores. FlyDSL also ships a fused dispatch + GEMMs +
+combine kernel (`kernels/mega_moe/`) and a gfx1250 MoE kernel; neither is covered here.
 
 ## 2. How the work is mapped
 
@@ -122,7 +123,7 @@ fused dispatch + GEMMs + combine kernel (`kernels/mega_moe/`) and a gfx1250 MoE 
   where K is the intermediate size, was neutral to negative: the split landed on launch and epilogue fixed costs.
 - **Keep the grid N-fastest.** *(field)* Swapping to M-fastest cost 2.4% on stage 1 and 1.5% on stage 2 (whose
   relative L2 error also rose from 0.0003 to 0.0017). N-fastest keeps the N-blocks that share one A tile running
-  together, so the A tile stays in L2 and MALL. Both FlyDSL grids are N-fastest
+  together, so the A tile stays in L2 and MALL (the last-level Infinity Cache). Both FlyDSL grids are N-fastest
   (`moe_gemm_2stage/gemm1.py:518-535`, `mxfp_moe/gemm1.py:120-121`).
 - *(field)* Halving stage 2's A-tile LDS (packing fp4 at its real width) was neutral: that stage 2 was not limited
   by LDS occupancy.

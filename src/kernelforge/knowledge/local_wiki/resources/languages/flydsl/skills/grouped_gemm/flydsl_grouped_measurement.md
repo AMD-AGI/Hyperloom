@@ -55,7 +55,7 @@ the deployment, not from a previous bench:
 
 | Condition | What goes wrong when it drifts |
 |---|---|
-| Groups per call (local experts = experts / EP) | bands, tiles per group and skew change with G; tunings do not transfer |
+| Groups per call (local experts = experts / EP, the expert-parallel degree) | bands, tiles per group and skew change with G; tunings do not transfer |
 | Per-call tokens per group | the step aggregate is several calls; a bench at the aggregate size reads high |
 | Histogram of tokens per group | balanced-only benches miss every skew effect |
 | Which axis is padded, and to what | an unpadded contraction can take a slow path the deployment never runs |

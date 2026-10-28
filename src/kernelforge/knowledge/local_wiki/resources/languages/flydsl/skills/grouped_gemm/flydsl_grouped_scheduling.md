@@ -219,9 +219,10 @@ Contiguous parks a run of small groups (no B reuse) on one XCD; per-tile scatter
   `m_total / G`, not on `m_total` (`flydsl_grouped_wgrad.md`).
 
 ## 7. Two tiles per workgroup
-- What it buys is the per-workgroup fixed cost (launch, decode, table load, pipeline fill) shared by WGT
-  tiles; what it gives up is the dispatcher's dynamic balance. Turbo ships `wg_tiles = 1` in all three of its
-  MXFP4 wgrad tuples (MX4:1112-1122) and one tile per workgroup on MXFP4 NT (MX4:1086).
+- What it buys is the per-workgroup fixed cost (launch, decode, table load, pipeline fill) shared by WGT tiles
+  (tiles per workgroup; TOTAL below is the grid's tile count); what it gives up is the dispatcher's dynamic balance.
+  Turbo ships `wg_tiles = 1` in all three of its MXFP4 wgrad tuples (MX4:1112-1122) and one tile per workgroup on
+  MXFP4 NT (MX4:1086).
 - If you pair, gate on the paired grid width, not on how many rounds a group spans: `TOTAL / WGT ≥ N_CU` with
   TOTAL divisible by WGT (MX4:1725), and take the two tiles from opposite ends of the stream, so a heavy one
   pairs with a light one.

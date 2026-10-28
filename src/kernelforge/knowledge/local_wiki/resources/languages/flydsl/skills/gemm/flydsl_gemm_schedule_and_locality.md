@@ -113,13 +113,13 @@ the band; a 1D band is steadier there. Use 2D only when `GM · GN` is much large
 - FlyDSL's own `_xcd_swizzle` (`kernels/gemm/fp8_gemm_4wave.py`) is a contiguous-chunk remap plus
   `GROUP_M = 4`, used only when the grid has ≥ 4·256 workgroups and a multiple of 8; otherwise linear.
 
-**Judge by wall time and stall counters, not L2 hit rate.** *(field)* An XCD order that was 3% faster left
-`TCC_HIT`, `TCC_REQ` and `TCP_TCC_READ_REQ` unchanged; the gain showed in `MemUnitStalled` (12.4% →
-10.7%), i.e. TCP→TCC request queueing. Elsewhere hit rate rose sharply with no wall change. Use
-`SQ_WAIT_ANY` and `MemUnitStalled`. Differences of 1–2% on this axis flipped sign between back-to-back
-sweeps; 10%-scale effects reproduced. *(field)* That reading was on a grouped NN dgrad; a later band sweep on the same
-pass improved `MemUnitStalled` in both the winning and the losing cell, and only on a grouped NT did it rank the
-band axis both ways. Decide by wall time.
+**Judge by wall time; explain with stall counters, not L2 hit rate.** *(field)* An XCD order that was 3% faster left
+`TCC_HIT`, `TCC_REQ` and `TCP_TCC_READ_REQ` unchanged; the gain showed in `MemUnitStalled` (12.4% → 10.7%), i.e.
+TCP→TCC request queueing. Elsewhere hit rate rose sharply with no wall change. Read `SQ_WAIT_ANY` and
+`MemUnitStalled` to explain a result. Differences of 1–2% on this axis flipped sign between back-to-back sweeps;
+10%-scale effects reproduced. *(field)* That reading was on a grouped NN dgrad; a later band sweep on the same pass
+improved `MemUnitStalled` in both the winning and the losing cell, and only on a grouped NT did it rank the band
+axis both ways. Decide by wall time.
 
 ## 3. Scheduling hints and fences
 
