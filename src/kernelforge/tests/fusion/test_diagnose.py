@@ -157,3 +157,34 @@ class TestLoadTrace:
     def test_mul_not_miscounted_as_add(self):
         # A BinaryFunctor multiply must land in ``mul``, not ``add``.
         assert dg.categorize_kernel_name("vectorized_elementwise BinaryFunctor mul<bf16>") == "mul"
+
+
+class TestCollectivesAndDecodeSteps:
+    def test_collective_kernels_are_their_own_category_and_not_launch_bound(self):
+        """GLM-5.3: allreduce and reduce_scatter matched the reduce and copy rules, 0.15 of a 0.257 share."""
+        names = {
+            "void aiter::reduce_scatter_cross_device_store<__hip_bfloat16, 4>": "collective",
+            "void aiter::allreduce_fusion_kernel_1stage<__hip_bfloat16, 4>": "collective",
+            "void aiter::cross_device_reduce_2stage<__hip_bfloat16, 4>": "collective",
+            "void quickreduce::quick_reduce_twoshot<__hip_bfloat16>": "collective",
+            "void aiter::local_device_load_rmsnorm<__hip_bfloat16, 4>": "collective",
+            "index_select_gather_kernel": "copy",
+            "vectorized_elementwise CUDAFunctor_add<bf16>": "add",
+        }
+        assert {name: dg.categorize_kernel_name(name) for name in names} == names
+        assert "collective" not in dg.LAUNCH_BOUND_CATEGORIES
+
+    def test_the_category_shares_count_only_the_decode_steps(self, tmp_path):
+        """S1: forge-fuse chased a bf16 add that ran only outside the step windows, 0.05% of decode time."""
+        events = [
+            {"cat": "gpu_user_annotation", "name": "step[VERIFY bs=2]", "ts": 0, "dur": 100},
+            {"cat": "kernel", "name": "Cijk_Alik_Bljk_MT64x16x256", "ts": 10, "dur": 60},
+            {"cat": "kernel", "name": "_fused_rms_fp8_group_quant_kernel", "ts": 70, "dur": 20},
+            {"cat": "kernel", "name": "vectorized_elementwise CUDAFunctor_add<bf16>", "ts": 200, "dur": 500},
+        ]
+        trace = tmp_path / "trace.json"
+        trace.write_text(json.dumps({"traceEvents": events}))
+
+        shares, _busy, _kernels = dg.load_op_busy_from_kineto_trace(trace)
+
+        assert shares == {"gemm": 0.75, "rmsnorm": 0.25}
