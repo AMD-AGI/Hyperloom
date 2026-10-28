@@ -617,6 +617,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "priority",
                 "timeout_minutes",
                 "max_turns",
+                "module_group",
             ):
                 if isinstance(task, dict) and carry in task:
                     sub_params[carry] = task[carry]

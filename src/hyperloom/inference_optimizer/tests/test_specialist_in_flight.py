@@ -265,6 +265,38 @@ async def test_a_dispatch_without_a_known_group_or_with_the_bench_off_is_never_r
     assert await _module_denials(coord) == 0
 
 
+async def test_each_task_of_a_freeform_wave_holds_the_module_group_it_names(coord, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    tasks = [
+        {"task_description": "fuse the MoE sort", "module_group": "moe"},
+        {"task_description": "retune the MoE GEMMs", "module_group": "moe"},
+        {"task_description": "shrink the allreduce", "module_group": "allreduce/comm"},
+    ]
+    await _delegate(coord, scope="freeform", tasks=tasks)
+
+    assert await _queued_mandates(coord) == ["fuse the MoE sort", "shrink the allreduce"]
+    assert await _module_denials(coord) == 1
+
+
+@pytest.mark.parametrize(("switch", "shown"), [("1", True), ("0", False)])
+async def test_orchestration_sees_the_module_groups_and_which_ones_live_specialists_hold(
+    coord, monkeypatch, switch, shown
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", switch)
+    await _freeform(coord, "fuse the MoE sort", module_group="moe")
+    (holder,) = await coord.tasks.by_state("queued")
+
+    in_flight = coord.conversation._context_running_tasks_reader()
+
+    expected = (
+        "specialist module groups (set params.module_group to own one; one queued or running specialist each): "
+        "allreduce/comm, moe, indexer/topk, attention/mla, norm, gemm, quant, sampling/spec, elementwise/copy; "
+        f"held: moe task_id={holder.task_id}"
+    )
+    lines = [line for line in in_flight.splitlines() if line.startswith("specialist module groups")]
+    assert lines == ([expected] if shown else [])
+
+
 @pytest.mark.parametrize(
     ("params", "group"),
     [

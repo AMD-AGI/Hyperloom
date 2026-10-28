@@ -14,7 +14,8 @@ from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
-from ..specialists.in_flight import in_flight_domains
+from ..measurement.cycle_bench import cycle_bench_enabled
+from ..specialists.in_flight import MODULE_GROUPS, in_flight_domains, in_flight_module_groups
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
@@ -389,7 +390,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
-        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
+        backlog = "\n".join(
+            line
+            for line in (self._queued_backlog_line(), self._queued_specialists_line(), self._module_groups_line())
+            if line
+        )
         if not tasks:
             return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
@@ -459,6 +464,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return ""
         return "queued specialists (each holds its domain): " + ", ".join(
             f"{domain} task_id={task.task_id}" for domain, task in held.items()
+        )
+
+    def _module_groups_line(self) -> str:
+        """With the cycle bench on, the decode module groups a specialist may own and the live specialists' ones."""
+        if not cycle_bench_enabled() or self.shared_state.phase != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return ""
+        held = in_flight_module_groups([*self.tasks.queued_context_sync(), *self.tasks.running_context_sync()])
+        holders = ", ".join(f"{group} task_id={task.task_id}" for group, task in held.items()) or "none"
+        return (
+            "specialist module groups (set params.module_group to own one; one queued or running specialist each): "
+            f"{', '.join(MODULE_GROUPS)}; held: {holders}"
         )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
