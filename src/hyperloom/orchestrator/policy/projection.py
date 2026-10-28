@@ -61,33 +61,16 @@ def gpu_specialist_ceiling(shared_state: Any | None = None) -> int:
         return 0
 
 
-def serving_tp_for_policy(shared_state: Any | None = None) -> int:
-    """Resolve serving TP the way ``DispatcherCollaborator.resolve_serving_tp`` does.
-
-    Args:
-        shared_state: Optional SharedState carrying ``tp``.
-
-    Returns:
-        int: Serving TP, 0 when unknown.
-    """
-    if shared_state is not None:
-        try:
-            tp = int(getattr(shared_state, "tp", 0))
-        except (TypeError, ValueError):
-            tp = 0
-        if tp > 0:
-            return tp
-    try:
-        return max(0, int(os.environ.get("TP", "0")))
-    except ValueError:
-        return 0
+def serving_tp_for_policy(shared_state: Any) -> int:
+    """The live serving process's TP size from ``shared_state.tp``; 0 when unset."""
+    return max(0, int(shared_state.tp or 0))
 
 
-def effective_gpu_specialist_pool_size(shared_state: Any | None = None) -> int:
+def effective_gpu_specialist_pool_size(shared_state: Any) -> int:
     """Size of the serving-disjoint GPU specialist pool after the serving carve.
 
     Args:
-        shared_state: Optional SharedState carrying capacity and TP.
+        shared_state: SharedState carrying capacity and TP.
 
     Returns:
         int: Number of cards a non-bench ``needs_gpu`` specialist can be given.
@@ -159,7 +142,7 @@ class ResourceFacts:
 
     def update(
         self,
-        shared_state: Any | None,
+        shared_state: Any,
         *,
         rounds: Sequence[Round] = (),
         live_task_ids: Iterable[str] | None = None,

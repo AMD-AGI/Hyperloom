@@ -302,7 +302,6 @@ You may write any of these files; the Python runner reads them:
 | `last_phase.txt`       | you | One token: pre/intake/plan/manifest/exec/export/validate/eval. Updated at the START of each phase. |
 | `fix_hypothesis_attempt_N.md` | you | Precondition for Python retry — see §8. |
 | `blocked.md`           | you | `outcome_id: <id>\n<reason>` for any non-clean stop. |
-| `requantize_attempts.txt` | Python | Counter — do NOT touch. |
 
 ## 10. Self-check before declaring success
 

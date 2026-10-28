@@ -214,7 +214,7 @@ def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
         def __init__(self) -> None:
             self.selected: list[str] = []
 
-        def get_recipe(self, **_kwargs: Any) -> dict[str, Any]:
+        def get_recipe(self, *, canonical_id: str) -> dict[str, Any]:
             return exact
 
         def search(self, **_kwargs: Any) -> list[dict[str, Any]]:
@@ -230,7 +230,6 @@ def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
         cid="self-cid",
         identity=_find_identity(),
         shape=_TARGET_SHAPE,
-        warm_prefer=None,
     )
 
     assert row["canonical_id"] == "selected"

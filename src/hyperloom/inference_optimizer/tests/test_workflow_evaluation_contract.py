@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from zipfile import ZipFile
 
@@ -14,7 +15,7 @@ from jsonschema import ValidationError, validate
 
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison
 from hyperloom.inference_optimizer.breakdown.exporter import build, patch_breakdown_close, write_breakdown_json
-from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
+from hyperloom.inference_optimizer.breakdown.session_package import ENV_PACKAGE_DEST_ROOT, package_session_artifacts
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached, stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     CloseStep,
@@ -41,12 +42,11 @@ from hyperloom.inference_optimizer.breakdown.workflow_contract import (
 from hyperloom.inference_optimizer.session.manifest import write_manifest
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.phases.machine_state import (
-    compute_next_phase,
     record_phase_transition,
     workflow_predicate_inputs,
     PhaseFlags,
 )
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def _writer_fixture(tmp_path, *, denied: bool) -> dict:
@@ -205,34 +205,6 @@ def test_declared_consumer_paths_are_mechanically_covered(tmp_path):
     assert all(value is not None for value in values.values())
 
 
-def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path):
-    """A skip-to-close with no baseline validates against the contract and still closes as baseline_failed."""
-    write_manifest(tmp_path, session_id="skip-to-close-contract")
-    state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
-    with session_scope(tmp_path):
-        # Open the segment whose exit evidence carries the frozen inputs.
-        record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
-        state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-        target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(enablement_enabled=True))
-        assert (target, reason) == ("CLOSE", "baseline_failed")
-        assert evidence["baseline_tput"] == 0.0
-        frozen = evidence["predicate_inputs"]["global"]
-        assert "baseline_tput" in frozen
-        record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
-    state.save(tmp_path)
-
-    exported = build(tmp_path)
-    exits = [
-        segment["exit_evidence"]
-        for event in exported["timeline"]
-        if event.get("type") == "phase"
-        for segment in event["ext"]["segments"]
-        if segment.get("exit_reason") == "baseline_failed"
-    ]
-    assert [row["predicate_inputs"]["global"] for row in exits] == [frozen]
-    validate(instance=exported, schema=workflow_schema())
-
-
 def test_authored_milestones_survive_sbd_export(tmp_path):
     write_manifest(tmp_path, session_id="v2-milestones")
     state = SharedState(session_id="v2-milestones")
@@ -301,7 +273,8 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
         validate(instance=fixture, schema=workflow_schema())
 
 
-def test_final_close_refresh_matches_rebuilt_package(tmp_path):
+def test_final_close_refresh_matches_rebuilt_package(tmp_path, monkeypatch):
+    monkeypatch.setenv(ENV_PACKAGE_DEST_ROOT, str(tmp_path / "workspace"))
     write_manifest(tmp_path, session_id="v2-close")
     state = SharedState(session_id="v2-close", phase="CLOSE", baseline_tput=100.0)
     state.set_stop_reason("target_reached")
@@ -309,7 +282,7 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     record_close_opened(tmp_path)
     record_close_step(tmp_path, CloseStep(step="session_breakdown", status="done", optional=False))
     sbd_path = write_breakdown_json(tmp_path)
-    package = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
+    package = package_session_artifacts(tmp_path, session_id="v2-close")
     assert package is not None
     record_close_step(
         tmp_path, CloseStep(step="artifact_package", status="done", optional=False, artifact_path=str(package))
@@ -318,7 +291,7 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)
-    rebuilt = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
+    rebuilt = package_session_artifacts(tmp_path, session_id="v2-close")
     assert rebuilt == package
 
     on_disk = json.loads(sbd_path.read_text(encoding="utf-8"))
@@ -384,6 +357,18 @@ def test_schema_rejects_contract_drift(tmp_path, mutation: str):
 
     with pytest.raises(ValidationError):
         validate(instance=fixture, schema=workflow_schema())
+
+
+def test_contract_digest_canonicalization_is_byte_stable(monkeypatch):
+    # External verifiers recompute the digest with this exact serialization and compare it strictly.
+    from hyperloom.inference_optimizer.breakdown import workflow_contract as contract_module
+
+    monkeypatch.setattr(
+        contract_module, "_load_workflow_contract", lambda: {"b": [1, {"y": "\u00e9", "x": None}], "a": "\u00fc"}
+    )
+    canonical = b'{"a":"\xc3\xbc","b":[1,{"x":null,"y":"\xc3\xa9"}]}'
+    assert hashlib.sha256(canonical).hexdigest() == "7f96ea3a020e615b4302a3648283ecbbacc5c69be56d5c29187599e46b94effd"
+    assert contract_module.workflow_contract_digest() == hashlib.sha256(canonical).hexdigest()
 
 
 def test_unknown_contract_digest_fails_schema_validation(tmp_path):

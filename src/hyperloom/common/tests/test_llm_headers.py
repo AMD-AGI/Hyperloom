@@ -13,6 +13,7 @@ from hyperloom.common.llm_headers import (
     expand_env_refs,
     format_custom_headers,
     parse_custom_headers,
+    parse_unexpanded_headers,
 )
 
 
@@ -36,6 +37,19 @@ def test_text_that_only_looks_like_json_falls_back_to_lines() -> None:
 def test_a_json_array_names_no_header() -> None:
     """Well-formed JSON that cannot be a header map yields nothing, not punctuation."""
     assert parse_custom_headers('["X-Team: hyperloom"]') == {}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"Key": "${SUBKEY}"}', {"Key": "${SUBKEY}"}),
+        ("Key: ${SUBKEY}", {"Key": "${SUBKEY}"}),
+        ('["Key: ${SUBKEY}"]', {}),
+        (None, {}),
+    ],
+)
+def test_unexpanded_parse_keeps_env_refs_as_written(raw: str | None, expected: dict[str, str]) -> None:
+    assert parse_unexpanded_headers(raw) == expected
 
 
 @pytest.mark.parametrize("raw", [None, "", "   ", "\n\n"])

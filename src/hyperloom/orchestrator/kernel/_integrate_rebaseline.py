@@ -18,7 +18,7 @@ from . import apply_kernel_patch
 from ..actions.executors._kernel_agent_tool import HandlerResult
 from ._integrate_outcomes import _FRAMEWORK_APPLYBACK_ARTIFACT_KIND, _integrate_failure
 from ._integrate_payload import _is_paired_gemm_measurement
-from ._kernel_decisions import _honest_flag
+from .kernel_decisions import _honest_flag
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
 
     try:
         stats = sweep_stale_aiter_locks_if_dead()
-    except Exception as exc:  # noqa: BLE001 - cache hygiene must not hide benchmark results
+    except (OSError, RuntimeError) as exc:
         log.warning("integrate_handler: aiter lock sweep failed before %s: %r", reason, exc)
         return {"errors": 1, "exception": repr(exc)}
     if stats.get("skipped_live"):

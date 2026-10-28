@@ -71,8 +71,9 @@ from .agent_cli_config import (
 )
 from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
+from .reap_watch import PROCESS_LOG_NAME, ReapWatch, newest_activity, specialist_activity_paths
 from .trace_harvest import harvest_agent_trace
-from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
+from ..actions.cancel_channel import CancelScope, cancel_scope_listener, current_cancel_scope
 from hyperloom.common.git_safety import app_git, worktree_head
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
@@ -80,9 +81,6 @@ from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 
 
 log = logging.getLogger(__name__)
-
-_PROCESS_LOG_NAME = "process.log"
-
 
 #: How long the reaper waits on a specialist nobody bounded, matching the
 #: largest deadline the dispatcher hands down.
@@ -150,10 +148,10 @@ class SpecialistSubprocessConfig:
     """How often the reaper polls done.json / process exit / heartbeat."""
 
     heartbeat_stale_seconds: float = 300.0
-    """Liveness window for heartbeat.json or process.log activity.
+    """Liveness window for activity in any of :func:`specialist_activity_paths`.
 
-    A process that never creates either file is reaped after this window.
-    After either file has appeared, its mtime can refresh the liveness clock
+    A process that never creates any of them is reaped after this window.
+    After one has appeared, its mtime can refresh the liveness clock
     for one window before the subsequent stale window expires, yielding about
     two windows of silence before reap.
     """
@@ -281,6 +279,12 @@ def _setup_worktree(
 _RAY_PENDING_POLL_INTERVAL_SEC: float = 1.0
 
 
+def _raise_if_cancelled(scope: CancelScope | None) -> None:
+    """Raise ``CancelledError`` with the scope's reason once the action's cancel scope is cancelled."""
+    if scope is not None and scope.cancelled:
+        raise CancelledError(scope.reason)
+
+
 def _ray_specialist_pending_deadline_sec() -> float:
     """Max seconds to wait for a GPU-specialist actor to schedule before failing.
 
@@ -338,8 +342,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
     Nothing probes this number. A served process is setsid'd by design, so it
     leaves the group its spawn created, and every attempt to decide from such an
     identity whether a lane was free was refuted in review. What the number is
-    still worth is a starting point for the human who has to clear a retained
-    lane by hand.
+    still worth is a starting point for the human who has to go looking for
+    work a task may have left running.
 
     A local specialist is spawned with ``start_new_session=True``, so its root
     pid is also the id of the group and session it leads, and that number keeps
@@ -356,8 +360,8 @@ def _local_tree_pgid(proc: Any) -> int | None:
 
     Returns:
         int | None: A local process group to record for an operator's benefit,
-        or None when there is none to name. Either way the lane is retained:
-        nothing reclaims it from this number.
+        or None when there is none to name. Either way it decides nothing:
+        no lane is held or released on the strength of this number.
     """
     if proc is None or isinstance(proc, _RayLeaseProcess):
         return None
@@ -417,31 +421,6 @@ class SpecialistSpawn:
     progress_cb: Any = None
 
 
-@dataclass(frozen=True)
-class ReapWatch:
-    """What the reaper polls while a specialist subprocess runs.
-
-    Attributes:
-        workspace: Task workspace; supplies the ``process.log`` whose mtime is
-            the second liveness signal.
-        done_files: Candidate done-file paths to poll.
-        heartbeat_file: Heartbeat file whose mtime is one of the two activity
-            signals ORed together for the liveness check.
-        partial_files: Candidate partial-checkpoint paths polled for live
-            progress; never an exit signal.
-        progress_cb: Optional async callback for each new checkpoint.
-        task_id: Task identifier used to pick up live ``extend_lease``
-            wall-budget extensions each poll.
-    """
-
-    workspace: Path
-    done_files: tuple[Path, ...]
-    heartbeat_file: Path
-    partial_files: tuple[Path, ...] = ()
-    progress_cb: Any = None
-    task_id: str = ""
-
-
 # Dispatcher
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
@@ -476,8 +455,7 @@ class SpecialistSubprocessDispatcher:
                 process log path, and discovered patches.
         """
         scope = current_cancel_scope()
-        if scope is not None and scope.cancelled:
-            raise CancelledError(scope.reason)
+        _raise_if_cancelled(scope)
         # Drop any extension left over from a prior run of this task id.
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
@@ -487,19 +465,7 @@ class SpecialistSubprocessDispatcher:
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.
         write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
-        process_log = request.workspace / _PROCESS_LOG_NAME
-        # Poll worktree first (prompt-advertised path), then workspace as fallback.
-        done_candidates: list[Path] = []
-        if request.worktree is not None:
-            done_candidates.append(request.worktree / "specialist_done.json")
-        done_candidates.append(request.workspace / "specialist_done.json")
-        # Incremental checkpoint recovered as best-so-far on a budget kill; does
-        # NOT trigger reap. Same worktree-first / workspace-fallback order.
-        partial_candidates: list[Path] = []
-        if request.worktree is not None:
-            partial_candidates.append(request.worktree / "specialist_done.partial.json")
-        partial_candidates.append(request.workspace / "specialist_done.partial.json")
-        heartbeat_file = request.workspace / "heartbeat.json"
+        process_log = request.workspace / PROCESS_LOG_NAME
 
         # A requested demote that cannot be honoured fails the task: running the
         # specialist as the app user would defeat the point of asking.
@@ -518,8 +484,7 @@ class SpecialistSubprocessDispatcher:
         # for compatibility with deployments that authenticate the agent CLI
         # via env; set HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0 to disable.
         env = _build_specialist_env()
-        # Bound the spawned CLI's request transport so a stalled gateway stream
-        # raises client-side instead of hanging forever.
+        # Keep the spawned CLI off its non-essential traffic and auto-updater.
         from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
@@ -533,6 +498,7 @@ class SpecialistSubprocessDispatcher:
         try:
             backend = self._agent_backend()
             cmd = self._build_launch(backend, request, env, run_as)
+            watch = self._reap_watch(request)
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -551,8 +517,7 @@ class SpecialistSubprocessDispatcher:
             proc: Any = None
             proc_started: float
             try:
-                if scope is not None and scope.cancelled:
-                    raise CancelledError(scope.reason)
+                _raise_if_cancelled(scope)
                 if request.gpu_lease is not None:
                     # Non-blocking start: submit the actor launch, then poll for
                     # the pid with ``asyncio.sleep`` between polls. This keeps the
@@ -576,8 +541,8 @@ class SpecialistSubprocessDispatcher:
                                 stdin_path=str(prompt_file),
                             )
                         )
-                    except Exception as exc:  # noqa: BLE001 — surface a submit failure as a result
-                        log.warning("specialist GPU actor submit failed: %s", exc)
+                    except Exception as exc:  # isolation boundary: one specialist's GPU actor submit
+                        log.warning("specialist GPU actor submit failed: %s", exc, exc_info=True)
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,
@@ -589,12 +554,11 @@ class SpecialistSubprocessDispatcher:
                     pending_start = time.monotonic()
                     pid: int | None = None
                     while True:
-                        if scope is not None and scope.cancelled:
-                            raise CancelledError(scope.reason)
+                        _raise_if_cancelled(scope)
                         try:
                             pid = request.gpu_lease.poll_started()
-                        except Exception as exc:  # noqa: BLE001 — dead actor / ray error mid-schedule
-                            log.warning("specialist GPU actor start failed: %s", exc)
+                        except Exception as exc:  # isolation boundary: one specialist's GPU actor start
+                            log.warning("specialist GPU actor start failed: %s", exc, exc_info=True)
                             request.gpu_lease.close()
                             return SpecialistSubprocessResult(
                                 done_payload=None,
@@ -664,33 +628,9 @@ class SpecialistSubprocessDispatcher:
                                 log.warning("failed to close specialist prompt stdin", exc_info=True)
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-                outcome = await self._reap_loop(
-                    proc,
-                    ReapWatch(
-                        workspace=request.workspace,
-                        done_files=tuple(done_candidates),
-                        heartbeat_file=heartbeat_file,
-                        partial_files=tuple(partial_candidates),
-                        progress_cb=request.progress_cb,
-                        task_id=request.task_id,
-                    ),
-                    deadline=request.deadline,
-                    started=proc_started,
-                )
+                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
             except (CancelledError, asyncio.CancelledError):
-                try:
-                    if request.gpu_lease is not None:
-                        confirmed = request.gpu_lease.close() is True or request.gpu_lease.close() is True
-                    else:
-                        confirmed = self._kill(proc) if proc is not None else True
-                except (OSError, subprocess.SubprocessError) as exc:
-                    raise ExecutionCleanupUnconfirmed(
-                        f"task={request.task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
-                    ) from exc
-                if confirmed is not True:
-                    raise ExecutionCleanupUnconfirmed(
-                        f"task={request.task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
-                    )
+                self._confirm_cancel_teardown(request, proc)
                 raise
             finally:
                 if log_fh is not None:
@@ -700,26 +640,37 @@ class SpecialistSubprocessDispatcher:
                 finally:
                     self._release_task(backend, request)
 
+        return self._harvest_result(request, watch, backend, outcome, worktree_base_commit=worktree_base_commit)
+
+    def _harvest_result(
+        self,
+        request: SpecialistSpawn,
+        watch: ReapWatch,
+        backend: str,
+        outcome: dict[str, Any],
+        *,
+        worktree_base_commit: str,
+    ) -> SpecialistSubprocessResult:
+        """Read the reaped specialist's done payload, patches and agent trace into its result."""
+        process_log = watch.workspace / PROCESS_LOG_NAME
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
-        for cand in done_candidates:
-            if cand.exists():
-                done_payload = self._read_done(cand)
-                if done_payload is not None:
-                    break
+        for cand in watch.done_files:
+            done_payload = self._read_done(cand)
+            if done_payload is not None:
+                break
 
         # No final done.json — fall back to the most recent incremental partial
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
-            for cand in partial_candidates:
-                if cand.exists():
-                    partial = self._read_done(cand)
-                    if partial is not None:
-                        partial["_recovered_from_partial"] = True
-                        done_payload = partial
-                        if not outcome.get("error"):
-                            outcome["error"] = "recovered_from_partial"
-                        break
+            for cand in watch.partial_files:
+                partial = self._read_done(cand)
+                if partial is not None:
+                    partial["_recovered_from_partial"] = True
+                    done_payload = partial
+                    if not outcome.get("error"):
+                        outcome["error"] = "recovered_from_partial"
+                    break
 
         # Patches: harvest from the worktree via git diff first, else scan
         # disk. Runs after the done payload, whose targets scope the harvest.
@@ -748,6 +699,22 @@ class SpecialistSubprocessDispatcher:
             trace=trace,
             error=outcome["error"],
         )
+
+    def _confirm_cancel_teardown(self, request: SpecialistSpawn, proc: Any) -> None:
+        """Tear a cancelled specialist down, raising ``ExecutionCleanupUnconfirmed`` unless teardown is confirmed."""
+        try:
+            if request.gpu_lease is not None:
+                confirmed = request.gpu_lease.close() is True or request.gpu_lease.close() is True
+            else:
+                confirmed = self._kill(proc) if proc is not None else True
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ExecutionCleanupUnconfirmed(
+                f"task={request.task_id}: specialist cleanup failed: {exc}", tree_pgid=_local_tree_pgid(proc)
+            ) from exc
+        if confirmed is not True:
+            raise ExecutionCleanupUnconfirmed(
+                f"task={request.task_id}: specialist cleanup unconfirmed", tree_pgid=_local_tree_pgid(proc)
+            )
 
     # Internals
     def _build_launch(
@@ -791,6 +758,19 @@ class SpecialistSubprocessDispatcher:
         )
         stage_mcp_config(run_as, request.workspace, cmd)
         return cmd
+
+    @staticmethod
+    def _reap_watch(request: SpecialistSpawn) -> ReapWatch:
+        """What the reaper polls for ``request``: each file in the worktree first (the prompt-advertised path)."""
+        roots = (request.worktree, request.workspace) if request.worktree is not None else (request.workspace,)
+        return ReapWatch(
+            workspace=request.workspace,
+            done_files=tuple(root / "specialist_done.json" for root in roots),
+            # Recovered as best-so-far on a budget kill; never a reap signal.
+            partial_files=tuple(root / "specialist_done.partial.json" for root in roots),
+            progress_cb=request.progress_cb,
+            task_id=request.task_id,
+        )
 
     @staticmethod
     def _release_task(backend: str, request: SpecialistSpawn) -> None:
@@ -1051,7 +1031,8 @@ class SpecialistSubprocessDispatcher:
 
         Each tick checks (in order): a done-file at any candidate path
         (graceful exit with a short grace window), natural process exit,
-        activity staleness (heartbeat.json OR process.log), and the hard
+        activity staleness (heartbeat.json, process.log, or the dsh session
+        log; see :func:`specialist_activity_paths`), and the hard
         wall-clock cap. Stale / timed-out
         runs are killed via :meth:`_kill`. Partial checkpoints written along
         the way are forwarded to ``progress_cb`` as they change.
@@ -1081,18 +1062,13 @@ class SpecialistSubprocessDispatcher:
         # An unbounded caller still gets a finite instant.
         hard_stop = deadline if deadline is not None else Deadline.after(UNBOUNDED_REAP_CAP_SEC, now=started)
         last_heartbeat_seen: float = started
-        # process.log mtime is a reliable "still working" signal even when the
-        # agent never self-writes heartbeat.json.
-        process_log = watch.workspace / _PROCESS_LOG_NAME
         last_partial_mtime: float = 0.0
         scope = current_cancel_scope()
 
         while True:
-            if scope is not None and scope.cancelled:
-                raise CancelledError(scope.reason)
+            _raise_if_cancelled(scope)
             await asyncio.sleep(cfg.poll_interval_seconds)
-            if scope is not None and scope.cancelled:
-                raise CancelledError(scope.reason)
+            _raise_if_cancelled(scope)
             now = time.monotonic()
             elapsed = now - started
             outcome["elapsed"] = elapsed
@@ -1101,11 +1077,9 @@ class SpecialistSubprocessDispatcher:
             if any(p.exists() for p in watch.done_files):
                 grace_until = now + 30.0
                 while time.monotonic() < grace_until and proc.poll() is None:
-                    if scope is not None and scope.cancelled:
-                        raise CancelledError(scope.reason)
+                    _raise_if_cancelled(scope)
                     await asyncio.sleep(2.0)
-                if scope is not None and scope.cancelled:
-                    raise CancelledError(scope.reason)
+                _raise_if_cancelled(scope)
                 # Still alive after grace — reap it so no orphaned subprocess leaks.
                 if proc.poll() is None:
                     self._kill(proc)
@@ -1128,19 +1102,12 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if EITHER heartbeat.json was refreshed OR
-            # process.log is still growing. The hard wall-clock cap below still
-            # bounds genuinely hung subprocesses.
-            for activity_file in (watch.heartbeat_file, process_log):
-                try:
-                    if not activity_file.exists():
-                        continue
-                    a_mtime = activity_file.stat().st_mtime
-                except OSError:
-                    continue
-                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
-                    last_heartbeat_seen = now
-                    break
+            # Liveness check: alive if any activity signal changed within the
+            # window. The hard wall-clock cap below still bounds genuinely hung
+            # subprocesses.
+            a_mtime = newest_activity(specialist_activity_paths(watch.workspace))
+            if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+                last_heartbeat_seen = now
 
             if (now - last_heartbeat_seen) > cfg.heartbeat_stale_seconds:
                 outcome["stale_heartbeat"] = True

@@ -371,10 +371,7 @@ def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_ru
     recorder.record_budget.assert_called_once_with(
         SweepBudget(
             declared_total_sec=total,
-            granted_total_sec=total,
             rung_cost_sec=5.0,
-            raised=False,
-            gate_active=True,
             deadline=clock.wall() - clock.elapsed + total,
         )
     )
@@ -408,10 +405,7 @@ def test_the_agentx_ladder_keeps_the_declared_budget(sweep_run):
     recorder.record_budget.assert_called_once_with(
         SweepBudget(
             declared_total_sec=9000,
-            granted_total_sec=9000,
             rung_cost_sec=6660.0,
-            raised=False,
-            gate_active=True,
             deadline=clock.wall() - clock.elapsed + 9000,
         )
     )

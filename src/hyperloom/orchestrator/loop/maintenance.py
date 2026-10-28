@@ -30,14 +30,15 @@ async def run_lease_and_db_reclaim(
     elapsed lease budgets.
 
     ``leases_unverifiable`` rides the same summary because it is the other half
-    of that answer: lanes still held by a holder that ended without confirming
-    its cleanup. Nothing decides those -- no identity available to this process
-    survives a served process that setsid's away from it -- so they are retained
-    on purpose. A number that stays put while the queue does not drain is where
-    an operator starts; the remedy for each one is logged once by the diagnostic.
+    of that answer: lanes still held by a holder that ended. A holder gives its
+    lanes back where it writes its terminal row, so these are the ones that
+    release never reached, and nothing decides them -- no identity available to
+    this process survives a served process that setsid's away from it. A number
+    that stays put while the queue does not drain is where an operator starts;
+    the remedy for each one is logged once by the diagnostic.
 
     Args:
-        host: Coordinator exposing ``reconciler`` and ``db``.
+        host: Coordinator exposing ``reconciler``, ``locks`` and ``db``.
         summary: Mutated in place with the per-step counts.
         reason: Log prefix identifying the maintenance caller.
     """
@@ -45,12 +46,13 @@ async def run_lease_and_db_reclaim(
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
         summary["leases_unverifiable"] = report.leases_unverifiable
-        # Whether retained lanes are an accident or the ordinary outcome. Every
-        # portable way to release them automatically was refuted (see
-        # docs/task-containment.md), and the one candidate left is
-        # safety-critical, so this is the number that decides whether anyone
+        # How often a round ends without proving its processes stopped. Lanes
+        # come back either way now, so this measures work that may have escaped
+        # rather than capacity stuck: every portable way to prove a tree gone
+        # was refuted (see docs/task-containment.md) and the one candidate left
+        # is safety-critical, so this is the number that decides whether anyone
         # should build it.
-        unconfirmed, ended = await host.reconciler.cleanup_confirmation_rate()
+        unconfirmed, ended = await host.locks.cleanup_confirmation_rate()
         if ended:
             summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)

@@ -91,7 +91,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    shell_safe_dedupe as shell_safe_dedupe,
+    dedupe_extra_server_args,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
@@ -109,6 +109,8 @@ log = logging.getLogger(__name__)
 
 #: Sub-directory of a variant's slot that its discarded warmup round runs in.
 _WARMUP_ROUND_DIR = "warmup_round"
+#: A variant whose warm-up setup or warm-up YAML could not be built.
+_WARMUP_YAML_BUILD_ERROR = "warmup_yaml_build_error"
 
 
 def _validate_magpie_python_override(value: str) -> str:
@@ -236,7 +238,7 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
         )
         lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
         payload = json.loads(lines[-1]) if lines else {}
-    except Exception:  # noqa: BLE001
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
     status = payload.get("status")
     if status == "ok":
@@ -539,7 +541,7 @@ def _num_gpus_for_config(config_path: Path) -> float:
             cfg = yaml.safe_load(fp) or {}
         envs = (cfg.get("benchmark") or {}).get("envs") or {}
         return float(int(envs.get("TP", 1) or 1))
-    except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):  # best-effort; default to 1 GPU
         return 1.0
 
 
@@ -570,22 +572,19 @@ def _resolve_mn_effective_server_args(
         _variant_envs = _variant_bench.get("envs") or {}
         _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
         return str(_variant_envs.get(_variant_framework_env) or "")
-    except Exception:
+    except (OSError, ValueError, yaml.YAMLError, AttributeError):
         log.debug(
             "grid_runner: failed to read materialized variant args from %s",
             cfg_path,
             exc_info=True,
         )
-        try:
-            with base_yaml_path.open(encoding="utf-8") as _f:
-                _base_cfg = yaml.safe_load(_f) or {}
-            _base_bench = _base_cfg.get("benchmark") or {}
-            _base_envs = _base_bench.get("envs") or {}
-            _base_framework_env = server_args_env_name(_base_bench.get("framework"))
-            _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
-        except Exception:  # noqa: BLE001 - best-effort parity fallback
-            _fallback_inherited_args = ""
-        return shell_safe_dedupe(
+        with base_yaml_path.open(encoding="utf-8") as _f:
+            _base_cfg = yaml.safe_load(_f) or {}
+        _base_bench = _base_cfg.get("benchmark") or {}
+        _base_envs = _base_bench.get("envs") or {}
+        _base_framework_env = server_args_env_name(_base_bench.get("framework"))
+        _fallback_inherited_args = str(_base_envs.get(_base_framework_env) or "")
+        return dedupe_extra_server_args(
             compose_server_args(
                 inherited_args="" if str(base_args_mode).strip().lower() == "replace" else _fallback_inherited_args,
                 base_extra_args=base_extra_args,
@@ -945,7 +944,7 @@ def _sweep_stale_aiter_locks() -> None:
                 sweep.get("dir"),
                 sweep.get("compiler_alive"),
             )
-    except Exception as exc:  # noqa: BLE001 — best-effort hygiene, never blocks the grid
+    except (OSError, RuntimeError) as exc:
         log.debug("grid_runner: aiter lock sweep swallowed: %r", exc)
 
 
@@ -994,13 +993,14 @@ async def _variant_yaml_or_abort(
     """Materialize this variant's Magpie YAML under ``into``, or end the variant on the build error."""
     try:
         return await _variant_yaml(run, at, into=into, lifecycle=lifecycle)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
         error_class = failure_class or getattr(exc, "error_class", "yaml_build_error")
         log.warning(
             "grid_runner: variant %s aborted: %s: %r",
             _variant_tag(run, at),
             error_class,
             exc,
+            exc_info=True,
         )
         _abort_variant(at, _VariantFailure(error_class, repr(exc), f"{error_class}: {exc!r}"))
 
@@ -1033,12 +1033,14 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
             into=at.path,
             lifecycle={"cleanup": True, "pid_dir": str(at.path), "port": int(lifecycle.get("port") or 0)},
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # re-raised as _VariantAborted by _abort_variant
         log.warning(
-            "grid_runner: warmup-before-measure eligibility/materialization failed (%r); running single measured round.",
+            "grid_runner: variant %s aborted: warmup-before-measure eligibility/materialization failed: %r",
+            _variant_tag(run, at),
             exc,
+            exc_info=True,
         )
-        return cold
+        _abort_variant(at, _VariantFailure(_WARMUP_YAML_BUILD_ERROR, repr(exc), f"{_WARMUP_YAML_BUILD_ERROR}: {exc!r}"))
     return _VariantRounds(warmed_cfg_path, lifecycle, True, mn_effective_args)
 
 
@@ -1051,7 +1053,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
         at,
         into=warmup_slot,
         lifecycle={"cleanup": False, "pid_dir": str(at.path), "port": int(rounds.lifecycle.get("port") or 0)},
-        failure_class="warmup_yaml_build_error",
+        failure_class=_WARMUP_YAML_BUILD_ERROR,
     )
     workspaces_before = snapshot_workspaces(warmup_slot)
     started_unix = time.time()
@@ -1754,7 +1756,7 @@ def _attach_grid_launch_evidence(
         if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             "capability_unsupported",
             "yaml_build_error",
-            "warmup_yaml_build_error",
+            _WARMUP_YAML_BUILD_ERROR,
             SPECULATIVE_DECODING_PINNED,
             ServerArgvInvalidError.error_class,
         }:
@@ -1994,7 +1996,7 @@ def _build_variant_yaml(
         combined, args_env=extra_args_env, model_path=target.model_path, variant=variant
     )
     if combined:
-        envs[extra_args_env] = shell_safe_dedupe(combined)
+        envs[extra_args_env] = dedupe_extra_server_args(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base.args_mode == "replace":
         envs[extra_args_env] = ""
     base_envs = _apply_variant_env(envs, variant, base.extra_envs, base.unset_envs)

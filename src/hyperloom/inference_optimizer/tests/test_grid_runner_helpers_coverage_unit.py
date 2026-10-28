@@ -389,6 +389,20 @@ def test_build_variant_yaml_dedupes_repeated_flags(tmp_path: Path) -> None:
     assert "ROCM_AITER_FA" in args, "last-wins should keep variant value"
 
 
+def test_build_variant_yaml_repeated_multi_value_flag_keeps_last(tmp_path: Path) -> None:
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--cuda-graph-bs 1 2 4"}}}),
+        encoding="utf-8",
+    )
+    out = gr._build_variant_yaml(
+        gr.GridRecipe(base_yaml_path=base), _variant("v1", "--cuda-graph-bs 8 16"), output_subdir=tmp_path / "v1"
+    )
+    assert yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] == (
+        "--cuda-graph-bs 8 16"
+    )
+
+
 def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     # SWSPLAT-42358: a legitimate overlay is a single existing directory; it is prepended to PYTHONPATH unchanged.
     base = tmp_path / "base.yaml"
@@ -443,34 +457,6 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
         out = gr._build_variant_yaml(gr.GridRecipe(base_yaml_path=base), variant, output_subdir=tmp_path / "v1")
         envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
         assert "PYTHONPATH" not in envs or bad not in envs.get("PYTHONPATH", ""), bad
-
-
-def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
-    """JSON stays an opaque argv token while unrelated flags dedupe last-wins."""
-    args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
-    out = gr.shell_safe_dedupe(args)
-    assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
-    assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
-
-
-def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
-    """Multi-token flags must not be reassembled as stray positional tokens."""
-    args = "--cuda-graph-bs 1 2 4 --cuda-graph-bs 8 16"
-    out = gr.shell_safe_dedupe(args)
-    assert out == args
-
-
-def test_shell_safe_dedupe_normalizes_equals_form() -> None:
-    """--flag=value and --flag value must dedupe to one (last wins)."""
-    out = gr.shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
-    assert out.count("--attention-backend") == 1, out
-    assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
-    assert "ROCM_ATTN" not in out
-
-
-def test_shell_safe_dedupe_simple_last_wins() -> None:
-    out = gr.shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
-    assert out == "--tp 8 --mem-fraction-static 0.9"
 
 
 def test_compose_server_args_replace_still_applies_remove_args() -> None:

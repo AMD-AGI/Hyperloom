@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_SOURCE,
     DISPOSITION_ATTEMPTED,
     DISPOSITION_DROPPED,
-    DISPOSITION_PENDING,
     PLATEAU_PATH_ADVISORY,
     PLATEAU_PATH_EXIT,
     PRODUCER_ORCHESTRATION,
@@ -172,7 +171,7 @@ def test_policy_is_recorded_not_scavenged(_bound_session):
     recorder.record_policy(
         keep_threshold_pct=3.0,
         config={"keep_gain_threshold_pct": 1.0, "empty_streak_threshold": 2, "lookback": 5},
-        source={"no_keep_streak_threshold": 3, "authoring_enabled": True},
+        source={"no_keep_streak_threshold": 3},
     )
     recorder.finish(exit_reason="budget")
 
@@ -180,7 +179,7 @@ def test_policy_is_recorded_not_scavenged(_bound_session):
     assert set(policy) == {"keep_threshold_pct", ARM_CONFIG, ARM_SOURCE}
     assert policy["keep_threshold_pct"] == 3.0
     assert policy[ARM_CONFIG]["empty_streak_threshold"] == 2
-    assert policy[ARM_SOURCE]["authoring_enabled"] is True
+    assert policy[ARM_SOURCE]["no_keep_streak_threshold"] == 3
     # Never resolved, and so reported as unresolved rather than as an export-time default.
     assert policy[ARM_SOURCE]["discovery_retry_limit"] is None
 
@@ -489,16 +488,6 @@ def test_only_the_first_fault_is_kept(_bound_session):
     assert _ext(_bound_session)["failure"]["message"] == "the cause"
 
 
-def test_crash_closes_the_event_with_the_exception(_bound_session):
-    recorder = make_framework_recorder(macro_cycle=0)
-    recorder.record_attempt("a-1", arm=ARM_CONFIG, outcome="error")
-    recorder.finish_crashed(RuntimeError("serving slot never freed"))
-
-    event = _one(_bound_session)
-    assert event["status"] == "failed"
-    assert "serving slot never freed" in event["ext"]["failure"]["message"]
-
-
 def test_killed_entry_is_recovered_as_interrupted(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_proposal("p-1", arm=ARM_CONFIG, producer=PRODUCER_ORCHESTRATION)
@@ -521,15 +510,6 @@ def test_each_macro_cycle_gets_its_own_event(_bound_session):
     events = _events(_bound_session)
     assert [event["ext"]["macro_cycle"] for event in events] == [0, 1]
     assert [event["ext"]["attempts"][0]["attempt_id"] for event in events] == ["a-0", "a-1"]
-
-
-def test_pending_disposition_is_representable(_bound_session):
-    recorder = make_framework_recorder(macro_cycle=0)
-    recorder.record_proposal("p-1", arm=ARM_CONFIG, producer=PRODUCER_ORCHESTRATION)
-    recorder.settle_proposal("p-1", disposition=DISPOSITION_PENDING, reason="budget_exhausted")
-    recorder.finish(exit_reason="budget")
-
-    assert _ext(_bound_session)["proposals"][0]["terminal"]["disposition"] == DISPOSITION_PENDING
 
 
 @pytest.mark.parametrize(

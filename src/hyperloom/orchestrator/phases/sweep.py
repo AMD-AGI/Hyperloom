@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from typing import TYPE_CHECKING, Any
+from ..kernel import kernel_decisions
 from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
@@ -81,7 +83,7 @@ class SweepPhase(CoordinatorCollaborator):
         # anything on top; the recovery halts the session if it cannot.
         await self._coord.phase_kernel_stack.recover_interrupted_stack_validation()
         # Drain pending KEEP integrates so sweep measures full current_best.
-        if state.has_keep_pending_integrate:
+        if kernel_decisions.has_keep_pending_integrate(state):
             await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._coord.phase_kernel_stack.maybe_validate_positive_needs_review_stack()
@@ -126,7 +128,7 @@ class SweepPhase(CoordinatorCollaborator):
             task = await self._enqueue_internal_conc_sweep_task(
                 reason="phase_entry",
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "SWEEP entry hook: failed to enqueue auto-conc-sweep: %r",
                 exc,

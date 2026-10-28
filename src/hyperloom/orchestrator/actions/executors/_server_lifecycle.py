@@ -20,6 +20,7 @@ from hyperloom.common import rocm_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.proctree import group_members, running
+from hyperloom.inference_optimizer.gpu_types import magpie_reuse_scripts
 
 from ._subprocess_kill import TERM_GRACE_SECONDS, _signal_group
 
@@ -56,17 +57,7 @@ _HOLDERS_REPORTED = 8
 
 
 # Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
-MAGPIE_BUILTIN_SCRIPTS = frozenset(
-    {
-        "vllm_mi300x.sh",
-        "vllm_mi355x.sh",
-        "vllm_gfx12.sh",
-        "sglang_mi300x.sh",
-        "sglang_mi355x.sh",
-        "atom_mi300x.sh",
-        "atom_mi355x.sh",
-    }
-)
+MAGPIE_BUILTIN_SCRIPTS = magpie_reuse_scripts()
 
 # Default HTTP port for the persistent server when ``benchmark.envs.PORT`` is unset; pinned into the per-round YAML so
 # Magpie's reuse keying and our teardown agree.

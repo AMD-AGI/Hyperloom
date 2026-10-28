@@ -47,8 +47,8 @@ async def report_progress(**note: Any) -> None:
         return
     try:
         await reporter(**note)
-    except Exception as exc:  # noqa: BLE001 — a heartbeat never breaks its caller
-        log.debug("task progress note dropped: %r", exc)
+    except Exception as exc:  # outermost heartbeat sink: a heartbeat never breaks its caller
+        log.debug("task progress note dropped: %r", exc, exc_info=True)
 
 
 class OutputActivity:

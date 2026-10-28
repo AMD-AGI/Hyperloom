@@ -13,6 +13,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 
 from ..actions.executors._kernel_agent_tool import HandlerResult
+from . import kernel_decisions
 from .patch_landing import bundle_belongs_to
 
 
@@ -119,7 +120,7 @@ def _fill_integrate_defaults_from_state(
         return resolved
     state = SharedState.load_or_init(session_dir)
 
-    records = state.pending_kernel_integration_records()
+    records = kernel_decisions.pending_kernel_integration_records(state)
     pending_record = _pending_integration_record(records, str(resolved.get("integration_id") or ""))
     if pending_record is None and resolved.get("kernel_id"):
         pending_record = _sole_pending_record_for_kernel(records, resolved)
@@ -316,7 +317,7 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
     pending_record = _pending_integration_record(
-        state.pending_kernel_integration_records(),
+        kernel_decisions.pending_kernel_integration_records(state),
         str(resolved.get("integration_id") or ""),
     )
     if pending_record is not None:

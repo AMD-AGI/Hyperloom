@@ -893,7 +893,7 @@ class RooflineExecutor:
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this run's rows belong to."""
-        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
         from hyperloom.inference_optimizer.session.session_binding import session_is_bound
 
         params = ctx.task.params or {}
@@ -909,7 +909,7 @@ class RooflineExecutor:
             str(getattr(self.shared_state, "phase", "") or "unphased"),
             int(getattr(self.shared_state, "macro_cycle", 0) or 0),
         )
-        return make_sink(event, producer=_RECORDER_PRODUCER)
+        return EventSink(event, producer=_RECORDER_PRODUCER)
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context."""
@@ -952,7 +952,8 @@ class RooflineExecutor:
         returned: Any = None
         try:
             returned = await _reported("profile", lambda: profile_executor(profile_ctx))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one profile sub-executor run
+            log.warning("roofline: profile_executor raised", exc_info=True)
             unusable = _raised(exc)
         else:
             unusable = _classify_profile(returned)
@@ -1086,7 +1087,8 @@ class RooflineExecutor:
         run_index = recorder.begin_analysis_run(attempt_reason=attempt.attempt_reason) if recorder is not None else 0
         try:
             result = await _reported(attempt.label, lambda: trace_analyze_handler(payload, session_dir=session_dir))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # isolation boundary: one trace analysis run
+            log.warning("roofline: trace_analyze_handler raised%s", attempt.context, exc_info=True)
             error_class, message = type(exc).__name__, f"trace_analyze_handler raised{attempt.context}: {exc!r}"
         else:
             if isinstance(result, dict):
@@ -1124,9 +1126,9 @@ class RooflineExecutor:
         with _scoped_env({_COMPUTE_BOUND_PROFILE_ENV: "1"}):
             try:
                 adopted, outcome = await self._compute_bound_attempt(ctx, recorder, arm, analysis.payload)
-            except Exception as exc:  # noqa: BLE001 — fail-soft
+            except Exception as exc:  # isolation boundary: one optional compute-bound re-profile
                 outcome = f"re-profile raised: {exc!r}"
-                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc)
+                log.warning("roofline: compute-bound re-profile failed (%s); keeping original", exc, exc_info=True)
             finally:
                 if recorder is not None:
                     recorder.record_compute_bound_reprofile(attempted=True, adopted=adopted is not None, reason=outcome)
@@ -1284,7 +1286,6 @@ class RooflineExecutor:
             params=params,
             idempotency_key=f"{parent_task.idempotency_key}-profile",
             requires_lanes=list(parent_task.requires_lanes or []),
-            side_effects=list(parent_task.side_effects or []),
             lease_ttl_sec=parent_task.lease_ttl_sec,
         )
         return RunnerContext(

@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 
 # There are no in-place migrations: a database recorded at an older version is never opened.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class OlderCoordinatorDB(RuntimeError):

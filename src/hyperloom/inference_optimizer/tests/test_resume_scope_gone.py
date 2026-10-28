@@ -75,8 +75,8 @@ def _session(tmp_path, running: dict[str, list[str]], *, scope=LOST, expires=PAS
 
 def _lease(db, lane, task_id, scope, expires):
     db.execute(
-        "INSERT INTO leases VALUES (?, ?, ?, 'explore', 4519, ?, ?, ?, ?)",
-        (lane, task_id, task_id, scope, PAST, expires, PAST),
+        "INSERT INTO leases VALUES (?, ?, ?, 'explore', 4519, ?, ?, ?)",
+        (lane, task_id, task_id, scope, PAST, expires),
     )
 
 
@@ -265,8 +265,8 @@ def test_task_holding_leases_in_two_scopes_is_refused_atomically(tmp_path):
 
 def test_gpu_leases_of_the_lost_scope_are_released_and_others_kept(tmp_path):
     path = _session(tmp_path, LOST_SHAPES["explore"])
-    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'explore-1', ?, ?, ?)", (PAST, FUTURE, PAST))
-    _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'unrelated', ?, ?, ?)", (PAST, FUTURE, PAST))
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'explore-1')")
+    _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'unrelated')")
 
     result = confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
 

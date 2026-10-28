@@ -23,6 +23,11 @@ class PRMonitorError(RuntimeError):
     """Raised when a pr_monitor request cannot be completed (CLI exit code 2)."""
 
 
+# Merged/closed PRs are the backport-relevant ones that may already be in the local dev build; semantic audit
+# downstream judges + dedups them.
+_PR_STATE = "all"
+
+
 def _require_http_url(url: str) -> None:
     _base_require_http_url(url, error=PRMonitorError, context="PR Monitor URL")
 
@@ -54,8 +59,8 @@ def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) ->
     return base + path + qs
 
 
-def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
-    """Return ``(status, body_bytes, content_type)``; raise on transport errors."""
+def _http_get(url: str, *, timeout_sec: float) -> bytes:
+    """Return the response body; raise PRMonitorError on HTTP or transport errors."""
     _require_http_url(url)
     req = urllib.request.Request(
         url,
@@ -66,10 +71,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - URL scheme checked above.
-            status = int(getattr(resp, "status", 200) or 200)
-            body = resp.read()
-            content_type = resp.headers.get("Content-Type", "") if resp.headers else ""
-            return status, body, content_type
+            return resp.read()
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
@@ -83,21 +85,16 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
-    """GET and parse JSON body; raise PRMonitorError on >=400 or bad JSON."""
-    status, body, _ = _http_get(url, timeout_sec=timeout_sec)
-    if status >= 400:
-        raise PRMonitorError(f"pr_monitor HTTP {status} at {url}")
-    text = body.decode("utf-8", errors="replace")
+    """GET and parse JSON body; raise PRMonitorError on bad JSON."""
+    text = _http_get(url, timeout_sec=timeout_sec).decode("utf-8", errors="replace")
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise PRMonitorError(f"pr_monitor returned non-JSON at {url}: {exc}; body[:200]={text[:200]!r}") from exc
 
 
-def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
+def _coerce_pr_item(item: dict[str, Any], *, source_url: str) -> GitHubPr:
     """Coerce a pr_monitor list item into the shared GitHubPr record."""
-    if not isinstance(item, dict):
-        raise PRMonitorError(f"pr_monitor item at {source_url} is not a JSON object: {type(item).__name__}")
     # ``/v1/search/prs`` returns match records shaped as ``{"summary": {...pr fields...}, "matched_field": ...,
     # "snippet": ...}``.
     summary = item.get("summary")
@@ -146,15 +143,14 @@ def list_perf_prs(
     *,
     monitor: PRMonitorConfig,
     limit: int = 5,
-    state: str = "open",
 ) -> list[GitHubPr]:
-    """List PRs from pr_monitor."""
+    """List PRs in every state from pr_monitor."""
     try:
         slug = repo_slug(repo_url)
     except ValueError as exc:
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
-    query: dict[str, Any] = {"state": state, "limit": limit}
+    query: dict[str, Any] = {"state": _PR_STATE, "limit": limit}
     url = _build_url(monitor.base_url, f"/v1/repos/{slug}/prs", query)
     payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
@@ -170,7 +166,6 @@ def search_perf_prs_via_pr_monitor_search(
     monitor: PRMonitorConfig,
     query: str,
     limit: int = 5,
-    state: str = "open",
 ) -> list[GitHubPr]:
     """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
     try:
@@ -181,7 +176,7 @@ def search_perf_prs_via_pr_monitor_search(
     url = _build_url(
         monitor.base_url,
         "/v1/search/prs",
-        {"q": query, "repo": slug, "state": state, "limit": limit},
+        {"q": query, "repo": slug, "state": _PR_STATE, "limit": limit},
     )
     payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)

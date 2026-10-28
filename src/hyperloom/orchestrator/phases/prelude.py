@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from itertools import chain
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.common.coerce import to_float
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradingAnchor, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
@@ -46,8 +47,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
     Verdict,
 )
-from ..actions.executors._launch_restatement import config_launch_restated_by
-from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..actions.executors.baseline import revert_warm_kernel_patches
+from ..actions.executors.explore import restates_the_baseline_launch
 from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task, TaskSpec
@@ -60,7 +61,7 @@ from .warm_replay_stack import (
     commit_warm_replay_overlays,
     committing_overlays,
     replayed_patch_refs as _replayed_patch_refs,
-    uncommit_promoted_overlays,
+    restore_recipe_trees,
     warm_patch_trees as _warm_patch_trees,
     warm_replay_source_layer,
 )
@@ -98,6 +99,15 @@ _WARM_REPLAY_DONOR_FIELDS = (
     "donor_gain_pct",
     "donor_breakdown_link",
 )
+
+
+class _KernelLaunchOverlay(NamedTuple):
+    """The launch config a kernel plan contributes, with the envs and targets of each contributing entry by index."""
+
+    extra_server_args: str
+    extra_envs: dict[str, str]
+    entry_envs: dict[int, dict[str, str]]
+    entry_targets: dict[int, list[str]]
 
 
 def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any]]]) -> tuple[str, dict[str, str]]:
@@ -244,7 +254,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def warm_recipe_proven_items(self) -> list[dict[str, str]]:
@@ -528,17 +538,11 @@ class PreludePhase(CoordinatorCollaborator):
                 "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in kernel_id)[:96] or "warm_kernel"
             )
             snapshot_dir = Path(self.session_dir) / "runtime" / "warm_kernel_materialized" / safe_kernel_id
-            try:
-                materialized = materialize_unified_patch_snapshot(
-                    patch_path=patch_path,
-                    repo_root=repo_root,
-                    snapshot_dir=snapshot_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "status": "failed",
-                    "error": (f"warm replay unified diff materialization failed: {type(exc).__name__}: {exc}"),
-                }
+            materialized = materialize_unified_patch_snapshot(
+                patch_path=patch_path,
+                repo_root=repo_root,
+                snapshot_dir=snapshot_dir,
+            )
             payload["snapshot_dir"] = materialized
             payload["kernel_repo"] = str(repo_root)
 
@@ -647,29 +651,36 @@ class PreludePhase(CoordinatorCollaborator):
         self.shared_state.warm_replay_outcome = combined
         return kernel_outcome
 
-    def _preview_current_kernel_config(self, kb: Any) -> dict[str, Any]:
-        """Resolve the kernel launch overlay without mutating target files."""
+    def _kernel_launch_overlay(self, plan: list[dict[str, Any]]) -> _KernelLaunchOverlay:
+        """Resolve the launch overlay of the plan entries that contribute one, without mutating target files.
+
+        A GEMM entry contributes only with an env bundle; any other entry only when its patch targets resolve.
+        """
+        entry_envs: dict[int, dict[str, str]] = {}
+        entry_targets: dict[int, list[str]] = {}
         configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(self._collect_warm_kernel_plan(kb)):
+        for index, entry in enumerate(plan):
             envs = self._warm_kernel_extra_envs(entry)
             if entry.get("column") == "gemm":
                 if not envs:
                     continue
             else:
                 targets = self._resolve_kernel_target_paths(entry)
-                if not any(targets):
+                if not targets:
                     continue
+                entry_targets[index] = targets
+            entry_envs[index] = envs
             configs.append(
                 (
                     f"kernel[{index}]",
                     {
-                        "extra_server_args": str((entry.get("meta") or {}).get("extra_server_args") or "").strip(),
+                        "extra_server_args": str(entry["meta"].get("extra_server_args") or "").strip(),
                         "extra_envs": envs,
                     },
                 )
             )
         args, envs = _merge_named_current_recipe_configs(configs)
-        return {"extra_server_args": args, "extra_envs": envs}
+        return _KernelLaunchOverlay(args, envs, entry_envs, entry_targets)
 
     async def _prepare_warm_kernel_kb(self, kb: Any = None) -> dict[str, Any]:
         """Prepare the Recipe's kernel section for the combined replay benchmark."""
@@ -684,19 +695,13 @@ class PreludePhase(CoordinatorCollaborator):
         # resume.
         try:
             state.save(self.session_dir)
-        except Exception as exc:
+        except OSError as exc:
             log.warning("warm-kernel KB: one-shot state save failed", exc_info=True)
             return self._set_warm_kernel_outcome(
                 {"status": "error", "reason": (f"kernel_attempt_state_persist_failed:{type(exc).__name__}")}
             )
         if kb is None:
-            try:
-                kb = self._open_warm_kernel_section()
-            except Exception as exc:
-                log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
-                return self._set_warm_kernel_outcome(
-                    {"status": "skipped", "reason": f"recipe_section_unavailable:{type(exc).__name__}"}
-                )
+            kb = self._open_warm_kernel_section()
         if kb is None or not kb.active:
             return self._set_warm_kernel_outcome({"status": "skipped", "reason": "no_kernel_section"})
         plan = self._collect_warm_kernel_plan(kb)
@@ -706,7 +711,7 @@ class PreludePhase(CoordinatorCollaborator):
             outcome = self._set_warm_kernel_outcome({"status": "empty"})
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("warm-kernel KB: empty-state save failed", exc_info=True)
             return outcome
         return self._apply_warm_kernel_plan(plan)
@@ -715,56 +720,25 @@ class PreludePhase(CoordinatorCollaborator):
         state = self.shared_state
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
-        prepared_envs: dict[int, dict[str, str]] = {}
-        prepared_targets: dict[int, list[str]] = {}
-        kernel_configs: list[tuple[str, Mapping[str, Any]]] = []
-        for index, entry in enumerate(plan):
-            envs = self._warm_kernel_extra_envs(entry)
-            if entry.get("column") == "gemm":
-                if not envs:
-                    continue
-            else:
-                targets = self._resolve_kernel_target_paths(entry)
-                if not targets:
-                    continue
-                prepared_targets[index] = targets
-            prepared_envs[index] = envs
-            kernel_configs.append(
-                (
-                    f"kernel[{index}]",
-                    {
-                        "extra_server_args": str(entry["meta"].get("extra_server_args") or "").strip(),
-                        "extra_envs": envs,
-                    },
-                )
-            )
-        kernel_args, merged_envs = _merge_named_current_recipe_configs(kernel_configs)
+        overlay = self._kernel_launch_overlay(plan)
         state.warm_replay_pending = {
             **state.warm_replay_pending,
             "status": "preparing_kernel",
             "kernel_apply_results": [],
             "kernel_snapshots": [],
         }
-        try:
-            state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
-            return self._set_warm_kernel_outcome(
-                {"status": "error", "reason": f"kernel_pending_state_persist_failed:{type(exc).__name__}"}
-            )
+        state.save(self.session_dir)
         for index, entry in enumerate(plan):
-            if not (entry.get("source_paths") or entry.get("patch_path")):
-                entry["decision"] = "DEFERRED"
-                continue
             # Every column carries its env bundle: a fusion needs its switches to activate the patched path, and a
             # GEMM is nothing but its bundle.
-            envs = prepared_envs.get(index, {})
+            envs = overlay.entry_envs.get(index, {})
             if envs:
                 entry["extra_envs"] = envs
             # GEMM is parameter-shaped: its env bundle is the whole deliverable, so there is nothing to stage on disk.
             if entry.get("column") == "gemm":
                 entry["decision"] = "PENDING" if envs else "DEFERRED"
                 continue
-            targets = prepared_targets.get(index, [])
+            targets = overlay.entry_targets.get(index, [])
             if not targets:
                 entry["decision"] = "DEFERRED"
                 if entry.get("resolution_error"):
@@ -772,7 +746,9 @@ class PreludePhase(CoordinatorCollaborator):
                 continue
             if not self._land_warm_kernel_entry(entry, targets, kernel_snapshots, applied):
                 break
-        return self._settle_warm_kernel_preparation(plan, applied, kernel_snapshots, kernel_args, merged_envs)
+        return self._settle_warm_kernel_preparation(
+            plan, applied, kernel_snapshots, overlay.extra_server_args, overlay.extra_envs
+        )
 
     def _land_warm_kernel_entry(
         self, entry: dict[str, Any], targets: list[str], snapshots: list[dict[str, Any]], applied: list[dict[str, Any]]
@@ -789,14 +765,14 @@ class PreludePhase(CoordinatorCollaborator):
                 "kernel_apply_results": list(applied),
             }
             state.save(self.session_dir)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             log.warning("warm-kernel KB: pre-mutation snapshot persist failed for %s", targets, exc_info=True)
             entry["decision"] = "ERROR"
             entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
             return False
         try:
             apply_result = self._apply_warm_kernel_patch(entry, targets[0])
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: one warm-kernel entry's apply, marked ERROR and unwound
             log.warning("warm-kernel KB: apply failed for %s", targets[0], exc_info=True)
             entry["decision"] = "ERROR"
             entry["apply_result"] = {"exception": f"{type(exc).__name__}: {exc}"[:300]}
@@ -881,7 +857,7 @@ class PreludePhase(CoordinatorCollaborator):
         )
         try:
             state.save(self.session_dir)
-        except Exception as exc:
+        except OSError as exc:
             log.warning("warm-kernel KB: prepared state save failed", exc_info=True)
             return self._warm_kernel_persist_failure(outcome, exc, applied, snapshots, pending)
         return outcome
@@ -910,7 +886,7 @@ class PreludePhase(CoordinatorCollaborator):
         self._set_warm_kernel_outcome(failed)
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.warning("warm-kernel KB: rollback state save failed", exc_info=True)
         return failed
 
@@ -934,7 +910,8 @@ class PreludePhase(CoordinatorCollaborator):
         config = config_kb.read()
         args = str(config.get("extra_server_args") or "")
         envs = dict(config.get("extra_envs") or {})
-        kernel_config = self._preview_current_kernel_config(kernel)
+        kernel_overlay = self._kernel_launch_overlay(self._collect_warm_kernel_plan(kernel))
+        kernel_config = {"extra_server_args": kernel_overlay.extra_server_args, "extra_envs": kernel_overlay.extra_envs}
         combined_args, combined_envs = _merge_named_current_recipe_configs(
             [
                 ("config", config),
@@ -1005,7 +982,7 @@ class PreludePhase(CoordinatorCollaborator):
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:
+        except Exception as exc:  # isolation boundary: the warm-kernel preparation, recorded as the kernel outcome
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {"status": "error", "errors": 1, "reason": f"{type(exc).__name__}: {exc}"[:300]}
         if self._refused_dirty_warm_kernel(kernel):
@@ -1047,7 +1024,7 @@ class PreludePhase(CoordinatorCollaborator):
             return None
         try:
             sdk_replay = self._read_current_recipe_replay()
-        except Exception as exc:  # noqa: BLE001 — current replay fails closed
+        except (OSError, ValueError, RuntimeError, AttributeError, TypeError) as exc:  # current replay fails closed
             self._skip_warm_replay(
                 code=SKIP_RECIPE_READ_FAILED,
                 outcome={
@@ -1317,12 +1294,10 @@ class PreludePhase(CoordinatorCollaborator):
         try:
             from hyperloom.inference_optimizer.grid_server_args import validate_warm_replay_context_length
 
-            validated_args, workload_compatibility = validate_warm_replay_context_length(
+            workload_compatibility = validate_warm_replay_context_length(
                 combined_args, state.framework, int(state.isl or 0), int(state.osl or 0), state.max_model_len or None
             )
-            if validated_args != combined_args:
-                raise RuntimeError("warm replay context preflight must not mutate config")
-        except (ValueError, RuntimeError) as exc:
+        except ValueError as exc:
             rollback = self._unwind_warm_kernel_half(overlay)
             target_workload_shape = {
                 "conc": int(state.conc or 0),
@@ -1439,7 +1414,7 @@ class PreludePhase(CoordinatorCollaborator):
         }
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("combined warm replay pending save failed", exc_info=True)
         # Opened after the outcome is persisted so the request block reads the
         # donor identity the outcome just stamped, and a session killed between
@@ -1497,31 +1472,8 @@ class PreludePhase(CoordinatorCollaborator):
 
     def rollback_combined_warm(self, result: dict[str, Any], task: "Task | None") -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        restores: list[dict[str, Any]] = []
         pending = self.shared_state.warm_replay_pending
-        for tree in _warm_patch_trees(result, pending):
-            target = str(tree.get("root") or "")
-            if not target:
-                continue
-            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
-            recipe_manifest = tree.get("snapshot_manifest")
-            backups = list(tree.get("nogit_backups") or [])
-            if not bool(tree.get("mutated", True)):
-                # An overlay the tree already carried applies as a no-op, writing
-                # nothing and so owing nothing. A record predating the flag reads as
-                # written-to, and still has to answer with a channel below.
-                continue
-            if not recipe_manifest and not backups:
-                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
-                continue
-            restores.append(
-                _revert_warm_patch_state(
-                    target,
-                    pre_sha=str(tree.get("pre_sha") or ""),
-                    snapshot_manifest=recipe_manifest,
-                    nogit_backups=backups,
-                )
-            )
+        restores = restore_recipe_trees(result, pending)
         params = task.params if task is not None else {}
 
         def _kernel_rows(key: str, pending_key: str) -> list[Any]:
@@ -1657,7 +1609,7 @@ class PreludePhase(CoordinatorCollaborator):
             else:
                 try:
                     eval_out = parse_eval_results(root)
-                except Exception as exc:  # noqa: BLE001 — an unreadable eval is "no verdict"
+                except (OSError, AttributeError, TypeError, ValueError) as exc:  # an unreadable eval is "no verdict"
                     eval_out = {"error": f"eval parse raised: {type(exc).__name__}"}
                 parsed = eval_out.get("accuracy")
                 if isinstance(parsed, (int, float)):
@@ -1862,15 +1814,15 @@ class PreludePhase(CoordinatorCollaborator):
     ) -> bool:
         """Skip a replay whose launch would be the baseline's own; True when it did.
 
-        Patches and kernel items change the code, which no argv comparison sees,
+        Patches and kernel items change the code, which no launch comparison sees,
         so a replay carrying any of them always runs. So does one under reference
-        launch controls: materialization re-applies them to the baseline config,
-        so the replay's launch is not that config's argv plus the request.
+        launch controls: materialization rebuilds the args from the reference, so
+        the replay's launch is not the baseline config plus the request.
         """
         state = self.shared_state
         if code_changes or state.reference_launch_controls:
             return False
-        if not config_launch_restated_by(str(state.baseline_config_path or ""), args, envs, str(state.framework or "")):
+        if not restates_the_baseline_launch(state, args, envs):
             return False
         log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
         self._skip_warm_replay(
@@ -2336,7 +2288,7 @@ class PreludePhase(CoordinatorCollaborator):
                     tick=int(state.tick or 0),
                 )
             )
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.exception("warm-replay journal append failed")
 
     def _reject_warm_replay_as_drift(
@@ -2421,7 +2373,7 @@ class PreludePhase(CoordinatorCollaborator):
                 rl_task.kind,
                 rl_task.task_id,
             )
-        except Exception as exc:
+        except (sqlite3.Error, TypeError, ValueError) as exc:
             log.exception(
                 "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
                 exc,
@@ -2437,14 +2389,12 @@ class PreludePhase(CoordinatorCollaborator):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def enqueue_internal_analysis_task(
-        self, *, reason: str, inline_event: str = "", idem_scope: str = ""
-    ) -> "Task | None":
+    async def enqueue_internal_analysis_task(self, *, reason: str, idem_scope: str = "") -> "Task | None":
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
         internal-analysis-<reason><idem_scope>; ``idem_scope`` separates repeated triggers that share a reason.
         Returns None when the stack cannot produce a GPU trace for it to analyze.
         """
-        params = self.internal_analysis_params(reason=reason, inline_event=inline_event)
+        params = self.internal_analysis_params(reason=reason)
         if params is None:
             return None
         kind = self.internal_analysis_kind()

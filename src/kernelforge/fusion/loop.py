@@ -333,8 +333,8 @@ def _campaign_verdict(campaign_fn: CampaignFn, recipe: Recipe, experience: str) 
         return campaign_fn(recipe, experience)
     except FusionAbort:
         raise
-    except Exception as e:  # noqa: BLE001 — a campaign crash costs one recipe.
-        log.error("campaign for %s raised %s: %s", recipe.pattern_id, type(e).__name__, e)
+    except Exception as e:  # isolation boundary: one recipe's campaign
+        log.exception("campaign for %s raised %s: %s", recipe.pattern_id, type(e).__name__, e)
         return _failed_campaign(f"{type(e).__name__}: {e}").result
 
 

@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "The KernelForge enforced development loop: build, SNR correctness gate, benchmark, hardware-counter (PMC) analysis, and a measured keep-or-revert decision."
+    "description": "The KernelForge enforced development loop: build, SNR correctness gate, benchmark, register check, and a measured keep-or-revert decision."
     "keywords": "KernelForge, optimization loop, PMC, wait/MFMA ratio, SNR gate, occupancy, VGPR, roofline, measurement-driven"
 ---
 
@@ -17,7 +17,9 @@ blocked by the system, so no change is ever accepted without measured evidence.
 2. **SNR pre-filter** — run the correctness driver; a change must clear the
    signal-to-noise threshold (default 30 dB) before it can be benchmarked.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
-4. **PMC analysis** — read hardware counters and classify the bottleneck.
+4. **Register check** — read the candidate's VGPR usage from the build and record
+   it with the measurements. Hardware counters are not read per candidate: the
+   Analysis Agent profiles the current best, and planning reads that evidence.
 5. **Accept** (assembly only) — run the task's own `compile_command`, then its
    `correctness_command`, stopping at the first failure, and judge the
    `numerical_validation` evidence the assembly backend's contract requires.

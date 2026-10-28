@@ -175,6 +175,7 @@ def test_profile_argument_writers_only_run_through_the_sealed_composer():
         "_apply_framework_profile": (_profile_setup, "prepare_profile"),
         "prepare_profile": (_workload_envs, "_shape_request_window"),
         "apply_atom_profile_caps": (_workload_envs, "_restate_profile_capture"),
+        "fit_capture_to_speculative": (_workload_envs, "_restate_profile_capture"),
     }
     calls = {name: [] for name in owners}
     for path in sorted(_PACKAGE.rglob("*.py")):

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import builtins
 import io
 import os
@@ -199,3 +200,26 @@ def isolated_provider_registry(monkeypatch):
     registry.discover_agent_providers()
     monkeypatch.setattr(registry, "_providers", dict(registry._providers))
     monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+
+
+def patch_iteration_name(monkeypatch, name: str, value) -> None:
+    """Bind ``value`` for ``name`` in every iteration module that looks it up.
+
+    The iteration loop's stages were split across modules, so a name the loop
+    reads is bound in more than one of them; patching one leaves the others on
+    the real implementation.
+    """
+    from kernelforge.loop import iteration
+
+    patched = 0
+    for module_name in iteration.ITERATION_MODULES:
+        module = importlib.import_module(f"kernelforge.loop.iteration.{module_name}")
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+            patched += 1
+    assert patched, f"no iteration module binds {name}"
+
+
+def silence_jit_rebuild(monkeypatch) -> None:
+    """A unit test never rebuilds the JIT cache."""
+    patch_iteration_name(monkeypatch, "force_jit_rebuild", lambda _files: None)

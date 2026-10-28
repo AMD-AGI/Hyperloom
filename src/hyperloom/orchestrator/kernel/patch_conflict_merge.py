@@ -538,8 +538,8 @@ async def _resolve_conflicts(
             # The resolver is an injected callable reaching a network and an
             # optional SDK; its failures share no base class, and an escape
             # would abort integration with a marked-up tree still on disk.
-            except Exception as failure:  # noqa: BLE001 - a broken resolver costs the lane, nothing else
-                log.warning("conflict resolver failed for %s: %s", relative, failure)
+            except Exception as failure:  # isolation boundary: one lane patch's conflict resolution
+                log.warning("conflict resolver failed for %s: %s", relative, failure, exc_info=True)
                 return strategy, f"{relative}: resolver call failed ({failure!r})"
             if error:
                 return strategy, error

@@ -441,13 +441,13 @@ class TestFlyDSLTargetArch(unittest.TestCase):
     """FLYDSL_TARGET_ARCH comes from the shared board table, not a copy in this tool."""
 
     def test_every_supported_board_gets_the_table_arch(self) -> None:
-        from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+        from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
 
-        for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
+        for product, board in AMD_GPU_BOARDS.items():
             self.assertEqual(
-                _flydsl_kernel_params("", board).get("FLYDSL_TARGET_ARCH"),
-                arch,
-                board,
+                _flydsl_kernel_params("", product).get("FLYDSL_TARGET_ARCH"),
+                board.gfx,
+                product,
             )
 
     def test_an_unsupported_board_gets_no_arch(self) -> None:

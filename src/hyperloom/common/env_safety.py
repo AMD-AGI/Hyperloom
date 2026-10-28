@@ -17,7 +17,7 @@ from hyperloom.common.env import env_str
 from hyperloom.common.git_safety import trusted_admin_dir
 from hyperloom.common.fs_utils import rewrite_lines_nofollow
 
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 import json
 import logging
@@ -169,6 +169,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
+        "DSH_MODEL",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
@@ -260,10 +261,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "USER_DATA_PATH",
     }
 )
-
-# GPU visibility masks: setting one selects the hardware rather than tuning it.
-# Single definition in ``hyperloom.common.visible_devices``.
-GPU_MASK_ENV_NAMES = _GPU_MASK_ENV_NAMES
 
 # Env names an untrusted external source (reference recipe, framework-switch manifest) may never set: shell-unsafe
 # vars plus the workload/benchmark keys the optimizer's CLI flags own — setting one retargets the benchmark instead of
@@ -781,7 +778,6 @@ __all__ = [
     "BLOCKED_UNTRUSTED_ENV_NAMES",
     "BLOCKED_VARIANT_ENV_NAMES",
     "FILE_REFERENCING_ENV_PREFIXES",
-    "GPU_MASK_ENV_NAMES",
     "OPERATOR_EXTRA_ENV_VAR",
     "SENSITIVE_ENV_NAME_MARKERS",
     "build_benchmark_env",

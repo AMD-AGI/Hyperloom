@@ -17,7 +17,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
@@ -45,7 +46,7 @@ def _event(session_dir: Path) -> dict[str, Any]:
 def _ext(session_dir: Path) -> dict[str, Any]:
     """Assemble the lane's ``ext`` the way finalize would, since an open event holds only fragments."""
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(),
+        event_parts(ENABLEMENT_EVENT_SECTIONS),
         event=enablement_event.enablement_event_id(),
     )
     return ext
@@ -614,8 +615,6 @@ def test_the_archive_merges_onto_the_round_the_dispatch_opened(_bound_session):
         {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"},
         {"path": "reports/enablement/spec-1/server.log", "role": "server_log"},
     ]
-    # Read out of the manifest, so it cannot name a copy the manifest lacks.
-    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
     # The round's own paths stay, as identity rather than as a way to fetch.
     assert rows[0]["patches_applied"] == ["/s/patches/moe.diff"]
 
@@ -637,7 +636,6 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
 
     row = _ext(_bound_session)["attempts"]["rows"][0]
     assert row["files"] == []
-    assert row["accepted_config_path"] is None
 
 
 def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):
@@ -994,9 +992,9 @@ def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_se
         },
         "enablement_mode": "all",
     }
-    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+    collected = collect_enablement(_Path(str(_bound_session)), state)
 
-    assert collected["kept_patches"] == ["a.patch"]
+    assert [st["path"] for st in collected["recipe_steps"] if st["kind"] == "patch"] == ["a.patch"]
     assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
 
 
@@ -1037,14 +1035,12 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
         },
         "enablement_mode": "all",
     }
-    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+    collected = collect_enablement(_Path(str(_bound_session)), state)
 
     blob = _json.dumps(collected)
     assert "/authoring/ws" not in blob, blob
-    # ``framework_root`` stays: it is the recipe's declared subject, and the
-    # setting script exports it. What may not carry a host path is a field with
-    # no use for one -- the step's resolved root and the artifact's install
-    # target, both of which the rules reach through ``root_id`` instead.
+    # No field carries a host path it has no use for -- the step's resolved root
+    # and the artifact's install target are both reached through ``root_id``.
     steps = collected["recipe_steps"]
     assert all("root" not in st for st in steps if st.get("kind") == "patch"), steps
     assert all("target" not in a for a in collected["kept_artifacts"]), collected["kept_artifacts"]

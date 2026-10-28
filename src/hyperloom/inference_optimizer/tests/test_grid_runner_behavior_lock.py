@@ -534,6 +534,28 @@ class TestAutoWarmupTeardown:
         assert teardown_calls[0]["framework"] == "sglang"
         assert "run_grid_warmup_round_failed" in results[0].nonfatal_warnings
 
+    def test_warmup_setup_failure_fails_the_variant_instead_of_measuring_it_cold(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        state = {"n": 0}
+
+        def _broken_lifecycle(cfg_path):
+            raise ValueError("lifecycle probe broke")
+
+        def _run(cmd, *a, **k):
+            state["n"] += 1
+            out_idx = cmd.index("--output-dir")
+            _valid_workspace(Path(cmd[out_idx + 1]))
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        monkeypatch.setattr(sl, "resolve_lifecycle_params", _broken_lifecycle)
+        results, teardown_calls = self._run_capture_teardown(_run, base, tmp_path / "out")
+        assert (results[0].status, results[0].error_class) == ("failed", "warmup_yaml_build_error")
+        assert results[0].error == "warmup_yaml_build_error: ValueError('lifecycle probe broke')"
+        assert state["n"] == 0
+        assert teardown_calls == []
+
     def test_measured_round_timeout_tears_down_once(self, tmp_path, monkeypatch):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
         base = tmp_path / "base.yaml"

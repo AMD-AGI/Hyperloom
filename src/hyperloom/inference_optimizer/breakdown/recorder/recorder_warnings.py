@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from hyperloom.plugs import progress as _progress
 
 from ...session.session_binding import SessionNotBoundError
 from .trace import trace_skip
@@ -100,6 +101,7 @@ def note_failure(
         f" while {detail}" if detail else "",
     )
 
+    _progress.warn("recorder_write_failed", f"{section} could not be recorded ({type(error).__name__})")
     _parking.active = True
     try:
         from ...session.sbd_v6 import record_write_warning

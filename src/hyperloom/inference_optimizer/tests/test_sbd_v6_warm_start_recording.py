@@ -154,18 +154,6 @@ def test_a_seed_only_match_is_a_third_state_and_not_a_bad_status(_bound_session)
     assert event["ext"]["matched"]["canonical_id"] == CID
 
 
-def test_a_lookup_that_broke_is_separated_from_one_that_found_nothing(_bound_session):
-    _recorder().finish(match_status=MATCH_MISS, error="RecipeStoreTimeout")
-
-    event = _event(_bound_session)
-    assert event["status"] == "failed"
-    assert event["ext"]["failure"] == {
-        "stage": "lookup",
-        "error_class": "RecipeStoreTimeout",
-        "message": "",
-    }
-
-
 def test_a_degraded_tier_is_not_reported_as_exact(_bound_session):
     recorder = _recorder()
     recorder.finish(match_status=MATCH_HIT, matched=_matched(tier="compatible_framework_version"))
@@ -300,13 +288,14 @@ def test_finalize_closes_a_lookup_that_outlived_its_process(_bound_session):
 
 
 def test_the_closing_fragment_carries_only_exported_fields(_bound_session):
-    from hyperloom.inference_optimizer.breakdown.recorder.assembler import warm_start_event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.sections import WARM_START_EVENT_SECTIONS
     from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import SECTION_EVENT
 
     recorder = _recorder()
     recorder.finish(match_status=MATCH_MISS)
 
-    rows = warm_start_event_parts(recorder.event_id)[SECTION_EVENT]
+    rows = event_parts(WARM_START_EVENT_SECTIONS, event=recorder.event_id)[SECTION_EVENT]
     assert sorted({key for row in rows for key in row}) == [
         "end_time",
         "event_id",

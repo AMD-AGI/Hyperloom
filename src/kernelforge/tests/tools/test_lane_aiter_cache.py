@@ -86,7 +86,7 @@ def _implementer_through(backend):
     """Stand in for make_agent_fn, running one real backend session per call."""
 
     def make_agent(*_args, **_kwargs):
-        async def agent(kernel_path: str, plan: str) -> str:
+        async def agent(kernel_path: str, plan: str, session_sink: dict | None = None) -> str:
             await backend.run(
                 AgentRunSpec(
                     system_prompt="implementer",
@@ -97,6 +97,7 @@ def _implementer_through(backend):
             )
             return plan
 
+        agent.close = lambda: None
         return agent
 
     return make_agent

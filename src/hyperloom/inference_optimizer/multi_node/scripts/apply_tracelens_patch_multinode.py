@@ -25,6 +25,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -391,7 +392,7 @@ def _apply_on_pod(
     except Exception as e:  # noqa: BLE001 - actor must never raise
         result["status"] = "failed"
         result["error"] = f"unexpected: {type(e).__name__}: {e}"
-        _log(result["error"])
+        _log(f"{result['error']}\n{traceback.format_exc().rstrip()}")
         return result
     finally:
         result["elapsed_sec"] = round(time.time() - started, 3)
@@ -516,7 +517,8 @@ def main() -> int:
             sglang_version_pin=args.sglang_version_pin or None,
             patch_set=args.patch_set,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 - outermost CLI main: the Ray fan-out, reported as failed JSON
+        _log(f"ray fan-out aborted:\n{traceback.format_exc().rstrip()}")
         print(
             json.dumps(
                 {

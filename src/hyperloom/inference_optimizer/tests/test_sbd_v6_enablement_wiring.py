@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
-from hyperloom.inference_optimizer.breakdown.recorder.assembler import enablement_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.sections import ENABLEMENT_EVENT_SECTIONS
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -81,7 +82,7 @@ def _events(session_dir: Path) -> list[dict[str, Any]]:
 def _ext() -> dict[str, Any]:
     """The lane's assembled ``ext``, whether or not it has closed yet."""
     ext, _status = enablement_event.assemble_enablement_ext(
-        enablement_event_parts(),
+        event_parts(ENABLEMENT_EVENT_SECTIONS),
         event=enablement_event.enablement_event_id(),
     )
     return ext
@@ -432,7 +433,6 @@ async def test_a_kept_round_does_not_close_the_lane(_bound_session):
     assert row["validation_pending"] is True
     assert row["landed"] is False
     assert row["files"] == []
-    assert row["accepted_config_path"] is None
 
 
 @pytest.mark.asyncio
@@ -456,7 +456,6 @@ async def test_the_rearm_hands_the_round_its_archive(_bound_session):
     # The archive and the verdict are two calls on one tick, onto one row.
     assert len(rows) == 1
     assert {"path": "reports/enablement/spec-1/launch_config.yaml", "role": "launch_config"} in rows[0]["files"]
-    assert rows[0]["accepted_config_path"] == "reports/enablement/spec-1/launch_config.yaml"
     assert rows[0]["status"] == "kept"
 
 
@@ -481,7 +480,6 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     # nothing landed. The round is still ruled.
     row = _ext()["attempts"]["rows"][0]
     assert "files" not in row
-    assert "accepted_config_path" not in row
     assert row["status"] == "reverted"
 
 

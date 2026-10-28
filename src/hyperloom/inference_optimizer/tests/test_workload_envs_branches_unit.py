@@ -732,3 +732,154 @@ def test_the_cli_and_the_orchestrator_read_one_set_of_workload_defaults():
     orchestrator_src = Path(we.__file__).read_text(encoding="utf-8")
     assert "inference_optimizer.cli import parser" not in orchestrator_src
     assert "inference_optimizer.cli.parser" not in orchestrator_src
+
+
+# --- xDiT profile materialization: patch gate, flags, and status envs ---
+
+
+def _xdit_profile_bench(tmp_path, monkeypatch, *, patch_ok, workload_args=None):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: patch_ok)
+    envs = {"PROFILE": "1"}
+    if workload_args is not None:
+        envs["EXTRA_XDIT_ARGS"] = workload_args
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": envs}}),
+        encoding="utf-8",
+    )
+    return _materialize(src, tmp_path / "out")
+
+
+def test_xdit_profile_patched_sets_capture_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in bench["envs"]
+
+
+def test_xdit_profile_unpatched_falls_back_to_safe_flags(monkeypatch, tmp_path):
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=False)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" not in args
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert bench["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+
+
+def test_xdit_profile_preserves_config_declared_workload_args(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=workload)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--model tencent/HunyuanVideo" in args
+    assert "--num_frames 5" in args
+    assert "--num_inference_steps 4" in args
+    assert "--profile_capture_phase" in args
+
+
+def test_xdit_profile_append_is_idempotent_on_rematerialization(monkeypatch, tmp_path):
+    workload = "--model tencent/HunyuanVideo --num_frames 5 --num_inference_steps 4"
+    already_profiled = f"{workload} --profile_wait 1 --profile_capture_phase --profile_with_stack"
+    bench = _xdit_profile_bench(tmp_path, monkeypatch, patch_ok=True, workload_args=already_profiled)
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert args.count("--profile_wait") == 1
+    assert args.count("--profile_capture_phase") == 1
+    assert "--model tencent/HunyuanVideo" in args
+
+
+def test_xdit_profile_kill_switch_skips_patcher(monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    called = []
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: called.append(1) or True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "xdit", "model": "/m", "envs": {"PROFILE": "1"}}}),
+        encoding="utf-8",
+    )
+    bench = _materialize(src, tmp_path / "out")
+    assert not called
+    assert "--profile_capture_phase" not in bench["envs"].get("EXTRA_XDIT_ARGS", "")
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+
+
+def test_xdit_profile_flags_survive_replace_mode(monkeypatch, tmp_path):
+    """replace_args must not wipe --profile_wait; the re-assertion restores it.
+
+    The base YAML carries --num_inference_steps 4 so the test can verify
+    that only the profiler flags are restored, not the entire pre-replace string.
+    """
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {"PROFILE": "1", "EXTRA_XDIT_ARGS": "--num_inference_steps 4"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--use_cfg_parallel", args_mode="replace"),
+    )
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" in args
+    assert "--use_cfg_parallel" in args
+    assert "--num_inference_steps" not in args
+
+
+def test_xdit_profile_replace_with_existing_profile_wait(monkeypatch, tmp_path):
+    """Source already carries --profile_wait; replace must still restore all flags."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setattr(_server_patcher, "ensure_xdit_patched_for_tracelens", lambda *a, **kw: True)
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "xdit",
+                    "model": "/m",
+                    "envs": {
+                        "PROFILE": "1",
+                        "EXTRA_XDIT_ARGS": "--profile_wait 1 --profile_capture_phase --profile_with_stack",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(
+        src,
+        tmp_path / "out",
+        launch=we.LaunchLayer(extra_server_args="--use_cfg_parallel", args_mode="replace"),
+    )
+    args = bench["envs"]["EXTRA_XDIT_ARGS"]
+    assert "--profile_wait 1" in args
+    assert "--profile_capture_phase" in args
+    assert "--profile_with_stack" in args
+    assert "--use_cfg_parallel" in args

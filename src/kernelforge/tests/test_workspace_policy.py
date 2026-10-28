@@ -5,6 +5,7 @@ from pathlib import Path
 
 from kernelforge.workspace.edit_policy import (
     FORGE_LOOP_OUTPUT_DIRNAME,
+    hide_forge_loop_output,
     is_protected_path,
     protected_path_inventory,
     tracked_editable_paths,
@@ -116,3 +117,22 @@ def test_recursive_inventory_includes_missing_exact_paths(tmp_path: Path):
     )
 
     assert exact.resolve() in inventory
+
+
+def test_hidden_output_tree_is_never_listed_by_git(tmp_path: Path):
+    _git(tmp_path, "init", "-q")
+    output_root = hide_forge_loop_output(tmp_path)
+    log = output_root / "orchestration" / "iter_001" / "optimization_plan.reasoning.md"
+    log.parent.mkdir(parents=True)
+    log.write_text("Summary: x\n")
+
+    assert hide_forge_loop_output(tmp_path) == output_root == tmp_path / FORGE_LOOP_OUTPUT_DIRNAME
+    assert (output_root / ".gitignore").read_text() == "*\n"
+    listed = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert listed.stdout == ""

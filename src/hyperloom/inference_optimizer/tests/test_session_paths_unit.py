@@ -118,7 +118,6 @@ def test_recipe_kb_paths():
     assert sp.recipe_kb_pending_ndjson(SD).name == ".kb_pending.ndjson"
     assert sp.recipe_kb_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
     assert sp.recipe_kb_dead_letter_ndjson(SD).name == ".kb_dead_letter.ndjson"
-    assert sp.pr_monitor_status_json(SD).name == ".pr_monitor_status.json"
 
 
 def test_recipe_snapshot_paths():
