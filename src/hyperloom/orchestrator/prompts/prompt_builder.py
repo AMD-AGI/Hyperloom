@@ -31,7 +31,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from . import read_rules_fragment as _read_rules_fragment
-from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
+from .agentx_context import agentx_session_lines
 from .transport import TRANSPORTS, TRANSPORT_STRUCTURED_OUTPUT, TRANSPORT_TOOLS
 
 
@@ -212,13 +212,7 @@ def _section_session_context(session: SessionContext) -> list[str]:
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
     if is_agentx_mode(session.benchmark_mode):
-        lines += [
-            "",
-            *corpus_lines(session.agentx_corpus_shape),
-            "",
-            *grading_lines(session.agentx_grading, session.agentx_backend),
-            *launch_ownership_lines(session.agentx_backend),
-        ]
+        lines += agentx_session_lines(session.agentx_corpus_shape, session.agentx_grading, session.agentx_backend)
     lines += [
         "",
         "The Coordinator supplies the session context (resource pools,",

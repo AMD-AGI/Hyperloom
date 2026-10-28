@@ -113,3 +113,18 @@ def launch_ownership_lines(backend: str = "") -> list[str]:
         "Magpie rejects a candidate that violates them before it is benchmarked, which wastes the",
         "variant and every other change bundled into it; spend variants on other knobs.",
     ]
+
+
+def agentx_session_lines(shape: Mapping[str, Any] | None, grading: Mapping[str, Any] | None, backend: str) -> list[str]:
+    """The three blocks as one paragraph run, for the session context an orchestrator prompt opens with.
+
+    The blank lines are the separators that run renders with; a prompt that lays the blocks out itself calls the
+    three renderers.
+    """
+    return [
+        "",
+        *corpus_lines(shape),
+        "",
+        *grading_lines(grading, backend),
+        *launch_ownership_lines(backend),
+    ]
