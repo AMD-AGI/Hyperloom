@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import (
@@ -158,20 +158,20 @@ CLOCK = Clock(now=lambda: 7.0, sleep=_no_wait)
 
 
 class _Shares:
-    """The blackboard's op shares by commit, as the TraceLens results put them there, and the records of the tests the
-    toolbox ``requests`` holds."""
+    """The blackboard's op shares by commit, as the TraceLens results put them there, and the records of the tests
+    ``toolbox`` holds."""
 
     def __init__(self, shares: Mapping[str, OpShares] | None = None) -> None:
         self.shares = dict(shares or {})
         self.reads: list[str] = []
-        self.requests: Mapping[str, TestRequest] = {}
+        self.toolbox: FakeToolbox
 
     async def op_shares(self, commit_id: str) -> OpShares | None:
         self.reads.append(commit_id)
         return self.shares.get(commit_id)
 
     async def record(self, request_id: str) -> TestRecord:
-        return TestRecord(self.requests[request_id])
+        return TestRecord(self.toolbox.requests[request_id])
 
 
 def _events(
@@ -183,7 +183,7 @@ def _events(
 ) -> SessionEvents:
     toolbox = toolbox or FakeToolbox()
     records = shares or _Shares()
-    records.requests = toolbox.requests
+    records.toolbox = toolbox
     profiler = IntegrationProfiler(toolbox, SessionTests(toolbox, CLOCK), records, CLOCK)  # type: ignore[arg-type]
     return SessionEvents(health, DecisionLog(log, CLOCK), profiler, toolbox, workload)
 
@@ -293,8 +293,10 @@ async def test_events_wait_for_the_next_judge_call_however_many_ticks_pass(log: 
     assert [event.kind for event in events.hand_over()] == [EventKind.INTEGRATION_MOVED, EventKind.ENVIRONMENT_CHANGED]
 
 
-def _op_shares(commit: str, shares: Mapping[str, float], job: str = "job-0") -> OpShares:
-    return OpShares(commit, job, "r-profile", shares)
+def _op_shares(
+    commit: str, shares: Mapping[str, float], job: str = "job-0", profile_request_id: str = "r-profile"
+) -> OpShares:
+    return OpShares(commit, job, profile_request_id, shares)
 
 
 @pytest.mark.parametrize(
@@ -358,7 +360,8 @@ class _AnalysingToolbox(FakeToolbox):
         return self.status
 
     def finish(self, commit: str, shares: Mapping[str, float]) -> None:
-        self._shares.shares[commit] = _op_shares(commit, shares, f"job-{len(self.analyses)}")
+        profiled = self.analyses[-1][3]
+        self._shares.shares[commit] = _op_shares(commit, shares, f"job-{len(self.analyses)}", profiled)
         self.status = JobStatus.SUCCEEDED
 
 
@@ -432,6 +435,32 @@ async def test_a_profile_whose_analysis_left_no_shares_is_not_a_profile_the_head
     assert profile["reason"] == PROFILE_NOT_ANALYSED
     assert (profile["detail"]["analysis"], profile["detail"]["commit"]) == ("failed", "c-merged")
     assert "largest_op" not in profile["detail"]
+
+
+@pytest.mark.parametrize(
+    ("same_profile", "reason"), [(True, PROFILED), (False, PROFILE_NOT_ANALYSED)], ids=["same_profile", "other_profile"]
+)
+async def test_the_head_takes_the_shares_of_its_profile_whichever_analysis_wrote_them_last(
+    log: Path, same_profile: bool, reason: str
+) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.hand_over()
+    await _until(lambda: toolbox.analyses)
+
+    [(request_id, _)] = toolbox.requests.items()
+    profiled = request_id if same_profile else "r-other-profile"
+    shares.shares["c-merged"] = _op_shares("c-merged", {"attn": 45.0, "gemm": 40.0}, "job-b04", profiled)
+    toolbox.status = JobStatus.SUCCEEDED
+    await _until(lambda: not events.profiling)
+
+    assert await events.detect() is same_profile
+    assert [event.kind for event in events.hand_over()] == [EventKind.BOTTLENECK_MOVED] * same_profile
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert (profile["reason"], profile["detail"]["job_id"]) == (reason, "job-1")
 
 
 async def test_a_head_that_moved_while_a_profile_ran_is_profiled_when_that_one_ends(log: Path) -> None:

@@ -339,10 +339,9 @@ class IntegrationProfiler:
         while self._toolbox.tool_status(job) is JobStatus.RUNNING:
             await self._clock.sleep(ANALYSIS_POLL_SECONDS)
         # A job's status turns final just before its result is pushed to the blackboard, so the shares are read a poll
-        # later, and only when they are this job's.
+        # later. A branch's analysis of this same trace may have written them last; they are this profile's all the same.
         await self._clock.sleep(ANALYSIS_POLL_SECONDS)
-        found = await self._records.op_shares(head)
-        shares = found if found is not None and found.job_id == job else None
+        shares = await self._profile_shares(request_id)
         detail.update(job_id=job, analysis=self._toolbox.tool_status(job).value)
         if shares is None:
             return ProfileOutcome(PROFILE_NOT_ANALYSED, detail)
