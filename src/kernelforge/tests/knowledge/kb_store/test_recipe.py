@@ -25,7 +25,7 @@ from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRec
 from kernelforge.workflows.flydsl_rewrite.measurement import FlydslMeasurement
 from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
-from kernelforge.tests.test_rewrite_by_flydsl_kb import (
+from kernelforge.tests.workflows.flydsl_rewrite.test_rewrite_by_flydsl_kb import (
     InMemoryKBStore,
     _remote_config,
     _spec,

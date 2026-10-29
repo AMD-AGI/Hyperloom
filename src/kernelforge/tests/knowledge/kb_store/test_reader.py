@@ -24,7 +24,7 @@ from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
 from kernelforge.tests.knowledge.kb_store.test_writer import write_flat_experience
-from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
+from kernelforge.tests.workflows.flydsl_rewrite.test_rewrite_by_flydsl_kb import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
 KERNEL_SOURCE = "import triton\n\n\n@triton.jit\ndef my_kernel(x):\n    return x\n"

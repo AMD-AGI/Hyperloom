@@ -42,9 +42,9 @@ def test_fusion_and_gemm_only_changes_do_not_trigger() -> None:
     assert not gate.requires_forge_e2e(
         [
             "src/kernelforge/workflows/forge_fusion/loop.py",
-            "src/kernelforge/tests/fusion/test_loop.py",
+            "src/kernelforge/tests/workflows/forge_fusion/test_loop.py",
             "src/kernelforge/workflows/gemm_tune/router.py",
-            "src/kernelforge/tests/gemm_tune/test_router.py",
+            "src/kernelforge/tests/workflows/gemm_tune/test_router.py",
         ]
     )
 
