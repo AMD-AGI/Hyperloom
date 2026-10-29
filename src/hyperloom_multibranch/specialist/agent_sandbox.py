@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import itertools
 import logging
+import math
 import os
 import shutil
 import signal
@@ -300,6 +301,11 @@ class LocalAgentSandbox:
             wrapper = self.root / BIN_DIR / tool
             wrapper.write_text(script, encoding="utf-8")
             wrapper.chmod(0o755)
+
+    @property
+    def lifetime_s(self) -> float:
+        """A local sandbox lives until it is stopped."""
+        return math.inf
 
     @property
     def tmp(self) -> Path:

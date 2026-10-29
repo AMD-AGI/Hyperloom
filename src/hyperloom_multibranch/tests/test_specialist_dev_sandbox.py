@@ -3,10 +3,12 @@
 
 import asyncio
 import json
+import math
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 
@@ -24,6 +26,8 @@ from hyperloom_multibranch.specialist.dev_sandbox import (
     CACHE_DIRS,
     DevLeases,
     DevLimits,
+    LeaseTerm,
+    hosted_dev_sandboxes,
     local_dev_sandboxes,
     register_dev_sandbox_tools,
 )
@@ -32,6 +36,8 @@ from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
 from hyperloom_multibranch.tests.branch_rig import branch_rig
+from hyperloom_multibranch.tests.subprocess_sandbox import SubprocessSandbox
+from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 
 B1, B2 = "s1", "s2"
 MINUTE = 60.0
@@ -54,17 +60,25 @@ class _Toolbox:
         self.root, self.queued, self.refusal = root, 0, None
         self.leased: list[tuple[str, int]] = []
         self.charges: list[LeaseCharge | None] = []
+        self.lifetimes: list[float | None] = []
         self.released: list[str] = []
 
     async def queue_state(self) -> QueueState:
         return QueueState(queued_by_priority={2: self.queued})
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
     ) -> BranchLease:
         if self.refusal is not None:
             raise self.refusal
         self.leased.append((branch_id, cards))
+        self.lifetimes.append(lifetime_sec)
         self.charges.append(charge)
         lease_id = f"lease-{len(self.leased)}"
         root = self.root / lease_id
@@ -91,8 +105,9 @@ class _Process:
 
 
 class _Sandbox:
-    def __init__(self, lease: BranchLease) -> None:
+    def __init__(self, lease: BranchLease, lifetime_s: float = math.inf) -> None:
         self.lease, self.runs, self.processes, self.stopped = lease, [], [], False
+        self.root, self.lifetime_s = lease.root, lifetime_s
 
     async def run(self, command, cwd, env, timeout) -> CommandResult:
         self.runs.append((command, cwd, dict(env), timeout))
@@ -219,7 +234,7 @@ async def test_a_lease_asks_the_toolbox_not_to_wait_and_is_refused_when_no_card_
     server = rig.build().server
     waits = []
 
-    async def busy(branch_id, cards, *, wait_sec=None, charge=None):
+    async def busy(branch_id, cards, *, wait_sec=None, charge=None, lifetime_sec=None):
         waits.append(wait_sec)
         raise SandboxUnavailable("no card is free")
 
@@ -524,7 +539,8 @@ print("imported", vllm.__file__)
 """
 
 
-async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _local_temp):
+def _worktree(tmp_path):
+    """A worktree of an installed vllm whose ``__init__`` the branch changed."""
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"")
@@ -533,6 +549,11 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
     base.build(["vllm"])
     worktree = base.worktree(B1, tmp_path / "worktrees" / B1)
     (worktree.path / "vllm" / "__init__.py").write_text("CHANGED = True\n")
+    return worktree
+
+
+async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _local_temp):
+    worktree = _worktree(tmp_path)
     before = worktree.diff("vllm")
     script = tmp_path / "writer.py"
     script.write_text(CACHE_WRITER)
@@ -547,6 +568,92 @@ async def test_a_sandbox_run_leaves_the_worktrees_diff_unchanged(tmp_path, _loca
     assert f"imported {worktree.path / 'vllm' / '__init__.py'}" in ran.output
     assert worktree.diff("vllm") == before
     assert (tmp_path / "leases" / "lease-1" / "cache" / "aiter-jit" / "build" / "module.cpp").exists()
+
+
+async def test_a_lease_asks_the_toolbox_for_its_term_and_a_shorter_lived_sandbox_bounds_it(rig):
+    server = rig.build(cap=2).server
+    await server.call("dev_sandbox_lease", minutes=10)
+    await server.call("dev_sandbox_lease", branch=B2, minutes=600, term="long")
+    assert rig.toolbox.lifetimes == [10 * MINUTE, LIMITS.long_max_s]
+
+    leases = DevLeases(
+        rig.toolbox,
+        lambda branch, lease: _Sandbox(lease, lifetime_s=20 * MINUTE),
+        lambda _: rig.logs,
+        limits=replace(LIMITS, cap=1),
+        clock=rig.clock,
+    )
+    granted = await leases.lease("s3", 1, 600, LeaseTerm.LONG)
+    assert granted.expires_in_s == 20 * MINUTE
+
+
+async def test_a_lease_whose_sandbox_is_slow_answers_starting_and_refuses_commands_until_it_is_up(rig):
+    server = rig.build(limits=replace(LIMITS, lease_wait_s=0.05)).server
+    up = asyncio.Event()
+    leasing = rig.toolbox.lease_branch_sandbox
+
+    async def slow(*args, **kwargs):
+        await up.wait()
+        return await leasing(*args, **kwargs)
+
+    rig.toolbox.lease_branch_sandbox = slow
+    assert await server.call("dev_sandbox_lease") == {"state": "starting", "detail": ANY}
+    await _refused(server.call("dev_sandbox_run", command="true"), "lease_not_ready")
+    assert (await server.call("dev_sandbox_lease"))["state"] == "starting"
+    up.set()
+    granted = await server.call("dev_sandbox_lease")
+    assert granted["lease_id"] == "lease-1" and rig.toolbox.leased == [(B1, 1)]
+    assert (await server.call("dev_sandbox_run", command="true"))["returncode"] == 3
+
+
+async def test_a_starting_lease_the_runtime_takes_back_is_abandoned_and_frees_its_slot(rig):
+    built = rig.build(limits=replace(LIMITS, lease_wait_s=0.05))
+    never = asyncio.Event()
+
+    async def hung(*args, **kwargs):
+        await never.wait()
+
+    rig.toolbox.lease_branch_sandbox = hung
+    assert (await built.server.call("dev_sandbox_lease"))["state"] == "starting"
+    await built.leases.reclaim(B1, "the branch stopped")
+
+    rig.toolbox.lease_branch_sandbox = _Toolbox.lease_branch_sandbox.__get__(rig.toolbox)
+    assert (await built.server.call("dev_sandbox_lease", branch=B2))["lease_id"] == "lease-1"
+
+
+class _HostedToolbox(_Toolbox):
+    """Leases the ``dev`` sandbox of the hosted backend, a sandbox whose commands run on this host."""
+
+    async def lease_branch_sandbox(self, branch_id, cards, *, wait_sec=None, charge=None, lifetime_sec=None):
+        self.leased.append((branch_id, cards))
+        return HostedBranchLease(
+            "lease-1", branch_id, (0,), Path("/app/work"), {}, 7, "dev-1", 3600, SubprocessSandbox()
+        )
+
+
+async def test_a_hosted_lease_runs_in_its_sandbox_rooted_below_the_branch_importing_the_worktree(tmp_path):
+    worktree = _worktree(tmp_path)
+    before = worktree.diff("vllm")
+    script = tmp_path / "writer.py"
+    script.write_text(CACHE_WRITER)
+    sandboxes = hosted_dev_sandboxes(lambda branch: worktree, lambda branch: tmp_path / "branches" / branch)
+    leases = DevLeases(_HostedToolbox(tmp_path), sandboxes, lambda _branch: _Logs(), limits=replace(LIMITS, cap=1))
+
+    granted = await leases.lease(B1, 1, 5)
+    ran = await leases.run(B1, f"python {script}", None, 30)
+    await leases.release(B1)
+
+    root = tmp_path / "branches" / B1 / "dev" / "lease-1"
+    assert granted.root == str(root) and ran.returncode == 0, ran.output
+    assert f"imported {worktree.path / 'vllm' / '__init__.py'}" in ran.output
+    assert worktree.diff("vllm") == before
+    assert (root / "cache" / "aiter-jit" / "build" / "module.cpp").exists()
+
+
+def test_a_hosted_sandbox_needs_a_hosted_lease(tmp_path):
+    sandboxes = hosted_dev_sandboxes(lambda branch: None, lambda branch: tmp_path)
+    with pytest.raises(TypeError, match="no hosted sandbox"):
+        sandboxes(B1, BranchLease("lease-1", B1, (0,), tmp_path, {}, 7))
 
 
 # -- the specialist's session gives its lease back ---------------------------------------------------------------

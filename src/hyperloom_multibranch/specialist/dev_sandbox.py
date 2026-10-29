@@ -15,10 +15,15 @@ a run ends or is stopped, unless it is :meth:`DevLeases.busy` (a long one with a
 run), and every lease when the branch stops (:class:`~hyperloom_multibranch.specialist.agent_session.DevLeaseHolder`);
 the toolbox's close releases whatever is left.
 
-Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards,
-importing the branch worktree's source, at a lower CPU priority, with every JIT and kernel cache in the lease's root:
-a cache beside the package it compiles for would be in the worktree, and its files in the next patch. Nothing a dev
-sandbox measures is written as a test, claim or judgement; its records are branch-log notices and the LLM spend the
+Commands run in a :class:`~hyperloom_multibranch.specialist.agent_sandbox.LocalAgentSandbox` on the leased cards, at a
+lower CPU priority, or, on the hosted backend, in the leased ``dev`` sandbox
+(:class:`~hyperloom_multibranch.specialist.remote_sandbox.RemoteAgentSandbox`), whose root is on the shared storage
+below the branch's directory. Either way they import the branch worktree's source, with every JIT and kernel cache in
+the sandbox's root: a cache beside the package it compiles for would be in the worktree, and its files in the next
+patch. A lease's sandbox lives as long as the lease asks, unless the toolbox lets it live less, which then bounds the
+lease. A lease whose sandbox is not up within :attr:`DevLimits.lease_wait_s` answers that it is starting, so the MCP
+call returns, and the specialist's next lease call waits for the same sandbox again; a command meanwhile is refused
+(``lease_not_ready``). Nothing a dev sandbox measures is written as a test, claim or judgement; its records are branch-log notices and the LLM spend the
 Forge runs under its root keep in their ledgers, charged to the branch every :attr:`DevLimits.spend_s` and when the
 lease ends.
 """
@@ -32,7 +37,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -58,7 +63,9 @@ from hyperloom_multibranch.specialist.agent_onboarding import AgentProcess, Agen
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 from hyperloom_multibranch.specialist.agent_session import Processes
 from hyperloom_multibranch.specialist.judging import NOTICE
+from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox, forwarded_env
 from hyperloom_multibranch.specialist.tools import WorktreeFor
+from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -68,6 +75,8 @@ CACHE_DIRS = {"TRITON_CACHE_DIR": "triton", "AITER_JIT_DIR": "aiter-jit", "TORCH
 #: Lines of output a reply carries unless the caller asks for others.
 LINES = 100
 MINUTE = 60.0
+#: Where, in a branch's directory, the roots of its hosted dev sandboxes are, one per lease.
+DEV_DIR = "dev"
 
 
 class LeaseTerm(str, Enum):
@@ -83,6 +92,8 @@ class DevLimits:
     call may hold the MCP request, which times out at 60 s; and the ports and CPU priority a lease's commands get."""
 
     cap: int = 0
+    #: The cards a lease takes when the specialist names none; the hosted backend leases the session's TP only.
+    cards: int = 1
     max_s: float = 1800.0
     #: A long lease, for work that runs for hours (a Forge fusion or rewrite): taken back only when it expires, or once
     #: nothing it started runs and it sat idle.
@@ -93,6 +104,8 @@ class DevLimits:
     cooldown_s: float = 600.0
     idle_s: float = 600.0
     idle_running_s: float = 900.0
+    #: How long a lease call waits for its sandbox before it answers that the sandbox is starting.
+    lease_wait_s: float = 45.0
     run_s: float = 40.0
     read_s: float = 40.0
     read_poll_s: float = 0.5
@@ -109,13 +122,26 @@ class LeaseSource(Protocol):
     async def queue_state(self) -> QueueState: ...
 
     async def lease_branch_sandbox(
-        self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
+        self,
+        branch_id: str,
+        cards: int,
+        *,
+        wait_sec: float | None = None,
+        charge: LeaseCharge | None = None,
+        lifetime_sec: float | None = None,
     ) -> BranchLease: ...
 
     async def release_branch_sandbox(self, lease_id: str) -> None: ...
 
 
 class DevSandbox(AgentSandbox, Protocol):
+    #: The sandbox's own directory, on this host's file system, where its caches and the specialist's files go.
+    root: Path
+
+    @property
+    def lifetime_s(self) -> float:
+        """How long the sandbox lives from its lease; ``math.inf`` when only a stop ends it."""
+
     def alive(self) -> bool:
         """Whether any process of the sandbox is left."""
 
@@ -148,6 +174,12 @@ class Granted:
     root: str
     ports: tuple[int, int]
     expires_in_s: float
+
+
+@dataclass(frozen=True)
+class Starting:
+    detail: str
+    state: str = "starting"
 
 
 @dataclass(frozen=True)
@@ -212,6 +244,7 @@ class DevLeases:
         self._limits, self._clock = limits, clock
         self._slots: dict[str, int] = {}
         self._held: dict[str, _Lease] = {}
+        self._starting: dict[str, asyncio.Task[Granted]] = {}
         self._ended: dict[str, float] = {}
         self._reclaimed: dict[str, str] = {}
         self._watch: asyncio.Task[None] | None = None
@@ -220,13 +253,36 @@ class DevLeases:
     def limits(self) -> DevLimits:
         return self._limits
 
-    async def lease(self, branch: str, cards: int, minutes: float, term: LeaseTerm = LeaseTerm.SHORT) -> Granted:
-        self._reclaimed.pop(branch, None)
-        await self._admit(branch)
-        slot = min(set(range(self._limits.cap)) - set(self._slots.values()))
-        self._slots[branch] = slot
+    async def lease(
+        self, branch: str, cards: int, minutes: float, term: LeaseTerm = LeaseTerm.SHORT
+    ) -> Granted | Starting:
+        """Lease ``cards`` for ``minutes`` at most; :class:`Starting` when its sandbox is not up within
+        :attr:`DevLimits.lease_wait_s`, and the lease the branch's next call waits for again."""
+
+        pending = self._starting.get(branch)
+        if pending is None:
+            self._reclaimed.pop(branch, None)
+            await self._admit(branch)
+            slot = min(set(range(self._limits.cap)) - set(self._slots.values()))
+            self._slots[branch] = slot
+            longest = self._limits.long_max_s if term is LeaseTerm.LONG else self._limits.max_s
+            pending = asyncio.get_running_loop().create_task(
+                self._granted(branch, cards, min(minutes * MINUTE, longest), term)
+            )
+            self._starting[branch] = pending
+        done, _ = await asyncio.wait({pending}, timeout=self._limits.lease_wait_s)
+        if not done:
+            return Starting("the sandbox is starting; call dev_sandbox_lease again for it")
+        self._starting.pop(branch, None)
+        return pending.result()
+
+    async def _granted(self, branch: str, cards: int, seconds: float, term: LeaseTerm) -> Granted:
+        """Lease ``branch``'s sandbox for ``seconds`` at most, the slot taken; a sandbox the toolbox lets live less
+        bounds the lease."""
+
+        slot = self._slots[branch]
         try:
-            lease = await self._leased(branch, cards)
+            lease = await self._leased(branch, cards, seconds)
         except BaseException:
             del self._slots[branch]
             raise
@@ -236,24 +292,23 @@ class DevLeases:
             del self._slots[branch]
             await self._toolbox.release_branch_sandbox(lease.lease_id)
             raise
-        now = self._clock()
-        seconds = min(minutes * MINUTE, self._limits.long_max_s if term is LeaseTerm.LONG else self._limits.max_s)
+        now, seconds = self._clock(), min(seconds, sandbox.lifetime_s)
         self._held[branch] = _Lease(lease, sandbox, slot, now, now + seconds, now, term)
         self._watching()
         await self._note(
             branch, f"dev sandbox leased ({term.value}): {cards} card(s) for up to {seconds / MINUTE:g} min"
         )
-        return Granted(lease.lease_id, len(lease.gpu_ids), str(lease.root), self._ports(slot), seconds)
+        return Granted(lease.lease_id, len(lease.gpu_ids), str(sandbox.root), self._ports(slot), seconds)
 
     async def run(self, branch: str, command: str, cwd: str | None, timeout_s: float) -> Ran:
         held = self._touch(branch)
         timeout = min(timeout_s, self._limits.run_s)
-        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.lease.root), timeout)
+        done = await held.sandbox.run(command, _cwd(held, cwd), _caches(held.sandbox.root), timeout)
         return Ran(done.returncode, done.output)
 
     async def start(self, branch: str, command: str, cwd: str | None) -> Started:
         held = self._touch(branch)
-        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.lease.root))
+        process = await held.sandbox.start(command, _cwd(held, cwd), _caches(held.sandbox.root))
         number = len(held.processes) + 1
         held.processes[number] = process
         return Started(number)
@@ -287,13 +342,15 @@ class DevLeases:
         return held is not None and held.busy()
 
     async def reclaim(self, branch: str, reason: str) -> None:
-        """Take back ``branch``'s lease, if it holds one."""
+        """Take back ``branch``'s lease, if it holds one or one is starting."""
+        await self._cancel_start(branch)
         if branch in self._held:
             await self._end(branch, reason)
 
     async def reclaim_unless_busy(self, branch: str, reason: str) -> None:
         """Take back ``branch``'s lease, if it holds one, unless it is :meth:`busy`: that one stays until its own rules
         end it, and the branch log says so once until the branch calls again, so the next session reads its process."""
+        await self._cancel_start(branch)
         held = self._held.get(branch)
         if held is None:
             return
@@ -307,6 +364,16 @@ class DevLeases:
                 branch,
                 f"dev sandbox kept, though {reason}: its long lease still runs {what}; read it with dev_sandbox_read",
             )
+
+    async def _cancel_start(self, branch: str) -> None:
+        """Abandon ``branch``'s lease that is starting; the toolbox ends its sandbox once made."""
+        pending = self._starting.pop(branch, None)
+        if pending is None:
+            return
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        if branch in self._held:
+            await self._end(branch, "it was abandoned while starting")
 
     async def sweep(self) -> None:
         """Take back every lease that expired, sat idle, or kept tests waiting for cards too long."""
@@ -357,11 +424,11 @@ class DevLeases:
         if len(self._slots) >= self._limits.cap:
             raise DevRefused("cap_reached", f"the session's {self._limits.cap} dev sandbox(es) are all lent out")
 
-    async def _leased(self, branch: str, cards: int) -> BranchLease:
+    async def _leased(self, branch: str, cards: int, lifetime_sec: float) -> BranchLease:
         """A dev sandbox takes only cards free now: waiting would hold cards a test is about to need."""
         try:
             return await self._toolbox.lease_branch_sandbox(
-                branch, cards, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, branch)
+                branch, cards, wait_sec=0, charge=LeaseCharge(LeaseKind.DEV, branch), lifetime_sec=lifetime_sec
             )
         except RequestRejected as error:
             raise DevRefused(error.code, error.reason) from error
@@ -370,6 +437,8 @@ class DevLeases:
 
     def _touch(self, branch: str) -> _Lease:
         held = self._held.get(branch)
+        if held is None and branch in self._starting:
+            raise DevRefused("lease_not_ready", "your dev sandbox is still starting; call dev_sandbox_lease for it")
         if held is None:
             why = self._reclaimed.pop(branch, "")
             raise DevRefused("no_lease", "you hold no dev sandbox" + (f": it was taken back, {why}" if why else ""))
@@ -392,7 +461,7 @@ class DevLeases:
 
     async def _charge(self, branch: str, held: _Lease) -> None:
         """Record what the Forge runs under the lease spent since the last charge."""
-        spent = await asyncio.to_thread(forge_spend, held.lease.root)
+        spent = await asyncio.to_thread(forge_spend, held.sandbox.root)
         if spent is None:
             return
         cost, tokens = spent[0] - held.charged[0], _less(spent[1], held.charged[1])
@@ -455,7 +524,7 @@ def _report_failure(task: asyncio.Task[None]) -> None:
 
 def _cwd(held: _Lease, cwd: str | None) -> Path:
     if not cwd:
-        return held.lease.root
+        return held.sandbox.root
     if not Path(cwd).is_absolute():
         raise InvalidParamsError(f"cwd must be an absolute path, not {cwd!r}")
     return Path(cwd)
@@ -471,16 +540,10 @@ def local_dev_sandboxes(
     """Sandboxes on this host, importing the source of every component the branch's worktree holds."""
 
     def sandbox(branch: str, lease: BranchLease) -> LocalAgentSandbox:
-        worktree = worktrees(branch)
-        sources = tuple(
-            worktree.path / PurePosixPath(layout.upstream_prefix).parent
-            for component, layout in COMPONENT_LAYOUTS.items()
-            if worktree.holds(component)
-        )
         base_env = {**os.environ, **lease.env}
         return LocalAgentSandbox(
             lease.gpu_ids,
-            tuple(dict.fromkeys(sources)),
+            _sources(worktrees, branch),
             lease.root,
             processes,
             branch,
@@ -489,6 +552,37 @@ def local_dev_sandboxes(
         )
 
     return sandbox
+
+
+def hosted_dev_sandboxes(worktrees: WorktreeFor, branch_dir: Callable[[str], Path]) -> SandboxFor:
+    """The leased ``dev`` sandboxes of the hosted backend, importing what :func:`local_dev_sandboxes` imports, each
+    rooted on the shared storage at ``dev/<lease id>`` below the branch's directory, ``branch_dir`` gives."""
+
+    def sandbox(branch: str, lease: BranchLease) -> RemoteAgentSandbox:
+        if not isinstance(lease, HostedBranchLease):
+            raise TypeError(f"lease {lease.lease_id} holds no hosted sandbox")
+        return RemoteAgentSandbox(
+            lease.sandbox,
+            branch_dir(branch) / DEV_DIR / lease.lease_id,
+            _sources(worktrees, branch),
+            len(lease.gpu_ids),
+            forwarded_env(os.environ),
+            lifetime_s=lease.lifetime_sec,
+        )
+
+    return sandbox
+
+
+def _sources(worktrees: WorktreeFor, branch: str) -> tuple[Path, ...]:
+    """The source directory of every component ``branch``'s worktree holds, each once."""
+
+    worktree = worktrees(branch)
+    sources: Iterable[Path] = (
+        worktree.path / PurePosixPath(layout.upstream_prefix).parent
+        for component, layout in COMPONENT_LAYOUTS.items()
+        if worktree.holds(component)
+    )
+    return tuple(dict.fromkeys(sources))
 
 
 # -- the MCP tools --------------------------------------------------------------------------------------------------
@@ -538,10 +632,11 @@ def _lease_tool(leases: DevLeases) -> _DevTool:
         "dev_sandbox_lease",
         "Lease cards of your own for a while, to check a change runs and time a kernel before a full test, or, as a "
         "long lease, to run a tool for hours (a Forge fusion or rewrite); refused while tests wait for cards. Its "
-        "results never enter the gate.",
+        "results never enter the gate. A sandbox may take minutes to start: while this answers starting, call it "
+        "again.",
         _schema(
             {
-                "cards": {"type": _INTEGER, "minimum": 1, "description": "How many cards (1)."},
+                "cards": {"type": _INTEGER, "minimum": 1, "description": f"How many cards ({leases.limits.cards})."},
                 "minutes": {
                     "type": _NUMBER,
                     "exclusiveMinimum": 0,
@@ -555,7 +650,9 @@ def _lease_tool(leases: DevLeases) -> _DevTool:
                 },
             }
         ),
-        lambda branch, a: leases.lease(branch, a.get("cards", 1), a.get("minutes", math.inf), _term(a)),
+        lambda branch, a: leases.lease(
+            branch, a.get("cards", leases.limits.cards), a.get("minutes", math.inf), _term(a)
+        ),
     )
 
 
@@ -636,6 +733,8 @@ __all__ = [
     "DevSandbox",
     "LeaseSource",
     "SandboxFor",
+    "Starting",
+    "hosted_dev_sandboxes",
     "local_dev_sandboxes",
     "register_dev_sandbox_tools",
 ]

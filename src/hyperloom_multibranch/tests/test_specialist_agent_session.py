@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import math
 import os
 import sys
 import time
@@ -1270,7 +1271,7 @@ class _DevToolbox:
     async def queue_state(self) -> QueueState:
         return QueueState()
 
-    async def lease_branch_sandbox(self, branch_id, cards, *, wait_sec=None, charge=None) -> BranchLease:
+    async def lease_branch_sandbox(self, branch_id, cards, *, wait_sec=None, charge=None, lifetime_sec=None):
         return BranchLease("lease-1", branch_id, (0,), self.root, {}, 3)
 
     async def release_branch_sandbox(self, lease_id: str) -> None:
@@ -1280,8 +1281,8 @@ class _DevToolbox:
 class _Forge:
     """A dev sandbox whose one started process runs until the test ends it or the sandbox is stopped."""
 
-    def __init__(self) -> None:
-        self.started, self.returncode = False, None
+    def __init__(self, root) -> None:
+        self.started, self.returncode, self.root, self.lifetime_s = False, None, root, math.inf
 
     async def start(self, command, cwd, env):
         self.started = True
@@ -1299,7 +1300,7 @@ class _Forge:
 
 async def _forge_running(rig, tmp_path) -> SimpleNamespace:
     """The branch's long dev lease, running Forge."""
-    toolbox, forge = _DevToolbox(tmp_path / "lease-1"), _Forge()
+    toolbox, forge = _DevToolbox(tmp_path / "lease-1"), _Forge(tmp_path / "lease-1")
     toolbox.root.mkdir()
     leases = DevLeases(toolbox, lambda branch, lease: forge, lambda branch: rig.blackboard, limits=DevLimits(cap=1))
     await leases.lease(BRANCH, 1, 180, LeaseTerm.LONG)
