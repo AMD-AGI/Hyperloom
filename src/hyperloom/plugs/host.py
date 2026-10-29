@@ -109,7 +109,7 @@ class PlugHost:
         return socket in self._started
 
     def close(self) -> None:
-        """Close what was started, newest first; one that fails to close is recorded and the rest still close."""
+        """Close what was started, newest first; an I/O failure to close one is recorded and the rest still close."""
         with self._lock:
             while self._order:
                 socket = self._order.pop()
@@ -119,7 +119,7 @@ class PlugHost:
                     continue
                 try:
                     closer()
-                except Exception as exc:  # isolation boundary: one plug implementation close
+                except OSError as exc:
                     self._close_errors[socket] = f"{type(exc).__name__}: {exc}"
                     log.warning("closing plug %s failed: %s", socket, exc, exc_info=True)
 

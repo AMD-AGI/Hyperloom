@@ -33,7 +33,7 @@ class _Plug:
     def close(self):
         self.log.append(f"close {self.name}")
         if self.fail_close:
-            raise RuntimeError(f"{self.name} refused to close")
+            raise OSError(f"{self.name} refused to close")
 
 
 def _build(log, spec, *, config=None):
@@ -80,7 +80,7 @@ def test_a_failing_close_is_recorded_and_the_rest_still_close() -> None:
     log.clear()
     host.close()
     assert log == ["close b", "close a"]
-    assert host.close_errors() == {"b": "RuntimeError: b refused to close"}
+    assert host.close_errors() == {"b": "OSError: b refused to close"}
 
 
 def test_a_missing_dependency_refuses_the_start() -> None:
