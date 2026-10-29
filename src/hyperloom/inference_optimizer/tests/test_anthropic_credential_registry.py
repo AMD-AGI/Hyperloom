@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import backends as bk
 from hyperloom.inference_optimizer.cli import credentials as cr
 from hyperloom.inference_optimizer.cli import preflight as pf
+from hyperloom.inference_optimizer.cli import preflight_env as pf_env
 from hyperloom.orchestrator.specialists.agent_cli_config import _SPECIALIST_SECRET_ENV_ALLOWLIST
 
 _FAKE_CREDENTIAL_ENV = "ANTHROPIC_FAKE_CREDENTIAL_FOR_TEST"
@@ -54,7 +55,6 @@ def registered_fake_credential(monkeypatch):
 def test_detection_sites_recognize_a_newly_registered_form(registered_fake_credential):
     """Adding a form to the tuple must be all it takes for detection to follow."""
     assert lc.has_anthropic_credential() is True
-    assert cr._has_explicit_anthropic_key() is True
     # The endpoint resolver keys off the same predicate.
     anthropic_url, _ = cr._resolve_llm_endpoints()
     assert anthropic_url == "https://api.anthropic.com"
@@ -64,7 +64,7 @@ def test_detection_sites_recognize_a_newly_registered_form(registered_fake_crede
     cr._validate_credentials()
     # Single-provider intent, which decides whether a stale OpenAI side from the kernel-agent env file gets
     # suppressed.
-    assert pf._provider_only_mode() == "anthropic"
+    assert pf_env._provider_only_mode() == "anthropic"
     # The forced-protocol gate: an unrecognized form here would reject a host that the rest of the runtime considers
     # fully configured.
     assert bk._resolve_critic_protocol("anthropic", orchestration_on_codex=False) == "anthropic"

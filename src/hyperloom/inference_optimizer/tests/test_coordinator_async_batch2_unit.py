@@ -2044,10 +2044,8 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
             "critic", "orchestration", "review_verdict", {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"}
         )
     )
-    out = await coord.writeback.replay_for_resume()
-    assert out["pending_restored"] == 1
-    assert p1.msg_id in coord.state.pending_proposals
-    assert p2.msg_id not in coord.state.pending_proposals
+    await coord.writeback.replay_for_resume()
+    assert list(coord.state.pending_proposals) == [p1.msg_id]
 
 
 @pytest.mark.asyncio
@@ -2062,8 +2060,7 @@ async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> N
             {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
         )
     )
-    out = await coord.writeback.replay_for_resume()
-    assert out["verdicts_seen"] == 1
+    await coord.writeback.replay_for_resume()
     assert p1.msg_id not in coord.state.pending_proposals
 
 
@@ -3219,7 +3216,7 @@ async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator)
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.phases import framework as _phase_framework
+    from hyperloom.orchestrator.phases import framework_discovery
 
     _enter_framework(coord)
     # Arm disabled: discovery exhaustion falls back to the historical exit (the enabled arm pivots to local
@@ -3227,7 +3224,7 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     coord.shared_state.framework_local_explore_enabled = False
     coord.shared_state.framework_agent_discover_failures = 0
     # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
-    coord.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    coord.shared_state.framework_agent_empty_discoveries = framework_discovery.DISCOVER_FAILURE_RETRY_LIMIT
     monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda **_k: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
     await coord.phase_framework._pump_framework_agent_phase()

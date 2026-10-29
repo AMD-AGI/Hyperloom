@@ -46,7 +46,6 @@ def test_filter_forward_env_drops_bad_keys():
             "LD_PRELOAD": "/evil.so",
             "X Y": "nope",
         },
-        warn_on_drop=False,
     )
     assert out == {"MORI_FOO": "1"}
 
@@ -228,7 +227,6 @@ def test_redact_secret_env_values_masks_every_langfuse_marker_and_scrubs_kept_va
 def test_langfuse_redact_env_markers_are_the_shared_list():
     from hyperloom.inference_optimizer.trace import langfuse_mapping
 
-    assert langfuse_mapping._SENSITIVE_ENV_MARKERS is common_env_safety.SENSITIVE_ENV_NAME_MARKERS
     # The Langfuse snapshot keeps its wider substring match.
     assert langfuse_mapping.redact_env({"MAX_NUM_BATCHED_TOKENS": "8192"}) == {
         "MAX_NUM_BATCHED_TOKENS": "***redacted***"
@@ -310,6 +308,12 @@ def test_redact_secret_values_preserves_json_around_authorization():
     out = common_env_safety.redact_secret_values(text)
 
     assert json.loads(out) == {"header": "Authorization: Basic [REDACTED]", "ok": True}
+
+
+def test_redact_secret_values_masks_custom_header_subscription_key():
+    out = common_env_safety.redact_secret_values("ANTHROPIC_CUSTOM_HEADERS=Ocp-Apim-Subscription-Key: deadbeefsecret")
+    assert "deadbeefsecret" not in out
+    assert "[REDACTED]" in out
 
 
 def test_redact_secret_values_spares_unauthorized_status_text():
@@ -429,3 +433,13 @@ def test_any_custom_headers_name_is_secret_shaped():
     assert common_env_safety.is_secret_shaped_env_name("SERVICE_CUSTOM_HEADERS")
     assert common_env_safety.is_secret_shaped_env_name("service_custom_headers")
     assert not common_env_safety.is_secret_shaped_env_name("TOKENIZERS_PARALLELISM")
+
+
+def test_launch_provided_names_cover_the_rank_topology_and_the_schedulers():
+    """Names the launch assigns per process, by name and by the prefixes a scheduler exports."""
+    assert common_env_safety.is_launch_provided_env_name("LOCAL_RANK")
+    assert common_env_safety.is_launch_provided_env_name("world_size")
+    assert common_env_safety.is_launch_provided_env_name("SLURM_PROCID")
+    assert common_env_safety.is_launch_provided_env_name("TORCHELASTIC_RUN_ID")
+    assert not common_env_safety.is_launch_provided_env_name("HL_FUSE_RMSNORM")
+    assert not common_env_safety.is_launch_provided_env_name("")

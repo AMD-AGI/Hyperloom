@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bundle a session's consumer-facing artifacts into a single zip under ``/workspace`` so the Claw sandbox sync picks it up."""
+"""Bundle a session's consumer-facing artifacts into a single zip under the destination root.
+
+The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
+hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
+"""
 
 from __future__ import annotations
 

@@ -42,6 +42,7 @@ from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accura
 class _BareState(SharedState):
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
+    baseline_runtime_sec: float = 20.0
     save_count: int = 0
     usable_sec: float | None = None
 
@@ -972,7 +973,7 @@ async def test_on_enter_sweep_keeps_the_declines_own_skip_reason(coord):
     )
 
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
 
 
 @pytest.mark.asyncio
@@ -988,7 +989,27 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 
     assert task is None
     assert coord.tasks._tasks == {}
-    assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_conc_sweep_declines_a_grant_that_cannot_fit_one_pair(coord):
+    """The sweep's own budget, not only the session clock, has to hold the anchor pair: two measured rounds."""
+    coord.shared_state.phase_history = [
+        {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
+    ]
+    coord.shared_state.remaining_minutes = lambda: 600.0
+    coord.shared_state.baseline_runtime_sec = 40.0
+
+    coord.shared_state.conc_sweep_total_budget_sec = 79
+    assert await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry") is None
+    assert coord.tasks._tasks == {}
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "grant_cannot_fit_one_pair"
+
+    coord.shared_state.last_conc_sweep = {}
+    coord.shared_state.conc_sweep_total_budget_sec = 80
+    task = await coord.phase_sweep._enqueue_internal_conc_sweep_task(reason="phase_entry")
+    assert task is not None and task.params["total_budget_sec"] == 80
 
 
 @pytest.mark.asyncio
@@ -1095,8 +1116,9 @@ async def test_on_enter_sweep_skips_when_no_validated_gain_since_last_conc_sweep
 
 @pytest.mark.asyncio
 async def test_on_enter_sweep_skips_when_the_session_budget_cannot_fit_conc_sweep(coord):
-    """A conc_sweep the clock cannot pay for must not be enqueued, or SWEEP idles."""
+    """A conc_sweep the clock cannot fit one measured pair into must not be enqueued, or SWEEP idles."""
     coord.shared_state.usable_sec = 14 * 60.0
+    coord.shared_state.baseline_runtime_sec = 8 * 60.0
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "kernel_no_more_leverage", "evidence": {}},
     ]

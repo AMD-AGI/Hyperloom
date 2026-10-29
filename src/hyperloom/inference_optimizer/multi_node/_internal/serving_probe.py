@@ -12,11 +12,19 @@ from .external_state import reachable_service_url
 
 log = logging.getLogger(__name__)
 
-# Mirror the orchestrator's post-restart probe so a resume and the wait that follows it agree on what "serving" means.
-_PROBE_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_TOKENS"
-_PROBE_MIN_TOKENS_ENV = "HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS"
-_DEFAULT_PROBE_TOKENS = 8
-_DEFAULT_PROBE_MIN_TOKENS = 2
+
+def completion_probe_tokens() -> int:
+    """``max_tokens`` a ``/v1/completions`` readiness probe requests.
+
+    Shared with the orchestrator's post-restart wait so a resume and the wait that follows it agree on what
+    "serving" means.
+    """
+    return env_int("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8)
+
+
+def completion_probe_min_tokens() -> int:
+    """Fewest generated tokens that count a ``/v1/completions`` readiness probe as served."""
+    return env_int("HYPERLOOM_MN_COMPLETION_PROBE_MIN_TOKENS", 2)
 
 
 def generated_tokens(data: object) -> int:
@@ -55,17 +63,13 @@ def cluster_is_serving(state: dict[str, Any], *, pd_mode: str, timeout_s: int) -
     Raises:
         EnvValueError: A completion-probe token setting is set but is not an integer.
     """
-    wanted = env_int(_PROBE_TOKENS_ENV, _DEFAULT_PROBE_TOKENS)
-    floor = env_int(_PROBE_MIN_TOKENS_ENV, _DEFAULT_PROBE_MIN_TOKENS)
+    wanted = completion_probe_tokens()
+    floor = completion_probe_min_tokens()
     legs = _serving_legs(state, pd_mode)
     front = reachable_service_url(state)
     if not legs or not front:
         return False
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
-        log.info("serving probe: httpx unavailable")
-        return False
+    import httpx
 
     deadline = time.monotonic() + timeout_s
 

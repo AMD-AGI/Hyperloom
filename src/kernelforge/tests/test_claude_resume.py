@@ -17,8 +17,10 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
+from kernelforge.loop.lessons import SUMMARIZER_ROLE
 from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 class _FakeOptions:
@@ -89,6 +91,7 @@ def _spec(**overrides) -> AgentRunSpec:
         model="fake-model",
         timeout_sec=60,
         tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
     base.update(overrides)
     return AgentRunSpec(**base)
@@ -229,7 +232,8 @@ def test_default_model_uses_the_runtime_effort_and_adaptive_thinking():
     # An effort written at a call site is this repository's opinion, and the one
     # on the runtime is the operator's decision about the run in front of them.
     assert kwargs["effort"] == "high"
-    assert kwargs["thinking"] == {"type": "adaptive"}
+    # Summarized display keeps bytes on the stream while the model thinks.
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
 
 
 @pytest.mark.parametrize(
@@ -372,7 +376,7 @@ def test_summarizer_resumes_read_only_and_without_hooks():
 
     spec, session_id, feedback, usage = backend.calls[0]
     assert session_id == "sess-1"
-    assert feedback == "record your lesson"
+    assert feedback == f"{SUMMARIZER_ROLE}\n\nrecord your lesson"
     assert usage == "usage-obj"
     # The in-session gate's Stop hook would otherwise block the summarizing turn and push the agent back into editing
     # the kernel.
@@ -393,6 +397,127 @@ def test_summarizer_resumes_read_only_and_without_hooks():
     assert implementer_spec.hooks is not None
     assert implementer_spec.writable is True
     assert implementer_spec.read_only_resume is False
+
+
+def test_summarizer_keeps_the_prefix_the_implementer_session_cached():
+    """Same system prompt, same described tools: the summary turn reads the session's prefix instead of rewriting it."""
+    backend = _RecordingBackend()
+    implementer_spec = _spec(
+        tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100, thinking_budget_tokens=3000)
+    )
+
+    summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage=None)
+    asyncio.run(summarize("record your lesson"))
+
+    spec = backend.calls[0][0]
+    assert spec.system_prompt == implementer_spec.system_prompt
+    assert spec.declared_tool_policy == implementer_spec.tool_policy
+    # Thinking settings are part of what a cached prefix is matched against.
+    assert spec.tool_policy.thinking_budget_tokens == 3000
+    assert spec.tool_policy.max_turns == 4
+
+
+def test_a_read_only_resume_describes_the_session_tools_but_permits_only_reading():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="sess-1")], captured)
+    # A gated implementer: its in-session hooks keep it from running bare.
+    implementer_spec = _spec(tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=100, bare=False))
+    summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage=None)
+
+    asyncio.run(summarize("record your lesson"))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["resume"] == "sess-1"
+    assert kwargs["system_prompt"] == "implementer system prompt"
+    assert kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+    assert kwargs["allowed_tools"] == ["Read", "Grep", "Glob"]
+    assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}
+
+
+def _denied_tools(kwargs: dict) -> set[str]:
+    """The tools a PreToolUse hook in these SDK options refuses, checked by calling the hook."""
+    denied: set[str] = set()
+    for matcher in kwargs.get("hooks", {}).get("PreToolUse", []):
+        for name in matcher.matcher.split("|"):
+            for callback in matcher.hooks:
+                answer = asyncio.run(callback({"tool_name": name}, None, None))
+                if answer.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+                    denied.add(name)
+    return denied
+
+
+@pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
+def test_an_approving_operator_mode_cannot_reopen_the_described_only_tools(mode):
+    """A permission mode from the operator's agent options replaces the policy's; the deny hook still holds."""
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    backend.runtime.options = {"permission_mode": mode}
+    spec = _spec(
+        writable=False,
+        read_only_resume=True,
+        allow_dirty_targets=True,
+        allow_untracked=True,
+        protected_globs=["*"],
+        declared_tool_policy=AgentToolPolicy(read=True, write=True, shell=True, bare=False),
+        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, bare=False),
+    )
+
+    asyncio.run(backend.run(spec))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["permission_mode"] == mode
+    assert _denied_tools(kwargs) == {"Edit", "Write", "Bash"}
+
+
+def test_a_bare_resume_describes_only_the_tools_it_may_use():
+    """A bare session runs no hooks, so it cannot refuse a described tool and does not describe one."""
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(
+        writable=False,
+        read_only_resume=True,
+        allow_dirty_targets=True,
+        allow_untracked=True,
+        protected_globs=["*"],
+        declared_tool_policy=AgentToolPolicy(read=True, write=True, shell=True),
+        tool_policy=AgentToolPolicy(read=True, write=False, shell=False, bare=True),
+    )
+
+    asyncio.run(backend.run(spec))
+
+    kwargs = captured["options"].kwargs
+    assert kwargs["tools"] == ["Read", "Grep", "Glob"]
+    assert "hooks" not in kwargs
+    assert kwargs["extra_args"] == {"bare": None}
+
+
+def test_a_session_describing_only_what_it_may_use_gets_no_deny_hook():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "hooks" not in captured["options"].kwargs
+
+
+def test_sessions_turn_off_claude_code_title_generation(monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", raising=False)
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert captured["options"].kwargs["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+def test_an_operator_setting_for_nonessential_traffic_wins(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "0")
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in captured["options"].kwargs.get("env", {})
 
 
 def test_summarizer_is_none_without_a_session_id():
@@ -484,3 +609,72 @@ def test_a_session_that_stays_in_its_target_reports_what_it_changed(tmp_path):
 
 def test_the_backend_declares_the_guard_it_now_runs():
     assert ClaudeBackend.capabilities.workspace_guard is True
+
+
+# ── a prefix shared with sibling sessions ─────────────────────────────────────
+
+
+async def _first_message(prompt) -> dict:
+    return [message async for message in prompt][0]
+
+
+def test_a_shared_prefix_is_sent_as_its_own_cached_block():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(user_prompt='{\n  "shared": 1,\n  "lane": 2\n}', shared_prompt_prefix='{\n  "shared": 1,')
+
+    asyncio.run(backend.run(spec))
+
+    message = asyncio.run(_first_message(captured["prompt"]))
+    blocks = message["message"]["content"]
+    assert blocks[0] == {"type": "text", "text": '{\n  "shared": 1,', "cache_control": {"type": "ephemeral"}}
+    assert blocks[1] == {"type": "text", "text": '\n  "lane": 2\n}'}
+    assert "".join(block["text"] for block in blocks) == spec.user_prompt
+
+
+def test_a_shared_prefix_must_lead_the_prompt():
+    backend = _backend([_result_message(session_id="s")], {})
+
+    with pytest.raises(ClaudeBackendError, match="leading part"):
+        asyncio.run(backend.run(_spec(user_prompt="the whole prompt", shared_prompt_prefix="not its start")))
+
+
+def test_a_resumed_session_sends_its_feedback_as_plain_text():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+    spec = _spec(user_prompt="shared tail", shared_prompt_prefix="shared")
+
+    asyncio.run(backend.resume(spec, "s", "revise it"))
+
+    assert captured["prompt"] == "revise it"
+
+
+class StreamEvent(SimpleNamespace):
+    """Named like the SDK's partial-message event, which the backend recognises by class name."""
+
+
+def test_the_response_start_is_reported_once_from_partial_events():
+    captured: dict = {}
+    calls: list[str] = []
+    backend = _backend(
+        [
+            StreamEvent(event={"type": "message_start"}),
+            StreamEvent(event={"type": "content_block_delta"}),
+            _result_message("s"),
+        ],
+        captured,
+    )
+
+    asyncio.run(backend.run(_spec(on_response_started=lambda: calls.append("started"))))
+
+    assert calls == ["started"]
+    assert captured["options"].kwargs["include_partial_messages"] is True
+
+
+def test_partial_events_are_off_without_a_response_start_listener():
+    captured: dict = {}
+    backend = _backend([_result_message(session_id="s")], captured)
+
+    asyncio.run(backend.run(_spec()))
+
+    assert "include_partial_messages" not in captured["options"].kwargs

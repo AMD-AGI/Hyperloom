@@ -84,9 +84,7 @@ from .bootstrap import (
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,
@@ -1897,7 +1895,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
 
     ``--resume-from`` names a subdirectory under the workspace root; USER_DATA_PATH itself stays where it is.
     """
-    from ..session.paths import ENV_CURRENT_SESSION_DIR, _SESSION_SKELETON, is_path_within, workspace_root
+    from ..session.paths import ENV_CURRENT_SESSION_DIR, ensure_session_skeleton, is_path_within, workspace_root
 
     ws = workspace_root()
     session_dir = Path(args.resume_from).expanduser().resolve()
@@ -1916,8 +1914,7 @@ def _open_resumed_session(args: argparse.Namespace) -> _SessionStart:
         sys.exit(2)
     # Pin before Coordinator/SharedState load so paths/subprocesses inherit the resolved location.
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
-    for sub in _SESSION_SKELETON:
-        (session_dir / sub).mkdir(parents=True, exist_ok=True)
+    ensure_session_skeleton(session_dir)
 
     # Single-optimizer guard: take the session lock before any state.json / lease access.
     session_lock = _acquire_session_lock_or_exit(session_dir)
@@ -2367,7 +2364,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
         )
         sys.exit(2)
     if _critic_agent_runtime_needed(critic_choice):
-        critic_agent_root = _resolve_agent_root("critic")
+        critic_agent_root = _resolve_agent_root()
         if critic_agent_root is None:
             print(
                 f"ERROR: --critic-agent selected but critic-agent runtime not "
@@ -2379,7 +2376,7 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
                 file=sys.stderr,
             )
             sys.exit(2)
-        _validate_agent_runtime(critic_agent_root, agent="critic")
+        _validate_agent_runtime(critic_agent_root)
         if critic_kb_mode == "live" and not os.environ.get("KB_BASE_URL"):
             print(
                 "ERROR: CRITIC_KB_CLIENT_MODE=live but KB_BASE_URL is not "

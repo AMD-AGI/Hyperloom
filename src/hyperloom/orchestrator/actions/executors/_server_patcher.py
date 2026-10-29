@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom.inference_optimizer.session import paths
 
 from ._file_lock import best_effort_file_lock
 from ._git import _git_head_sha
@@ -258,26 +259,22 @@ def _resolve_versioned_patches_dir(
 # Public API
 
 
-def ensure_vllm_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_vllm_patched_for_tracelens() -> bool:
     """Ensure the installed vLLM accepts the TraceLens profiler flags."""
     install = _discover_vllm_install()
     if install is None:
         return False
-    plan = _discover_vllm_plan(tracelens_root, install=install)
+    plan = _discover_vllm_plan(install=install)
     if plan is None:
         return False
     return _ensure_patched(plan)
 
 
-def ensure_sglang_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_sglang_patched_for_tracelens() -> bool:
     """Apply the roofline set (< 0.5.18) or ``sglang_gc_patch`` (>= 0.5.18)."""
     if resolve_sglang_shape_mode() == "sitecustomize":
-        return _ensure_sglang_gc_patched(tracelens_root)
-    plan = _discover_sglang_plan(tracelens_root)
+        return _ensure_sglang_gc_patched()
+    plan = _discover_sglang_plan()
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -286,7 +283,6 @@ def ensure_sglang_patched_for_tracelens(
 # SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
 # (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
 _SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
-_SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
 # No-patch tool location, relative to TRACELENS_ROOT.
 _KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 
@@ -296,14 +292,7 @@ def sglang_shape_mode(version: str) -> str:
 
     ``"sitecustomize"`` (>= 0.5.18) uses the no-patch TraceLens tool;
     ``"patched"`` (< 0.5.18) uses the legacy ``git apply`` flow.
-    ``HYPERLOOM_SGLANG_SHAPE_MODE=patch|sitecustomize`` overrides the gate
-    (``auto`` / unset = version-based).
     """
-    override = os.environ.get(_SGLANG_SHAPE_MODE_ENV, "auto").strip().lower()
-    if override in {"patch", "patched"}:
-        return "patched"
-    if override == "sitecustomize":
-        return "sitecustomize"
     vt = _version_tuple(version)
     if vt is None:
         # Unparseable version: keep the safe legacy mechanism.
@@ -311,9 +300,9 @@ def sglang_shape_mode(version: str) -> str:
     return "sitecustomize" if vt >= _SGLANG_SITECUSTOMIZE_MIN_VERSION else "patched"
 
 
-def kernel_shape_tool_dir(tracelens_root: Path | str | None = None) -> Path | None:
+def kernel_shape_tool_dir() -> Path | None:
     """Resolve the no-patch ``kernel_shape_tool`` dir under TRACELENS_ROOT, or None."""
-    root = _resolve_tracelens_root(tracelens_root)
+    root = _resolve_tracelens_root()
     if root is None:
         return None
     tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
@@ -330,11 +319,11 @@ def _detect_installed_sglang_version() -> str | None:
 
 
 def resolve_sglang_shape_mode() -> str:
-    """Resolve the SGLang shape mode from override -> local install -> MN version pin.
+    """Resolve the SGLang shape mode from the local install, else the MN version pin.
 
-    ``HYPERLOOM_SGLANG_SHAPE_MODE`` wins; otherwise the version comes from the
-    locally-installed SGLang (single-node / sandbox) or, when SGLang is not
-    importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
+    The version comes from the locally-installed SGLang (single-node / sandbox)
+    or, when SGLang is not importable in the controller (multi-node),
+    ``HYPERLOOM_SGLANG_VERSION_PIN``.
     Falls back to ``"patched"`` (legacy) when the version cannot be determined.
     """
     version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
@@ -345,7 +334,7 @@ def resolve_sglang_patch_set() -> str:
     """Patch set the multi-node pods must apply: ``graph-capture`` in sitecustomize mode, else ``roofline``.
 
     Resolved on the controller and passed to every pod, which cannot see the
-    controller's env (override / version pin) and would otherwise decide alone.
+    controller's version pin and would otherwise decide alone.
     """
     return "graph-capture" if resolve_sglang_shape_mode() == "sitecustomize" else "roofline"
 
@@ -357,9 +346,7 @@ def _gc_patch_deferred_to_pods() -> bool:
     return is_multi_node()
 
 
-def _ensure_sglang_gc_patched(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def _ensure_sglang_gc_patched() -> bool:
     """Git-apply ``sglang_gc_patch`` onto the installed SGLang tree."""
     version = _detect_installed_sglang_version()
     if version is None:
@@ -373,15 +360,13 @@ def _ensure_sglang_gc_patched(
     vt = _version_tuple(version)
     if vt is not None and vt < _SGLANG_SITECUSTOMIZE_MIN_VERSION:
         return True
-    plan = _discover_sglang_gc_plan(tracelens_root, version)
+    plan = _discover_sglang_gc_plan(version)
     if plan is None:
         return False
     return _ensure_patched(plan)
 
 
-def ensure_xdit_patched_for_tracelens(
-    tracelens_root: Path | str | None = None,
-) -> bool:
+def ensure_xdit_patched_for_tracelens() -> bool:
     """Apply TraceLens profiling patches to the xDiT installation.
 
     xDiT is an editable install at ``/app/xDiT`` (no pip version);
@@ -390,7 +375,7 @@ def ensure_xdit_patched_for_tracelens(
     The nearest-lower fallback applies only when a known version
     has no exact patch file.
     """
-    plan = _discover_xdit_plan(tracelens_root)
+    plan = _discover_xdit_plan()
     if plan is None:
         return False
     return _ensure_patched(plan)
@@ -422,7 +407,7 @@ def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
     return None
 
 
-def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
+def _discover_xdit_plan() -> _PatchPlan | None:
     """Build the xDiT patch plan for the installed xDiT version.
 
     Only attempts patching when the HEAD SHA matches a known image.
@@ -446,7 +431,7 @@ def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.info("_server_patcher: TRACELENS_ROOT unset/missing — skip xDiT patch")
         return None
@@ -538,15 +523,9 @@ def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
     return any(target.endswith(suffix) for target in targets)
 
 
-def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
-    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or missing on disk."""
-    if arg:
-        root = Path(arg)
-    else:
-        env = os.environ.get("TRACELENS_ROOT", "").strip()
-        if not env:
-            return None
-        root = Path(env)
+def _resolve_tracelens_root() -> Path | None:
+    """Resolve :func:`paths.tracelens_root`; ``None`` when it is not on disk."""
+    root = paths.tracelens_root()
     return root if root.is_dir() else None
 
 
@@ -684,21 +663,14 @@ def _discover_vllm_install() -> tuple[str, Path] | None:
     return version, install_root
 
 
-def _discover_vllm_plan(
-    arg: Path | str | None,
-    *,
-    install: tuple[str, Path] | None = None,
-) -> _PatchPlan | None:
+def _discover_vllm_plan(*, install: tuple[str, Path]) -> _PatchPlan | None:
     """Build the vLLM patch plan for the installed vLLM version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.info("_server_patcher: TRACELENS_ROOT (public) unset/missing — skip vLLM patch")
         return None
 
-    resolved = install if install is not None else _discover_vllm_install()
-    if resolved is None:
-        return None
-    version, install_root = resolved
+    version, install_root = install
 
     patches_dir = _patch_tree(tracelens_root, "vllm_patches")
     patch_file = _resolve_vllm_patch_file(patches_dir, version)
@@ -749,9 +721,9 @@ def _discover_vllm_plan(
 _SGLANG_OPTIONAL_PATCH_MARKERS = ("eagle",)
 
 
-def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
+def _discover_sglang_plan() -> _PatchPlan | None:
     """Build the SGLang patch plan for the installed SGLang version."""
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.warning(
             "_server_patcher: TRACELENS_ROOT (public) unset/missing — skip SGLang patch "
@@ -864,17 +836,14 @@ _SGLANG_GC_SENTINELS: tuple[str, ...] = (
 )
 
 
-def _discover_sglang_gc_plan(
-    arg: Path | str | None,
-    version: str,
-) -> _PatchPlan | None:
+def _discover_sglang_gc_plan(version: str) -> _PatchPlan | None:
     """Build the ``sglang_gc_patch`` plan for an exact ``sglang_<X_Y_Z>`` dir; strict ``git apply`` only.
 
     No nearest-version fallback and no fuzzy apply: the patch adds an unconditional
     ``_set_profile_trace_tag`` call to the capture loop, so a drifted apply could
     break CUDA-graph capture, and newer releases may already carry the upstream fix.
     """
-    tracelens_root = _resolve_tracelens_root(arg)
+    tracelens_root = _resolve_tracelens_root()
     if tracelens_root is None:
         log.warning(
             "_server_patcher: TRACELENS_ROOT unset/missing — skip SGLang graph-capture "

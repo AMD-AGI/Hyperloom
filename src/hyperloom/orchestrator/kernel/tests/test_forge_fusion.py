@@ -944,7 +944,7 @@ def test_run_reports_the_outage_despite_a_non_zero_exit(tmp_path, monkeypatch):
             ),
             encoding="utf-8",
         )
-        return 3, "", ""  # kernelforge.fusion.command.EXIT_LLM_UNAVAILABLE
+        return 3, "", ""  # kernelforge.fusion.pipeline.EXIT_LLM_UNAVAILABLE
 
     result = _run(monkeypatch, _payload(output_dir), fake_run)
 

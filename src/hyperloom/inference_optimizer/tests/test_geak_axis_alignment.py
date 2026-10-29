@@ -137,9 +137,7 @@ def test_the_interactivity_handoff_carries_the_rule_the_rebench_keeps_on():
 )
 def test_the_workload_spec_publishes_the_rule_with_the_sessions_own_band(backend_env, objective, rule_expected):
     """The guards' band is the one the session was seeded with, not this process's default."""
-    spec = build_agentx_workload_spec(
-        {}, {}, model_path="/models/GLM-5.2-MXFP4", env=backend_env, grading={"objective": objective, "noise_pct": 7.5}
-    )
+    spec = build_agentx_workload_spec({}, env=backend_env, grading={"objective": objective, "noise_pct": 7.5})
     if rule_expected:
         assert spec["acceptance"] == geak_acceptance(spec["metric_basis"], 7.5)
     else:

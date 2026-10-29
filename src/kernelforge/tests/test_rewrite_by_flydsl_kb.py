@@ -12,10 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.config import Config
-from kernelforge.knowledge.kb_store.config import (
-    KnowledgeConfig,
-    KnowledgeStoreMode,
-)
+from kernelforge.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,

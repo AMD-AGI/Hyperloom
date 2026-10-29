@@ -457,46 +457,8 @@ class TestRooflineSnapshotUnits:
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
         assert "6440.0 ms" in table
-        assert "decode memory-roofline ceiling" not in table
 
-    def test_snapshot_carries_latency_siblings_and_within(self):
-        """e2e_mean_ms / roofline_ideal_ms are stored at the tok/s level and drive a unit-agnostic within/gap when no decode ceiling applies."""
-        from hyperloom.inference_optimizer import roofline_snapshot as rs
-
-        snap = rs.build_roofline_snapshot(
-            snapshot_id=1,
-            ts="t",
-            analysis_md_path="",
-            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
-            framework="xdit",
-        )
-        assert snap["e2e_mean_ms"] == 6440.0
-        assert snap["roofline_ideal_ms"] == 644.0
-        # No tok/s ceiling -> within = ideal / measured.
-        assert snap["within_roofline_pct"] == 10.0
-        assert snap["gap_to_roofline_pct"] == 90.0
-        assert snap["theoretical_peak_tok_per_sec"] is None
-
-    def test_metrics_table_scriptable_shows_compute_ceiling(self):
-        """The compact table surfaces the ms compute-roofline floor + within%."""
-        from hyperloom.inference_optimizer import roofline_snapshot as rs
-
-        snap = rs.build_roofline_snapshot(
-            snapshot_id=1,
-            ts="t",
-            analysis_md_path="",
-            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
-            framework="xdit",
-        )
-        cmp = rs.build_roofline_comparison_from_history([snap])
-        table = "\n".join(rs.format_roofline_metrics_table(cmp))
-        assert "Compute-roofline ideal (per-image latency floor):" in table
-        assert "644.0 ms" in table
-        assert "10.0%" in table
-        assert "decode memory-roofline ceiling" not in table
-
-    def test_serving_snapshot_latency_siblings_are_none(self):
-        """Serving snapshots keep tok/s within/gap and leave ms siblings unset."""
+    def test_metrics_table_scriptable_shows_ceiling_in_img_per_s(self):
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
@@ -505,72 +467,17 @@ class TestRooflineSnapshotUnits:
             analysis_md_path="",
             reading=rs.RooflineReading(
                 ceiling=RooflineBreakdown(
-                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=200.0, bound_kind="unknown"
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=2.0, peak_tok_per_sec=2.0, bound_kind="compute"
                 ),
-                achieved_tok_per_sec=150.0,
+                achieved_tok_per_sec=0.5,
+                throughput_unit="img/s",
             ),
-            framework="vllm",
+            framework="xdit",
         )
-        assert snap["e2e_mean_ms"] is None
-        assert snap["roofline_ideal_ms"] is None
-        assert snap["within_roofline_pct"] == 75.0
-
-
-class TestScriptableLatencyRooflineSidecar:
-    """``_scriptable_latency_roofline`` must find the diffusion sidecar even when ``kernel_roofline_path`` is empty (diffusion trace_analyze emits only ``diffusion_roofline.json``, so the run-dir cannot be derived from it)."""
-
-    def _make_state(self, tmp_path):
-        from hyperloom.orchestrator.state.shared_state import SharedState
-
-        return SharedState.load_or_init(tmp_path)
-
-    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0):
-        run_dir = session_dir / "kernel-agent" / "runs" / "20260705T193725Z" / "20260705T200313Z_tl-abc"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        payload = {"totals": {"sigma_ideal_roofline_us": sigma_ideal_us}}
-        sidecar = run_dir / "diffusion_roofline.json"
-        sidecar.write_text(json.dumps(payload), encoding="utf-8")
-        return sidecar
-
-    def test_empty_kernel_roofline_path_falls_back_to_session_dir(self, tmp_path):
-        state = self._make_state(tmp_path)
-        self._write_sidecar(tmp_path)
-        # kernel_roofline_path empty (the diffusion case) must still resolve.
-        e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert e2e_ms == pytest.approx(1350.0, abs=1.0)
-        assert ideal_ms == pytest.approx(611.192, abs=0.01)
-
-    def test_analytic_ceiling_takes_priority_over_summed_kernels(self, tmp_path):
-        state = self._make_state(tmp_path)
-        sidecar = self._write_sidecar(tmp_path)
-        sidecar.write_text(
-            json.dumps({"analytic_ceiling": {"ideal_ms": 400.0}, "totals": {"sigma_ideal_roofline_us": 611192.0}}),
-            encoding="utf-8",
-        )
-        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert ideal_ms == 400.0
-
-    def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
-        state = self._make_state(tmp_path)
-        e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert e2e_ms > 0
-        assert ideal_ms == 0.0
-
-    def test_serving_framework_is_noop(self, tmp_path):
-        state = self._make_state(tmp_path)
-        self._write_sidecar(tmp_path)
-        assert state._scriptable_latency_roofline("vllm", 100.0, "") == (0.0, 0.0)
-
-    def test_explicit_kernel_roofline_path_still_resolves(self, tmp_path):
-        state = self._make_state(tmp_path)
-        run_dir = tmp_path / "kernel-agent" / "runs" / "ts" / "ts_tl-xyz"
-        (run_dir / "reports").mkdir(parents=True, exist_ok=True)
-        (run_dir / "diffusion_roofline.json").write_text(
-            json.dumps({"totals": {"sigma_ideal_roofline_us": 500000.0}}), encoding="utf-8"
-        )
-        krp = str(run_dir / "reports" / "kernel_roofline.json")
-        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, krp)
-        assert ideal_ms == pytest.approx(500.0, abs=0.01)
+        cmp = rs.build_roofline_comparison_from_history([snap])
+        table = "\n".join(rs.format_roofline_metrics_table(cmp))
+        assert "**Roofline ceiling:** 2.0 img/s" in table
+        assert "25.0%" in table
 
 
 class TestHyperloomArchSpec:

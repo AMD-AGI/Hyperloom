@@ -17,17 +17,24 @@ Non-blocking observations are deleted, not softened. Not "note", not "FYI", not 
 but", not "for reference", not a postscript under the conclusion. If the only way to keep an
 observation is to relabel it, it fails the bar and goes.
 
-The bar is one question: **if this is not changed, is the current behaviour wrong?**
+The bar is two questions: **if this is not changed, is the current behaviour wrong?** and **was the
+reason for the change true, and does the change end the failure it names?**
 
-Blocking means one of three things, and the repo treats them as equal:
+Blocking means one of four things, and the repo treats them as equal:
 
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
+| Ineffective | the premise does not reproduce at the merge base, or the failure the PR names still happens at the head, or a check is dropped as covered by something that decides less — rules E1-E5 |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
 | Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names the bullet it breaks plus, where that bullet is about ownership, the module in this repo that already owns the concern |
 
-The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
+The second kind is the one a correct diff passes: right line by line, tested, accurately described,
+and still resting on a measurement that does not reproduce or leaving the reported failure
+happening. E1-E5 each name the tool to re-run, the branch to trace or the predicate to read; one that names neither is
+taste and goes like any other.
+
+The fourth kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
 "consider extracting a helper" are reviewer taste and are deleted like anything else. What
 survives is the case where the repo has already decided — a detour around a path that exists, or
 a concern implemented outside the module that owns it — and the decision is written down where
@@ -49,16 +56,6 @@ scope: re-flagging a gated rule is a defect in the review, not a finding.
 
 ---
 
-## Step 0 — Scope
-
-Before fetching anything, answer two questions from the title and body and hold them open:
-
-1. What is this change for — what wrong behaviour or missing capability does it address?
-2. By what route — which layer does it change, and is that the layer that owns the concern?
-
-No artifact. A body that answers neither is already a signal: a description naming no mechanism
-usually accompanies a diff nobody traced end to end.
-
 ## Step 1 — Fetch
 
 ```bash
@@ -66,8 +63,9 @@ bash .claude/skills/review-pr/fetch.sh <PR>
 ```
 
 Keep the `$WORK` it prints. Read `diff.txt`, `body.txt` and `comments.txt` before going on. When
-`comments.txt` holds an earlier card for this PR, settle its findings first and still review the whole
-diff: follow [`references/re-review.md`](references/re-review.md) beside the steps below.
+`comments.txt` holds an earlier card for this PR, or a human's blocking objection the author has not
+answered in code, settle those first and still review the whole diff:
+follow [`references/re-review.md`](references/re-review.md) beside the steps below.
 
 | file | what it is for |
 |---|---|
@@ -75,7 +73,7 @@ diff: follow [`references/re-review.md`](references/re-review.md) beside the ste
 | `title.txt`, `body.txt` | the title, one line, and the description — rule X2 checks both against the diff |
 | `diff.txt` | the full diff against the merge base |
 | `files.txt` | changed paths, one per line — the input to rule selection |
-| `numstat.txt` | added, deleted, path — size and shape of the change |
+| `numstat.txt`, `netlines.txt` | added, deleted, path; and E3's production total, `src/` outside `tests/`, binary rows excluded |
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
@@ -87,22 +85,28 @@ diff: follow [`references/re-review.md`](references/re-review.md) beside the ste
 ## Step 1b — Select the rules
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
-`files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 76 rules across 10
+`files.txt`, a skim of `diff.txt`, or a `label:` line in `meta.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 78 rules across 11
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
-you are unsure about is taken, never dropped. V1-V8 and X2 are on every list. On a re-review, so are
+you are unsure about is taken, never dropped. V1-V8 and X2 are on every list, V2 and V7 without
+a verdict line. On a re-review, so are
 the rules of the earlier findings that still hold.
 
 ## Step 2 — Semantic understanding
 
-Answer all five from the diff, not the description. One line each into `$WORK/answers.txt`,
-prefixed `Q1:` … `Q5:`. An answer that anchors in nothing — no path, symbol or condition — is not
+Answer all six from the diff, not the description. One line each into `$WORK/answers.txt`,
+prefixed `Q1:` … `Q6:`. An answer that anchors in nothing — no path, symbol or condition — is not
 an answer; rewrite it before going on.
 
-- **Q1 — State the root cause in one sentence.** Not the symptom, not a list of mitigations. A body
-  listing three improvements instead of one causal change is the tell that nobody found the cause.
-- **Q2 — Name the route.** Which module, which function, which call path now behaves differently,
-  and why there rather than at the layer above or below.
+- **Q1 — State the root cause in one sentence, and say what pins it.** Not the symptom, not a list
+  of mitigations. What pins it is evidence outside the description — failing output, a session
+  artifact, a measurement re-run at `base.txt`; sourced to the body alone it is `[unverified]` and
+  E1 decides what that costs. A body listing three improvements is the tell nobody found the cause.
+- **Q2 — Name the route, and the layer at each end.** Place two frames on this upstream-first
+  vocabulary — `admission` (could refuse the input), `producer` (computes the value), `intermediate`
+  (passes it on), `consumer` (acts on it): the frame this diff changes, and the earliest frame that
+  could have refused the bad value. Both go on the card; strictly downstream with no hunk upstream
+  is E4.
 - **Q3 — What does this make observable to an operator?** A behaviour, an interface, a default, a
   flag, an artifact path, a metric, a log line. If the answer is "nothing", say what makes that
   true — that claim is what the exemption in `AGENTS.md` rests on.
@@ -110,7 +114,14 @@ an answer; rewrite it before going on.
   member, field, keyword argument or return shape: the membership tests, the call sites, the
   readers of the persisted document, the prompt that names it. Grep, do not guess.
 - **Q5 — What would it take for this change to be wrong?** Name the input, configuration, phase or
-  race that would make it produce a wrong answer. "Nothing" is not an answer.
+  race that would make it produce a wrong answer. "Nothing" is not an answer, and neither is a
+  differential run that never built the shapes whose early return the diff moved (E1).
+- **Q6 — Name the scenario, then say whether it ends.** The scenario is the input, configuration or
+  sequence that produces the failure, in actual values and actual order — "the interpreter already
+  carries ray 2.44.1 with click 8.5.0 and pip cannot write to it", never "when the config is wrong".
+  Then trace the branch the head runs under exactly that, and say what the outcome becomes. It goes
+  on the card. Where the failure recurs the diff may still be worth landing, but it closes nothing —
+  that is E2.
 
 ## Step 3 — Core-file risk
 
@@ -133,10 +144,9 @@ A docs-, CI- or test-only diff touches nothing under `src/`: write one
 `NONE -- <reason naming what it does touch>` line.
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
-Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
-holds 24 collaborators as explicit attributes, so a rename passes every import check, passes
-lint, passes collection, and fails only hours into a session when that phase is entered.
-Grep the class name, not just the symbol.
+Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — a `Coordinator`
+attribute rename passes imports, lint and collection and fails hours into a session. Grep the class
+name, not just the symbol.
 
 ## Step 4 — Rule checklist
 
@@ -152,61 +162,64 @@ can trigger, so there is no rule here you may pass over because the list looked 
 must cite a file this PR changes; everything else — the header stating the contract, the prompt
 naming the flag, the doc that did not move — is evidence and welcome beside it.
 
+A rule whose `Severity:` is advisory in every shape it names takes no line here, and neither
+does one whose own body says it cannot be a finding -- V2 is the output contract and V7 is Q4,
+both recorded by the step that runs them. The contract
+cannot publish it, so adjudicate it only when it fires, as a note outside the card. Across 23
+recorded reviews 815 verdict lines carried 12 `FIRE`s — spend the `CLEAR` reasons where a finding
+could come out.
+
 ## Step 5 — AI-code diagnostic
 
 A clean, well-written description is something AI produces easily; these are the structural places
 a diff that reads well hides its defects. One line per check into `$WORK/ai_diagnostic.txt`:
 
 ```
-<check>: CLEAN|HIT -- <what you looked at and what you found>
+<check>: CLEAN|HIT|N/A -- <what you looked at and what you found>
 ```
 
 "clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
-1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
-   base. Every name-resolved entry (`KERNEL_REQUEST_HANDLERS`,
-   `ACTION_CATALOGUE`, action-surface names) has a module and class that exist. Then the inverse:
-   an added identifier whose head-tree occurrence count is 1 is a writer with no reader; a removed
-   caller whose helper survives is a reader with no writer. Both are blocking.
-2. `twins` — **Twin divergence.** Mirrored code half-adapted: sibling executors, per-framework patchers
-   (vllm / sglang / atom / xdit), sync and async variants, the duplicated frozensets in
-   `protocol/intent.py` and `agents/critic`. The defect is the asymmetry, not the copy.
-3. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
+1. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
    comment and the prompt assert? Every number, flag name, path and default in the description must
-   be greppable in the head tree. A number you cannot trace to an output is `[unverified]` and is
-   never repeated as fact.
-4. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
+   be greppable in the head tree; a number you cannot trace to an output is `[unverified]` and is
+   never repeated as fact. A command or an artifact name the diff adds to an instruction — a rule's
+   evidence step, a prompt, a runbook — is run here, once, and its output read: a step naming the
+   wrong artifact or a deprecated form prints nothing and fails silently forever.
+2. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
    reachable, will it ever fire, does it convert a failed measurement, a failed patch apply or a
    failed artifact write into a plausible-looking value? A fail-closed gate that coalesces a
    missing input to a passing default is the blocking shape.
-5. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
+3. `test-falsifies` — **Test calibrated to pass, not to falsify.** Does the test drive the production entry point or a
    mock of it? Does it assert behaviour or restate the implementation? Would it fail on the merge
    base? A regression test that passes on base pins nothing.
-6. `constants` — **Unjustified constants and unbounded lifetimes.** A new timeout, budget, deadline or threshold
-   literal: finite, positive, single-sourced, and derived from somewhere. A `create_task` whose
-   handle is not stored, an `await`-less blocking call inside `async def`, a subprocess with no
-   timeout and no kill path.
+4. `patch-shape` — **A fix that cannot reach its own cause.** Run on a fix PR as the card contract
+   defines one, against Q2's two frames, each shape naming its file:line; elsewhere write `N/A`.
+   Any hit is an E4 candidate, and the first two are blocking on their own:
+   - every production hunk lands in failure classification, naming or reporting — a diff whose whole
+     footprint is what the failure is *called* cannot stop it happening (#2015);
+   - the error class, message or identifier the body quotes appears in neither the changed files nor
+     the code that writes it — then the diff cannot be on that path at all (#1981);
+   - the new guard reads a value its own function did not produce, and no hunk touches it (#1982);
+   - the permissive branch that produced the symptom survives unchanged, with the new branch added
+     above it — narrowing a default is not changing it (#2099);
+   - state is cleared at a reader's entry instead of where it is written or named (#2188);
+   - the body or a new test concedes the rejected input is a reasonable thing to emit, and the diff
+     rejects it anyway — the cause is a missing capability, not a bad caller (#1983).
 
-## Step 6 — Free-form pass, then the build-it-again and blind-spot lines
+## Step 6 — Free-form pass, then the build-it-again line
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any
 correctness risk the rules missed — a phase entered twice, a resume landing on a state shape the
 new code cannot read, a destructive sweep scoped by pattern rather than by what this run owns, a
-number compared against one another measurement system produced?
-
-Then two questions, both answered in full rather than assented to.
+number compared against one another measurement system produced? This step is where most findings
+come from; the rule list is a prompt for it, not a substitute.
 
 Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
 build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
-say which of the diff's parts it does not contain. A part that survives that comparison only
-because it is already written is the answer this question exists to catch. Anything found here is
-a `Contract violation` candidate and carries the `AGENTS.md` bullet and the owner module with it,
-or it is taste and stops here.
-
-Append a `BLIND:` line: **"Is there any correctness risk, resource hazard, or behavioural edge
-case in this diff that none of Steps 1-5 caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
-after this point goes on the card marked `-- late finding` rather than back into a finished
-artifact, so that the order the review ran in stays legible.
+say which of the diff's parts it does not contain. A part that survives only because it is already
+written is what this question exists to catch; where the diff is a refactor it settles under E3 on
+the net line count, otherwise it carries an `AGENTS.md` bullet and an owner module, or stops here.
 
 ## Step 7 — Refutation
 
@@ -230,7 +243,8 @@ trigger reachable in a real configuration; is the point already made in `comment
 other than an earlier review-pr card. A finding on an earlier card is not "already made": it is
 settled in `prior_verdicts.txt`, kept if it still holds and dropped if it was fixed.
 
-Then hand `card.md`, the diff and `base.txt` to a reader who has not seen your reasoning — a second
+Then hand the surviving findings as they will appear, the diff and `base.txt` to a reader who has
+not seen your reasoning — a second
 agent or a person — with every finding false until defended. `$WORK/independent.txt` takes the same
 `FINDING` / `ATTEMPT` / `OUTCOME` blocks, one per finding that survived above. With no such reader,
 write `FINDING: none -- no independent reader available` and say so on the card.
@@ -252,9 +266,12 @@ blocks in `refutations.txt` and `independent.txt`. A finding with no key cannot 
 What it does: <one or two sentences: the wrong behaviour or missing capability, and the route
 taken. Written for someone who has not read the diff.>
 
+Scenario: <Q6's values and order, then what the head does under them. Fix PRs only.>
+Layer: <Q2's two frames: the one this diff changes -> the earliest that could have refused.>
+
 Blocking issues: <N | none>
 
-1. [<RULE-ID|free:slug>] <one-line summary> [verified|inferred]
+1. [<RULE-ID|free:slug>] <one-line summary> [verified]
    Problem: <what is wrong> path/to/file.py:123
    Impact: <what it costs at runtime>
    Action: <verb> <what to change>
@@ -264,6 +281,11 @@ deferred: <key> -- <reason>
 
 Checked: <paths and symbols read> | Ran: <commands> | Skill: <skill> | Model: <model> | Prior: <KEY status, ...> | Base: <merge-base sha> | Head: <head sha>
 ```
+
+`Scenario:` and `Layer:` are written when `title.txt` carries a `fix` prefix or the body names a
+concrete failure — an error string, a session id, an RSI problem, `Fixes #N` — and only then; that
+is E2's trigger. "when the config is invalid" is not a scenario: if neither the body nor a
+surviving artifact pins it, write `Scenario: [unverified] -- <where you looked>`, E2's finding.
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
 survived both refutation passes is not dropped in silence — it goes on a `deferred:` line, which is
@@ -283,9 +305,10 @@ refutation.
 ### Evidence threshold
 
 - `[verified]` — you opened the code, followed the chain, and can name the input, configuration or
-  phase that triggers it.
+  phase that triggers it; for an E1 or E2 evidence gap, naming where you looked — body, artifacts,
+  commits — and what was not there is what verifies it.
 - `[inferred]` — plausible, not confirmed. An inferred finding is not blocking: verify it or delete
-  it, do not ship it as a question at the bottom of the card.
+  it. `pr-review-publish.sh` refuses a card whose blocking findings are not all `[verified]`.
 
 A finding with no `path:line` does not go on the card, and one that stops at "likely the root
 cause" with no chain is not shippable.
@@ -330,19 +353,7 @@ A finding produced by a sub-agent is a hypothesis. Before publishing it, do all 
 A finding that fails any of these is deleted, not downgraded. Report one verified finding rather
 than five unconfirmed ones. Nothing in the output says "a sub-agent found" — you own every line.
 
-## Adding a new rule
-
-When a human reviewer catches something this skill missed:
-
-1. Add the rule body to `rules.md` under its family, with the real PR it was learned from quoted as
-   evidence. A rule with no PR behind it is a hypothetical and does not go in.
-2. Put its id on an index row whose trigger a reviewer can match against `files.txt` and the diff,
-   or add a row. A rule on no row is never read.
-3. Write the false-positive self-check into the body: the condition under which the shape is
-   correct and the rule must stay silent.
-4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
-
-**Nothing new goes in this file.** SKILL.md is budgeted at 350 lines and holds only what every
+**Nothing new goes in this file.** SKILL.md is budgeted at 365 lines and holds only what every
 review needs. Past that length a skill stops being read in full, and an unread instruction is worth
 less than no instruction because it looks like coverage. Conditional content goes in `rules.md` and
 reaches the reviewer through the index; lookup tables go in `references/` and are opened at the step

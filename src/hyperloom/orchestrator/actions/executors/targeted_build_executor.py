@@ -158,7 +158,7 @@ class TargetedBuildExecutor:
         result: Any,
         shared_state: Any,
         *,
-        action: Any = None,
+        action: Any,
         task_id: str = "",
     ) -> None:
         """Append the build result to the manifest; record failure carrier.
@@ -169,13 +169,12 @@ class TargetedBuildExecutor:
         unrecoverable from the row it leaves behind.
         """
         entry = result.to_state()
-        if action is not None:
-            entry["build_driver"] = build_driver_for(action)
-            entry["build_inputs"] = build_input_record(
-                action,
-                installed_versions=getattr(result, "installed_versions", {}) or {},
-                ambient_env=os.environ,
-            )
+        entry["build_driver"] = build_driver_for(action)
+        entry["build_inputs"] = build_input_record(
+            action,
+            installed_versions=getattr(result, "installed_versions", {}) or {},
+            ambient_env=os.environ,
+        )
         # Recorded on the timeline whether or not there is a SharedState to
         # append to: a build dispatched without one still ran, and the manifest
         # is only where the *lane* reads its own history from.

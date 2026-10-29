@@ -13,10 +13,10 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pytest
 
-from kernelforge.cli.forge_loop_command import _load_external_baseline
+from kernelforge.loop.bootstrap.errors import InvalidOptionValue
+from kernelforge.loop.bootstrap.run import _load_external_baseline
 from kernelforge.loop import knowledge_integration as integration
 from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
@@ -1607,12 +1607,12 @@ def test_a_usable_anchor_file_is_read_whole(tmp_path):
 )
 def test_an_anchor_that_cannot_divide_a_speedup_is_refused(tmp_path, payload):
     """Every number the run publishes divides by this file, so a bad entry must cost an exit code, not a ratio."""
-    with pytest.raises(click.BadParameter):
+    with pytest.raises(InvalidOptionValue):
         _load_external_baseline(_anchor_file(tmp_path, payload))
 
 
 def test_a_missing_anchor_file_is_refused(tmp_path):
-    with pytest.raises(click.BadParameter):
+    with pytest.raises(InvalidOptionValue):
         _load_external_baseline(str(tmp_path / "absent.json"))
 
 

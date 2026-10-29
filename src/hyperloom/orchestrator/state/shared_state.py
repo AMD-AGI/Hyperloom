@@ -313,7 +313,6 @@ def _skipped_kernels_top(result: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
-    kid = entry.get("kernel_id")
     arithmetic_intensity = entry.get("arithmetic_intensity")
     if arithmetic_intensity is None:
         arithmetic_intensity = entry.get("flops_per_byte")
@@ -321,13 +320,14 @@ def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
     if efficiency_percent is None:
         efficiency_percent = entry.get("efficiency_pct")
     return {
-        "kernel_id": kid,
+        "kernel_id": entry.get("kernel_id"),
         "name": entry.get("name"),
         # TraceLens kernel_category bucket ("" when absent).
         "kernel_category": entry.get("kernel_category") or "",
         "gpu_pct": entry.get("gpu_pct"),
         "call_count": entry.get("call_count"),
         "duration_us": entry.get("duration_us"),
+        "shapes": entry.get("shapes") or [],
         "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
         "impact_score": entry.get("impact_score"),
         "bottleneck": entry.get("bottleneck"),
@@ -497,9 +497,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # GPU power record: {"declared", "observed": {gpu: {power_cap_w, perf_level, sclk_max_mhz}}, "node" (NPM),
     # "applied", and with --allow-shared-npm-node "shared_npm_node" (the cards left out)}. Asserted on resume.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
-    # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
-    # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
-    # state.osl placeholders. Absent on synthetic sessions.
+    # AgentX corpus shape: written at seed from canonical constants. Read by semantic consumers (prompts, manifest,
+    # reports) instead of the inert state.isl / state.osl placeholders. Absent on synthetic sessions.
     agentx_corpus_shape: dict[str, Any] = field(default_factory=dict)
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
@@ -1801,53 +1800,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Optimized-arm throughput for a current_best roofline snapshot."""
         return first_positive_tput(self.current_best)
 
-    def _locate_diffusion_roofline_sidecar(self, kernel_roofline_path: Any) -> Path | None:
-        """Locate the ``diffusion_roofline.json`` sidecar for the latest trace run."""
-        krp = str(kernel_roofline_path or "").strip()
-        if krp:
-            cand = Path(krp).parent.parent / "diffusion_roofline.json"
-            if cand.is_file():
-                return cand
-        session_dir = getattr(self, "_session_dir", None)
-        if session_dir:
-            try:
-                sidecars = [
-                    p for p in Path(session_dir).glob("kernel-agent/runs/**/diffusion_roofline.json") if p.is_file()
-                ]
-                if sidecars:
-                    return max(sidecars, key=lambda p: p.stat().st_mtime)
-            except OSError:
-                return None
-        return None
-
-    def _scriptable_latency_roofline(
-        self, framework: str, achieved_tput: float, kernel_roofline_path: Any
-    ) -> tuple[float, float]:
-        """Resolve the (measured e2e latency, ideal latency floor) ms pair."""
-        from hyperloom.inference_optimizer import framework_registry
-
-        if not framework_registry.is_scriptable(framework):
-            return 0.0, 0.0
-        # img/s -> per-image e2e latency (ms); the achieved metric.
-        e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
-        # Ideal per-image latency floor from the diffusion roofline sidecar.
-        roofline_ideal_ms = 0.0
-        sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
-        if sidecar is not None:
-            try:
-                data = json.loads(sidecar.read_text(encoding="utf-8"))
-                data = data if isinstance(data, dict) else {}
-                # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
-                approach_a = data.get("analytic_ceiling")
-                totals = data.get("totals")
-                if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
-                    roofline_ideal_ms = float(approach_a["ideal_ms"])
-                elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
-                    roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                roofline_ideal_ms = 0.0
-        return e2e_mean_ms, roofline_ideal_ms
-
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload."""
         from hyperloom.inference_optimizer import framework_registry
@@ -2010,10 +1962,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             if snapshot_arm == "current_best"
             else self._resolve_baseline_achieved_tput()
         )
-        # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
-        # per-image e2e latency vs the ideal floor from the sidecar).
         fw = str(getattr(self, "framework", "") or "")
-        e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, achieved_tput, kernel_roofline_path)
         history_entry = build_roofline_snapshot(
             snapshot_id=snapshot_id,
             ts=latest["ts"],
@@ -2023,12 +1972,10 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 ceiling=compute_roofline_breakdown_from_state(self, arm=snapshot_arm),
                 achieved_tok_per_sec=achieved_tput,
                 throughput_unit=self._roofline_throughput_unit(),
-                e2e_mean_ms=e2e_mean_ms,
-                roofline_ideal_ms=roofline_ideal_ms,
             ),
             framework=fw,
         )
-        # Per-op PerfModel breakdown for dashboard visualization.
+        # Per-op PerfModel breakdown for dashboard visualization (serving runs only).
         attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
         history_entry["trace_input"] = str(latest["trace_input"])
         history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)

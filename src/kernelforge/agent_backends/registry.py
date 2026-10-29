@@ -397,6 +397,9 @@ register_agent_provider(
             # environment it spawns the CLI with.
             session_env=True,
             workspace_guard=True,
+            # ClaudeBackend sends AgentRunSpec.shared_prompt_prefix as a text block with its own cache breakpoint and
+            # reports on_response_started from the SDK's partial stream events.
+            shared_prompt_cache=True,
         ),
         availability=_claude_available,
         credentialed=_claude_credentialed,

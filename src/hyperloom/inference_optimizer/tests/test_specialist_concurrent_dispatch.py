@@ -115,7 +115,6 @@ class _ConcurrencyProbe:
                 "new_findings": [],
                 "residual_questions": [],
             },
-            "turns_used": 1,
             "workspace": "",
             "transcript_path": "",
             "done_path": "",

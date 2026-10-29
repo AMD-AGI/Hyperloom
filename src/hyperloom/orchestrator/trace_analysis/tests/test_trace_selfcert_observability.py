@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hyperloom.orchestrator.trace_analysis._idle_gate import resolve_idle_pct_threshold
+from hyperloom.orchestrator.trace_analysis._trace_gates import resolve_min_busy_ratio
 from hyperloom.orchestrator.trace_analysis.trace_selfcert import (
     CoverageMeasures,
     TraceHealth,
@@ -108,7 +110,6 @@ def test_metrics_state_the_terms_they_were_computed_from(tmp_path):
 
     rank = certify_trace_dir(tmp_path, framework="sglang")["rank_level"][0]
 
-    assert rank["parse"]["aggregation_scope"] is not None
     assert rank["parse"]["truncated"] is False
     assert rank["parse"]["truncation_reason"] == ""
     assert rank["attribution"]["gpu_kernel_sum_ms"] is not None
@@ -162,3 +163,17 @@ def test_measures_do_not_change_any_decision():
 
     for key in ("usable_by", "decode_conclusions_valid", "silently_wrong", "blocking_reasons", "warnings"):
         assert plain[key] == annotated[key], key
+
+
+def test_effective_thresholds_echo_the_values_the_gates_apply(monkeypatch):
+    """The certificate reports the thresholds the shipping gates resolve, including their env handling."""
+    monkeypatch.setenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", "-5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO", "0.20")
+
+    thresholds = effective_thresholds()
+
+    assert thresholds["idle_pct_threshold"] == resolve_idle_pct_threshold() == 80.0
+    assert thresholds["chunk_quality_min_busy_ratio"] == resolve_min_busy_ratio() == 0.20
+
+    monkeypatch.setenv("HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD", "42.5")
+    assert effective_thresholds()["idle_pct_threshold"] == 42.5

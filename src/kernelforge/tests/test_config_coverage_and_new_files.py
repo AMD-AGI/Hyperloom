@@ -658,7 +658,9 @@ def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
     assert "--commit-new-path" in option.opts
     assert option.multiple
 
-    source = inspect.getsource(cli.forge_loop.callback)
+    from kernelforge.loop.bootstrap import run as forge_loop_run
+
+    source = inspect.getsource(forge_loop_run._iteration_config)
     assert re.search(
         r"commit_new_paths\s*=\s*list\(\s*campaign\.commit_new_paths\s*\)",
         source,
@@ -722,7 +724,7 @@ def test_campaign_config_missing_a_field_names_it(tmp_path, monkeypatch):
 
 def test_matching_refuses_a_pattern_normalization_would_have_rejected():
     """Unreachable through the entry points, and a silent skip if it were not."""
-    from kernelforge.loop.new_path_allowlist import (
+    from kernelforge.tools.new_path_allowlist import (
         AllowlistPatternError,
         matches_commit_new_paths,
     )

@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.agent_backends.session_resume import (
     is_api_failure,
     resumable_session_id,
@@ -46,9 +47,10 @@ from kernelforge.agent_backends.codex import (
     resolve_codex_reasoning_effort,
 )
 from kernelforge.config import Config
-from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
+from kernelforge.config import AgentRuntimeOptions, agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.tracker.usage import UsageAccumulator
+from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -421,6 +423,7 @@ def _spec(repo: Path, kernel: Path, driver: Path, timeout: int = 2) -> AgentRunS
         timeout_sec=timeout,
         target_files=[str(kernel)],
         driver_script=str(driver),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
     )
 
 
@@ -699,7 +702,7 @@ def test_config_loads_generic_provider_runtime(
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "workspace-write")
 
     config = Config.from_env()
-    runtime = config.agent_runtime()
+    runtime = agent_runtime(config)
 
     assert config.agent_backend == "codex"
     assert runtime.model == "gpt-test-codex"
@@ -708,7 +711,7 @@ def test_config_loads_generic_provider_runtime(
 
 def test_shared_model_option_is_provider_neutral() -> None:
     """Map --model directly to the selected provider runtime."""
-    overrides = _agent_runtime_overrides(
+    overrides = agent_runtime_overrides(
         AgentRuntimeOptions(
             model="provider-model",
             agent_backend="codex",
@@ -718,7 +721,7 @@ def test_shared_model_option_is_provider_neutral() -> None:
             agent_sandbox_mode=None,
             agent_fallback_provider=None,
             agent_precheck=None,
-            agent_options_json=None,
+            agent_options=None,
         )
     )
 
@@ -1703,6 +1706,7 @@ def _read_only_spec(cwd: Path) -> AgentRunSpec:
         timeout_sec=2,
         writable=False,
         tool_policy=AgentToolPolicy(read=False, search=False, write=False, shell=False, max_turns=1),
+        protected_path_rules=FORGE_PROTECTED_PATHS,
         protected_globs=["*"],
     )
 

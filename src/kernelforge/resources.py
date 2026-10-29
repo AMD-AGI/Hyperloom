@@ -66,7 +66,7 @@ def default_project_root() -> Path:
 
     Must never be ``site-packages`` (read-only, wiped on upgrade) nor the process
     working directory (scatters state wherever the caller happened to be). The
-    precedence mirrors ``knowledge.kb_store.config.KnowledgeConfig.from_env``:
+    precedence mirrors ``kernelforge.config.KnowledgeConfig.from_env``:
 
     ``$KERNELFORGE_PROJECT_ROOT`` -> ``$USER_DATA_PATH/kernelforge`` ->
     ``~/.cache/hyperloom/kernelforge``
@@ -101,3 +101,6 @@ def assert_sandbox_grant(path: str | Path, *, what: str) -> Path:
             "granting it to an agent sandbox would expose the whole installation"
         )
     return resolved
+
+
+__all__ = ["assert_sandbox_grant", "default_project_root", "resource_path"]

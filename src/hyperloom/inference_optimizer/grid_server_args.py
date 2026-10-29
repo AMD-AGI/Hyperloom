@@ -89,6 +89,50 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
+def _parse_removal_specs(remove_args: Any) -> list[tuple[str, str | None]]:
+    """Parse removal specs into ``(flag, value)`` pairs, in the order they are written.
+
+    One entry may name several options (``"--a --b"``), and a removal may be scoped to a value
+    (``"--a 8"``, ``"--a=8"``); a bare flag parses as ``(flag, None)`` and drops every copy of it.
+    """
+    parsed: list[tuple[str, str | None]] = []
+    for spec in to_str_list(remove_args):
+        spec_tokens = _split_args_preserving_json(spec)
+        if spec_tokens is None:
+            spec_tokens = spec.split()
+        i = 0
+        while i < len(spec_tokens):
+            tok = spec_tokens[i]
+            if not tok.startswith("--"):
+                i += 1
+                continue
+            if "=" in tok:
+                flag, _, value = tok.partition("=")
+                parsed.append((flag, value))
+                i += 1
+            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+                parsed.append((tok, spec_tokens[i + 1]))
+                i += 2
+            else:
+                parsed.append((tok, None))
+                i += 1
+    return parsed
+
+
+def removal_option_names(remove_args: Any) -> list[str]:
+    """The bare long option names a removal spec names, in order, each one once.
+
+    Only for a consumer whose contract is option names, such as Magpie's ``launch_overrides.remove_args``:
+    the value a spec is scoped to is dropped here, so this must not stand in for a removal composed against
+    args we build ourselves -- ``remove_server_args`` keeps the scope there.
+    """
+    names: list[str] = []
+    for flag, _value in _parse_removal_specs(remove_args):
+        if flag not in names:
+            names.append(flag)
+    return names
+
+
 def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
     """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
     tok = tokens[index]
@@ -121,27 +165,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if tokens is None:
         return args
 
-    removals: set[tuple[str, str | None]] = set()
-    for spec in removes:
-        spec_tokens = _split_args_preserving_json(spec)
-        if spec_tokens is None:
-            spec_tokens = spec.split()
-        i = 0
-        while i < len(spec_tokens):
-            tok = spec_tokens[i]
-            if not tok.startswith("--"):
-                i += 1
-                continue
-            if "=" in tok:
-                flag, _, value = tok.partition("=")
-                removals.add((flag, value))
-                i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                removals.add((tok, spec_tokens[i + 1]))
-                i += 2
-            else:
-                removals.add((tok, None))
-                i += 1
+    removals: set[tuple[str, str | None]] = set(_parse_removal_specs(removes))
 
     out: list[str] = []
     i = 0

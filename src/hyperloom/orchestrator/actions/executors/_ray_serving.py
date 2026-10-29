@@ -811,10 +811,9 @@ class ServingLease:
 
 def maybe_serving_lease(*, num_gpus: float) -> ServingLease | None:
     """Return a :class:`ServingLease` when single-node Ray execution is active."""
-    from ._multi_node_env import is_multi_node
-    from ._ray_backend import _should_use_ray_backend
+    from ._ray_backend import ray_exec_enabled
 
-    if not _should_use_ray_backend() or is_multi_node():
+    if not ray_exec_enabled():
         return None
     return ServingLease(num_gpus=num_gpus)
 
@@ -913,10 +912,9 @@ def maybe_gpu_specialist_lease(*, num_gpus: float, serving_slot: bool = False) -
     """Return a :class:`GpuSpecialistLease` when single-node Ray execution is active."""
     if num_gpus <= 0:
         return None
-    from ._multi_node_env import is_multi_node
-    from ._ray_backend import _should_use_ray_backend
+    from ._ray_backend import ray_exec_enabled
 
-    if not _should_use_ray_backend() or is_multi_node():
+    if not ray_exec_enabled():
         return None
     return GpuSpecialistLease(num_gpus=num_gpus, serving_slot=serving_slot)
 

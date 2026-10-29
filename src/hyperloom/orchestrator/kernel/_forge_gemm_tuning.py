@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import optional_positive_int
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget
+from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
 from ..actions.executors._kernel_agent_tool import HandlerResult, _run_subprocess, _shape_tool_result
@@ -40,7 +40,6 @@ from ._forge_shapes import (
     _normalize_tokens,
     _path_is_existing_file,
     _resolve_forge_shapes,
-    _resolve_trace_shape_manifest,
 )
 from ._integrate_payload import _requested_framework, _requested_setting
 from .serving_log_evidence import resolve_forge_server_log, _tokens_from_serving_log
@@ -241,7 +240,7 @@ async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) ->
         moe_untuned_csv=moe_untuned_csv,
         moe_key_report=moe_key_report,
         tunableop_input=str(payload.get("tunableop_input") or "").strip(),
-        shapes_manifest="",
+        shapes_manifest=_requested_existing_file(payload, "shapes_manifest"),
         demand_json=_requested_existing_file(payload, "demand_json"),
         capture=None,
     )
@@ -338,28 +337,6 @@ async def _captured_forge_shapes(
     # capture is workload-matched and must supersede any stale specialist CSV
     # resolved before the capture pass.
     return captured._replace(shapes_json=captured_shapes, untuned_csv=""), None
-
-
-async def _forge_dense_shape_manifest(
-    state: Any,
-    payload: dict,
-    run: _ForgeGemmRun,
-    sources: _ForgeShapeSources,
-) -> str:
-    requested = str(payload.get("shapes_manifest") or "").strip()
-    if requested:
-        return requested if _path_is_existing_file(requested) else ""
-    if sources.untuned_csv or sources.shapes_json:
-        log.debug(
-            "GEMM: not scavenging a trace shape manifest; this run already has "
-            "a workload-matched dense-shape source (%s)",
-            "untuned_csv" if sources.untuned_csv else "shapes_json",
-        )
-        return ""
-    # Off the event loop for the same reason: a ``**/`` walk of a session tree
-    # that holds thousands of run artifacts.
-    scavenged = await asyncio.to_thread(_resolve_trace_shape_manifest, state, run.session_dir)
-    return scavenged if _path_is_existing_file(scavenged) else ""
 
 
 def _forge_gemm_tune_input(
@@ -559,7 +536,6 @@ async def _run_forge_gemm_tuning(
     sources, capture_failure = await _captured_forge_shapes(state, payload, run, sources, priced_gemm_lane)
     if capture_failure is not None:
         return capture_failure
-    sources = sources._replace(shapes_manifest=await _forge_dense_shape_manifest(state, payload, run, sources))
 
     gemm_lane = await priced_gemm_lane(
         evidence=RoutingEvidence(
@@ -611,7 +587,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     directory would hand the table to every later server start -- including after
     E2E rejected the candidate, and including servers for other models, since the
     scan does not discriminate by model. Replay does not need the scan: it
-    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
+    restores the env var explicitly (see ``prelude_warm_kernel._warm_kernel_extra_envs``) and
     defers a GEMM column that has no env at all.
 
     The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same

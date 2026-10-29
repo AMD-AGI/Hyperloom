@@ -32,21 +32,20 @@ def test_gain_math_branches() -> None:
 
 # --------------------------------------------------------------------------- # orchestrator.knowledge.kb_writeback #
 # --------------------------------------------------------------------------- #
-def test_kb_writeback_default_root_override(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_override(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
-    root = kb_writeback._default_kb_root()
-    assert root == tmp_path / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "framework_optimization"
 
 
-def test_kb_writeback_default_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
-    from hyperloom.orchestrator.knowledge import kb_writeback
+def test_framework_optimization_root_uses_user_data_path(monkeypatch, tmp_path) -> None:
+    from hyperloom.agents.framework.kb import framework_optimization_root
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
-    assert kb_writeback._default_kb_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
+    assert framework_optimization_root() == tmp_path / "workspace" / "framework-kb" / "framework_optimization"
 
 
 async def test_kb_writeback_rejects_unknown_outcome() -> None:
@@ -215,23 +214,6 @@ def test_file_lock_acquires(tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 # orchestrator.actions.executors._framework_gap_composer #
 # --------------------------------------------------------------------------- #
-def test_framework_gap_bottleneck(tmp_path) -> None:
-    from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
-
-    # top_kernels as list of strings.
-    bp = tmp_path / "bd.json"
-    bp.write_text(json.dumps({"top_kernels": ["fused_moe_gemm_kernel"]}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(bp)) == "moe"
-
-    # No candidates -> "".
-    empty = tmp_path / "empty.json"
-    empty.write_text(json.dumps({"top_kernels": []}), encoding="utf-8")
-    assert gc._extract_bottleneck_from_breakdown(str(empty)) == ""
-
-    assert gc._extract_bottleneck_from_breakdown(None) == ""
-    assert gc._extract_bottleneck_from_breakdown(str(tmp_path / "missing.json")) == ""
-
-
 def test_framework_gap_compose() -> None:
     from hyperloom.orchestrator.actions.executors import _framework_gap_composer as gc
 

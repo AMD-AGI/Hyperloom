@@ -6,21 +6,24 @@ import asyncio
 import hashlib
 import json
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from click.testing import CliRunner
 
-import kernelforge.cli.forge_loop_command as forge_loop_command
-import kernelforge.cli.relay as relay_module
+import kernelforge.loop.bootstrap.reporter as reporter_module
+import kernelforge.loop.bootstrap.run as forge_loop_command
+import kernelforge.loop.bootstrap.warm_start as warm_start_module
+import kernelforge.loop.bootstrap.relay as relay_module
 import kernelforge.loop.recovery as recovery_module
 import kernelforge.orchestrator.agent as agent_module
 import kernelforge.orchestrator.analysis as analysis_module
 import kernelforge.orchestrator.orchestration as orchestration_module
 import kernelforge.orchestrator.supervisor as supervisor_module
 from kernelforge.cli import main
-from kernelforge.cli.session_budget import _forge_session_timeout_sec
+from kernelforge.loop.bootstrap.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
 from kernelforge.loop.campaign_config import (
     CampaignConfigStore,
@@ -28,6 +31,7 @@ from kernelforge.loop.campaign_config import (
     create_campaign_config,
 )
 from kernelforge.loop.experience import ExperienceLedger
+from kernelforge.loop.knowledge_integration import WarmStartRollbackError
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfileSpec,
@@ -234,9 +238,9 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(relay_module, "probe_agent_profiles", fake_probe_agent_profiles)
-    monkeypatch.setattr(forge_loop_command, "kb_warmstart", fake_warmstart)
+    monkeypatch.setattr(warm_start_module, "kb_warmstart", fake_warmstart)
     monkeypatch.setattr(
-        forge_loop_command,
+        reporter_module,
         "write_experience_to_kb",
         fake_write,
     )
@@ -418,7 +422,7 @@ def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployme
         seen["agent_timeout_sec"] = session.timeout_sec
         return "outcome"
 
-    monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", fake_backend)
+    monkeypatch.setattr("kernelforge.roofline_ceiling.standalone.resolve_analyst_backend", fake_backend)
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", fake_estimate)
     estimator = captured["loops"][-1].ceiling_estimator
     asyncio.run(estimator(case_ids=["a"], case_ms={"a": 1.0}))
@@ -503,7 +507,7 @@ def test_a_warm_start_rejected_by_the_task_suite_is_not_returned(
             "reference_program_md_addition": "REFERENCE ONLY",
         }
 
-    monkeypatch.setattr(forge_loop_command, "kb_warmstart", rejected_warmstart)
+    monkeypatch.setattr(warm_start_module, "kb_warmstart", rejected_warmstart)
     result_json = tmp_path / "rejected-warm-start.json"
 
     result, workspace = _invoke_forge_loop(
@@ -630,13 +634,13 @@ def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(
             "reference_program_md_addition": "REFERENCE ONLY",
         }
 
-    monkeypatch.setattr(forge_loop_command, "kb_warmstart", applied_warmstart)
+    monkeypatch.setattr(warm_start_module, "kb_warmstart", applied_warmstart)
 
     def fail_publication(*_args, **_kwargs):
         raise OSError("manifest failed")
 
     monkeypatch.setattr(
-        forge_loop_command,
+        warm_start_module,
         "publish_warm_start_recovery",
         fail_publication,
     )
@@ -668,9 +672,9 @@ def test_warm_start_rollback_failure_exits_cleanly_with_code_two(
     _install_cli_fakes(monkeypatch, tmp_path)
 
     def fail_rollback(**_kwargs):
-        raise forge_loop_command.WarmStartRollbackError("restore failed")
+        raise WarmStartRollbackError("restore failed")
 
-    monkeypatch.setattr(forge_loop_command, "kb_warmstart", fail_rollback)
+    monkeypatch.setattr(warm_start_module, "kb_warmstart", fail_rollback)
     result, _workspace = _invoke_forge_loop(tmp_path, [])
 
     assert result.exit_code == 2
@@ -946,7 +950,7 @@ def test_forge_loop_persists_deadline_read_status(tmp_path, monkeypatch):
         tmp_path,
         [
             "--deadline-unix",
-            str(forge_loop_command.time.time() + 650),
+            str(time.time() + 650),
             "--result-json",
             str(result_json),
         ],
@@ -966,7 +970,7 @@ def test_forge_loop_persists_sanitized_read_error(tmp_path, monkeypatch):
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     result_json = tmp_path / "forge-result.json"
     monkeypatch.setattr(
-        forge_loop_command,
+        warm_start_module,
         "kb_warmstart",
         lambda **_kwargs: {
             "candidate": False,

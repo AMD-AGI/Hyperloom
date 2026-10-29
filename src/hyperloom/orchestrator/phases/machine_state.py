@@ -251,18 +251,18 @@ def redistribute_budget_pct(
     *,
     optimize_enabled: bool = True,
     kernel_enabled: bool = True,
+    sweep_enabled: bool = True,
 ) -> dict[str, float]:
     """Move disabled work-phase shares to enabled work phases.
 
     FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
-    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb.
+    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb. A SWEEP whose concurrency
+    sweep is off only drains and validates on entry, which the session budget
+    alone gates, so a share there would just shrink the phases before it.
     """
     out = dict(base)
-    disabled: list[str] = []
-    if not optimize_enabled:
-        disabled.append(PHASE_FRAMEWORK_AGENT)
-    if not kernel_enabled:
-        disabled.append(PHASE_KERNEL_AGENT)
+    toggles = {PHASE_FRAMEWORK_AGENT: optimize_enabled, PHASE_KERNEL_AGENT: kernel_enabled, PHASE_SWEEP: sweep_enabled}
+    disabled = [phase for phase, enabled in toggles.items() if not enabled]
     freed = sum(float(out.get(p, 0.0)) for p in disabled)
     for p in disabled:
         out[p] = 0.0
@@ -273,8 +273,8 @@ def redistribute_budget_pct(
     if weight > 0.0:
         for p in absorbers:
             out[p] = float(out.get(p, 0.0)) + freed * float(out.get(p, 0.0)) / weight
-    else:
-        # No weighted absorber left → park the freed share on SWEEP (always on).
+    elif sweep_enabled:
+        # No weighted absorber left → park the freed share on SWEEP.
         out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
     # Own our output: a share above a full wall clock is unspendable, and
     # leaving it in place makes the downstream re-normalize drop it back to the

@@ -50,7 +50,7 @@ class ApplyVerdict:
 def _parse(server_log: Path) -> dict | None:
     """Parse the serving log with forge's evidence module, if it is installed."""
     try:
-        from kernelforge.gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune import parse_log_file
     except ImportError:
         # Warning, not info: kernelforge ships in this same wheel, so an ImportError here is a broken install rather
         # than a supported configuration.

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
-from kernelforge.gemm_tune.evidence import moe_tuple
+from kernelforge.gemm_tune import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(

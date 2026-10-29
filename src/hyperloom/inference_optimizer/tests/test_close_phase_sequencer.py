@@ -831,7 +831,6 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     assert [(row["attempt"], row["source"], row["status"]) for row in write_back["attempts"]] == [
         (1, "close", "written"),
     ]
-    assert "queue" in write_back
 
 
 @pytest.mark.asyncio

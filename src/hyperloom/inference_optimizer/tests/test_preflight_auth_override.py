@@ -26,7 +26,9 @@ from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_e
 from hyperloom.common.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
+from hyperloom.inference_optimizer.cli import framework_probe as cli_framework_probe
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
+from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 
@@ -45,7 +47,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
     monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
-    def _fake_which(name: str):
+    def _fake_which(name: str, **_kwargs):
         return f"/usr/bin/{name}"
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
@@ -118,7 +120,7 @@ _RUNTIME_PYTHON_KEYS = ("PYTHON", "VIRTUAL_ENV", "INFERENCE_OPTIMIZER_FORCE_PYTH
 def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path, loader, shell_mode, file_mode, pin):
     marker = tmp_path / ".dockerenv"
     marker.touch()
-    monkeypatch.setattr(cli_preflight, "_CONTAINER_MARKER_FILES", (str(marker),))
+    monkeypatch.setattr(cli_framework_probe, "_CONTAINER_MARKER_FILES", (str(marker),))
     monkeypatch.setenv("REPO_ROOT", str(tmp_path))
     monkeypatch.delenv("HYPERLOOM_RUN_MODE", raising=False)
     if shell_mode is not None:
@@ -136,9 +138,9 @@ def test_env_loaders_respect_explicit_mode_and_python_pins(monkeypatch, tmp_path
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(env_file))
 
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     expected_mode = shell_mode or file_mode
     assert os.environ["HYPERLOOM_RUN_MODE"] == expected_mode
@@ -174,7 +176,7 @@ def test_runtime_loader_fills_missing_values_and_corrects_only_invalid_paths(mon
     monkeypatch.delenv("PYTHONPATH", raising=False)
     path_before = os.environ.get("PATH")
 
-    cli_preflight._load_kernel_agent_env_fallback()
+    cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ["MAGPIE_PATH"] == "/installed/Magpie"
     assert os.environ["KERNEL_AGENT_LOG_LEVEL"] == "DEBUG"
@@ -195,7 +197,7 @@ def test_runtime_loader_rejects_a_missing_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("KERNEL_AGENT_ENV", str(tmp_path / "missing.env.sh"))
 
     with pytest.raises(SystemExit) as failure:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert failure.value.code == 2
 
@@ -212,7 +214,7 @@ def test_dotenv_model_reaches_every_backend(monkeypatch, tmp_path, backend):
     for key in _BACKEND_MODEL_KEYS.values():
         monkeypatch.delenv(key, raising=False)
 
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
 
     assert resolve_forge_llm_model(backend) == f"dotenv-{backend}"
 
@@ -286,7 +288,7 @@ def test_runtime_multiline_headers_from_real_emitter_survive_loading(
     if operator_value is not None:
         monkeypatch.setenv(key, operator_value)
 
-    cli_preflight._load_kernel_agent_env_fallback()
+    cli_preflight_env._load_kernel_agent_env_fallback()
 
     expected = headers if operator_value is None else operator_value
     assert os.environ[key] == expected
@@ -310,9 +312,9 @@ def test_env_loaders_preserve_quoted_multiline_headers(monkeypatch, tmp_path, lo
     monkeypatch.delenv(key, raising=False)
 
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ[key] == headers
     assert parse_custom_headers(os.environ[key]) == {
@@ -346,9 +348,9 @@ def test_env_loaders_decode_escaped_json_quotes_without_executing_substitutions(
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", no_command)
     if loader == "dotenv":
-        cli_preflight._load_dotenv_fallback()
+        cli_preflight_env._load_dotenv_fallback()
     else:
-        cli_preflight._load_kernel_agent_env_fallback()
+        cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == headers
     assert parse_custom_headers(os.environ["ANTHROPIC_CUSTOM_HEADERS"])["Ocp-Apim-Subscription-Key"] == "test-value"
@@ -374,19 +376,19 @@ def test_env_loaders_reject_unclosed_quoted_values_without_partial_exports(monke
 
     with pytest.raises(ValueError, match="ANTHROPIC_CUSTOM_HEADERS"):
         if loader == "dotenv":
-            cli_preflight._load_dotenv_fallback()
+            cli_preflight_env._load_dotenv_fallback()
         else:
-            cli_preflight._load_kernel_agent_env_fallback()
+            cli_preflight_env._load_kernel_agent_env_fallback()
 
     assert "ANTHROPIC_CUSTOM_HEADERS" not in os.environ
     assert "HYPERLOOM_RUN_MODE" not in os.environ
 
 
 def test_parse_env_assignments_keeps_internal_but_not_external_whitespace():
-    assert cli_preflight._parse_env_assignments('OPENAI_CUSTOM_HEADERS="X-Name:  a  "  \n') == {
+    assert cli_preflight_env._parse_env_assignments('OPENAI_CUSTOM_HEADERS="X-Name:  a  "  \n') == {
         "OPENAI_CUSTOM_HEADERS": "X-Name:  a  "
     }
-    assert cli_preflight._parse_env_assignments("OPENAI_CUSTOM_HEADERS=X-Name:  a b\n") == {
+    assert cli_preflight_env._parse_env_assignments("OPENAI_CUSTOM_HEADERS=X-Name:  a b\n") == {
         "OPENAI_CUSTOM_HEADERS": "X-Name:  a b"
     }
 
@@ -395,7 +397,7 @@ def test_parse_env_assignments_preserves_first_assignment_and_single_quote_escap
     text = "export OPENAI_CUSTOM_HEADERS='X-Name: it'\\''s literal\\value'\n"
     text += "OPENAI_CUSTOM_HEADERS=duplicate\n"
 
-    assert cli_preflight._parse_env_assignments(text) == {"OPENAI_CUSTOM_HEADERS": "X-Name: it's literal\\value"}
+    assert cli_preflight_env._parse_env_assignments(text) == {"OPENAI_CUSTOM_HEADERS": "X-Name: it's literal\\value"}
 
 
 def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
@@ -406,7 +408,7 @@ def test_dotenv_fallback_ignores_arbitrary_cwd_dotenv(tmp_path, monkeypatch):
         "LD_PRELOAD=/tmp/evil.so\nOPENAI_BASE_URL=https://evil.example/v1\n",
         encoding="utf-8",
     )
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
     assert "LD_PRELOAD" not in os.environ
     assert os.environ.get("OPENAI_BASE_URL") != "https://evil.example/v1"
 
@@ -419,7 +421,7 @@ def test_dotenv_fallback_filters_explicit_repo_env(tmp_path, monkeypatch):
         "LD_PRELOAD=/tmp/evil.so\nPYTHONSTARTUP=/tmp/pwn.py\nOPENAI_BASE_URL=https://gateway.example/v1\n",
         encoding="utf-8",
     )
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
     assert "LD_PRELOAD" not in os.environ
     assert "PYTHONSTARTUP" not in os.environ
     assert os.environ["OPENAI_BASE_URL"] == "https://gateway.example/v1"
@@ -441,7 +443,7 @@ def test_dotenv_fallback_parses_safe_lines_and_preserves_env_wins(tmp_path, monk
         encoding="utf-8",
     )
 
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
 
     assert os.environ["HYPERLOOM_RUNTIME_DIR"] == "/runtime from env"
     assert os.environ["OPENAI_BASE_URL"] == "https://operator.example/v1"
@@ -463,7 +465,7 @@ def test_dotenv_fallback_loads_gateway_custom_headers(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    cli_preflight._load_dotenv_fallback()
+    cli_preflight_env._load_dotenv_fallback()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}"
     assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
@@ -941,8 +943,8 @@ def test_preflight_keeps_official_anthropic_endpoint_despite_leftover_deepseek_k
 def test_provider_fallback_keys_strip_retired_deepseek_vars_in_either_mode():
     """A stale .env must not hand a single-provider run the other side."""
     for key in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"):
-        assert key in cli_preflight._PROVIDER_FALLBACK_KEYS, key
-        assert key in cli_preflight._ANTHROPIC_FALLBACK_KEYS, key
+        assert key in cli_preflight_env._PROVIDER_FALLBACK_KEYS, key
+        assert key in cli_preflight_env._ANTHROPIC_FALLBACK_KEYS, key
 
 
 def test_is_stale_proxy_url_matches_legacy_only():
@@ -1187,7 +1189,7 @@ def test_ensure_python_sdks_installs_missing_claude_agent_sdk(monkeypatch, capsy
 
 # _ensure_ray
 def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
-    """Ray/click smoke passes -> no pip install fires (probe uses the interpreter)."""
+    """Ray smoke passes -> no pip install fires (probe uses the interpreter)."""
     runner = _RecordingRun([_Completed(returncode=0)])
     monkeypatch.setattr(cli_preflight.subprocess, "run", runner)
 
@@ -1203,10 +1205,10 @@ def test_ensure_ray_skips_when_smoke_passes(monkeypatch, capsys):
 
 
 def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
-    """When Ray/click smoke fails, pip install runs with the SAME interpreter."""
+    """When the Ray smoke fails, pip install runs with the SAME interpreter."""
     runner = _RecordingRun(
         [
-            _Completed(returncode=1, stderr="click version incompatible with Ray CLI: 8.4.2 >= 8.3.0"),
+            _Completed(returncode=1, stderr="ray start does not accept --resources"),
             _Completed(returncode=0),
             _Completed(returncode=0),
         ]
@@ -1221,9 +1223,11 @@ def test_ensure_ray_installs_when_smoke_fails(monkeypatch, capsys):
     assert install_call[1:4] == ["-m", "pip", "install"]
     assert "--break-system-packages" in install_call
     assert any(arg.startswith("ray[default]==") for arg in install_call)
-    assert "click<8.3.0" in install_call
+    # Only Ray is repaired: the CLI is certified by what it parses, so no click
+    # release is pinned or downgraded on the way.
+    assert not any("click" in arg for arg in install_call)
     captured = capsys.readouterr().out
-    assert "ray/click invalid" in captured
+    assert "ray unusable (ray start does not accept --resources)" in captured
     assert "ray installed OK" in captured
 
 
@@ -1617,11 +1621,11 @@ def test_provider_only_mode_reads_a_subscription_token_as_anthropic_only(monkeyp
     """Without this the token yields no provider-only mode, so a stale OpenAI side from the kernel-agent env file is never suppressed."""
     _oauth_only_env(monkeypatch, base_url="")
 
-    assert cli_preflight._provider_only_mode() == "anthropic"
+    assert cli_preflight_env._provider_only_mode() == "anthropic"
     # Nothing else in this shell carries the verdict: drop the token and the mode collapses, which is what the
     # pre-registry code returned all along.
     monkeypatch.delenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")))
-    assert cli_preflight._provider_only_mode() == ""
+    assert cli_preflight_env._provider_only_mode() == ""
 
 
 def test_claude_config_json_is_left_alone_in_subscription_mode(monkeypatch, tmp_path, capsys):

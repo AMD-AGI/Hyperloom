@@ -38,10 +38,6 @@ def _tables(db: sqlite3.Connection) -> set[str]:
     return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def _lease_columns(db: sqlite3.Connection) -> set[str]:
-    return {row[1] for row in db.execute("PRAGMA table_info(leases)")}
-
-
 def _label(value: object) -> str:
     text = "unknown" if value is None or value == "" else str(value)
     label = ascii(text[:80])
@@ -101,15 +97,9 @@ def _scan_leases(db: sqlite3.Connection, owner_scope: str, found: _Diagnostics) 
     A round lease is held by a bring-up round rather than an execution, so it
     is judged later, against the rounds that are actually open.
     """
-    columns = _lease_columns(db)
-    query = (
-        "SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"
-        if "owner_scope" in columns
-        else "SELECT lane, holder_id, task_id, pid, '' AS owner_scope FROM leases"
-    )
     local_tasks: set[str] = set()
     round_leases: list[sqlite3.Row] = []
-    for row in db.execute(query):
+    for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"):
         if row["lane"] == "bringup_round":
             round_leases.append(row)
             continue
@@ -163,16 +153,14 @@ def _scan_open_rounds(db: sqlite3.Connection, tasks: dict, uncertainties: dict, 
 
 
 def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
-    tables = _tables(db)
+    # A database left before its schema was created records no execution.
+    if not _tables(db):
+        return []
     found = _Diagnostics()
-    local_tasks: set[str] = set()
-    round_leases: list[sqlite3.Row] = []
-    if "leases" in tables:
-        local_tasks, round_leases = _scan_leases(db, owner_scope, found)
-    if "gpu_leases" in tables:
-        _scan_gpu_leases(db, found)
-    tasks, uncertainties = _scan_tasks(db, local_tasks) if "tasks" in tables else ({}, {})
-    open_rounds = _scan_open_rounds(db, tasks, uncertainties, found) if "bringup_rounds" in tables else {}
+    local_tasks, round_leases = _scan_leases(db, owner_scope, found)
+    _scan_gpu_leases(db, found)
+    tasks, uncertainties = _scan_tasks(db, local_tasks)
+    open_rounds = _scan_open_rounds(db, tasks, uncertainties, found)
 
     for row in round_leases:
         if open_rounds.get(row["holder_id"]) != row["task_id"]:
@@ -188,14 +176,25 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
 
 def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     """Name up to five recorded execution scopes other than ``owner_scope``, for a blocked resume."""
-    if "owner_scope" not in _lease_columns(db):
-        return []
     rows = db.execute(
         "SELECT DISTINCT owner_scope FROM leases WHERE owner_scope NOT IN ('', ?) ORDER BY owner_scope LIMIT 5",
         (owner_scope,),
     )
     scopes = [_label(row[0]) for row in rows]
     return ["other owner scopes: " + " ".join(scopes)] if scopes else []
+
+
+def foreign_owner_scopes(session_dir: Path, owner_scope: str) -> list[str]:
+    """The exact owner scopes, other than ``owner_scope``, that hold execution leases in the session's ledger.
+
+    Empty for a session without a readable ledger: ``ensure_resume_safe`` reports what cannot be read.
+    """
+    try:
+        with closing(sqlite3.connect(db_path_for(session_dir).resolve().as_uri() + "?mode=ro", uri=True)) as db:
+            rows = db.execute("SELECT DISTINCT owner_scope FROM leases WHERE owner_scope != '' ORDER BY owner_scope")
+            return [row[0] for row in rows if not same_environment(row[0], owner_scope)]
+    except (OSError, sqlite3.Error):
+        return []
 
 
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
@@ -237,21 +236,13 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
         )
 
 
-def _task_leases(db: sqlite3.Connection, tables: set[str], task_id: str, owner_scope: str) -> list[dict]:
+def _task_leases(db: sqlite3.Connection, task_id: str, owner_scope: str) -> list[dict]:
     """Return the execution leases a confirmation releases; every one must carry ``owner_scope``.
 
     The empty scope is the legacy unattributed ownership confirmed task by task. A
     bring-up round's lane never records a scope and stays with the round reconciler.
     """
-    if "leases" not in tables:
-        return []
-    columns = _lease_columns(db)
-    query = (
-        "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
-        if "owner_scope" in columns
-        else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
-    )
-    rows = list(db.execute(query, (task_id,)))
+    rows = list(db.execute("SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?", (task_id,)))
     scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
     if any(row["owner_scope"] != owner_scope for row in scoped):
         raise CleanupConfirmationError(
@@ -361,9 +352,9 @@ def _check_prior_confirmation_still_holds(target: _ConfirmTarget, *, manual_inde
         raise CleanupConfirmationError("prior operator confirmation no longer establishes cleanup")
 
 
-def _round_is_uncertain(db: sqlite3.Connection, tables: set, task: sqlite3.Row, task_id: str, terminal: bool) -> bool:
+def _round_is_uncertain(db: sqlite3.Connection, task: sqlite3.Row, task_id: str, terminal: bool) -> bool:
     """Whether a still-open bring-up round leaves this terminal task's cleanup unproven."""
-    if not terminal or "bringup_rounds" not in tables:
+    if not terminal:
         return False
     open_round = db.execute(
         "SELECT 1 FROM bringup_rounds WHERE state='open' AND holder_task_id=? LIMIT 1", (task_id,)
@@ -420,14 +411,10 @@ def _write_confirmation(db: sqlite3.Connection, target: _ConfirmTarget, *, confi
     if target.terminal:
         db.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
     else:
-        task_columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
-        if "updated_at" in task_columns:
-            db.execute(
-                "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
-                (json.dumps(history), confirmed_at, task_id),
-            )
-        else:
-            db.execute("UPDATE tasks SET state='cancelled', history=? WHERE task_id=?", (json.dumps(history), task_id))
+        db.execute(
+            "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
+            (json.dumps(history), confirmed_at, task_id),
+        )
     if target.leases:
         db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
     if target.gpu_leases:
@@ -436,20 +423,17 @@ def _write_confirmation(db: sqlite3.Connection, target: _ConfirmTarget, *, confi
 
 def _confirm_task_stopped_in_transaction(db: sqlite3.Connection, task_id: str, confirmation: _Confirmation) -> dict:
     """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
-    tables = _tables(db)
-    if "tasks" not in tables:
+    if "tasks" not in _tables(db):
         raise CleanupConfirmationError("confirmation requires an existing tasks table")
     task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
     if task is None:
         raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
     history = _confirmable_history(task)
 
-    leases = _task_leases(db, tables, task_id, confirmation.owner_scope)
-    gpu_leases = []
-    if "gpu_leases" in tables:
-        gpu_leases = [
-            dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
-        ]
+    leases = _task_leases(db, task_id, confirmation.owner_scope)
+    gpu_leases = [
+        dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
+    ]
     target = _ConfirmTarget(task_id=task_id, row=task, history=history, leases=leases, gpu_leases=gpu_leases)
 
     result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
@@ -459,7 +443,7 @@ def _confirm_task_stopped_in_transaction(db: sqlite3.Connection, task_id: str, c
         result["status"] = "already_confirmed"
         return result
 
-    uncertain_round = _round_is_uncertain(db, tables, task, task_id, target.terminal)
+    uncertain_round = _round_is_uncertain(db, task, task_id, target.terminal)
     if target.state != "running" and not leases and not gpu_leases and not uncertain_round:
         return result
 
@@ -491,10 +475,6 @@ def _confirm_scope_gone_in_transaction(
     earlier container may have left), refuses while a holder process that started before
     its lease still runs here.
     """
-    tables = _tables(db)
-    columns = _lease_columns(db) if "leases" in tables else set()
-    if "owner_scope" not in columns:
-        raise CleanupConfirmationError("the ownership ledger records no owner scopes; use --confirm-stopped")
     owner_scope = confirmation.owner_scope
     now = datetime.fromisoformat(confirmation.confirmed_at)
     target_tasks: set[str] = set()
@@ -565,11 +545,14 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
 
                 db.row_factory = sqlite3.Row
                 db.execute("BEGIN IMMEDIATE")
+                refuse_older_schema(db)
                 return update(db, pwd.getpwuid(os.getuid()).pw_name, now_iso())
         finally:
             lock.release()
     except (session_lock.SessionAlreadyRunning, session_lock.SessionLockPathError) as exc:
         raise CleanupConfirmationError("cannot confirm cleanup while the session lock is unavailable") from exc
+    except OlderCoordinatorDB as exc:
+        raise CleanupConfirmationError(str(exc)) from exc
     except (OSError, sqlite3.Error, KeyError) as exc:
         raise CleanupConfirmationError(
             "cannot confirm cleanup in the existing ownership database; no changes committed"

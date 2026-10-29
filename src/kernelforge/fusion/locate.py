@@ -5,17 +5,22 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import inspect
 import logging
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from kernelforge.tools.git import git
+
 from .calibration import predict_cuda_graph_on_gain
+from .emit import _git_tracks
 from .models import Diagnosis, FusionPattern, Recipe
 from .patterns import match_patterns
 from .shapes import load_model_config, resolve_decode_shapes
@@ -593,3 +598,40 @@ def build_recipes(
             recipe = _compile_pass_recipe(recipe, state, "fusion", pat.description)
         recipes.append(recipe)
     return rank_recipes(recipes)
+
+
+def _package_root(source_file: str) -> str:
+    """Top install dir containing ``source_file``'s package (site-packages-style root)."""
+    if not source_file:
+        return ""
+    p = Path(source_file).resolve()
+    d = p.parent
+    while (d.parent != d) and (d / "__init__.py").is_file():
+        d = d.parent
+    return str(d)
+
+
+def _framework_repo_root(source_file: str, framework_root: str) -> str:
+    """Repo/install root that patch paths are relative to (for patch export)."""
+    start = source_file or framework_root
+    if not start:
+        return framework_root or ""
+    start_dir = str(Path(start).parent if Path(start).suffix else start)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        r = git(
+            "-C",
+            start_dir,
+            "rev-parse",
+            "--show-toplevel",
+            check=False,
+            timeout=30,
+        )
+        if r.returncode == 0:
+            toplevel = r.stdout.strip()
+            if source_file and _git_tracks(toplevel, source_file):
+                return toplevel
+            # Inside a git work tree but the framework file is untracked (venv in a git project): use the package
+            # root, not the project root.
+            return _package_root(source_file) or toplevel or framework_root or ""
+    # Not a git work tree at all (plain pip install).
+    return _package_root(source_file) or framework_root or ""

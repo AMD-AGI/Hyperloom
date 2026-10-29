@@ -77,6 +77,36 @@ async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_grid_unreadable_workload_pin_fails_only_its_own_variant(tmp_path, monkeypatch):
+    """Sizing a rung's grant reads its composed env, and one rung's unreadable pin is its own failure.
+
+    ``HYPERLOOM_AGENTX='maybe'`` is no boolean, so the reader that sizes the cap refuses
+    it. Raising out of the variant would end the grid and throw away every rung already
+    measured, for a config only this rung launches.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    launched: list[str] = []
+
+    def _no_ws(*_a, **_k):
+        launched.append("magpie")
+        return 1, "stdout", "boom stderr"
+
+    monkeypatch.setattr(gr, "_run_magpie", _no_ws)
+    results = await run_grid(
+        grid=[GridVariant("vA", extra_envs={"HYPERLOOM_AGENTX": "maybe", "CONC": "20"}), GridVariant("vB")],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
+        stop=GridStop(keep_going_on_failure=True),
+    )
+    assert [r.status for r in results] == ["failed", "failed"]
+    assert results[0].error_class == "benchmark_cap_error"
+    assert "HYPERLOOM_AGENTX" in (results[0].error or ""), "the row has to name the pin that could not be read"
+    assert results[0].granted_cap_sec is None, "no round of it ran, so it was granted no time"
+    assert launched == ["magpie"], "the next variant has to be benchmarked all the same"
+
+
+@pytest.mark.asyncio
 async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)

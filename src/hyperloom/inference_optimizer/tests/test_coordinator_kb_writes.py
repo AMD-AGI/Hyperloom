@@ -432,6 +432,52 @@ def test_close_does_not_clobber_with_bare_baseline_higher_tput(
     )
 
 
+def test_close_below_the_row_keeps_what_worked_and_merges_what_failed(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.recipe_kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"name": "mtp", "extra_server_args": "--speculative-algorithm NEXTN", "tput": "1420"},
+            best_throughput=1420.0,
+            what_worked=[{"name": "mtp_on", "gain_pct": 35.0}, {"name": "max_running_256", "gain_pct": 5.2}],
+            what_failed=[{"name": "fp8_kv_cache", "reason": "accuracy"}, {"name": "chunked_off", "reason": "reverted"}],
+        )
+    )
+    ss = coord.shared_state
+    ss.current_best = {"name": "warm_replay", "extra_server_args": "--speculative-algorithm NEXTN", "tput": 1010.0}
+    ss.optimization_stack = [
+        {
+            "action": "replay_warm_recipe",
+            "variant_name": "warm_replay",
+            "extra_server_args": "--speculative-algorithm NEXTN",
+        }
+    ]
+    ss.cumulative_gain_validated = 0.8
+    ss.cumulative_gain_validated_stack_len = 1
+    ss.last_action_failures = [
+        {"name": "fp8_kv_cache", "reason": "accuracy"},
+        {"name": "tp8", "reason": "oom"},
+        {"name": "tp8", "reason": "oom"},
+    ]
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert row["best_throughput"] == 1420.0
+    assert [r["name"] for r in row["what_worked"]] == ["mtp_on", "max_running_256"]
+    assert [(r["name"], r["reason"]) for r in row["what_failed"]] == [
+        ("chunked_off", "reverted"),
+        ("fp8_kv_cache", "accuracy"),
+        ("tp8", "oom"),
+    ]
+
+
 def test_best_config_reads_stack_args_from_canonical_server_key(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +520,8 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
             precision=_PREC,
             best_config={"name": "old", "extra_server_args": "--page-size 16", "tput": "2000"},
             best_throughput=2000.0,
+            what_worked=[{"name": "page16", "gain_pct": 3.0}],
+            what_failed=[{"name": "tp8", "reason": "oom"}],
         )
     )
     ss = coord.shared_state
@@ -495,6 +543,45 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
+    assert [r["name"] for r in row["what_worked"]] == ["page32"]
+    assert [(r["name"], r["reason"]) for r in row["what_failed"]] == [("tp8", "oom")]
+
+
+@pytest.mark.parametrize("prior_row", [True, False], ids=["prior-row", "first-session"])
+def test_what_worked_follows_a_best_config_the_keep_amend_stamped(tmp_path: Path, prior_row: bool) -> None:
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    if prior_row:
+        coord.recipe_kb.put_recipe(
+            RecipeUpsert(
+                canonical_id=cid,
+                model=_MODEL,
+                hardware=_HW,
+                framework_name=_FW,
+                framework_version=_FWV,
+                precision=_PREC,
+                best_config={"name": "old", "extra_server_args": "--page-size 16", "tput": "2000"},
+                best_throughput=2000.0,
+                what_worked=[{"name": "page16", "gain_pct": 3.0}],
+            )
+        )
+    journal = coord.recipe_journal
+    _stack_one_keep(coord.shared_state)
+    coord.shared_state.cumulative_gain_validated_stack_len = 1
+    overrides = journal.kb_best_config_overrides_for_keep(
+        live=journal.read_local_recipe_row(),
+        best_config_candidate={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
+        throughput_after=2200.0,
+    )
+    journal.kb_amend_recipe(
+        append_lesson={"statement": "page32 helped", "measured_impact": {}}, recipe_overrides=overrides
+    )
+
+    assert journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert row["best_config"]["extra_server_args"] == "--page-size 32"
+    assert [r["name"] for r in row["what_worked"]] == ["page32"]
 
 
 def _stack_one_keep(state) -> None:

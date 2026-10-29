@@ -24,7 +24,7 @@ from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinato
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
-from hyperloom.orchestrator.phases.framework import ProgressStamp
+from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
@@ -200,7 +200,7 @@ def test_a_dispatched_discovery_round_records_its_run(session_dir: Path):
 def test_a_run_recorded_for_neither_a_task_nor_an_id_raises(session_dir: Path):
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.phases.framework import _record_run
+    from hyperloom.orchestrator.phases.framework_records import _record_run
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"

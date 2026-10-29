@@ -10,10 +10,11 @@ import base64
 import json
 import os
 import shlex
+import subprocess
 import tempfile
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,6 @@ import httpx
 
 from hyperloom.common.env import EnvValueError, env_int
 
-from ..session.paths import mn_profile_trace_root
 from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
 from ._internal.log import info, warn, err
@@ -31,7 +31,7 @@ from ._internal.server_args_safety import (
     prepare_shell_safe_extra_args,
     validate_server_args,
 )
-from .state_paths import resolve_state_file
+from .state_paths import _ensure_runtime_dir, resolve_state_file
 from ._internal.env_safety import filter_forward_env
 from ._internal.external_state import external_service_url, load_multi_node_state
 from ._internal.serving_probe import cluster_is_serving
@@ -72,21 +72,8 @@ def _normalize_extra_args(s: str | None) -> str:
 # Exit codes — part of the CLI's contract with the agent; keep stable.
 EXIT_OK = 0
 EXIT_TRANSIENT = 1  # network / Ray Dashboard or SSH error / timeout — caller may retry
-EXIT_TERMINAL_FAILURE = 2  # workload entered Failed/Stopped/Cancelled — DO NOT retry; fix and recreate
 EXIT_CONFIG_ERROR = 3  # missing env / required arg — fix the call, don't retry blindly
 EXIT_INTERRUPT = 130  # Ctrl-C / SIGINT
-
-
-class WorkloadTerminalFailure(RuntimeError):
-    """Raised when the polled job reports a terminal failure state; carries the diag snapshot. Exit code -> 2."""
-
-    def __init__(self, label: str, phase: str, diag: str, snapshot: dict[str, Any]) -> None:
-        """Initialize the terminal-failure error."""
-        super().__init__(f"{label} terminal phase={phase}: {diag}")
-        self.label = label
-        self.phase = phase
-        self.diag = diag
-        self.snapshot = snapshot
 
 
 class TransientFailure(RuntimeError):
@@ -141,12 +128,7 @@ def _load_state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     """Write the CLI state dict to the state file as pretty JSON."""
     path = _state_file()
-    runtime_dir = path.parent
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        runtime_dir.chmod(0o700)
-    except OSError as exc:
-        warn(f"could not chmod runtime dir {runtime_dir} to 0700: {exc}")
+    _ensure_runtime_dir(path.parent)
     path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     try:
         path.chmod(0o600)
@@ -185,24 +167,34 @@ def _infera_known_hosts_path(state: dict[str, Any] | None = None) -> Path:
     return ssh_known_hosts.default_known_hosts_path(_infera_ssh_dir())
 
 
-def _refresh_infera_known_hosts(
-    targets: list[tuple[str, int]],
-    *,
-    state: dict[str, Any] | None = None,
-) -> Path:
-    """Run ssh-keyscan for Infera GPU pods and persist the path in state."""
-    kh = ssh_known_hosts.refresh_known_hosts(
-        [(ip, int(port)) for ip, port in targets if (ip or "").strip()],
-        _infera_known_hosts_path(state),
-    )
-    if state is not None:
-        state["ssh_known_hosts"] = str(kh)
-    return kh
-
-
 def _infera_default_ssh_port(state: dict[str, Any]) -> int:
     """Return the session default SSH port from state."""
     return int(state.get("ssh_port") or ssh_client.DEFAULT_SSH_PORT)
+
+
+def _infera_ssh_with_host_key_retry(
+    state: dict[str, Any],
+    ip: str,
+    port: int | None,
+    run: Callable[[ssh_client.SshTarget], subprocess.CompletedProcess],
+) -> subprocess.CompletedProcess:
+    """Run ``run`` against an Infera pod; on a host-key mismatch, re-scan known_hosts and retry once."""
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
+    cp = run(target)
+    if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
+        try:
+            known_hosts = ssh_known_hosts.refresh_known_hosts([(ip, target.port)], target.known_hosts)
+        except RuntimeError as exc:
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
+            return cp
+        cp = run(replace(target, known_hosts=known_hosts))
+    return cp
 
 
 def _infera_ssh_run_script(
@@ -212,26 +204,11 @@ def _infera_ssh_run_script(
     *,
     timeout: int,
     port: int | None = None,
-):
+) -> subprocess.CompletedProcess:
     """Run a script on an Infera pod over SSH with host-key retry."""
-    target = ssh_client.SshTarget(
-        host=ip,
-        key_path=state["ssh_key_path"],
-        port=int(port if port is not None else _infera_default_ssh_port(state)),
-        known_hosts=_infera_known_hosts_path(state),
+    return _infera_ssh_with_host_key_retry(
+        state, ip, port, lambda target: ssh_client.ssh_run_script(target, script, timeout=timeout)
     )
-
-    cp = ssh_client.ssh_run_script(target, script, timeout=timeout)
-    if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
-        try:
-            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
-        except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
-            return cp
-        _save_state(state)
-        cp = ssh_client.ssh_run_script(replace(target, known_hosts=known_hosts), script, timeout=timeout)
-    return cp
 
 
 def _infera_ssh_bash_with_env(
@@ -241,26 +218,11 @@ def _infera_ssh_bash_with_env(
     *,
     timeout: int,
     port: int | None = None,
-):
+) -> subprocess.CompletedProcess:
     """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
-    target = ssh_client.SshTarget(
-        host=ip,
-        key_path=state["ssh_key_path"],
-        port=int(port if port is not None else _infera_default_ssh_port(state)),
-        known_hosts=_infera_known_hosts_path(state),
+    return _infera_ssh_with_host_key_retry(
+        state, ip, port, lambda target: ssh_client.ssh_run_bash_stdin(target, script, timeout=timeout)
     )
-
-    cp = ssh_client.ssh_run_bash_with_env(target, script, None, timeout=timeout)
-    if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
-        try:
-            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
-        except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
-            return cp
-        _save_state(state)
-        cp = ssh_client.ssh_run_bash_with_env(replace(target, known_hosts=known_hosts), script, None, timeout=timeout)
-    return cp
 
 
 def _short_poll(
@@ -357,10 +319,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         if args.print_logs:
             logs = ray.get_job_logs(sub_id)
             print(logs)
-
-    # Persist the bootstrap submission id for later debugging.
-    state["last_bootstrap_submission_id"] = sub_id
-    _save_state(state)
     return 0
 
 
@@ -401,9 +359,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
             logs = ray.get_job_logs(sub_id)
             print(logs)
         info(f"verify done: {result.get('status')}")
-
-    state["last_verify_submission_id"] = sub_id
-    _save_state(state)
     return 0
 
 
@@ -419,22 +374,15 @@ def _read_pod_script(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def _read_jit_cache_core() -> str:
-    """Read the same stdlib-only cache owner used by local patch transactions."""
-    return (Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py").read_text(encoding="utf-8")
-
-
 _KERNEL_NODE_OPS_DEPS = (
     Path(__file__).resolve().parents[2] / "common" / "aiter_jit_cache.py",
     _SCRIPTS_DIR / "patch_path_safety.py",
 )
-_LAUNCHER_DEPS = (
-    Path(__file__).parent / "_internal" / "server_args_safety.py",
-    _SCRIPTS_DIR / "sglang_shape_gate.py",
-)
+_SHAPE_GATE_DEPS = (_SCRIPTS_DIR / "sglang_shape_gate.py",)
+_LAUNCHER_DEPS = (Path(__file__).parent / "_internal" / "server_args_safety.py", *_SHAPE_GATE_DEPS)
 
 
-def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...] = _KERNEL_NODE_OPS_DEPS) -> str:
+def _read_bundled_pod_python_script(main: str, deps: tuple[Path, ...]) -> str:
     """Bundle a pod script with its dependencies registered under their own module names.
 
     Pods receive one file, so each dependency is registered in ``sys.modules``
@@ -526,7 +474,7 @@ def _exec_kill_submission(
     *,
     label: str,
     args: argparse.Namespace,
-) -> str:
+) -> None:
     """Submit a kill entrypoint via Ray Dashboard and poll to SUCCEEDED."""
     with _ray_dashboard_client(state) as ray:
         kill_sub = ray.submit_job(entrypoint)
@@ -546,10 +494,9 @@ def _exec_kill_submission(
         if getattr(args, "print_logs", False):
             logs = ray.get_job_logs(kill_sub)
             print(logs)
-    return kill_sub
 
 
-def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
+def _build_multinode_kill_entrypoint(pid_dir: str) -> str:
     """Compose the head-pod entrypoint that kills every rank's server via heredoc-embedded kill_multinode.py (fans out via ray actors)."""
     py = _read_pod_script("kill_multinode.py")
     return (
@@ -557,34 +504,42 @@ def _build_multinode_kill_entrypoint(pid_dir: str, grace_sec: int = 5) -> str:
         f"cat > \"$WORK_DIR/kill_multinode.py\" <<'__MN_KILL_PY_EOF__'\n"
         f"{py}__MN_KILL_PY_EOF__\n"
         f'python3 "$WORK_DIR/kill_multinode.py" '
-        f"--pid-dir {shlex.quote(str(pid_dir))} --grace-sec {grace_sec}"
+        f"--pid-dir {shlex.quote(str(pid_dir))}"
     )
 
 
-def _extract_launcher_summary(launch_logs: str) -> dict:
-    """Parse the JSON summary launch_multinode.py writes to stdout (the last balanced ``{...}`` in the interleaved logs); ``{}`` on failure."""
-    if not launch_logs:
-        return {}
-    text = launch_logs.rstrip()
+def _json_object_candidates(text: str) -> Iterator[str]:
+    """Yield balanced ``{...}`` blocks from the end of ``text`` backward, ignoring braces inside JSON strings."""
     depth = 0
-    end_idx = -1
+    in_str = False
+    end = -1
     for i in range(len(text) - 1, -1, -1):
         ch = text[i]
-        if ch == "}":
+        if depth and ch == '"':
+            j = i
+            while j and text[j - 1] == "\\":
+                j -= 1
+            if (i - j) % 2 == 0:
+                in_str = not in_str
+        elif in_str:
+            continue
+        elif ch == "}":
             if depth == 0:
-                end_idx = i
+                end = i
             depth += 1
-        elif ch == "{":
+        elif ch == "{" and depth:
             depth -= 1
             if depth == 0:
-                try:
-                    candidate = text[i : end_idx + 1]
-                    parsed = json.loads(candidate)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                end_idx = -1
+                yield text[i : end + 1]
+
+
+def _extract_launcher_summary(launch_logs: str) -> dict:
+    """Parse the JSON summary launch_multinode.py writes to stdout: the last ``{...}`` block that parses; ``{}`` on failure."""
+    for candidate in _json_object_candidates(launch_logs or ""):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
     return {}
 
 
@@ -604,21 +559,8 @@ def _build_multinode_launch_entrypoint(
         )
     except ServerArgsRejected as exc:
         raise RuntimeError(str(exc)) from exc
-    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env, else derive from state.json's rayjob_id; empty =>
-    # skip the flag.
+    # Pin SGLANG_TORCH_PROFILER_DIR to a shared-FS path from env; empty => skip the flag.
     profiler_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    if not profiler_dir:
-        _st = _load_state()
-        _rid = str(_st.get("rayjob_id") or "").strip()
-        if _rid:
-            _profiler_path = mn_profile_trace_root() / _rid / "torch_trace"
-            # Best-effort mkdir.
-            try:
-                _profiler_path.mkdir(parents=True, exist_ok=True)
-            except OSError as _exc:
-                warn(f"cannot mkdir profile-traces dir {_profiler_path}: {_exc}; pod-side launch will retry the mkdir")
-            profiler_dir = str(_profiler_path)
-            info(f"profile-traces dir derived from rayjob_id: {profiler_dir}")
     profiler_arg = f"--torch-profiler-dir {shlex.quote(str(profiler_dir))} " if profiler_dir else ""
     # Expert-parallel size; ep <= 1 emits no flag.
     ep_arg = f"--ep {args.ep} " if args.ep > 1 else ""
@@ -672,7 +614,6 @@ def _build_multinode_router_entrypoint(
 ) -> str:
     """Compose the head-pod entrypoint that detaches the PD router (rank 0 only, binds 8888) via heredoc-embedded launch_router.py."""
     py = _read_pod_script("launch_router.py")
-    public_port = 8888
     pid_file = f"{pid_dir.rstrip('/')}/router.pid"
     log_file = f"{log_dir.rstrip('/')}/router.log"
     vllm_router_cmd = (getattr(args, "pd_vllm_router_cmd", "") or "").strip()
@@ -684,7 +625,6 @@ def _build_multinode_router_entrypoint(
         f'python3 "$WORK_DIR/launch_router.py" '
         f"--framework {args.framework!s} "
         f"--prefill-url {shlex.quote(str(prefill_url))} --decode-url {shlex.quote(str(decode_url))} "
-        f"--public-port {public_port} "
         f"--pid-file {shlex.quote(str(pid_file))} --log-file {shlex.quote(str(log_file))} "
         f"{vrc_arg}"
     )
@@ -692,16 +632,10 @@ def _build_multinode_router_entrypoint(
 
 def _kernel_patch_pod_files() -> str:
     """Ship the kernel patch driver and its fixed sibling imports to Ray pods."""
-    return (
-        'cat > "$WORK_DIR/aiter_jit_cache.py" '
-        "<<'__MN_JIT_CACHE_EOF__'\n"
-        f"{_read_jit_cache_core()}__MN_JIT_CACHE_EOF__\n"
-        'cat > "$WORK_DIR/patch_path_safety.py" '
-        "<<'__MN_PPATH_EOF__'\n"
-        f"{_read_pod_script('patch_path_safety.py')}__MN_PPATH_EOF__\n"
-        'cat > "$WORK_DIR/kernel_patch_multinode.py" '
-        "<<'__MN_KPATCH_PY_EOF__'\n"
-        f"{_read_pod_script('kernel_patch_multinode.py')}__MN_KPATCH_PY_EOF__\n"
+    return "".join(
+        f"cat > \"$WORK_DIR/{path.name}\" <<'__MN_{path.stem.upper()}_EOF__'\n"
+        f"{path.read_text(encoding='utf-8')}__MN_{path.stem.upper()}_EOF__\n"
+        for path in (*_KERNEL_NODE_OPS_DEPS, _SCRIPTS_DIR / "kernel_patch_multinode.py")
     )
 
 
@@ -769,7 +703,7 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     patch_set: str = "",
 ) -> str:
     """Compose the head-pod entrypoint fanning out the TraceLens patch set via heredoc-embedded apply_tracelens_patch_multinode.py."""
-    py = _read_pod_script("apply_tracelens_patch_multinode.py")
+    py = _read_bundled_pod_python_script("apply_tracelens_patch_multinode.py", _SHAPE_GATE_DEPS)
     extra_args = ""
     if sglang_version_pin:
         extra_args += f" --sglang-version-pin {shlex.quote(str(sglang_version_pin))}"
@@ -788,38 +722,11 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
 
 def _extract_pod_json(logs: str) -> dict | None:
     """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
-    if not logs:
-        return None
-    text = logs.rstrip()
-    end = text.rfind("}")
-    if end == -1:
-        return None
-    # Scan backward for the matching open brace at depth 0.
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(end, -1, -1):
-        ch = text[i]
-        if esc:
-            esc = False
-            continue
-        if ch == "\\":
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "}":
-            depth += 1
-        elif ch == "{":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[i : end + 1])
-                except json.JSONDecodeError:
-                    return None
+    for candidate in _json_object_candidates(logs or ""):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
     return None
 
 
@@ -860,7 +767,7 @@ def per_round_forward_overrides() -> dict[str, Any]:
 
 def _forward_runtime_env(overrides: dict[str, Any]) -> dict[str, Any] | None:
     """Build the Ray runtime_env carrying per-round env overrides to every rank."""
-    env_vars = filter_forward_env(dict(overrides.get("set") or {}), warn_on_drop=True)
+    env_vars = filter_forward_env(dict(overrides.get("set") or {}))
     if not env_vars:
         return None
     info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")
@@ -1249,11 +1156,8 @@ def _start_pd_router(
     return router_sub, router_state, 0
 
 
-def _persist_multinode_restart(
-    state: dict, args: argparse.Namespace, *, kill_sub: str, router_sub: str, router_state: dict
-) -> None:
+def _persist_multinode_restart(state: dict, args: argparse.Namespace, *, router_sub: str, router_state: dict) -> None:
     """Complete the early checkpoint once the launch is up, so a later invocation can resume or fall back to it."""
-    state["last_kill_submission_id"] = kill_sub
     # Persist PD state so later invocations can fall back when a flag is omitted.
     if state["last_restart_pd_mode"] == "disaggregated":
         state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
@@ -1284,9 +1188,8 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
     topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
     launch_sub, resumed_serving = _resume_prior_launch(args, state, topology=topology)
 
-    kill_sub = ""
     if not launch_sub:
-        kill_sub = _exec_kill_submission(state, kill_ep, label="restart kill", args=args)
+        _exec_kill_submission(state, kill_ep, label="restart kill", args=args)
 
     with _ray_dashboard_client(state) as ray:
         if not launch_sub:
@@ -1297,8 +1200,6 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
         # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
         state["last_server_pid_dir"] = pid_dir
         state["last_server_log_dir"] = log_dir
-        if kill_sub:
-            state["last_kill_submission_id"] = kill_sub
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework
         state["last_restart_model"] = args.model
@@ -1343,7 +1244,7 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
             if router_rc:
                 return router_rc
 
-    _persist_multinode_restart(state, args, kill_sub=kill_sub, router_sub=router_sub, router_state=router_state)
+    _persist_multinode_restart(state, args, router_sub=router_sub, router_state=router_state)
     info("multi-node servers launched; benchmarks should target $service_url")
     return 0
 
@@ -1385,7 +1286,6 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
             print(ray.get_job_logs(sub_id))
 
     state["last_server_pid_file"] = pid_file
-    state["last_server_log_file"] = log_file
     state["last_restart_submission_id"] = sub_id
     state["last_restart_framework"] = args.framework
     state["last_restart_model"] = args.model
@@ -1409,9 +1309,8 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     return _restart_single_node(args, state)
 
 
-def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
-    """Persist a kill submission and drop the launch identity it terminated."""
-    state["last_kill_submission_id"] = kill_sub
+def _record_kill_and_invalidate_launch(state: dict) -> None:
+    """Drop the launch identity a kill terminated."""
     state.pop("last_restart_submission_id", None)
     _save_state(state)
 
@@ -1428,28 +1327,16 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
             args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
         )
         info(f"kill-inference (multi-node): pid_dir={pid_dir}")
-        kill_ep = _build_multinode_kill_entrypoint(pid_dir)
-        kill_sub = _exec_kill_submission(
-            state,
-            kill_ep,
-            label="kill-inference",
-            args=args,
-        )
-        _record_kill_and_invalidate_launch(state, kill_sub)
+        _exec_kill_submission(state, _build_multinode_kill_entrypoint(pid_dir), label="kill-inference", args=args)
+        _record_kill_and_invalidate_launch(state)
         return 0
 
     pid_file = (
         args.pid_file or state.get("last_server_pid_file") or str(Path(tempfile.gettempdir()) / "multi_node_server.pid")
     )
     info(f"kill-inference (single-node): pid_file={pid_file}")
-    entrypoint = _build_kill_single_entrypoint(pid_file)
-    kill_sub = _exec_kill_submission(
-        state,
-        entrypoint,
-        label="kill-inference",
-        args=args,
-    )
-    _record_kill_and_invalidate_launch(state, kill_sub)
+    _exec_kill_submission(state, _build_kill_single_entrypoint(pid_file), label="kill-inference", args=args)
+    _record_kill_and_invalidate_launch(state)
     return 0
 
 
@@ -1757,7 +1644,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable), 2 terminal workload failure (do not retry), 3 config error, 130 SIGINT."""
+    """CLI entrypoint with stable exit codes: 0 ok, 1 transient (retryable, including a terminal Ray job failure), 2 usage error, 3 config error, 130 SIGINT."""
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -1765,11 +1652,6 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         err("interrupted")
         return EXIT_INTERRUPT
-    except WorkloadTerminalFailure as wtf:
-        err(str(wtf))
-        # Single-line JSON marker the controller can grep on stderr.
-        err("MULTI_NODE_FAILURE_SNAPSHOT=" + json.dumps(wtf.snapshot, default=str))
-        return EXIT_TERMINAL_FAILURE
     except TransientFailure as tf:
         err(str(tf))
         return EXIT_TRANSIENT
@@ -1780,15 +1662,7 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError) as exc:
         # Caller-fixable input/state errors -> config error; else transient.
         msg = str(exc)
-        if any(
-            s in msg
-            for s in (
-                "is required",
-                "Missing required environment variable",
-                "missing required keys",
-                "unsupported framework",
-            )
-        ):
+        if any(s in msg for s in ("missing required keys", "unsupported framework")):
             err(f"{type(exc).__name__}: {exc}")
             return EXIT_CONFIG_ERROR
         err(f"{type(exc).__name__}: {exc}")

@@ -21,7 +21,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.plugs import (
     ManifestSources,
@@ -33,9 +33,6 @@ from hyperloom.plugs import (
     resolve_manifest,
 )
 from hyperloom.plugs.resolved import read_resolved, write_resolved
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.workload_defaults import (
@@ -646,11 +643,11 @@ def _card_errors(
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
-    """Return the canonical corpus shape, until a measurement replaces it."""
+    """Return the canonical corpus shape."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
 
     if is_mlperf_backend():
-        # The MLPerf corpus has no published shape; the first measurement supplies it.
+        # The MLPerf corpus has no published length distribution, only its trajectory count.
         return {
             "corpus_loader": MLPERF_CORPUS,
             "corpus_entries": mlperf_trajectories(),
@@ -769,8 +766,7 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        # AgentX corpus shape: seeded from canonical constants if AgentX is on;
-        # overwritten by the measured shape after every aiperf run.
+        # AgentX corpus shape: seeded from canonical constants if AgentX is on.
         agentx_corpus_shape=_build_agentx_corpus_shape_seed() if benchmark_mode == "agentx" else {},
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,

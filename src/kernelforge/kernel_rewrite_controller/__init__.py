@@ -4,6 +4,9 @@
 """Autonomous multi-operator coordination for KernelForge rewrite campaigns."""
 
 from kernelforge.kernel_rewrite_controller.contracts import (
+    SERVING_CONTEXT_FILENAME,
+    TRACE_EVIDENCE_FILENAME,
+    WORKLOAD_FILENAME,
     HandoffBundle,
     HandoffContractError,
     KernelRewriteTask,
@@ -27,7 +30,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     OpportunityAnalysisResult,
     run_opportunity_analysis,
 )
-from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout
+from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout, operator_directory_name
 from kernelforge.kernel_rewrite_controller.publisher import (
     OperatorPublication,
     PublicationError,
@@ -58,9 +61,15 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
     publish_complete_staged_tasks,
     publish_staged_task,
 )
+from kernelforge.kernel_rewrite_controller.worktree import (
+    CAMPAIGN_BRANCH_PREFIX,
+    reclaim_campaign_branch,
+    untracked_paths,
+)
 
 __all__ = [
     "ANALYSIS_BUDGET_SEC",
+    "CAMPAIGN_BRANCH_PREFIX",
     "ControllerLayout",
     "FORGE_LOOP_BUDGET_SEC",
     "MIN_TASK_START_REMAINING_SEC",
@@ -69,6 +78,7 @@ __all__ = [
     "OpportunityAnalysisResult",
     "PublicationError",
     "RecoveryResult",
+    "SERVING_CONTEXT_FILENAME",
     "ScheduleResult",
     "ControllerRunError",
     "ControllerRunState",
@@ -82,7 +92,9 @@ __all__ = [
     "TaskPublicationResult",
     "TaskState",
     "TaskStateError",
+    "TRACE_EVIDENCE_FILENAME",
     "TaskStateStore",
+    "WORKLOAD_FILENAME",
     "discover_task_dirs",
     "dispatch_single_task",
     "dispatch_prepared_tasks",
@@ -96,6 +108,9 @@ __all__ = [
     "recover_all_task_results",
     "recover_task_result",
     "run_controller",
+    "operator_directory_name",
+    "reclaim_campaign_branch",
     "run_opportunity_analysis",
     "sort_tasks",
+    "untracked_paths",
 ]

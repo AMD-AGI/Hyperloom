@@ -19,7 +19,7 @@ from hyperloom.orchestrator.knowledge.agent_kb import KernelAgentKB
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
-from hyperloom.orchestrator.phases import prelude as prelude_mod
+from hyperloom.orchestrator.phases import prelude_warm_kernel as prelude_warm_kernel_mod
 from hyperloom.orchestrator.phases.prelude import PreludePhase
 
 
@@ -467,7 +467,7 @@ async def test_prepared_state_save_failure_rolls_back_kernel_set(
 
     stub.shared_state.save = _save
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: (
             rollbacks.append((list(applied), list(snapshots or []))) or {"ok": True, "errors": []}
@@ -580,7 +580,7 @@ async def test_prepared_set_waits_for_combined_verdict(
     stub = _StubPrelude(tmp_path, reader=_kernel_reader(record))
     reverted: list[list[dict]] = []
     monkeypatch.setattr(
-        prelude_mod,
+        prelude_warm_kernel_mod,
         "revert_warm_kernel_patches",
         lambda applied, snapshots=None: {
             "ok": not bool(reverted.append(applied)),

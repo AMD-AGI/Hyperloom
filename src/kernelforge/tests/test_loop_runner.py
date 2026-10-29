@@ -695,7 +695,7 @@ def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeyp
     Moving it to after ``run_lanes`` returns deletes the lane copy first, and
     the guard then fails the resume before the session can answer.
     """
-    from kernelforge.cli import lanes as cli_lanes
+    from kernelforge.loop.bootstrap import lanes as cli_lanes
     from kernelforge.config import Config
     from kernelforge.orchestrator import agent as agent_module
     from kernelforge.tests.test_claude_resume import _FakeOptions, _backend
@@ -1486,7 +1486,9 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
     loop._lane_queue = [campaign_runtime.LaneResult(lane_id="1", plan="tamper", diff=diff)]
-    patch_iteration_name(monkeypatch, "is_protected_path", lambda *_args, **_kwargs: False)
+    patch_iteration_name(
+        monkeypatch, "FORGE_PROTECTED_PATHS", SimpleNamespace(is_protected=lambda *_args, **_kwargs: False)
+    )
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)

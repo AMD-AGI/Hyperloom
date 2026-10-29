@@ -102,7 +102,7 @@ def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:
 
     if not params.get("enablement"):
         return {}
-    state = SharedState()
+    state = SharedState(phase="ENABLEMENT")
     state.record_specialist_patch_verdict(str(params.get("specialist_task_id") or ""), "approve")
     return {"shared_state": state}
 
