@@ -94,12 +94,13 @@ async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(sessio
     assert baseline.accuracy == pytest.approx(0.90)
 
 
-async def test_the_baseline_records_no_short_prompt_floor_since_the_check_refuses_nothing(session):
+async def test_the_baseline_is_written_whatever_the_root_tests_short_prompt_checks_answered(session):
     checks = (short_prompt_check(0, 1, 0, 0, 0, 0), short_prompt_check(0, 0, 2, 0, 0, 0), None)
 
     record = await _prelude(session, checks=checks)
 
-    assert record.short_prompt_floor is None
+    assert record.request_ids == ("b0", "b1", "b2")
+    assert await session.gate.baseline() == record
 
 
 @pytest.mark.parametrize(
@@ -135,7 +136,6 @@ async def test_an_agentx_baseline_read_from_the_child_run_names_it_and_anchors_o
     assert (record.values, record.request_ids, record.dispersion_pct) == (AGENTX, (), {})
     assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
     assert (record.source, record.wall_seconds) == ("prelude-child:/runs/baseline/r1", 5287.67)
-    assert record.short_prompt_floor is None, "no BASELINE test ran the short-prompt check"
     assert await session.gate.baseline() == record
 
 
@@ -147,10 +147,12 @@ async def test_a_child_run_without_what_every_comparison_reads_anchors_nothing(s
 
 
 def test_a_baseline_written_before_it_named_a_source_reads_back_with_none():
+    """An older record: no source or wall time, and the short-prompt floor the gate no longer writes."""
+
     stored = codec.encode(BaselineRecord(ROOT, AGENTX, {}, {GRADED_INTVTY_P50: 1.0}, ("b0",)))
-    del stored["source"], stored["wall_seconds"], stored["short_prompt_floor"]
+    del stored["source"], stored["wall_seconds"]
+    stored["short_prompt_floor"] = 3
 
     decoded = codec.decode(BaselineRecord, stored)
 
-    assert (decoded.source, decoded.wall_seconds, decoded.request_ids) == ("", None, ("b0",))
-    assert decoded.short_prompt_floor is None
+    assert decoded == BaselineRecord(ROOT, AGENTX, {}, {GRADED_INTVTY_P50: 1.0}, ("b0",))

@@ -223,11 +223,8 @@ class BaselineRecord:
     """The PRELUDE baseline the rule gate measured, per metric; every recorded value is anchored to it.
 
     ``request_ids`` are the root tests it anchored on. A baseline read from the PRELUDE child's own run has none:
-    ``source`` names that run instead, and ``wall_seconds`` is how long it took.
-
-    ``short_prompt_floor`` is the most prompts one process of a root test's short-prompt check answered differently from
-    the consensus of its processes, the most a candidate's may; ``None`` when no root test's check compared two
-    processes, so no candidate is refused on its check.
+    ``source`` names that run instead, and ``wall_seconds`` is how long it took. A record an older session wrote with
+    a ``short_prompt_floor`` reads as one without it.
     """
 
     root_commit: str
@@ -237,7 +234,6 @@ class BaselineRecord:
     request_ids: tuple[str, ...]
     source: str = ""
     wall_seconds: float | None = None
-    short_prompt_floor: int | None = None
 
 
 @dataclass(frozen=True)

@@ -66,17 +66,11 @@ PARENT = {GRADED_OUTPUT: 1000.0}
 
 
 class _Baseline:
-    """The session's baseline record; ``floor`` is the short-prompt floor a session before the gate stopped reading it
-    recorded."""
+    """The session's baseline record."""
 
-    def __init__(self, floor=None):
+    def __init__(self):
         self.record = BaselineRecord(
-            "c0",
-            {GRADED_OUTPUT: 1000.0, ACCURACY_SCORE: 0.90},
-            {},
-            {GRADED_OUTPUT: 2.0},
-            ("b0", "b1", "b2"),
-            short_prompt_floor=floor,
+            "c0", {GRADED_OUTPUT: 1000.0, ACCURACY_SCORE: 0.90}, {}, {GRADED_OUTPUT: 2.0}, ("b0", "b1", "b2")
         )
 
     async def baseline(self):
@@ -145,7 +139,7 @@ SHORT_PROMPTS_INCONSISTENT = "short_prompts_inconsistent"
     ids=["far-above-any-floor", "a-larger-pool", "clean", "no-check"],
 )
 async def test_an_inferencex_candidate_is_never_refused_for_its_short_prompt_check(check):
-    judgement = await InferenceXRule(_Baseline(floor=1), 64).first(_checked(1000.0, check), PARENT)
+    judgement = await InferenceXRule(_Baseline(), 64).first(_checked(1000.0, check), PARENT)
 
     assert SHORT_PROMPTS_INCONSISTENT not in judgement.refused_by
     assert judgement.verdict is Verdict.FLAT
@@ -154,7 +148,7 @@ async def test_an_inferencex_candidate_is_never_refused_for_its_short_prompt_che
 async def test_a_gain_whose_short_prompts_differ_between_processes_on_both_measurements_still_lands():
     """Run-to-run nondeterministic kernels (atomic split-K GEMMs) make two boots of one recipe answer 30 to 41 of 64
     prompts differently while every eval passes; a gain must not be held back for it."""
-    rule = InferenceXRule(_Baseline(floor=1), 64)
+    rule = InferenceXRule(_Baseline(), 64)
     first = await rule.first(_checked(1100.0, short_prompt_check(0, 41, 0)), PARENT)
     assert first.verdict is Verdict.NEEDS_CONFIRM and first.refused_by == ()
 
