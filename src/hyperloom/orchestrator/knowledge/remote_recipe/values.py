@@ -30,6 +30,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from ._vendor.kb_store_client import KBStoreError
 from .models import (
     CONFIG_SECTION,
     KERNEL_SECTION,
@@ -936,7 +937,7 @@ def merge_staged_sections(
             merged[name] = dict(staged.knowledge)
         except RemoteRecipeValidationError:
             raise
-        except Exception as exc:
+        except (KBStoreError, OSError, ValueError) as exc:
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
 

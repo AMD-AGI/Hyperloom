@@ -40,7 +40,7 @@ class RecipeKB:
             return
         try:
             hook(event)
-        except Exception:  # caller-supplied hook; audit must not break the KB call
+        except OSError:  # caller-supplied hook; audit must not break the KB call
             log.debug("recipe_kb: audit_hook raised", exc_info=True)
 
     def _read_event(
