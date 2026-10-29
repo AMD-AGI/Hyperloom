@@ -98,8 +98,10 @@ python3 -m hyperloom optimize \
     --max-hours 1
 ```
 
-Add `--no-framework-agent` for a measure-only pass: it establishes the baseline
-and stops, which is the cheapest way to prove the contract is wired up.
+Add `--no-framework-agent` to skip the FRAMEWORK_AGENT phase — the configuration
+sweep and the source-patch lever. The run still goes PRELUDE → KERNEL_AGENT, so
+it is not a measure-only pass. To confirm only that the contract is wired up,
+run the script standalone as above and read the JSON it writes.
 
 ## The correctness gate is the interesting part
 

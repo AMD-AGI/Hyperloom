@@ -10,7 +10,10 @@
 #   KAOLIN_SRC        kaolin checkout (default /work/kaolin)
 #   KAOLIN_ROCM_INC   dir with rocThrust/hipsparse headers the slim image lacks
 #   KAOLIN_REF_STORE  where the correctness reference is cached
+#   KAOLIN_BENCH_PY   the benchmark to run (default: benchmark.py beside this script)
 set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RESULT_DIR="${RESULT_DIR:-/tmp/hlhpc-kaolin}"; mkdir -p "$RESULT_DIR"
 RESULT_FILENAME="${RESULT_FILENAME:-inferencex_result}"
@@ -28,7 +31,9 @@ if [[ -d "${KAOLIN_ROCM_INC:-}" ]]; then
     export CPLUS_INCLUDE_PATH="${KAOLIN_ROCM_INC}:${CPLUS_INCLUDE_PATH:-}"
 fi
 # (2) it ships only versioned libamdhip64.so.N -- the linker needs the bare .so
-_A=$(find /opt/venv -name 'libamdhip64.so*' 2>/dev/null | head -1)
+# `|| true`: on a host without this layout find exits non-zero, and pipefail would
+# otherwise end the run here rather than at the missing-torch error that explains it.
+_A=$(find "${ROCM_LIB_SEARCH_ROOT:-/opt/venv}" -name 'libamdhip64.so*' 2>/dev/null | head -1 || true)
 if [[ -n "${_A:-}" ]]; then
     _D=$(dirname "$_A")
     [[ -e "$_D/libamdhip64.so" ]] || ln -sf "$(basename "$_A")" "$_D/libamdhip64.so" 2>/dev/null || true
@@ -36,7 +41,7 @@ if [[ -n "${_A:-}" ]]; then
 fi
 
 set +e
-python3 "${KAOLIN_BENCH_PY:-/work/kaolin_bench.py}" > "$LOG" 2>&1
+python3 "${KAOLIN_BENCH_PY:-$HERE/benchmark.py}" > "$LOG" 2>&1
 RC=$?
 set -e
 

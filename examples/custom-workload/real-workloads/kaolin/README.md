@@ -78,3 +78,7 @@ work rather than evidence that the loop failed.
 | `_kaolin_bench.sh` | Build-env fixes, runs the benchmark, writes `inferencex_result.json` |
 | `benchmark.py` | JIT-builds the kernel, times fwd+bwd, applies the gate |
 | `levers.json` | Six HIP runtime variants (near-no-ops here, by measurement) |
+
+`levers.json` is read by the declared-lever grid in
+[#1546](https://github.com/AMD-AGI/Hyperloom/pull/1546); until that lands the adapter still runs and
+still reports through the contract, but the declared variants are not seeded.
