@@ -12,8 +12,8 @@
 #   1. refuses, naming the tool, when the image has no git or setpriv (nothing is installed here),
 #   2. makes sure the account HYPERLOOM_SPECIALIST_USER names exists with uid/gid 2000,
 #   3. puts the layer's claude CLI on PATH,
-#   4. trusts the layer's extra CA certificate (if any) through a bundle written under the run's
-#      state dir, without touching /etc,
+#   4. trusts the layer's extra CA certificate (if any) through a bundle written to ${TMPDIR:-/tmp}/hyperloom-host
+#      (local to the container: not the layer, not the state dir, not /etc),
 #   5. execs the layer's app_bootstrap.sh, which does the rest.
 # Every refusal here is a plain failure (exit 1) of an image that cannot host a run, not an exit.json.
 
@@ -53,18 +53,27 @@ PATH="$layer/bin:$PATH"
 export PATH
 command -v claude >/dev/null 2>&1 || die "the layer has no claude CLI ($layer/bin/claude)"
 
-# Trust the layer's CA on top of the image's own. A bundle of its own, in the state dir.
+# Trust the layer's CA on top of the image's own. A bundle of its own, local to this container (the layer
+# directory may be read-only and the state dir is shared storage, possibly private to root), readable by every account.
 ca="$layer/ca.pem"
-state="${HYPERLOOM_STATE_DIR:-}"
-if [ -f "$ca" ] && [ -d "$state" ]; then
+if [ -f "$ca" ]; then
   system=""
   for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
-    [ -f "$f" ] && { system="$f"; break; }
+    if [ -f "$f" ]; then
+      system="$f"
+      break
+    fi
   done
-  bundle="$state/ca-bundle.pem"
-  { [ -z "$system" ] || cat "$system"; cat "$ca"; } >"$bundle.tmp"
+  dir="${TMPDIR:-/tmp}/hyperloom-host"
+  bundle="$dir/ca-bundle.pem"
+  mkdir -p "$dir"
+  chmod 0755 "$dir"
+  {
+    [ -z "$system" ] || cat "$system"
+    cat "$ca"
+  } >"$bundle.tmp"
+  chmod 0644 "$bundle.tmp"
   mv -f "$bundle.tmp" "$bundle"
-  chmod 0644 "$bundle"
   SSL_CERT_FILE="$bundle"
   REQUESTS_CA_BUNDLE="$bundle"
   NODE_EXTRA_CA_CERTS="$bundle"
