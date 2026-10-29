@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.agents.quantization.driver.outcomes import OutcomeId
 from hyperloom.agents.quantization.driver.retry import (
+    DEFAULT_QUARK_GIT_URL,
     QuantSkillRunOptions,
     QuantSkillRunResult,
     _decide_next_step,
@@ -76,6 +77,10 @@ async def test_quark_root_missing_fast_path(tmp_path, monkeypatch):
     )
     assert result.status == "failed"
     assert result.assessment.final == OutcomeId.quark_root_missing
+    assert result.assessment.notes == (
+        "quark_root is not configured (set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); "
+        f"clone from {DEFAULT_QUARK_GIT_URL})",
+    )
     assert result.quantized_model_dir is None
 
 
@@ -92,6 +97,11 @@ async def test_quark_root_nonexistent_dir_fast_path(tmp_path):
     )
     assert result.status == "failed"
     assert result.assessment.final == OutcomeId.quark_root_missing
+    assert result.assessment.notes == (
+        f"quark_root path does not exist or is not a directory: {tmp_path / 'does_not_exist'} "
+        "(set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); "
+        f"clone from {DEFAULT_QUARK_GIT_URL})",
+    )
 
 
 # ───────────────────────────────────────────────────────────────────────────── happy path — single clean attempt

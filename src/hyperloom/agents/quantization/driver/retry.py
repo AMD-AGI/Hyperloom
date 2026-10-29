@@ -18,6 +18,9 @@ from .runner import AttemptContext, RunOneAttemptFn, attempt_ended, run_one_atte
 
 # Upstream git URL for the Quark repo; quoted in the quark_root_missing error so operators know where to clone from.
 DEFAULT_QUARK_GIT_URL = "https://github.com/amd/Quark.git"
+_QUARK_ROOT_HINT = (
+    f"set $QUARK_ROOT or pass options=QuantSkillRunOptions(quark_root=...); clone from {DEFAULT_QUARK_GIT_URL}"
+)
 
 
 @dataclass(frozen=True)
@@ -216,15 +219,14 @@ async def quantize_via_prompt(
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root is not configured; set $QUARK_ROOT or pass quark_root= (clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root is not configured ({_QUARK_ROOT_HINT})",
         )
     quark_root_path = Path(quark_root).expanduser()
     if not quark_root_path.is_dir():
         return _build_failed_bootstrap_result(
             workspace_path,
             OutcomeId.quark_root_missing,
-            f"quark_root path does not exist or is not a directory: {quark_root_path} "
-            f"(set $QUARK_ROOT or pass quark_root=; clone from {DEFAULT_QUARK_GIT_URL})",
+            f"quark_root path does not exist or is not a directory: {quark_root_path} ({_QUARK_ROOT_HINT})",
         )
 
     interactive_resolved = _resolve_interactive(options.interactive)

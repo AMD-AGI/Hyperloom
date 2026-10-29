@@ -152,7 +152,7 @@ layout are left in place and not read. Callers can read these directly:
 
 | var                                  | default | effect                                                                     |
 | ------------------------------------ | ------- | -------------------------------------------------------------------------- |
-| `QUARK_ROOT`                         | —       | Path to amd-quark checkout. Required unless passed as `quark_root=` kwarg. |
+| `QUARK_ROOT`                         | —       | Path to amd-quark checkout. Required unless passed as `options=QuantSkillRunOptions(quark_root=...)`. |
 | `HYPERLOOM_QUANT_STRICT_VALIDATION`  | `1`     | When `0`, MUST-validate SKIPPED demotes to `partial` instead of `failed`.  |
 
 Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by
