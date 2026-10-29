@@ -14,17 +14,20 @@ loads from a file of its workspace goes in as a kernel artifact, the text the fi
 An agent run as a component writes each keep whole instead, as a snapshot directory (:func:`read_snapshot`, the layout
 of Arbor's component mode): ``keep.json`` names the keep before it and the commits it was made on and made, its
 ``change.patch`` takes the one to the other, ``config.json`` is its whole launch and ``tables/<VAR>/`` the kernel table
-each variable loads. Its source is the chain of its patches from the root, so a snapshot made on a commit that no
-snapshot of the chain made, or on a root other than the one MB gave, is refused. What the agent's tree links to outside
-itself (``outside.json``) is not read: AITER builds a JIT module it lacks at its first call.
+each variable loads, with the digest ``keep.json`` lists (a table too large to copy is listed with no file). Its source
+is the chain of its patches from the root, so a snapshot made on a commit that no snapshot of the chain made, or on a
+root other than the one MB gave, is refused; one made on the root after another, its ``notes`` saying the earlier commit
+is gone, starts the chain again with ``served.patch``, its whole tree against the root. What the agent's tree links to
+outside itself (``outside.json``) is not read: AITER builds a JIT module it lacks at its first call.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from hyperloom.common.outside_facts import TUNABLEOP_TABLE_ENV
 from hyperloom.contracts.recipe import (
@@ -50,6 +53,7 @@ Applied = Callable[[Sequence[str]], str]
 LATEST_FILE = "LATEST"
 KEEP_FILE = "keep.json"
 CHANGE_FILE = "change.patch"
+SERVED_FILE = "served.patch"
 LAUNCH_FILE = "config.json"
 TABLES_DIR = "tables"
 #: The patch from the state the head's imported patches make, in order, to the state a keep's cumulative patch makes,
@@ -75,7 +79,8 @@ class KeptChangeError(ValueError):
 class KeptChange:
     """The agent's state at its ``seq``-th keep: ``source_patch`` against the root and the whole ``server_args`` and
     ``envs`` it runs with; ``summary`` is the agent's own words for it; ``tables``, the text at the keep of each kernel
-    table file of its workspace a variable of ``envs`` names, by that path."""
+    table file of its workspace a variable of ``envs`` names, by that path; ``uncopied``, the variables whose table the
+    agent did not copy into its snapshot, which then load what the variable names."""
 
     seq: int
     source_patch: str
@@ -83,6 +88,7 @@ class KeptChange:
     envs: Mapping[str, str] = field(default_factory=dict)
     summary: str = ""
     tables: Mapping[str, str] = field(default_factory=dict)
+    uncopied: tuple[str, ...] = ()
 
 
 def read_kept_change(seq: int, source_patch: str, state: object, source: ConfigSource, summary: str) -> KeptChange:
@@ -119,11 +125,15 @@ def latest_snapshot(outbox: Path) -> int | None:
 
 @dataclass(frozen=True)
 class _Snapshot:
+    """One snapshot's ``keep.json``; ``rebased`` when its change is against the root, though a keep came before it."""
+
     number: int
     previous: int | None
     parent: str
     commit: str
     summary: str
+    tables: Mapping[str, object]
+    rebased: bool
 
 
 def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> KeptChange:
@@ -134,7 +144,7 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> Kep
     """
 
     chain = _chain(outbox, number, root)
-    patches = [_patch(outbox / _directory(link.number)) for link in chain]
+    patches = [_patch(outbox / _directory(link.number), SERVED_FILE if link.rebased else CHANGE_FILE) for link in chain]
     directory = outbox / _directory(number)
     launch = read_json(directory / LAUNCH_FILE)
     args = launch.get("server_flags") if isinstance(launch, Mapping) else None
@@ -142,16 +152,16 @@ def read_snapshot(outbox: Path, number: int, root: str, applied: Applied) -> Kep
     if not isinstance(args, str) or not isinstance(envs, Mapping):
         raise KeptChangeError(f"{_directory(number)}/{LAUNCH_FILE} holds no server_flags string or server_env object")
     named = {str(name): str(value) for name, value in envs.items()}
-    kept = KeptChange(number, applied(patches), args, named, chain[-1].summary)
-    return replace(kept, tables=_snapshot_tables(directory / TABLES_DIR, named))
+    tables, uncopied = _snapshot_tables(directory / TABLES_DIR, chain[-1].tables, named)
+    return KeptChange(number, applied(patches), args, named, chain[-1].summary, tables, uncopied)
 
 
 def _chain(outbox: Path, number: int, root: str) -> list[_Snapshot]:
-    """The snapshots from the first to ``number``, each made on the commit the one before it made, the first on
-    ``root``."""
+    """The snapshots from the first, or the last one made on ``root``, to ``number``, each made on the commit the one
+    its ``previous`` names made."""
 
     chain = [_snapshot(outbox, number, root)]
-    while (later := chain[-1]).previous is not None:
+    while (later := chain[-1]).previous is not None and not later.rebased:
         if later.previous >= later.number:
             raise KeptChangeError(f"{_refused(later)} it names {later.previous} as the keep before it")
         try:
@@ -171,12 +181,17 @@ def _snapshot(outbox: Path, number: int, root: str) -> _Snapshot:
     keep = read_json(outbox / _directory(number) / KEEP_FILE)
     if not isinstance(keep, Mapping):
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} is no object")
-    previous, parent, commit = keep.get("previous"), keep.get("parent"), keep.get("commit")
+    previous, parent, commit, tables = keep.get("previous"), keep.get("parent"), keep.get("commit"), keep.get("tables")
     if keep.get("number") != number or not (previous is None or isinstance(previous, int)):
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} numbers it {keep.get('number')!r}, after {previous!r}")
     if not isinstance(parent, str) or not isinstance(commit, str):
         raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} names no parent and commit")
-    snapshot = _Snapshot(number, previous, parent, commit, _said(keep))
+    if not isinstance(tables, Mapping):
+        raise KeptChangeError(f"{_directory(number)}/{KEEP_FILE} lists no tables")
+    # Arbor makes a keep on the root when the commit of the one before is gone from its workspace, and says why.
+    notes = keep.get("notes")
+    rebased = previous is not None and parent == root and isinstance(notes, str) and bool(notes.strip())
+    snapshot = _Snapshot(number, previous, parent, commit, _said(keep), tables, rebased)
     if keep.get("root") != root:
         raise KeptChangeError(f"{_refused(snapshot)} it was made against the root {keep.get('root')}, not {root}")
     return snapshot
@@ -187,29 +202,43 @@ def _said(keep: Mapping[str, object]) -> str:
     return next((said for said in (keep.get("change"), keep.get("intent")) if isinstance(said, str) and said), "")
 
 
-def _patch(directory: Path) -> str:
+def _patch(directory: Path, name: str) -> str:
     try:
-        return (directory / CHANGE_FILE).read_text(encoding="utf-8")
+        return (directory / name).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
-        raise KeptChangeError(f"{directory.name}/{CHANGE_FILE} cannot be read: {error}") from error
+        raise KeptChangeError(f"{directory.name}/{name} cannot be read: {error}") from error
 
 
-def _snapshot_tables(tables: Path, envs: Mapping[str, str]) -> dict[str, str]:
-    """The text of the kernel table each variable of ``envs`` that loads one has in ``tables``, by the variable's
-    value."""
+def _snapshot_tables(
+    tables: Path, listed: Mapping[str, object], envs: Mapping[str, str]
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """The text of the kernel table each variable of ``envs`` that loads one has in ``tables``, by the variable's value,
+    each checked against the digest ``listed`` gives it; and the variables listed with no file, which were not copied.
+    """
 
     found: dict[str, str] = {}
+    uncopied: list[str] = []
     for name, value in envs.items():
-        if not (_loads_table(name) and (tables / name).is_dir()):
+        entry = listed.get(name)
+        if not (_loads_table(name) and isinstance(entry, Mapping)):
             continue
-        files = sorted((tables / name).iterdir())
-        if len(files) != 1:
-            raise KeptChangeError(f"{TABLES_DIR}/{name} holds {len(files)} files, not the one table {name} loads")
+        file, digest = entry.get("file"), entry.get("sha256")
+        if file is None:
+            uncopied.append(name)
+            continue
+        if not isinstance(file, str) or not isinstance(digest, str):
+            raise KeptChangeError(f"{KEEP_FILE} lists the table {name} loads with no file name and sha256")
         try:
-            found[value] = files[0].read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            data = (tables / name / PurePosixPath(file).name).read_bytes()
+        except OSError as error:
             raise KeptChangeError(f"the table {name} loads cannot be read: {error}") from error
-    return found
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise KeptChangeError(f"the table {name} loads does not match its sha256 {digest}")
+        try:
+            found[value] = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise KeptChangeError(f"the table {name} loads is no text: {error}") from error
+    return found, tuple(uncopied)
 
 
 def _directory(number: int) -> str:
@@ -321,6 +350,7 @@ __all__ = [
     "KEEP_FILE",
     "LATEST_FILE",
     "LAUNCH_FILE",
+    "SERVED_FILE",
     "TABLES_DIR",
     "KeepStores",
     "KeptChange",

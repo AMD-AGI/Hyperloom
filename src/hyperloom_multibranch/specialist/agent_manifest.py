@@ -187,26 +187,33 @@ class LedgerSource:
         return {"path": self.path, "id": self.id, "kind": self.kind, "text": self.text, "kinds": kinds}
 
 
+#: Where Arbor's component mode writes its snapshots in its session, unless its config's ``component.outbox`` renames
+#: it, and the file it writes why it ended to, before an exit 0 only.
+DEFAULT_OUTBOX = "keeps"
+EXIT_FILE = "component_exit.json"
+
+
 @dataclass(frozen=True)
 class SnapshotSource:
-    """Where an agent run as a component writes a snapshot of each keep, as Arbor's component mode does: the directory
-    ``outbox`` of its checkout, holding one directory per keep and ``LATEST``, which names the newest; and ``exit``,
-    the file of its checkout it writes why it ended to, ``""`` when it writes none."""
+    """Where an agent run as a component, as Arbor's component mode, keeps its session: the directory ``session`` of its
+    checkout, holding its snapshot outbox (one directory per keep and ``LATEST``, which names the newest) and its exit
+    file."""
 
-    outbox: str
-    exit: str = ""
+    session: str
 
     @classmethod
     def read(cls, document: object) -> SnapshotSource:
-        fields = _fields(document, "snapshots", {"outbox", "exit"})
-        exit_file = _optional(fields.get("exit"), "snapshots.exit")
-        return cls(
-            _relative(fields.get("outbox"), "snapshots.outbox"),
-            _relative(exit_file, "snapshots.exit") if exit_file else "",
-        )
+        fields = _fields(document, "snapshots", {"session"})
+        return cls(_relative(fields.get("session"), "snapshots.session"))
 
     def to_document(self) -> dict[str, object]:
-        return {"outbox": self.outbox, "exit": self.exit}
+        return {"session": self.session}
+
+
+def _outbox_name(config: Mapping[str, Any]) -> str:
+    component = config.get("component")
+    named = component.get("outbox") if isinstance(component, Mapping) else None
+    return _relative(named or DEFAULT_OUTBOX, "config.component.outbox")
 
 
 _MANIFEST_FIELDS = {
@@ -254,6 +261,21 @@ class AgentManifest:
         """Whether the agent says when it keeps a change, rather than having its workspace collected."""
         return self.keep is not None or self.snapshots is not None
 
+    @property
+    def snapshots_outbox(self) -> str:
+        """The snapshot outbox of an agent run as a component, relative to its checkout, as its config names it."""
+        return str(PurePosixPath(self._session()) / _outbox_name(self.config))
+
+    @property
+    def snapshots_exit(self) -> str:
+        """The exit file of an agent run as a component, relative to its checkout."""
+        return str(PurePosixPath(self._session()) / EXIT_FILE)
+
+    def _session(self) -> str:
+        if self.snapshots is None:
+            raise ManifestError("the agent writes no snapshots")
+        return self.snapshots.session
+
     @classmethod
     def read(cls, document: object) -> AgentManifest:
         """The manifest ``document`` holds; raise :class:`ManifestError` naming the first field it gets wrong."""
@@ -268,7 +290,7 @@ class AgentManifest:
             given = [name for name, value in (("keep", keep), ("config_source", source)) if value is not None]
             if given:
                 raise ManifestError(f"{' and '.join(given)} must be null when snapshots carries every keep whole")
-        return cls(
+        manifest = cls(
             source=_text(fields.get("source"), "source"),
             commit=_text(fields.get("commit"), "commit"),
             install=_commands(fields.get("install", []), "install"),
@@ -283,6 +305,9 @@ class AgentManifest:
             ledger=None if ledger is None else LedgerSource.read(ledger),
             snapshots=None if snapshots is None else SnapshotSource.read(snapshots),
         )
+        if manifest.snapshots is not None:
+            _outbox_name(manifest.config)
+        return manifest
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -309,5 +334,7 @@ __all__ = [
     "LedgerSource",
     "ManifestError",
     "SnapshotSource",
+    "DEFAULT_OUTBOX",
+    "EXIT_FILE",
     "read_field",
 ]

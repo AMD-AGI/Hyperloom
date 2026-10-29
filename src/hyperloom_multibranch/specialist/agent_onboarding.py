@@ -12,7 +12,7 @@ not take every attempt with it. After :data:`ATTEMPTS` failures the preflight ra
 :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line.
 
 An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
-that mode, the absolute deadline and the commit its keeps are read against in its config itself
+that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
 (:func:`component_config`), whatever the manifest says of them.
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
@@ -229,7 +229,6 @@ async def _attempt(
         raise AttemptFailed(f"the manifest: {error}") from error
     if manifest.snapshots is not None:
         manifest = replace(manifest, config=component_config(manifest.config, spec))
-        forget_exit(checkout, manifest)
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
@@ -249,20 +248,17 @@ async def _attempt(
 
 
 def component_config(config: Mapping[str, object], spec: AgentSpec) -> dict[str, object]:
-    """``config`` in Arbor's component mode, ending by ``spec``'s deadline, in whole unix seconds, and making every
-    patch against ``spec``'s root."""
+    """``config`` in Arbor's component mode, which runs on the host only, ending by ``spec``'s deadline, in whole unix
+    seconds, and making every patch against ``spec``'s root."""
 
     component = config.get("component")
     given = dict(component) if isinstance(component, Mapping) else {}
-    return {**config, "mode": "component", "component": {**given, "deadline": int(spec.deadline), "root": spec.root}}
-
-
-def forget_exit(checkout: Path, manifest: AgentManifest) -> None:
-    """Remove the exit file an earlier run of the agent in ``checkout`` left, before it runs again: the file is
-    rewritten at each exit, so one left in place would be read as the next run's."""
-
-    if manifest.snapshots is not None and manifest.snapshots.exit:
-        (checkout / manifest.snapshots.exit).unlink(missing_ok=True)
+    return {
+        **config,
+        "mode": "component",
+        "docker_container": "@host",
+        "component": {**given, "deadline": int(spec.deadline), "root": spec.root},
+    }
 
 
 async def _started(process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup) -> None:
@@ -380,10 +376,10 @@ The sandbox:
 - the agent edits the framework source in "workspace", in place, and launches its servers from it;
 - "seconds" is how long the agent may run, 0 when MB stops it: then give it a time budget it cannot reach.
 
-If the agent's README describes running it inside a host (Arbor's component mode: an absolute deadline, the commit its
-patches are made against, and a snapshot directory written for each kept change), run it in that mode: MB sets its
-"mode", "component.deadline" ("deadline") and "component.root" ("root") itself; set everything else the README asks of a
-host, give its session a directory in the checkout, and answer "snapshots".
+If the agent can run inside a host (Arbor's component mode, which its docs/hosts.md describes: an absolute deadline, the
+commit its patches are made against, and a snapshot directory written for each kept change), run it in that mode: MB
+sets its "mode", "docker_container", "component.deadline" ("deadline") and "component.root" ("root") itself; set
+everything else docs/hosts.md asks of a host, give its session a directory in the checkout, and answer "snapshots".
 
 MB judges every change the agent keeps by measuring it with "client", the gate's own benchmark client, against a
 server on "port"; another client sends other prompts and ranks changes otherwise. Unless "client" is empty, make the
@@ -414,9 +410,8 @@ Answer with one JSON object and nothing else, with exactly these fields:
 - "ledger": where the agent writes down what it found, {{"path": JSON-lines file relative to the checkout, "id": the
   field of an entry's id, "kind": the field of its kind, "text": the field of the finding, "kinds": {{each of the
   agent's kinds that states a measured fact or a dead end: "insight" or "pitfall"}}}}, or null when it writes none;
-- "snapshots": for an agent run in that mode, {{"outbox": the directory relative to the checkout holding its snapshot
-  directories and LATEST, "exit": the file relative to the checkout it writes why it ended to}}, with "keep" and
-  "config_source" null; null otherwise.
+- "snapshots": for an agent run in that mode, {{"session": its session directory relative to the checkout, where it
+  writes its snapshot outbox and its exit file}}, with "keep" and "config_source" null; null otherwise.
 
 Earlier attempts that failed, to correct rather than repeat:
 {failures}
@@ -439,7 +434,6 @@ __all__ = [
     "ReadyAgent",
     "agent_env",
     "component_config",
-    "forget_exit",
     "make_ready",
     "onboarding_prompt",
     "split_source",

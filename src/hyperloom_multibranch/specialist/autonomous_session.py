@@ -76,7 +76,6 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentSpec,
     OnboardingSetup,
     agent_env,
-    forget_exit,
     make_ready,
     tail,
 )
@@ -112,6 +111,8 @@ AGENT_DIR = "agent"
 SETTLE_SECONDS = 120.0
 #: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
 LAUNCH_REFUSED = "delta_not_applicable"
+#: The exit code of an agent run as a component that refused its config, saying why on stderr.
+REFUSED_CONFIG = 2
 #: The deadline of an agent run as a component when EXPLORE has none, which it refuses to run without; MB stops it
 #: long before.
 NO_DEADLINE_SECONDS = 365 * 24 * 3600.0
@@ -238,7 +239,10 @@ class AutonomousSession:
         document = ready.manifest.to_document()
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(document), encoding=ENCODING)
         await self._place.blackboard.record_agent_manifest(self._start.branch, document)
-        KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
+        # Every snapshot of the agent's session is one of this branch's keeps, the first among them possibly written
+        # while the preflight waited for the agent to start.
+        mark = None if ready.manifest.snapshots is not None else self._mark(ready.manifest)
+        KeepWatch(root, mark=mark).save(self._place.workspace / WATCH_FILE)
         await self._note(f"the agent {ready.manifest.source} at {ready.manifest.commit} is running")
 
     def _run_seconds(self) -> float:
@@ -392,7 +396,6 @@ class AutonomousSession:
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
-        forget_exit(self._agent_dir / SOURCE_DIR, manifest)
         sandbox = self._setup.sandbox(self._held())
         process = await sandbox.start(command, self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir))
         self._manifest, self._process, self._sandbox = manifest, process, sandbox
@@ -428,10 +431,11 @@ class AutonomousSession:
     async def _ended(self, manifest: AgentManifest, process: AgentProcess, watch: KeepWatch) -> None:
         """End the run of an agent that exited: a crash when it failed, else once what it kept last settled."""
 
-        said = self._exit_reason(manifest) if manifest.snapshots is not None else ""
+        if process.returncode == REFUSED_CONFIG and manifest.snapshots is not None:
+            raise SessionCrashed(f"the agent refused its config: {tail(await process.output())}")
         if process.returncode != 0:
-            why = f" ({said})" if said else ""
-            raise SessionCrashed(f"the agent exited {process.returncode}{why}: {tail(await process.output())}")
+            raise SessionCrashed(f"the agent exited {process.returncode}: {tail(await process.output())}")
+        said = self._exit_reason(manifest) if manifest.snapshots is not None else ""
         if not manifest.signals_keeps:
             await self._take(manifest, watch, watch.seq + 1)
         await self._learn(manifest.ledger, watch)
@@ -443,11 +447,9 @@ class AutonomousSession:
         raise SessionFinished(finished)
 
     def _exit_reason(self, manifest: AgentManifest) -> str:
-        """Why the agent run as a component says it ended, as its exit file has it."""
+        """Why the agent run as a component says it ended, as the exit file it writes before an exit 0 has it."""
 
-        if manifest.snapshots is None or not manifest.snapshots.exit:
-            return "it writes no exit reason"
-        path = self._agent_dir / SOURCE_DIR / manifest.snapshots.exit
+        path = self._agent_dir / SOURCE_DIR / manifest.snapshots_exit
         if not path.exists():
             return "it wrote no exit reason"
         try:
@@ -481,6 +483,12 @@ class AutonomousSession:
             watch.pending = await asyncio.to_thread(self._read, manifest, watch.root, seq)
         except (KeptChangeError, WorktreeError) as error:
             await self._note(f"keep {seq} cannot be read and is skipped: {error}")
+        else:
+            if watch.pending.uncopied:
+                names = ", ".join(watch.pending.uncopied)
+                await self._note(
+                    f"keep {seq}: the kernel tables of {names} were not copied, too large; imported as set"
+                )
         await self._learn(manifest.ledger, watch)
         watch.save(self._place.workspace / WATCH_FILE)
 
@@ -624,7 +632,7 @@ class AutonomousSession:
         holds no counter the manifest names, which :attr:`_unread` then says."""
 
         if manifest.snapshots is not None:
-            return self._latest(manifest.snapshots.outbox)
+            return self._latest(manifest.snapshots_outbox)
         if manifest.keep is None:
             return None
         path = self._agent_dir / SOURCE_DIR / manifest.keep.path
@@ -664,7 +672,7 @@ class AutonomousSession:
         with the root's."""
 
         if manifest.snapshots is not None:
-            outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots.outbox
+            outbox = self._agent_dir / SOURCE_DIR / manifest.snapshots_outbox
             applied = partial(self._place.worktree.diff_applied, root, component=self._setup.component)
             return read_snapshot(outbox, seq, root, applied)
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)

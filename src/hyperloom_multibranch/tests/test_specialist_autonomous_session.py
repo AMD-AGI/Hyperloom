@@ -91,23 +91,30 @@ while time.time() < end:
         pathlib.Path("run/progress").write_text(str(time.time()))
 sys.exit(config["exit"])
 """
-#: An agent in Arbor's component mode: every ``gap`` seconds it commits each of ``keeps`` to its workspace, writing a
-#: file of its own at the first, and writes the keep's snapshot to run/keeps (``change.patch`` against its parent, the
-#: launch, ``table`` as the kernel table AITER_CONFIG_GEMM_A8W8 loads, and an AITER JIT link outside its tree), naming
-#: it in LATEST at each keep or, without ``latest_each``, at the last only. The snapshot ``stray`` says it was made on
-#: a commit MB never gave it. It ends with ``exit`` after ``tail`` seconds, or on SIGTERM, leaving ``reason`` in
-#: run/component_exit.json.
+#: An agent in Arbor's component mode, its session in run/: every ``gap`` seconds it commits each of ``keeps`` to its
+#: workspace, writing a file of its own at the first, and writes the keep's snapshot to its outbox, run/snaps as the
+#: config MB wrote renames it: ``change.patch`` against its parent, ``served.patch`` against the root, the launch,
+#: ``table`` as the kernel table AITER_CONFIG_GEMM_A8W8 loads (listed as too large to copy with ``huge``, with a wrong
+#: digest with ``bad_sha``), and an AITER JIT link outside its tree; LATEST names it at each keep or, without
+#: ``latest_each``, at the last only. The keep ``skip`` gets no snapshot, as one that failed; ``stray`` says it was made
+#: on a commit MB never gave it; ``orphan`` is made on the root, its earlier snapshot's commit gone, as ``notes`` say.
+#: It removes the last run's exit file as it starts, and ends with ``exit`` after ``tail`` seconds, or 0 on SIGTERM,
+#: writing ``reason`` to run/component_exit.json before an exit 0 only; exit 2 says why on stderr.
 COMPONENT_AGENT = """
-import json, os, pathlib, signal, subprocess, sys, time
+import hashlib, json, os, pathlib, signal, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
 plan, workspace, root = config["plan"], pathlib.Path(config["workspace"]), config["component"]["root"]
-outbox = pathlib.Path("run/keeps")
+session = pathlib.Path("run")
+outbox = session / config["component"].get("outbox", "keeps")
 outbox.mkdir(parents=True, exist_ok=True)
+(session / "component_exit.json").unlink(missing_ok=True)
 
 
 def leave(reason, code):
-    if reason:
-        pathlib.Path("run/component_exit.json").write_text(json.dumps({"reason": reason}))
+    if code == 0 and reason:
+        (session / "component_exit.json").write_text(json.dumps({"reason": reason, "keeps": 0, "ts": time.time()}))
+    if code == 2:
+        print("component mode: docker_container must be @host", file=sys.stderr, flush=True)
     sys.exit(code)
 
 
@@ -126,18 +133,30 @@ for number, seqs in enumerate(plan["keeps"], start=1):
     git("add", "-A")
     git("commit", "-qm", f"keep {number}")
     commit = git("rev-parse", "HEAD").strip()
-    made_on = "f" * 40 if number == plan["stray"] else parent
+    if number == plan["skip"]:
+        continue
+    made_on = root if number == plan["orphan"] else parent
     built = outbox / f".{number:04d}.tmp"
     built.mkdir()
-    (built / "change.patch").write_text(git("diff", "--binary", parent, commit))
+    (built / "change.patch").write_text(git("diff", "--binary", made_on, commit))
+    (built / "served.patch").write_text(git("diff", "--binary", root, commit))
     keep = {"number": number, "previous": previous, "root": root, "parent": made_on, "commit": commit,
-            "change": f"seqs {seqs}", "intent": "", "outside": 1}
-    (built / "keep.json").write_text(json.dumps(keep))
+            "change": f"seqs {seqs}", "intent": "", "outside": 1, "tables": {}, "tables_outside_workspace": []}
+    if number == plan["stray"]:
+        keep["parent"] = "f" * 40
+    if number == plan["orphan"] and plan["orphan_notes"]:
+        keep["notes"] = f"the commit of keep {previous} is gone from the workspace; this change is against the root"
     envs = dict(plan["envs"])
     if plan["table"]:
-        envs["AITER_CONFIG_GEMM_A8W8"] = "/arbor/workspace/tuned.csv"
-        (built / "tables" / "AITER_CONFIG_GEMM_A8W8").mkdir(parents=True)
-        (built / "tables" / "AITER_CONFIG_GEMM_A8W8" / "tuned.csv").write_text(plan["table"].format(seqs=seqs))
+        name, table = "AITER_CONFIG_GEMM_A8W8", plan["table"].format(seqs=seqs).encode()
+        envs[name] = "/arbor/workspace/tuned.csv"
+        digest = "0" * 64 if plan["bad_sha"] else hashlib.sha256(table).hexdigest()
+        file = None if plan["huge"] else "tuned.csv"
+        keep["tables"][name] = {"path": envs[name], "file": file, "sha256": digest, "bytes": len(table)}
+        if not plan["huge"]:
+            (built / "tables" / name).mkdir(parents=True)
+            (built / "tables" / name / "tuned.csv").write_bytes(table)
+    (built / "keep.json").write_text(json.dumps(keep))
     (built / "config.json").write_text(json.dumps({"server_flags": f"--max-num-seqs {seqs}", "server_env": envs}))
     outside = [{"link": "vllm/module.so", "target": "/nonexistent/aiter/jit/module.so", "sha256": "0" * 64, "size": 1}]
     (built / "outside.json").write_text(json.dumps(outside))
@@ -150,7 +169,7 @@ for number, seqs in enumerate(plan["keeps"], start=1):
 time.sleep(plan["tail"])
 leave(plan["reason"], plan["exit"])
 """
-SNAPSHOTS = {"outbox": "run/keeps", "exit": "run/component_exit.json"}
+SNAPSHOTS = {"session": "run"}
 KEEPS = {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}}
 LEDGER = {
     "path": "run/ledger.jsonl",
@@ -189,9 +208,14 @@ class Component:
     exit: int = 0
     reason: str = "done"
     stray: int = 0
+    skip: int = 0
+    orphan: int = 0
+    orphan_notes: bool = True
     latest_each: bool = True
     envs: dict[str, str] = field(default_factory=dict)
     table: str = ""
+    huge: bool = False
+    bad_sha: bool = False
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -359,7 +383,7 @@ def _component_manifest(workspace: str, agent: Component) -> str:
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
-            "config": {"workspace": workspace, "plan": asdict(agent), "component": {"outbox": "keeps"}},
+            "config": {"workspace": workspace, "plan": asdict(agent), "component": {"outbox": "snaps"}},
             "launch": "python3 component.py",
             "resume": "",
             "keep": None,
@@ -1048,8 +1072,9 @@ async def test_an_agent_in_component_mode_runs_to_the_deadline_on_the_commit_mb_
 
     config = json.loads((tmp_path / BRANCH / "session" / AGENT_DIR / "src" / "campaign.json").read_text())
     root = rig.sandbox.prompts[0].split('"root": "')[1].split('"')[0]
-    assert config["mode"] == "component"
-    assert config["component"] == {"outbox": "keeps", "deadline": int(now + 3600.0 - 0.5), "root": root}
+    assert (config["mode"], config["docker_container"]) == ("component", "@host")
+    assert config["component"] == {"outbox": "snaps", "deadline": int(now + 3600.0 - 0.5), "root": root}
+    assert "docs/hosts.md" in rig.sandbox.prompts[0]
     assert root == json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())["root"]
 
 
@@ -1129,11 +1154,90 @@ async def test_an_agent_in_component_mode_that_finished_records_why(
     assert (await rig.notices())[-1] == f"{NOTICE} the agent finished its run: {said}"
 
 
-async def test_an_agent_in_component_mode_that_failed_is_a_crash_with_its_exit_reason(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Component(keeps=(), exit=3, reason="error", tail=0.6), start_seconds=0.2)
+async def _imported(rig: Rig) -> TestRequest:
+    """The one import of a component agent's run, once the run finished."""
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    await rig.toolbox_blackboard.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+    [request] = rig.toolbox.requests
+    return request
+
+
+async def test_a_snapshot_after_one_that_was_never_written_carries_both_keeps(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256, 512, 768), gap=0.1, skip=2, latest_each=False), start_seconds=0.2)
+
+    patch = rig.patch(await _imported(rig))
+
+    assert "+FIRST = 1" in patch and "+max_num_seqs = 768" in patch
+    assert any(note.startswith(f"{NOTICE} keep 3 imported") for note in await rig.notices())
+
+
+async def test_a_snapshot_whose_earlier_commit_is_gone_is_read_whole_from_the_root_as_its_notes_say(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(256, 512), gap=0.1, orphan=2, latest_each=False), start_seconds=0.2)
+
+    patch = rig.patch(await _imported(rig))
+
+    assert "+FIRST = 1" in patch and "-max_num_seqs = 128" in patch and "+max_num_seqs = 512" in patch
+
+
+async def test_a_snapshot_made_on_the_root_after_another_with_no_notes_is_refused(tmp_path: Path) -> None:
+    agent = Component(keeps=(256, 512), gap=0.1, orphan=2, orphan_notes=False, latest_each=False, tail=0.6)
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
 
     await rig.session.preflight()
-    with pytest.raises(SessionCrashed, match="exited 3 \\(error\\)"):
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    assert not rig.toolbox.requests
+    assert any("snapshot 0002 is refused" in note for note in await rig.notices())
+
+
+async def test_a_table_too_large_to_copy_is_noted_and_its_variable_imported_as_the_agent_set_it(
+    tmp_path: Path,
+) -> None:
+    agent = Component(keeps=(256,), gap=0.1, table="M,N,K\n{seqs},5120,5120\n", huge=True)
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    request = await _imported(rig)
+
+    assert request.delta.add_kernels == ()
+    assert request.delta.config.envs["AITER_CONFIG_GEMM_A8W8"] == "/arbor/workspace/tuned.csv"
+    assert any("AITER_CONFIG_GEMM_A8W8" in note and "not copied" in note for note in await rig.notices())
+
+
+async def test_a_table_whose_digest_does_not_match_its_listing_refuses_the_snapshot(tmp_path: Path) -> None:
+    agent = Component(keeps=(256,), gap=0.1, table="M,N,K\n{seqs},5120,5120\n", bad_sha=True, tail=0.6)
+    rig = await _rig(tmp_path, agent, start_seconds=0.2)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    assert not rig.toolbox.requests
+    assert any("keep 1 cannot be read" in note and "sha256" in note for note in await rig.notices())
+
+
+async def test_an_agent_in_component_mode_that_crashed_is_resumed_as_any_crash(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(), exit=3, tail=0.6), start_seconds=0.2)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed, match="the agent exited 3: ") as crashed:
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+
+    assert not crashed.value.lost
+
+
+async def test_an_agent_in_component_mode_that_refused_its_config_says_why(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(), exit=2, tail=0.6), start_seconds=0.2)
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed, match="refused its config.*docker_container must be @host"):
         await asyncio.wait_for(rig.session.run(), 10)
     await rig.session.stop()
 
@@ -1148,19 +1252,3 @@ async def test_an_agent_in_component_mode_stopped_by_mb_records_its_sigterm_exit
     await asyncio.wait_for(running, 10)
 
     assert (await rig.notices())[-1] == f"{NOTICE} the agent stopped: sigterm"
-
-
-async def test_an_exit_reason_left_by_an_earlier_run_is_not_read_as_the_resumed_agent_s(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, Component(keeps=(), exit=3, reason="error", tail=0.6), start_seconds=0.2)
-
-    await rig.session.preflight()
-    with pytest.raises(SessionCrashed):
-        await asyncio.wait_for(rig.session.run(), 10)
-    await rig.session.stop()
-    manifest_file = tmp_path / BRANCH / "session" / MANIFEST_FILE
-    manifest = json.loads(manifest_file.read_text())
-    manifest_file.write_text(json.dumps({**manifest, "resume": "true"}))
-    resumed = rig.restart()
-
-    with pytest.raises(SessionFinished, match="it wrote no exit reason"):
-        await asyncio.wait_for(resumed.run(), 10)
