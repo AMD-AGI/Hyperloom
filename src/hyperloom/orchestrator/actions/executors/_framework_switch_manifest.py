@@ -16,6 +16,8 @@ from hyperloom.common.env_safety import (
     valid_env_key,
 )
 
+from ._framework_rewrite_evidence import _CATEGORY_TAXONOMY
+
 
 log = logging.getLogger(__name__)
 
@@ -29,25 +31,10 @@ DEFAULT_SWITCH_VALUE = "1"
 
 # Recognised rewrite categories, mirroring ``_framework_rewrite_evidence`` plus the two that are not host-observable
 # and therefore never appear in evidence.
-KNOWN_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "memoize_invariant",
-        "hoist_loop_invariant",
-        "eliminate_host_round_trip",
-        "eliminate_host_sync",
-        "fuse_collectives",
-        "keep_device_resident",
-        "swap_vendor_kernel",
-        "drop_noop_glue",
-    }
-)
+KNOWN_CATEGORIES: frozenset[str] = frozenset(_CATEGORY_TAXONOMY) | {"swap_vendor_kernel", "drop_noop_glue"}
 
 # Cap on manifest entries.
 MAX_SWITCHES = 24
-
-# Env names a manifest may never claim: setting one of these from a "rewrite switch" would silently retarget the
-# benchmark rather than toggling a code path.
-FORBIDDEN_SWITCHES: frozenset[str] = BLOCKED_EXTERNAL_ENV_NAMES
 
 
 def _clean_list(raw: Any) -> list[str]:
@@ -95,7 +82,9 @@ def _accept_switches(entries: list[dict[str, Any]], reserved: set[str]) -> _Acce
             problems.append(f"dropped {name!r}: not a valid environment variable name")
             continue
         upper = name.upper()
-        if upper in FORBIDDEN_SWITCHES:
+        # A manifest may never claim these: setting one from a "rewrite switch" would silently retarget the benchmark
+        # rather than toggling a code path.
+        if upper in BLOCKED_EXTERNAL_ENV_NAMES:
             problems.append(f"dropped {name!r}: reserved benchmark variable, not a rewrite switch")
             continue
         if is_secret_shaped_env_name(upper):
@@ -285,7 +274,9 @@ def _could_be_a_round_switch(name: str) -> bool:
     switch of the patch's own, so reporting it would only be noise.
     """
     return (
-        name not in FORBIDDEN_SWITCHES and not is_secret_shaped_env_name(name) and not is_launch_provided_env_name(name)
+        name not in BLOCKED_EXTERNAL_ENV_NAMES
+        and not is_secret_shaped_env_name(name)
+        and not is_launch_provided_env_name(name)
     )
 
 
@@ -317,33 +308,21 @@ def unarmed_env_reads(patch_texts: list[str], *, armed: "set[str] | frozenset[st
     return sorted(name for name in unarmed if _could_be_a_round_switch(name))
 
 
-def dependency_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
-    """Return every switch ``name`` transitively depends on, plus ``name``."""
+def transitive_closure(name: str, switches: list[dict[str, Any]], edge: str) -> set[str]:
+    """Return every switch reachable from ``name`` along the ``edge`` lists, plus ``name``.
+
+    ``depends_on`` yields what ``name`` needs; ``enables`` yields what needs ``name``.
+    """
     by_name = {entry["switch"]: entry for entry in switches}
     target = name.strip().upper()
     closure = {target}
     frontier = [target]
     while frontier:
         current = frontier.pop()
-        for dep in (by_name.get(current) or {}).get("depends_on") or []:
-            if dep not in closure:
-                closure.add(dep)
-                frontier.append(dep)
-    return closure
-
-
-def dependents_closure(name: str, switches: list[dict[str, Any]]) -> set[str]:
-    """Return every switch that transitively depends on ``name``, plus ``name``."""
-    by_name = {entry["switch"]: entry for entry in switches}
-    target = name.strip().upper()
-    closure = {target}
-    frontier = [target]
-    while frontier:
-        current = frontier.pop()
-        for enabled in (by_name.get(current) or {}).get("enables") or []:
-            if enabled not in closure:
-                closure.add(enabled)
-                frontier.append(enabled)
+        for linked in (by_name.get(current) or {}).get(edge) or []:
+            if linked not in closure:
+                closure.add(linked)
+                frontier.append(linked)
     return closure
 
 
@@ -356,7 +335,7 @@ def additive_variants(
     seen: set[frozenset[str]] = set()
     variants: list[dict[str, Any]] = []
     for entry in switches:
-        bundle = dependency_closure(entry["switch"], switches)
+        bundle = transitive_closure(entry["switch"], switches, "depends_on")
         key = frozenset(bundle)
         if key in seen:
             continue
@@ -408,7 +387,7 @@ def leave_one_out_variants(
     seen: set[frozenset[str]] = set()
     variants: list[dict[str, Any]] = []
     for entry in switches:
-        removed = dependents_closure(entry["switch"], switches)
+        removed = transitive_closure(entry["switch"], switches, "enables")
         if len(removed) >= len(switches):
             # Removing this lever removes everything, which is the pre-patch baseline rather than an attribution of
             # this lever.
@@ -460,16 +439,14 @@ def summarize(switches: list[dict[str, Any]], problems: list[str]) -> str:
 
 __all__ = [
     "DEFAULT_SWITCH_VALUE",
-    "FORBIDDEN_SWITCHES",
     "KNOWN_CATEGORIES",
     "MANIFEST_KEY",
     "MAX_SWITCHES",
     "additive_variants",
-    "dependency_closure",
-    "dependents_closure",
     "leave_one_out_variants",
     "parse_manifest",
     "summarize",
     "switch_env",
+    "transitive_closure",
     "unarmed_env_reads",
 ]

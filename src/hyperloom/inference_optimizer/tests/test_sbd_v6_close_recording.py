@@ -38,7 +38,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_write_back_opened,
     record_write_back_settled,
 )
-from hyperloom.inference_optimizer.session.session_paths import recipe_kb_dead_letter_ndjson
 
 
 @pytest.fixture
@@ -319,24 +318,6 @@ def test_skip_reason_is_a_recorded_code_not_a_matched_substring(sd: Path) -> Non
     assert write_back["result_type"] == RESULT_AGENTX_BLOCKED
     assert write_back["status"] == "skipped"
     assert "failure" not in write_back
-
-
-def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
-    dead_letter = recipe_kb_dead_letter_ndjson(sd)
-    dead_letter.parent.mkdir(parents=True, exist_ok=True)
-    dead_letter.write_text('{"a": 1}\n\n{"b": 2}\n', encoding="utf-8")
-
-    record_close_opened(sd)
-    record_write_back_opened(sd, attempt=1, source="close")
-    record_write_back_settled(
-        sd, WriteBackSettlement(attempt=1, source="close", status="written", result_type=RESULT_WRITTEN)
-    )
-    # Moves after the settlement; the recorded depth must not follow it.
-    dead_letter.write_text("", encoding="utf-8")
-
-    queue = _close(sd)["kb_write_back"]["queue"]
-    assert queue["dead_letter_lines"] == 2
-    assert queue["pending_lines"] == 0
 
 
 def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:

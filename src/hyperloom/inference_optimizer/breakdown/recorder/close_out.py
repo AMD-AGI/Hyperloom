@@ -497,7 +497,6 @@ def record_write_back_settled(session_dir: Path | str | None, settlement: WriteB
     arc: dict[str, Any] = {
         "status": verdict,
         "end_time": settled,
-        "queue": _queue_depth(session_dir),
     }
     for key, value in (
         ("result_type", code),
@@ -539,35 +538,6 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
         dict(row),
         key=str(int(attempt)),
     )
-
-
-def _queue_depth(session_dir: Path | str) -> dict[str, int]:
-    """Line counts of the local KB write queues, as of this settlement.
-
-    Snapshotted here because the queues keep moving: a depth read at export
-    describes when the export ran, not when the publication settled.
-    """
-    from ...session.session_paths import (
-        recipe_kb_dead_letter_ndjson,
-        recipe_kb_flushed_ndjson,
-        recipe_kb_pending_ndjson,
-    )
-
-    root = Path(session_dir)
-    return {
-        "pending_lines": _count_lines(recipe_kb_pending_ndjson(root)),
-        "flushed_bookmarks": _count_lines(recipe_kb_flushed_ndjson(root)),
-        "dead_letter_lines": _count_lines(recipe_kb_dead_letter_ndjson(root)),
-    }
-
-
-def _count_lines(path: Path) -> int:
-    """Non-blank line count for ``path``, or ``0`` when it cannot be read."""
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return sum(1 for line in handle if line.strip())
-    except OSError:
-        return 0
 
 
 def _any_step_failed(session_dir: Path | str) -> bool | None:
