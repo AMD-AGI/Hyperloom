@@ -1134,6 +1134,38 @@ def test_a_hosted_run_without_its_shared_storage_ends_for_good_naming_the_variab
     assert agent_cli == [] and not any(host.workspace.iterdir())
 
 
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_lends_dev_sandboxes_and_runs_agents_with_the_grants_dev_key(
+    host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "dev_leases": 2, "autonomous_agents": ["/agents/a", "/agents/b"]})
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key-0123456789")
+    agents = ("--autonomous-agent", "/agents/a", "--autonomous-agent", "/agents/b")
+    on_the_command_line = _settings(*SPEC_RUN_ARGS, "--dev-leases", "2", *agents)
+    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
+
+    assert cli.main(["hosted", "run"]) == 0
+
+    assert agent_cli == [on_the_command_line]
+
+
+@pytest.mark.parametrize(
+    ("agents", "named"),
+    [(["/agents/a"], "need HYPERLOOM_SANDBOX_KEY_DEV"), ("/agents/a", "must be a list of agent sources")],
+    ids=["no-dev-key", "not-a-list"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_spec_whose_agents_cannot_run_ends_for_good_naming_why(
+    agents: object, named: str, host: Host, agent_cli: list[RunSettings]
+) -> None:
+    host.spec(multibranch={**SPEC["multibranch"], "autonomous_agents": agents})
+
+    assert cli.main(["hosted", "run"]) == cli.EXIT_USAGE
+
+    document = host.exit_document()
+    assert named in str(document["error"]) and agent_cli == []
+
+
 def test_the_hosted_runner_cache_is_the_directory_the_variable_names() -> None:
     assert cli.hosted_runner_cache({"HYPERLOOM_RUNNER_CACHE": " /data/hl/runner-cache "}) == Path(
         "/data/hl/runner-cache"
@@ -1425,19 +1457,49 @@ def test_a_grant_missing_a_variable_is_a_usage_error_naming_it_and_no_secret(
     assert handed.sessions == [] and handed.stops == []
 
 
+BRANCHES_IN_DEV_SANDBOXES = [["--dev-leases", "1"], ["--autonomous-agent", "/agents/a"]]
+
+
+@pytest.mark.parametrize("extra", BRANCHES_IN_DEV_SANDBOXES, ids=["dev-leases", "agent"])
+@pytest.mark.usefixtures("ready_environment")
+def test_a_hosted_run_lends_dev_sandboxes_and_runs_agents_in_the_grants_dev_sandboxes(
+    extra: list[str], handed: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+
+    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra]) == 0
+
+    [(settings, peer_factory)] = handed.sessions
+    assert (settings.dev_leases, settings.agents) in {(1, ()), (0, ("/agents/a",))}
+    assert peer_factory.args[0].backend.inputs.host.sandbox_keys.dev.reveal() == "dev-key"
+    assert "HYPERLOOM_SANDBOX_KEY_DEV" not in os.environ, "no child process inherits a grant key"
+
+
+@pytest.mark.parametrize("extra", BRANCHES_IN_DEV_SANDBOXES, ids=["dev-leases", "agent"])
 @pytest.mark.parametrize(
-    ("extra", "option"),
-    [(["--dev-leases", "1"], "--dev-leases"), (["--autonomous-agent", "/agents/a"], "--autonomous-agent")],
+    ("given", "missing"),
+    [({"HYPERLOOM_SANDBOX_KEY_DEV": None}, "HYPERLOOM_SANDBOX_KEY_DEV"), ({"USER_DATA_PATH": None}, "USER_DATA_PATH")],
+    ids=["no-dev-key", "no-user-data"],
 )
 @pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_refuses_what_would_run_on_this_machine(
-    extra: list[str], option: str, handed: Started, capsys: pytest.CaptureFixture[str]
+def test_a_hosted_run_without_what_a_dev_sandbox_needs_is_a_usage_error_naming_it(
+    extra: list[str],
+    given: dict[str, str | None],
+    missing: str,
+    handed: Started,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_KEY_DEV", "dev-key")
+    for name in given:
+        monkeypatch.delenv(name)
+
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", *extra])
 
     assert exc.value.code == cli.EXIT_USAGE
-    assert f"{option} is refused with --measurement hosted" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"need {missing}" in err and "dev-key" not in err
     assert handed.sessions == []
 
 

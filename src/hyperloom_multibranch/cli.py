@@ -62,7 +62,9 @@ A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 (:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
 run id is ``HYPERLOOM_RUN_ID`` when set, the session's id otherwise. A missing or malformed grant variable is a usage
-error naming it; so are ``--dev-leases`` and ``--autonomous-agent``, whose commands would run on this machine.
+error naming it. Its ``--dev-leases`` and ``--autonomous-agent`` run in ``dev`` sandboxes of the grant, so they also
+need the ``dev`` key (``HYPERLOOM_SANDBOX_KEY_DEV``) and ``USER_DATA_PATH``, the storage the ``dev`` template mounts at
+the same path; a usage error names what is missing.
 ``hosted run`` takes no arguments: it runs the session of the campaign spec a host injected, as
 :mod:`~hyperloom_multibranch.scheduling.hosted_run` maps it onto the options of ``run``, measured in the runner
 sandboxes of the host's sandbox service (:mod:`~hyperloom_multibranch.scheduling.hosted_peers`). Started again over a
@@ -126,6 +128,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     grant_deadline,
     record_session,
     recorded_session,
+    refuse_unhosted_branches,
     reported_stop_reason,
     run_argv,
     toolbox_grant,
@@ -306,8 +309,7 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         type=int,
         default=0,
         metavar="N",
-        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none."
-        " Refused with --measurement hosted.",
+        help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
     )
     run.add_argument(
         "--measurement",
@@ -785,7 +787,9 @@ def _hosted_settings(host: HostInfo, session_hours: Callable[[float], float]) ->
     spec = campaign_spec(host)
     tests_that_fit = grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
-    return settings_from(_parsed_run(argv), tests_that_fit)
+    settings = settings_from(_parsed_run(argv), tests_that_fit)
+    refuse_unhosted_branches(settings, host, os.environ)
+    return settings
 
 
 def _parsed_run(argv: list[str]) -> argparse.Namespace:
@@ -825,12 +829,6 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
     """The grant handed to ``run --measurement hosted``, taken out of the environment; ``args.max_hours`` is cut to
     what it leaves. Raises ValueError naming what is missing or refused, never a value."""
 
-    if args.dev_leases:
-        raise ValueError(
-            "--dev-leases is refused with --measurement hosted: a dev sandbox's commands run on this machine"
-        )
-    if args.agents:
-        raise ValueError("--autonomous-agent is refused with --measurement hosted: its agent runs on this machine")
     host = take_host_info(os.environ, require=HANDED_GRANT, require_run=False)
     deadline = grant_deadline(host, datetime.now(timezone.utc))
     args.max_hours = deadline.session_hours(args.max_hours)
@@ -839,6 +837,8 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
 
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
     settings = settings_from(args) if grant is None else settings_from(args, grant_tests_that_fit(grant.host))
+    if grant is not None:
+        refuse_unhosted_branches(settings, grant.host, os.environ)
     if args.reuse_prelude is not None:
         reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
         settings = replace(settings, reuse_prelude=reused)

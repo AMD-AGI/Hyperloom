@@ -6,10 +6,13 @@
 The campaign spec maps onto the options of ``run`` (:func:`run_argv`), so a hosted session is built by the one builder
 of :class:`~hyperloom_multibranch.scheduling.settings.RunSettings` a command-line session is. Besides the common part
 the legacy entry validated, a multi-branch session needs ``multibranch.workload`` (``--workload``),
-``workload.conc`` and ``workload.precision``; ``multibranch.max_branches`` is ``--max-branches`` and
-``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant runs at once. The fields ``run``
-has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
-``placement.specialist_capacity`` -- are not read, and neither dev sandbox leases nor autonomous agents are given.
+``workload.conc`` and ``workload.precision``; ``multibranch.max_branches`` is ``--max-branches``,
+``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
+``--autonomous-agent``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what the grant runs at
+once. The fields ``run`` has no option for -- ``objective``, ``launch``, ``options``, ``placement.profile`` and
+``placement.specialist_capacity`` -- are not read. Dev sandboxes and agents run in ``dev`` sandboxes of the grant, so
+they need its ``dev`` key and the session directory on the storage ``USER_DATA_PATH`` names, which the ``dev``
+template mounts at the same path (:func:`refuse_unhosted_branches`).
 Every test, PRELUDE's included, runs in a measurement sandbox, as PRELUDE starts no child on a hosted session, so the
 application's container needs no card: ``hosted-cpu`` serves as ``hosted-gpu`` does.
 
@@ -32,6 +35,7 @@ import signal
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +43,10 @@ from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
+from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS, MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits
 
 # hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
@@ -93,9 +99,42 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-gpu-hours": spec.max_gpu_hours,
         "max-llm-usd": spec.max_llm_usd,
         "max-branches": section.get("max_branches"),
+        "dev-leases": section.get("dev_leases"),
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
     }
-    return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None)]
+    agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
+    return ["run", *(f"--{option}={value}" for option, value in values.items() if value is not None), *agents]
+
+
+def _agent_sources(sources: object) -> list[str]:
+    if sources is None:
+        return []
+    if not isinstance(sources, list) or not all(isinstance(source, str) and source.strip() for source in sources):
+        raise HostedRefused("multibranch.autonomous_agents must be a list of agent sources")
+    return sources
+
+
+def refuse_unhosted_branches(settings: RunSettings, host: HostInfo, env: Mapping[str, str]) -> None:
+    """Refuse a session whose dev sandboxes or autonomous agents could not run in ``dev`` sandboxes of ``host``'s
+    grant: one the grant gives no ``dev`` key or no limits for, or whose session directory is not where ``env``'s
+    ``USER_DATA_PATH`` names, the storage the ``dev`` template mounts at the same path.
+
+    Raises:
+        HostedRefused: Naming every variable that is missing.
+    """
+
+    if not settings.dev_leases and not settings.agents:
+        return
+    given = {
+        Var.SANDBOX_KEY_DEV: host.sandbox_keys.dev,
+        Var.GRANT_LIMITS: host.grant_limits,
+        ENV_USER_DATA_PATH: env.get(ENV_USER_DATA_PATH, "").strip(),
+    }
+    missing = [str(name) for name, value in given.items() if not value]
+    if missing:
+        raise HostedRefused(
+            f"dev sandboxes and autonomous agents run in the grant's dev sandboxes and need {', '.join(missing)}"
+        )
 
 
 def _multibranch_section(section: object) -> dict[str, Any]:
@@ -233,6 +272,7 @@ __all__ = [
     "grant_deadline",
     "record_session",
     "recorded_session",
+    "refuse_unhosted_branches",
     "reported_stop_reason",
     "run_argv",
     "toolbox_grant",

@@ -13,10 +13,11 @@ toolbox keeps its journal, archive and landed output under ``MB-toolbox``. A run
 built from it (:func:`runner_cache_pin`), or finds it built, before anything is measured, and pins every runner sandbox
 to that entry's manifest through the toolbox's inputs.
 
-A hosted session lends its specialists no dev sandbox and runs no autonomous agent: their commands run in a sandbox on
-this machine's cards (:func:`~hyperloom_multibranch.specialist.dev_sandbox.local_dev_sandboxes`), and a hosted lease's
-cards are in another machine. Nor does PRELUDE start a child on this machine's cards: it roots the session on root tests
-and a profile of the root in runner sandboxes (:mod:`~hyperloom_multibranch.scheduling.prelude`).
+The dev sandboxes a hosted session lends its specialists and its autonomous agents run in ``dev`` sandboxes of the grant
+(:func:`~hyperloom_multibranch.scheduling.local_peers.branch_sandboxes`): only their processes run there, and their
+files stay in the session directory, which the ``dev`` template mounts at the path it has here. PRELUDE starts no child
+on this machine's cards: it roots the session on root tests and a profile of the root in runner sandboxes
+(:mod:`~hyperloom_multibranch.scheduling.prelude`).
 
 The grant is either injected by a host (``hosted run``) or handed to a session started by hand (``run --measurement
 hosted``); a grant without a run id of its own names its sandboxes by the session's id.

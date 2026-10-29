@@ -68,6 +68,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     LocalCards,
     MeasurementHost,
     SessionWiring,
+    branch_sandboxes,
     local_peers,
     machine_cards,
     machine_parallel_tests,
@@ -90,7 +91,10 @@ from hyperloom_multibranch.specialist import agent_sessions as agent_sessions_mo
 from hyperloom_multibranch.specialist import model_sessions as model_sessions_module
 from hyperloom_multibranch.specialist import worktree as worktree_module
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSetup
+from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
+from hyperloom_multibranch.specialist.remote_sandbox import RemoteAgentSandbox
+from hyperloom_multibranch.toolbox.hosted_leases import HostedBranchLease
 from hyperloom_multibranch.specialist.gate_client import GateClient
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
@@ -710,6 +714,26 @@ async def test_a_session_lending_dev_sandboxes_leases_the_toolbox_cards_to_a_spe
     assert "no_lease" in released["result"]["content"][0]["text"]
 
 
+def test_a_hosted_session_lends_the_dev_sandboxes_of_its_grant_on_its_tp_and_runs_its_agents_there(
+    tmp_path: Path,
+) -> None:
+    layout = SimpleNamespace(branch_dir=lambda branch: tmp_path / "MB-branches" / branch)
+    setup = SimpleNamespace(layout=layout, workload=replace(WORKLOAD, tp=4), processes=None)
+    worktree = SimpleNamespace(path=tmp_path / "worktree", holds=lambda component: False)
+    lease = HostedBranchLease("lease-1", "b01", (0, 1, 2, 3), Path("/app/work"), {}, 4, "dev-4", 3600, object())
+
+    hosted = branch_sandboxes(HostedSandboxes(lambda layout, tp: None), setup, lambda branch: worktree)
+    local = branch_sandboxes(LocalCards((0, 1)), setup, lambda branch: worktree)
+
+    assert (hosted.dev_cards, local.dev_cards) == (4, 1)
+    assert isinstance(hosted.agents, RemoteAgentSandboxes) and isinstance(local.agents, LocalAgentSandboxes)
+    sandbox = hosted.dev("b01", lease)
+    assert (
+        isinstance(sandbox, RemoteAgentSandbox) and sandbox.root == tmp_path / "MB-branches" / "b01" / "dev" / "lease-1"
+    )
+    assert (sandbox.cards, sandbox.lifetime_s) == (4, 3600)
+
+
 class _IdleService(E2BSandboxProvider):
     """The host's sandbox service with no sandbox running: what a session closes before it measured anything."""
 
@@ -849,6 +873,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
             blackboards=None,
             dev_leases=held,
             native={},
+            agent_sandboxes=None,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 
@@ -921,6 +946,7 @@ def test_the_specialists_source_base_holds_aiter_beside_the_framework_only_from_
         blackboards=None,
         dev_leases=None,
         native={},
+        agent_sandboxes=None,
     )
 
     model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
@@ -1031,6 +1057,7 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
             blackboards=None,
             dev_leases=None,
             native=native,
+            agent_sandboxes=None,
         )
         model_backed_sessions(AgentCommand("claude", "claude"))(wiring)
 

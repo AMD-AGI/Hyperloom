@@ -84,7 +84,8 @@ if TYPE_CHECKING:
     from hyperloom.measure.pins import ActiveImage, ToolCommits
     from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
-    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
+    from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, SandboxFor
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
     from hyperloom_multibranch.specialist.tools import WorktreeFor
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox
@@ -120,8 +121,8 @@ class SessionWiring:
     """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
     tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
     when a specialist starts), each branch's log, the session's briefs, its dev sandboxes, ``None`` when it lends
-    none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, and the
-    native trees the branches edit (:func:`native_trees`)."""
+    none, the canonical configuration the toolbox rendered, which the gate's benchmark client is read from, the
+    native trees the branches edit (:func:`native_trees`) and the sandboxes autonomous agents run in."""
 
     setup: PeerSetup
     repo: ExperimentRepo
@@ -132,11 +133,35 @@ class SessionWiring:
     dev_leases: DevLeases | None
     canonical: Path
     native: Mapping[str, NativeTree]
+    agent_sandboxes: AgentSandboxes
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
 #: session's wiring.
 SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
+
+
+@dataclass(frozen=True)
+class BranchSandboxes:
+    """Where a session's dev sandboxes and autonomous agents run: ``dev``, the sandbox of each dev lease, which takes
+    ``dev_cards`` unless the specialist asks for others, and ``agents``."""
+
+    dev: SandboxFor
+    dev_cards: int
+    agents: AgentSandboxes
+
+
+def branch_sandboxes(backend: ToolboxBackend, setup: PeerSetup, worktrees: WorktreeFor) -> BranchSandboxes:
+    """This machine's sandboxes when ``backend`` measures on its cards; else the ``dev`` sandboxes of the hosted
+    backend's leases, which have the session's TP cards and see the session directory at the path it has here."""
+
+    from hyperloom_multibranch.specialist.agent_sessions import LocalAgentSandboxes, RemoteAgentSandboxes
+    from hyperloom_multibranch.specialist.dev_sandbox import hosted_dev_sandboxes, local_dev_sandboxes
+
+    if backend.on_this_machine:
+        return BranchSandboxes(local_dev_sandboxes(worktrees, setup.processes), 1, LocalAgentSandboxes(setup.processes))
+    dev = hosted_dev_sandboxes(worktrees, setup.layout.branch_dir)
+    return BranchSandboxes(dev, setup.workload.tp, RemoteAgentSandboxes())
 
 
 @dataclass(frozen=True)
@@ -325,10 +350,14 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs)
-    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, lambda branch: built.worktrees(branch))
+    sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
+    leases = _lend_dev_sandboxes(mcp, setup, toolbox, runtime_blackboard, sandboxes)
     tokens = McpSpecialistTokens(mcp)
     rendered = canonical_dir / RENDERED_CANONICAL
-    built = sessions(SessionWiring(setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native))
+    wiring = SessionWiring(
+        setup, repo, tokens, runtime_blackboard, briefs, toolbox, leases, rendered, native, sandboxes.agents
+    )
+    built = sessions(wiring)
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     gate = RuleGate(gate_blackboard, repo, setup.desk, toolbox)
     register_blocked_tools(mcp, blocked=BlockedCandidates(gate_blackboard, gate), home=asyncio.get_running_loop())
@@ -415,23 +444,18 @@ def _lend_dev_sandboxes(
     setup: PeerSetup,
     toolbox: RealToolbox,
     blackboards: Callable[[str], LocalBlackboard],
-    worktrees: WorktreeFor,
+    sandboxes: BranchSandboxes,
 ) -> DevLeases | None:
     """The session's dev sandboxes on ``toolbox``'s cards, their tools registered on ``mcp`` for the session's loop;
-    ``None``, and no tools, when ``setup`` lends none. ``worktrees`` is read only when a lease is granted, after the
-    MCP service starts, so it may name sessions built after this call."""
+    ``None``, and no tools, when ``setup`` lends none. The branch's worktree ``sandboxes`` import is read only when a
+    lease is granted, after the MCP service starts, so it may be of a session built after this call."""
 
     if setup.dev_leases < 1:
         return None
-    from hyperloom_multibranch.specialist.dev_sandbox import (
-        DevLeases,
-        DevLimits,
-        local_dev_sandboxes,
-        register_dev_sandbox_tools,
-    )
+    from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, DevLimits, register_dev_sandbox_tools
 
-    limits = DevLimits(cap=setup.dev_leases)
-    leases = DevLeases(toolbox, local_dev_sandboxes(worktrees, setup.processes, limits), blackboards, limits=limits)
+    limits = DevLimits(cap=setup.dev_leases, cards=sandboxes.dev_cards)
+    leases = DevLeases(toolbox, sandboxes.dev, blackboards, limits=limits)
     register_dev_sandbox_tools(mcp, leases=leases, home=asyncio.get_running_loop())
     return leases
 
@@ -613,8 +637,9 @@ AITER = "aiter"
 
 def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
-    each branch's third-party agent in a sandbox leased from the session's toolbox, given the gate's benchmark client
-    when the session's canonical configuration names one; a session that runs no agent reads no canonical.
+    each branch's third-party agent in a sandbox leased from the session's toolbox (``wiring.agent_sandboxes``), given
+    the gate's benchmark client when the session's canonical configuration names one; a session that runs no agent
+    reads no canonical.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -664,7 +689,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             agent.env,
             wiring.toolbox,
             wiring.repo,
-            wiring.setup.processes,
+            wiring.agent_sandboxes,
             client=GateClient.read(wiring.canonical) if wiring.setup.agents else None,
         )
         return with_agents(sessions, agents, branch_dir=layout.branch_dir, blackboard_for=wiring.blackboards)
