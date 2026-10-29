@@ -439,7 +439,7 @@ resolve_ray_version() {
 
 # Exit code of ray_cli_probe for the one failure a click hold can fix: Ray 2.44.1's
 # CLI fails to import under click 8.3+ (`ValueError: ... is not a valid Sentinel`).
-RAY_CLI_PROBE_CLICK_RC=3
+RAY_CLI_PROBE_CLICK_RC=75
 # That hold is fixed, not an operator knob, and only for the default pin.
 RAY_CLICK_HOLD_VERSION="2.44.1"
 RAY_CLICK_HOLD_SPEC="click<8.3"

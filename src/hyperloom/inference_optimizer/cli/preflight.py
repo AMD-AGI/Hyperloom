@@ -155,11 +155,11 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
 # Ray 2.44.1's CLI does not import under click 8.3+ ("ValueError: ... is not a valid Sentinel"). The smoke
-# test exits with this code for that failure alone, on that Ray alone; it is the one failure a fixed click
-# hold repairs, and every other smoke failure leaves click untouched. install_kernel_tools.sh applies the same rule.
+# exits with this code for that failure on that Ray alone, the one failure a fixed click hold repairs;
+# install_kernel_tools.sh applies the same rule.
 _RAY_CLICK_HOLD_VERSION = "2.44.1"
 _RAY_CLICK_HOLD_SPEC = "click<8.3"
-_RAY_SENTINEL_EXIT = 3
+_RAY_SENTINEL_EXIT = 75
 # A representative `ray start` argv of the orchestrator's Ray runtime: every option it passes to the head
 # this step provisions, with values of its kind. Ray's own parser reading this argv is the certification, so
 # a pair whose `ray start` parses what Hyperloom passes is never refused over a version number.
@@ -170,63 +170,7 @@ _RAY_START_ARGV = (
 )
 
 
-_RAY_SMOKE_TEMPLATE = r"""
-import re
-import sys
-
-RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
-RAY_START_ARGV = __RAY_START_ARGV__
-RAY_CLICK_HOLD_VERSION = "__RAY_CLICK_HOLD_VERSION__"
-SENTINEL_EXIT = __RAY_SENTINEL_EXIT__
-ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
-
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-try:
-    import ray
-except Exception as exc:
-    print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-if ray_version:
-    if ray.__version__ != ray_version:
-        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
-        raise SystemExit(1)
-elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
-    print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
-    raise SystemExit(1)
-
-try:
-    import click
-    from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
-except Exception as exc:
-    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == RAY_CLICK_HOLD_VERSION
-    raise SystemExit(SENTINEL_EXIT if sentinel else 1)
-
-try:
-    _ray_start = _ray_cli.commands["start"]
-    _ray_start.make_context("start", list(RAY_START_ARGV), resilient_parsing=False).close()
-except click.UsageError as exc:
-    print(f"ray start does not accept {' '.join(RAY_START_ARGV)}: {exc.format_message()}", file=sys.stderr)
-    raise SystemExit(1)
-except Exception as exc:
-    print(f"ray CLI has no usable start command: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-print(ray.__version__)
-"""
-
-
-_RAY_SMOKE = (
-    _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
-    .replace("__RAY_START_ARGV__", repr(_RAY_START_ARGV))
-    .replace("__RAY_CLICK_HOLD_VERSION__", _RAY_CLICK_HOLD_VERSION)
-    .replace("__RAY_SENTINEL_EXIT__", str(_RAY_SENTINEL_EXIT))
-)
+_RAY_SMOKE_SCRIPT = Path(__file__).resolve().parent.parent / "assets" / "ray_cli_smoke.py"
 
 
 def _ray_probe_env() -> dict[str, str]:
@@ -242,9 +186,14 @@ def _ray_probe_env() -> dict[str, str]:
     return env
 
 
+def _ray_smoke_command(python_exe: str, ray_version: str) -> list[str]:
+    hold = (_RAY_CLICK_HOLD_VERSION, str(_RAY_SENTINEL_EXIT))
+    return [python_exe, str(_RAY_SMOKE_SCRIPT), _RAY_MIN_VERSION, *hold, *_RAY_START_ARGV, ray_version]
+
+
 def _ray_smoke(python_exe: str, ray_version: str = "") -> subprocess.CompletedProcess:
     return subprocess.run(
-        [python_exe, "-c", _RAY_SMOKE, ray_version],
+        _ray_smoke_command(python_exe, ray_version),
         capture_output=True,
         text=True,
         env=_ray_probe_env(),

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 INSTALL_SH = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
+_CLICK_RC = int(re.search(r"^RAY_CLI_PROBE_CLICK_RC=(\d+)$", INSTALL_SH.read_text(encoding="utf-8"), re.M).group(1))
 
 
 def _extract_shell_function(name: str) -> str:
@@ -227,7 +228,7 @@ def test_the_probe_gives_the_sentinel_import_failure_its_own_exit_code(tmp_path:
 
     done = _run_real_probe(site, ray_version="2.44.1")
 
-    assert done.returncode == 3, done.stderr
+    assert done.returncode == _CLICK_RC, done.stderr
     assert "is not a valid Sentinel" in done.stderr
 
 
@@ -281,7 +282,7 @@ def test_a_cli_that_starts_keeps_the_click_ray_resolved() -> None:
 
 
 def test_the_sentinel_failure_holds_click_below_8_3_once_and_probes_again() -> None:
-    done = _run_ensure_ray_with_probe([3, 0])
+    done = _run_ensure_ray_with_probe([_CLICK_RC, 0])
 
     assert done.returncode == 0, done.stderr
     assert done.stdout.count("[click<8.3]") == 1
@@ -290,7 +291,7 @@ def test_the_sentinel_failure_holds_click_below_8_3_once_and_probes_again() -> N
 
 
 def test_a_sentinel_failure_the_hold_does_not_fix_fails_the_install() -> None:
-    done = _run_ensure_ray_with_probe([3, 3])
+    done = _run_ensure_ray_with_probe([_CLICK_RC, _CLICK_RC])
 
     assert done.returncode != 0
     assert done.stdout.count("[click<8.3]") == 1
@@ -306,14 +307,14 @@ def test_any_other_probe_failure_ends_the_install_without_touching_click() -> No
 
 
 def test_a_sentinel_failure_under_another_ray_version_leaves_click_alone() -> None:
-    done = _run_ensure_ray_with_probe([3], ray_version="2.55.0")
+    done = _run_ensure_ray_with_probe([_CLICK_RC], ray_version="2.55.0")
 
     assert done.returncode != 0
     assert "click" not in done.stdout
 
 
 def test_check_only_reports_a_sentinel_failure_without_installing_anything() -> None:
-    done = _run_ensure_ray_with_probe([3], check_only=1)
+    done = _run_ensure_ray_with_probe([_CLICK_RC], check_only=1)
 
     assert done.returncode != 0
     assert "ARGS:" not in done.stdout

@@ -80,7 +80,7 @@ def _fake_site(tmp_path: Path, *, ray_version: str, start_options: dict[str, str
 
 def _run_smoke(site: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-c", cli_preflight._RAY_SMOKE],
+        cli_preflight._ray_smoke_command(sys.executable, ""),
         capture_output=True,
         text=True,
         env={"PYTHONPATH": str(site), "PATH": "/usr/bin:/bin"},
@@ -319,7 +319,7 @@ def _scripted(monkeypatch, smokes: list[subprocess.CompletedProcess], pip_rc: in
 
 
 def test_the_sentinel_failure_holds_click_and_smokes_again(monkeypatch) -> None:
-    pips = _scripted(monkeypatch, [_completed(3), _completed(0, "2.44.1\n")])
+    pips = _scripted(monkeypatch, [_completed(cli_preflight._RAY_SENTINEL_EXIT), _completed(0, "2.44.1\n")])
 
     record = cli_preflight._ensure_ray("python3", [])
 
@@ -329,7 +329,11 @@ def test_the_sentinel_failure_holds_click_and_smokes_again(monkeypatch) -> None:
 
 
 def test_the_sentinel_failure_after_a_ray_install_holds_click_too(monkeypatch) -> None:
-    smokes = [_completed(1, stderr="ray import failed: x"), _completed(3), _completed(0, "2.44.1\n")]
+    smokes = [
+        _completed(1, stderr="ray import failed: x"),
+        _completed(cli_preflight._RAY_SENTINEL_EXIT),
+        _completed(0, "2.44.1\n"),
+    ]
     pips = _scripted(monkeypatch, smokes)
 
     record = cli_preflight._ensure_ray("python3", [])
@@ -356,7 +360,15 @@ def test_any_other_smoke_failure_never_touches_click(monkeypatch, version) -> No
 
 
 def test_a_sentinel_failure_the_hold_does_not_fix_fails_the_install(monkeypatch) -> None:
-    pips = _scripted(monkeypatch, [_completed(3), _completed(3), _completed(3), _completed(3)])
+    pips = _scripted(
+        monkeypatch,
+        [
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+            _completed(cli_preflight._RAY_SENTINEL_EXIT),
+        ],
+    )
 
     with pytest.raises(RuntimeError, match="smoke test still failed"):
         cli_preflight._ensure_ray("python3", [])
