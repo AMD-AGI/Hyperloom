@@ -85,8 +85,8 @@ class MagpieBackend:
         config_path: Path,
         output_dir: Path,
     ) -> list[str]:
-        """Return the Magpie ... --run-mode local argv, run through :mod:`.magpie_confined` so that, in a sandbox,
-        Magpie's leftover-server sweep cannot kill another sandbox's server."""
+        """Return the Magpie ... --run-mode local argv, run through :mod:`.magpie_confined` so that Magpie's
+        leftover-server sweep cannot kill another sandbox's server."""
         return [
             python_exe,
             str(Path(__file__).with_name("magpie_confined.py")),

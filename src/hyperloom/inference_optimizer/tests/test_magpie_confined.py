@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Magpie's leftover-server sweep, run through ``magpie_confined``, signals only the caller's sandbox."""
+"""Magpie's leftover-server sweep, run through ``magpie_confined``, signals only the caller's sandbox or host."""
 
 from __future__ import annotations
 
 import signal
+import sys
 import types
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def test_unconfined_the_sweep_kills_every_sandbox_s_server(signalled: list[tuple
 def test_confined_the_sweep_kills_only_its_own_sandbox_s_server(signalled: list[tuple[int, int]]) -> None:
     module = _benchmarker()
     real_os = module.os
-    magpie_confined.confine_sweep(module, b"E2B_SANDBOX_ID=lsb-a", environ=lambda pid: ENVIRONS[pid])
+    magpie_confined.confine_sweep(module, b"lsb-a", environ=lambda pid: ENVIRONS[pid])
 
     module.BenchmarkMode()._cleanup_server_processes("sglang")
 
@@ -67,7 +68,7 @@ def test_a_magpie_without_the_sweep_runs_unconfined_and_says_so(capsys: pytest.C
     module = types.ModuleType("benchmarker")
     module.BenchmarkMode = type("BenchmarkMode", (), {})
 
-    magpie_confined.confine_sweep(module, b"E2B_SANDBOX_ID=lsb-a")
+    magpie_confined.confine_sweep(module, b"lsb-a")
 
     assert "BenchmarkMode._cleanup_server_processes not found" in capsys.readouterr().err
 
@@ -85,3 +86,32 @@ def test_the_magpie_backend_runs_magpie_through_the_confinement(tmp_path: Path) 
         "--run-mode",
         "local",
     ]
+
+
+def test_outside_a_sandbox_magpie_s_sweep_spares_every_sandbox_s_server(
+    monkeypatch: pytest.MonkeyPatch, signalled: list[tuple[int, int]]
+) -> None:
+    module = _benchmarker()
+    for name in ("Magpie", "Magpie.modes", "Magpie.modes.benchmark"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setattr(sys.modules["Magpie.modes.benchmark"], "benchmarker", module, raising=False)
+    monkeypatch.setitem(sys.modules, "Magpie.modes.benchmark.benchmarker", module)
+    monkeypatch.delenv("E2B_SANDBOX_ID", raising=False)
+    monkeypatch.setattr(magpie_confined, "process_environ", lambda pid: ENVIRONS[pid])
+    monkeypatch.setattr(
+        magpie_confined.runpy, "run_module", lambda *a, **k: module.BenchmarkMode._cleanup_server_processes("sglang")
+    )
+    monkeypatch.setattr(sys, "argv", ["magpie_confined.py"])
+
+    magpie_confined.main()
+
+    assert signalled == [(UNTAGGED, signal.SIGKILL)]
+
+
+def test_the_sweep_spares_a_process_whose_environment_cannot_be_read(signalled: list[tuple[int, int]]) -> None:
+    module = _benchmarker()
+    magpie_confined.confine_sweep(module, b"", environ=lambda pid: None if pid == UNTAGGED else ENVIRONS[pid])
+
+    module.BenchmarkMode._cleanup_server_processes("sglang")
+
+    assert signalled == []
