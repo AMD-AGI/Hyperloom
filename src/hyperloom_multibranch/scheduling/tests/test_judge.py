@@ -320,11 +320,12 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is
         "gave_up": True,
         "judge_failed": False,
         "unready": "",
+        "finished": "",
     }
     assert (rows["b02"]["specialist"]["lost"], rows["b02"]["specialist"]["judge_failed"]) == (6, True)
     assert "specialist" not in rows[INTEGRATION_BRANCH] and "specialist" not in rows["b03"]
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
-    for field in ("crashes", "lost", "gave_up", "unready", "judge_failed"):
+    for field in ("crashes", "lost", "gave_up", "unready", "finished", "judge_failed"):
         assert f"({field})" in prompt
     assert "The scheduler stops a gave-up branch itself" in prompt
     assert "A branch whose judging failed makes no more progress" in prompt

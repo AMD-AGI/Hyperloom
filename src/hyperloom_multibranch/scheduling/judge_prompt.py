@@ -159,7 +159,8 @@ A specialist branch's specialist, shown only when the specialist runtime reports
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
 whether the runtime gave up restarting it after repeated crashes, after several sessions in a row lost their
 heartbeat or after several sessions in a row found nothing to test (gave_up), why it could not be started at all,
-empty when it was (unready), and whether it was stopped because judging its tests failed (judge_failed). The
+empty when it was (unready), why it ended with no work left, such as a third-party agent's run reaching its end,
+empty when it did not (finished), and whether it was stopped because judging its tests failed (judge_failed). The
 scheduler stops a gave-up branch itself, unless a candidate of its waits to be confirmed, and that one you cannot stop
 either. A branch whose judging failed makes no more progress but holds
 its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
