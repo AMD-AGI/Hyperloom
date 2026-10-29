@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from kernelforge.rewrite_by_flydsl import protocol
-from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
+from kernelforge.workflows.flydsl_rewrite import protocol
+from kernelforge.workflows.flydsl_rewrite.spec import RewriteSpec
 
 
 def test_capabilities_report_the_supported_protocol():

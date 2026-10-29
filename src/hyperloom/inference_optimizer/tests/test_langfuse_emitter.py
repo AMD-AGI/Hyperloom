@@ -358,10 +358,10 @@ def test_session_start_masks_extra_env_pins_the_cli_exported(monkeypatch):
     # The CLI serializes --extra-env into one JSON var whose name carries no marker; each pin is masked by its own name.
     import os
 
-    from hyperloom.inference_optimizer import cli
+    from hyperloom.inference_optimizer.cli import launch_shape
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_EXTRA_ENV", raising=False)
-    cli._export_operator_launch_shape(
+    launch_shape._export_operator_launch_shape(
         server_args="",
         extra_env={
             "HF_TOKEN": "hf_plaintextvalue",
@@ -706,72 +706,6 @@ def test_failed_generation_is_kept_for_a_later_retry(tmp_path, monkeypatch):
     em.flush_session()
     assert len(client.generations) == 1
     assert em._flushed is True
-
-
-def test_ext_shard_send_failure_is_retried_without_duplicates(tmp_path, monkeypatch):
-    """A failed shard row is resumed, and the rows that landed are not re-sent."""
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-7.jsonl"
-    shard.write_text(
-        "\n".join(json.dumps(_llm_row(component="forge", role=None, call_id=f"ext-{i}")) for i in range(2)) + "\n",
-        encoding="utf-8",
-    )
-    em = lfe.LangfuseEmitter(sd)
-
-    real_emit = em._emit_generation
-    attempts = {"n": 0}
-
-    def _flaky_emit(**kwargs):
-        attempts["n"] += 1
-        if attempts["n"] == 2:  # the second shard row
-            return False
-        return real_emit(**kwargs)
-
-    monkeypatch.setattr(em, "_emit_generation", _flaky_emit)
-    em.flush_session()
-    assert em._flushed is False
-    assert len(client.generations) == 1
-
-    monkeypatch.setattr(em, "_emit_generation", real_emit)
-    em.flush_session()
-    assert em._flushed is True
-    # The row that already landed was not emitted twice.
-    assert len(client.generations) == 2
-    assert em._counts["ext_shards_read"] == 1
-
-
-def test_new_emitter_resumes_the_ext_shard_cursor(tmp_path, monkeypatch):
-    """Across processes the durable unit is the row, not the step."""
-    _enable_env(monkeypatch)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
-    shard.write_text(
-        json.dumps(_llm_row(component="forge", role=None, call_id="row-0")) + "\n",
-        encoding="utf-8",
-    )
-
-    first = _FakeClient()
-    _install_fake_sdk(monkeypatch, first)
-    lfe.LangfuseEmitter(sd).flush_session()
-    assert len(first.generations) == 1
-    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 1}
-
-    # The resumed process appends one more row to the same shard.
-    with shard.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(_llm_row(component="forge", role=None, call_id="row-1", output_tokens=777)) + "\n")
-
-    second = _FakeClient()
-    _install_fake_sdk(monkeypatch, second)
-    lfe._REGISTRY.clear()
-    lfe.LangfuseEmitter(sd).flush_session()
-
-    # Only the new row was pushed; the first was not duplicated.
-    assert len(second.generations) == 1
-    assert second.generations[0].kwargs["usage_details"]["output"] == 777
-    assert lfe.read_receipt(sd)["rows_sent"] == {"reports/trace/ext/forge-1.jsonl": 2}
 
 
 def _append_jsonl(path: Path, *rows: dict) -> None:
@@ -1127,7 +1061,7 @@ def test_module_record_session_breakdown_reads_file(tmp_path, monkeypatch):
 
 def _seed_trace_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "SID"
-    (sd / "reports" / "trace" / "ext").mkdir(parents=True)
+    (sd / "reports" / "trace").mkdir(parents=True)
     _write_manifest(sd)
     return sd
 
@@ -1146,34 +1080,12 @@ def test_flush_emits_unpaired_token_only_generation(tmp_path, monkeypatch):
     assert client.flushed == 1
 
 
-def test_flush_backfills_ext_shards(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    sd = _seed_trace_dir(tmp_path)
-    shard = sd / "reports" / "trace" / "ext" / "forge-123.jsonl"
-    shard.write_text(
-        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
-    em = lfe.LangfuseEmitter(sd)
-    em.flush_session()
-    geak_gens = [g for g in client.generations if g.kwargs["metadata"]["component"] == "forge"]
-    assert len(geak_gens) == 1
-    assert geak_gens[0].kwargs["usage_details"]["input"] == 500
-    assert geak_gens[0].kwargs["metadata"]["has_text"] is False
-
-
 def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     """A second flush_session() must not re-emit what the first sent (would duplicate Generations/Scores)."""
     _enable_env(monkeypatch)
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
-        json.dumps(_llm_row(component="forge", role=None, input_tokens=500, output_tokens=60)) + "\n",
-        encoding="utf-8",
-    )
     em = lfe.LangfuseEmitter(sd)
     em.record_llm_call(_llm_row())  # unpaired token half
 
@@ -1184,26 +1096,6 @@ def test_flush_session_is_idempotent_no_duplicate_reemit(tmp_path, monkeypatch):
     # Second call: no new Generation emitted.
     em.flush_session()
     assert len(client.generations) == gens_after_first
-
-
-def test_a_released_receipt_still_resumes_its_ext_shards(tmp_path, monkeypatch):
-    """v1.0.0 through v1.1.3 persist the ext cursors as ``ext_rows_sent``; a resumed leg must not re-push them."""
-    _enable_env(monkeypatch)
-    sd = _seed_trace_dir(tmp_path)
-    ext_shard = sd / "reports" / "trace" / "ext" / "forge-1.jsonl"
-    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="old"))
-    _append_jsonl(ext_shard, _llm_row(component="forge", role=None, call_id="new", output_tokens=777))
-    released = {"ext_rows_sent": {"forge-1.jsonl": 1}}
-    (sd / "reports" / "trace" / "langfuse_receipt.json").write_text(json.dumps(released), encoding="utf-8")
-
-    client = _FakeClient()
-    _install_fake_sdk(monkeypatch, client)
-    lfe.LangfuseEmitter(sd).flush_session()
-
-    assert [g.kwargs["usage_details"]["output"] for g in client.generations] == [777]
-    receipt = lfe.read_receipt(sd)
-    assert receipt["rows_sent"]["reports/trace/ext/forge-1.jsonl"] == 2
-    assert "ext_rows_sent" not in receipt
 
 
 def test_a_later_flush_ships_what_was_recorded_after_the_close_flush(tmp_path, monkeypatch):
@@ -1847,11 +1739,7 @@ def test_flush_writes_receipt_file_with_final_counts(tmp_path, monkeypatch):
     client = _FakeClient()
     _install_fake_sdk(monkeypatch, client)
     sd = _seed_trace_dir(tmp_path)
-    # one ext shard + one unpaired token half + one decision so flush counts move.
-    (sd / "reports" / "trace" / "ext" / "forge-1.jsonl").write_text(
-        json.dumps(_llm_row(component="forge", role=None)) + "\n",
-        encoding="utf-8",
-    )
+    # one unpaired token half + one decision so flush counts move.
     (sd / "reports" / "trace" / "decision_trace.jsonl").write_text(
         json.dumps(
             {
@@ -1905,7 +1793,6 @@ def test_pair_key_distinguishes_same_second_burst():
         "tick": 3,
         "role": "assistant",
         "task_id": "t1",
-        "dyn_id": "d1",
         "ts": "2026-06-11T10:00:00.100Z",
     }
     turn_a = {**base, "turn": 1}
@@ -1923,7 +1810,6 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
         "role": "assistant",
         "turn": 2,
         "task_id": "tk",
-        "dyn_id": "dy",
         "ts": "2026-06-11T10:00:01.020Z",
     }
     text = {**token, "ts": "2026-06-11T10:00:01.450Z"}
@@ -1937,7 +1823,6 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
         "tick": None,
         "role": "proposal_scorer",
         "task_id": None,
-        "dyn_id": None,
         "turn": None,
         "ts": "2026-06-11T10:00:00.300Z",
     }
@@ -1959,7 +1844,7 @@ def test_pair_key_scorer_token_and_text_pair_when_roles_match():
 
 
 def test_pair_key_degrades_when_turn_absent():
-    """Rows without turn/task_id/dyn_id still produce a stable key rather than raising."""
+    """Rows without turn/task_id still produce a stable key rather than raising."""
     row = {"component": "forge", "tick": 1, "role": None, "ts": "2026-06-11T10:00:00Z"}
     k = lfmap.pair_key(row)
     assert lfmap.pair_key(dict(row)) == k

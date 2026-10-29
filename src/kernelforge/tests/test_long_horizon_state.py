@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.prompt_view import render_long_horizon_header
-from kernelforge.loop.run_state import (
+from kernelforge.workflows.forge_loop.roles.prompt_view import render_long_horizon_header
+from kernelforge.workflows.forge_loop.campaign.run_state import (
     IterationVerdict,
     LoopStanding,
     StallPolicy,
@@ -43,7 +43,7 @@ from kernelforge.loop.run_state import (
     should_resume,
     start_session,
 )
-from kernelforge.loop.iteration.campaign_report import LONG_HORIZON_OUTCOME_WINDOW, _long_horizon_header
+from kernelforge.workflows.forge_loop.iteration.campaign_report import LONG_HORIZON_OUTCOME_WINDOW, _long_horizon_header
 
 # The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
 # from the defaults the loop relies on.
@@ -805,7 +805,7 @@ def test_should_resume_only_when_commit_is_head():
 
 def test_supervisor_intervention_resets_the_cooldown_but_not_the_stall():
     """Advice is not a result, so only the cooldown window restarts."""
-    from kernelforge.loop import run_state as run_state_module
+    from kernelforge.workflows.forge_loop.campaign import run_state as run_state_module
 
     state = RunState()
     state.best.iteration = 2

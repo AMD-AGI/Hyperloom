@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.tuners._aiter_dense_common import _filter_unimproved_rows, _parse_tuner_stdout
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _filter_unimproved_rows, _parse_tuner_stdout
 
 _HDR = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRatio"
 

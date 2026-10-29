@@ -18,26 +18,26 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from kernelforge.tools import process_reaping
-from kernelforge.tools.process_reaping import ReapReport
+from kernelforge.utils import process_reaping
+from kernelforge.utils.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.tools.git import GitError
-from kernelforge.loop import analysis_evidence
-from kernelforge.loop import fanout
-from kernelforge.loop import runner as runner_module
-from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
-from kernelforge.loop.archive import CandidateRecord
-from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
-from kernelforge.loop.lessons import SummaryOutcome
+from kernelforge.utils.git import GitError
+from kernelforge.workflows.forge_loop.roles import analysis_evidence
+from kernelforge.workflows.forge_loop.iteration import fanout
+from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.workflows.forge_loop.policy.analysis_refresh_policy import AnalysisRefreshDecision
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateRecord
+from kernelforge.workflows.forge_loop.iteration.device_hazard import MAX_BLOCKED_ITERATIONS
+from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.tests._experiment_records import persisted_experiments
-from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
-from kernelforge.loop.round_budget import (
+from kernelforge.workflows.forge_loop.campaign.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
+from kernelforge.workflows.forge_loop.policy.round_budget import (
     ADMISSION_SESSION_SEC,
     FIRST_ROUND_MEASUREMENT_SEC,
     admit_dispatch,
     admit_round,
 )
-from kernelforge.loop.run_state import (
+from kernelforge.workflows.forge_loop.campaign.run_state import (
     IterationVerdict,
     LoopStanding,
     RoundCost,
@@ -56,14 +56,14 @@ from kernelforge.loop.run_state import (
     apply_supervisor_intervention,
     make_event,
 )
-from kernelforge.loop.merge_candidates import (
+from kernelforge.workflows.forge_loop.iteration.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
     MERGE_PRECEDENCE_STREAK_LIMIT,
 )
-from kernelforge.loop.iteration.iteration_types import WindowGain
-from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.workflows.forge_loop.iteration.iteration_types import WindowGain
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
 from kernelforge.evaluation.scoring import GateScoring, passes_keep_threshold
-from kernelforge.loop.search_policy import (
+from kernelforge.workflows.forge_loop.search.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
     NO_CHANGES_ESCALATION_THRESHOLD,
@@ -71,37 +71,37 @@ from kernelforge.loop.search_policy import (
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
 )
-from kernelforge.loop.supervisor import SupervisionMonitor
-from kernelforge.orchestrator.contracts import (
+from kernelforge.workflows.forge_loop.search.supervisor import SupervisionMonitor
+from kernelforge.workflows.forge_loop.roles.contracts import (
     EvidenceRef,
     OrchestrationRunResult,
     PlanCriticOutcome,
     SpecialistDefinition,
 )
-from kernelforge.orchestrator.orchestration import (
+from kernelforge.workflows.forge_loop.roles.orchestration import (
     OrchestrationAgent,
     OrchestrationService,
 )
-from kernelforge.orchestrator.analysis_session import (
+from kernelforge.workflows.forge_loop.roles.analysis_session import (
     AnalysisAttemptLimitError,
 )
-from kernelforge.orchestrator.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
-from kernelforge.orchestrator.specialists import (
+from kernelforge.workflows.forge_loop.roles.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
+from kernelforge.workflows.forge_loop.roles.specialists import (
     SpecialistAgent,
     SpecialistPool,
 )
-from kernelforge.tracker import ExperimentTracker
-from kernelforge.loop.iteration import attempt_verdict
-from kernelforge.loop.iteration import campaign_runtime
-from kernelforge.loop.iteration import iteration_phases
-from kernelforge.loop.iteration import keep_checkpoint
-from kernelforge.loop.iteration import lane_runtime
-from kernelforge.loop.iteration import locked_run
-from kernelforge.loop.iteration import outcome_runtime
-from kernelforge.loop.iteration import round_admission
-from kernelforge.loop.iteration import best_publication
-from kernelforge.loop.fanout import LaneResult
-from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
+from kernelforge.workflows.forge_loop.iteration import attempt_verdict
+from kernelforge.workflows.forge_loop.iteration import campaign_runtime
+from kernelforge.workflows.forge_loop.iteration import iteration_phases
+from kernelforge.workflows.forge_loop.iteration import keep_checkpoint
+from kernelforge.workflows.forge_loop.iteration import lane_runtime
+from kernelforge.workflows.forge_loop.iteration import locked_run
+from kernelforge.workflows.forge_loop.iteration import outcome_runtime
+from kernelforge.workflows.forge_loop.iteration import round_admission
+from kernelforge.workflows.forge_loop.iteration import best_publication
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
+from kernelforge.workflows.forge_loop.roles.supervisor import latest_supervisor_ruling_path
 from kernelforge.tests.conftest import patch_iteration_name, silence_jit_rebuild
 
 
@@ -695,9 +695,9 @@ def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeyp
     Moving it to after ``run_lanes`` returns deletes the lane copy first, and
     the guard then fails the resume before the session can answer.
     """
-    from kernelforge.loop.bootstrap import lanes as cli_lanes
+    from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
     from kernelforge.config import Config
-    from kernelforge.orchestrator import agent as agent_module
+    from kernelforge.workflows.forge_loop.roles import agent as agent_module
     from kernelforge.tests.test_claude_resume import _FakeOptions, _backend
 
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2)
@@ -6900,7 +6900,7 @@ def _lesson_result(**overrides) -> IterationResult:
 
 
 def _attach_lessons(loop, workspace):
-    from kernelforge.loop.lessons import LessonStore
+    from kernelforge.workflows.forge_loop.memory.lessons import LessonStore
 
     loop.lessons = LessonStore(str(workspace))
     return loop.lessons
@@ -7107,7 +7107,7 @@ def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(tmp_path, mo
         )
     )
 
-    from kernelforge.loop.lessons import UNDISPROVEN_CLAIM
+    from kernelforge.workflows.forge_loop.memory.lessons import UNDISPROVEN_CLAIM
 
     assert store.scope_of(3).disproof == UNDISPROVEN_CLAIM
     assert "feasibility claim not disproved" in store.read(3)
@@ -7148,7 +7148,7 @@ def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(tmp_path, m
         )
     )
 
-    from kernelforge.loop.lessons import is_claim_disproved
+    from kernelforge.workflows.forge_loop.memory.lessons import is_claim_disproved
 
     assert is_claim_disproved(store.scope_of(3).disproof)
     assert "feasibility claim disproved by a build-only screen" in store.read(3)
@@ -7654,7 +7654,7 @@ def test_an_unscored_case_is_not_recorded_as_a_case_that_was_measured(tmp_path, 
 
 def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_path, monkeypatch):
     """The render path validates against the scored suite, not every case."""
-    from kernelforge.loop.lessons import LessonScope, LessonStore
+    from kernelforge.workflows.forge_loop.memory.lessons import LessonScope, LessonStore
 
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     loop.ic.preloop_baseline_unscored_cases = ["decode-t64"]
@@ -7710,7 +7710,7 @@ def test_a_scope_that_cannot_be_written_says_so(tmp_path, monkeypatch, capsys):
 
 def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatch):
     """The planner reads handoffs; a refutation quoted from one needs its scope."""
-    from kernelforge.loop.handoffs import HandoffStore
+    from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
@@ -7742,7 +7742,7 @@ def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatc
 
 
 def test_handoff_plan_is_unchanged_when_no_lesson_was_written(tmp_path, monkeypatch):
-    from kernelforge.loop.handoffs import HandoffStore
+    from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _attach_lessons(loop, workspace)
@@ -7988,7 +7988,7 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, mon
 
 
 def test_decision_label_matches_every_outcome():
-    from kernelforge.loop.iteration.iteration_types import _decision_label
+    from kernelforge.workflows.forge_loop.iteration.iteration_types import _decision_label
 
     assert _decision_label(_lesson_result(crashed=True)) == "CRASH"
     assert (
@@ -8163,7 +8163,7 @@ def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
     Both rule blocks must carry the clarification, or one template keeps the
     ambiguity the other lost.
     """
-    from kernelforge.orchestrator import agent as agent_module
+    from kernelforge.workflows.forge_loop.roles import agent as agent_module
 
     source = Path(agent_module.__file__).read_text()
     enforcement = [

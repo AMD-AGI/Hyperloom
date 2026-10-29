@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-# Application image of a hosted Hyperloom run: the framework (ROCm) image of the optimize flow
+# Application image of a hosted Hyperloom run (an alternative to the layer of build_layer.sh, which runs on any framework image as it is): the framework (ROCm) image of the optimize flow
 # with no Hyperloom in it, plus the bootstrap that builds the wheel of HYPERLOOM_SOURCE_SHA when
 # the run starts. Build with scripts/hosted_app_image/build.sh (the build context is the repo root).
 ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.22-rocm10-mi30x-20261022

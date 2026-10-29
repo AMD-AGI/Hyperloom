@@ -77,7 +77,7 @@ def _inside_package(target: object) -> bool:
 def _refuse(target: object, how: str) -> None:
     raise AssertionError(
         f"test attempted to {how} inside the installed kernelforge package: {target!r}. "
-        "Runtime state belongs under kernelforge.resources.default_project_root(); the "
+        "Runtime state belongs under kernelforge.config.resources.default_project_root(); the "
         "packaged data tree is read-only and is replaced on upgrade."
     )
 
@@ -208,11 +208,11 @@ def patch_iteration_name(monkeypatch, name: str, value) -> None:
     reads is bound in more than one of them; patching one leaves the others on
     the real implementation.
     """
-    from kernelforge.loop import iteration
+    from kernelforge.workflows.forge_loop import iteration
 
     patched = 0
     for module_name in iteration.ITERATION_MODULES:
-        module = importlib.import_module(f"kernelforge.loop.iteration.{module_name}")
+        module = importlib.import_module(f"kernelforge.workflows.forge_loop.iteration.{module_name}")
         if hasattr(module, name):
             monkeypatch.setattr(module, name, value)
             patched += 1

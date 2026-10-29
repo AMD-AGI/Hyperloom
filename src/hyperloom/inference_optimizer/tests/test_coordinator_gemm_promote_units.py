@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
-import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
+import hyperloom.orchestrator.phases.kernel_gemm_tuning as kernel_gemm_tuning_mod
 from hyperloom.common.env import EnvValueError
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -630,7 +630,7 @@ class TestForgeGemmRuntimeConfigMerge:
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
         # The merge also probes the baked-in container config dir, which really exists on an aiter image.
         monkeypatch.setattr(
-            kernel_phase_mod,
+            kernel_gemm_tuning_mod,
             "_CONTAINER_AITER_CONFIG_DIR",
             tmp_path / "missing-container-configs",
         )
@@ -641,7 +641,7 @@ class TestForgeGemmRuntimeConfigMerge:
         # Point the last-resort container config dir at a non-existent path so the "no complete aiter config anywhere"
         # branch is exercised even on a dev box that has the real /sgl-workspace/aiter checkout mounted.
         monkeypatch.setattr(
-            "hyperloom.orchestrator.phases.kernel._CONTAINER_AITER_CONFIG_DIR",
+            "hyperloom.orchestrator.phases.kernel_gemm_tuning._CONTAINER_AITER_CONFIG_DIR",
             tmp_path / "missing-container-aiter-configs",
         )
         result = {
@@ -1484,7 +1484,7 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setattr(request_handlers, "_resolve_integrate_payload", unexpected)
         monkeypatch.setattr(integrate_payload, "repo_relative_manifest", unexpected)
         monkeypatch.setattr(
-            integrate_rebaseline, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
+            integrate_rebaseline, "patch_jit_cache", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected)
         )
         monkeypatch.setattr(integrate_accuracy, "grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(integrate_outcomes, "_maybe_finalize_kernel_patch", unexpected)

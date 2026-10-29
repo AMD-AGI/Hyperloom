@@ -28,8 +28,8 @@ from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
-    _BenchmarkRound,
 )
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import _BenchmarkRound
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     default_baseline_config,
     materialize_benchmark_config,
@@ -1750,7 +1750,7 @@ def test_profile_server_args_sanitizer_degrades_on_unbalanced_quote():
 
 def test_atom_disables_cuda_graphs_with_its_own_flag():
     """atom's argparse knows ``--enforce-eager``, not sglang's ``--disable-cuda-graph``."""
-    from hyperloom.orchestrator.actions.executors.baseline import _with_cuda_graph_disabled
+    from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 
     assert _with_cuda_graph_disabled("--trust-remote-code", "atom") == "--trust-remote-code --enforce-eager"
 

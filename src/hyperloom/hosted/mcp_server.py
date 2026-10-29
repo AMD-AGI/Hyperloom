@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from hyperloom.hosted.schema_check import first_problem
-from kernelforge.tools import InvalidParamsError, dispatch_envelope
+from kernelforge.utils import InvalidParamsError, dispatch_envelope
 
 logger = logging.getLogger(__name__)
 

@@ -37,7 +37,8 @@ from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
-from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor, BenchmarkAttempt
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 
 
 @pytest.fixture(autouse=True)

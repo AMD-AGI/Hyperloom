@@ -24,10 +24,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     LaunchLayer,
     MaterializeOptions,
 )
-from hyperloom.orchestrator.actions.executors.baseline import (
-    BaselineExecutor,
-    _with_cuda_graph_disabled,
-)
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

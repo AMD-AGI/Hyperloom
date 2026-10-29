@@ -14,8 +14,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from kernelforge.assembly.compiler import AssemblyError
-from kernelforge.assembly.flydsl import _replace_binary, with_assembly
+from kernelforge.kernel_backends.assembly.compiler import AssemblyError
+from kernelforge.kernel_backends.assembly.flydsl import _replace_binary, with_assembly
 
 
 def _binary(name="kernels", *, target='#rocdl.target<chip = "gfx950">', code=b"\x7fELF-reference"):
@@ -121,7 +121,7 @@ def flydsl_api(monkeypatch, request):
 
 @pytest.fixture()
 def source_assembler(tmp_path, monkeypatch):
-    from kernelforge.assembly import flydsl
+    from kernelforge.kernel_backends.assembly import flydsl
 
     source = tmp_path / "kernel.s"
     source.write_bytes(b"first assembly")
@@ -294,7 +294,7 @@ def test_rejects_uncompiled_callable(flydsl_api, source_assembler):
 
 
 def test_failed_assembly_does_not_change_reference(flydsl_api, source_assembler, monkeypatch):
-    from kernelforge.assembly import flydsl
+    from kernelforge.kernel_backends.assembly import flydsl
 
     reference = flydsl_api.compiled(_module(_binary()))
     monkeypatch.setattr(flydsl, "assemble", Mock(side_effect=AssemblyError("invalid instruction")))

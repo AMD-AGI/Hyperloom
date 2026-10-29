@@ -28,8 +28,8 @@ import pytest
 # it, so nothing in ``prepare_task`` pulls torch in either.
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
-from kernelforge.loop import dist_harness
-from kernelforge.loop.dist_harness import Case, HarnessError, RankContext
+from kernelforge.workflows.forge_loop.preparation import dist_harness
+from kernelforge.workflows.forge_loop.preparation.dist_harness import Case, HarnessError, RankContext
 
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 

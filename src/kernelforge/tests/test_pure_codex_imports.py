@@ -21,7 +21,7 @@ def blocked_import(name, *args, **kwargs):
 
 builtins.__import__ = blocked_import
 
-from kernelforge.orchestrator import agent as agent_module
+from kernelforge.workflows.forge_loop.roles import agent as agent_module
 import kernelforge.knowledge.kb_store.writer
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config

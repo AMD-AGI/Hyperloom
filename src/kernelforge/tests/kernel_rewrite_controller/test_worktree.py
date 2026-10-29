@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import ControllerLayout, parse_task_payload
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
-import kernelforge.kernel_rewrite_controller.worktree as worktree_module
-from kernelforge.kernel_rewrite_controller.worktree import (
+from kernelforge.workflows.rewrite_controller import ControllerLayout, parse_task_payload
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
+import kernelforge.workflows.rewrite_controller.worktree as worktree_module
+from kernelforge.workflows.rewrite_controller.worktree import (
     CAMPAIGN_BRANCH_PREFIX,
     FORGE_LOOP_OUTPUT_DIRNAME,
     WorktreeError,
@@ -21,7 +21,7 @@ from kernelforge.kernel_rewrite_controller.worktree import (
     release_operator_worktree,
     untracked_paths,
 )
-from kernelforge.tools.editable_repo import release_repo_lock
+from kernelforge.utils.editable_repo import release_repo_lock
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -621,7 +621,7 @@ def test_an_archive_that_failed_says_so(tmp_path: Path, monkeypatch, caplog) -> 
     """A silent failure here is the undiagnosable dispatch refusal this archive exists to end."""
     import shutil as shutil_module
 
-    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+    from kernelforge.workflows.rewrite_controller import worktree as worktree_module
 
     repo = tmp_path / "repo"
     (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True)

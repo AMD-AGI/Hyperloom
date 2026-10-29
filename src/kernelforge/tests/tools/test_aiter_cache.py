@@ -8,8 +8,8 @@ import subprocess
 
 import pytest
 
-from kernelforge.tools import aiter_cache
-from kernelforge.workspace.edit_policy import FORGE_PROTECTED_PATHS
+from kernelforge.utils import aiter_cache
+from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 
 
 @pytest.fixture(autouse=True)
@@ -350,7 +350,7 @@ def test_aiter_cache_droppings_do_not_fail_a_session(tmp_path):
         WorkspaceGuard,
         WorkspaceSafetyError,
     )
-    from kernelforge.orchestrator.agent import TOOL_OWNED_UNTRACKED_GLOBS
+    from kernelforge.workflows.forge_loop.roles.agent import TOOL_OWNED_UNTRACKED_GLOBS
 
     ws = tmp_path / "ws"
     (ws / "csrc").mkdir(parents=True)
@@ -399,7 +399,7 @@ def test_tool_owned_globs_still_refuse_an_undeclared_stray(tmp_path):
         WorkspaceGuard,
         WorkspaceSafetyError,
     )
-    from kernelforge.orchestrator.agent import TOOL_OWNED_UNTRACKED_GLOBS
+    from kernelforge.workflows.forge_loop.roles.agent import TOOL_OWNED_UNTRACKED_GLOBS
 
     ws = tmp_path / "ws"
     (ws / "csrc").mkdir(parents=True)

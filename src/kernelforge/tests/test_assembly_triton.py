@@ -15,8 +15,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from kernelforge.assembly import triton as adapter
-from kernelforge.assembly.compiler import AssemblyError
+from kernelforge.kernel_backends.assembly import triton as adapter
+from kernelforge.kernel_backends.assembly.compiler import AssemblyError
 
 ASM = """.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 .text

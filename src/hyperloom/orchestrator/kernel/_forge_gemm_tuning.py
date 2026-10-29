@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import optional_positive_int
-from kernelforge.gemm_tune import RoutingEvidence, RoutingTarget
+from kernelforge.workflows.gemm_tune import RoutingEvidence, RoutingTarget
 
 from . import forge_gemm_tuning
 from ..actions.executors._kernel_agent_tool import HandlerResult, _run_subprocess, _shape_tool_result
@@ -587,7 +587,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     directory would hand the table to every later server start -- including after
     E2E rejected the candidate, and including servers for other models, since the
     scan does not discriminate by model. Replay does not need the scan: it
-    restores the env var explicitly (see ``prelude._warm_kernel_extra_envs``) and
+    restores the env var explicitly (see ``prelude_warm_kernel._warm_kernel_extra_envs``) and
     defers a GEMM column that has no env at all.
 
     The snapshot lands under ``<session_dir>/optimization_stack/src/`` (the same

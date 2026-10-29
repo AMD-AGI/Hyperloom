@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.kernel_rewrite_controller import ControllerLayout, load_task
-from kernelforge.kernel_rewrite_controller import publisher
-from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from kernelforge.workflows.rewrite_controller import ControllerLayout, load_task
+from kernelforge.workflows.rewrite_controller import publisher
+from kernelforge.workflows.rewrite_controller.paths import operator_directory_name
 
 
 def _publication(task_dir: Path, best_commit: str, patch: str):

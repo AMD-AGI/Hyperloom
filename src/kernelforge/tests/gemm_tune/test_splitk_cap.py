@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-import kernelforge.gemm_tune.tuners._aiter_dense_common as ac
-from kernelforge.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe, _SplitKLimit
+import kernelforge.workflows.gemm_tune.tuners._aiter_dense_common as ac
+from kernelforge.workflows.gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe, _SplitKLimit
 
 from .test_aiter_splitk_validate import fake_aiter
 
@@ -386,7 +386,7 @@ def test_bpreshuffle_contract_excludes_ck_and_cktile():
     shipped 12 of 14 rows with a dropped splitK. The contract is what makes that
     mistake loud instead of silent.
     """
-    from kernelforge.gemm_tune.tuners._serve_safe import _SPLITK_FORWARDING_LIBTYPES
+    from kernelforge.workflows.gemm_tune.tuners._serve_safe import _SPLITK_FORWARDING_LIBTYPES
 
     assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale"] == {"ck", "cktile"}
     assert _SPLITK_FORWARDING_LIBTYPES["a8w8_blockscale_bpreshuffle"] == {"asm"}
@@ -434,7 +434,7 @@ def _tuner_spec(monkeypatch, tuner_cls):
 
 
 def test_bpreshuffle_tuner_asks_aiter_for_splitk(monkeypatch):
-    from kernelforge.gemm_tune.tuners.a8w8_blockscale_bpreshuffle import A8W8BlockscaleBpreshuffleTuner
+    from kernelforge.workflows.gemm_tune.tuners.a8w8_blockscale_bpreshuffle import A8W8BlockscaleBpreshuffleTuner
 
     spec = _tuner_spec(monkeypatch, A8W8BlockscaleBpreshuffleTuner)
     assert spec.script_key == "a8w8_blockscale_bpreshuffle"
@@ -442,7 +442,7 @@ def test_bpreshuffle_tuner_asks_aiter_for_splitk(monkeypatch):
 
 
 def test_blockscale_tuner_args_unchanged(monkeypatch):
-    from kernelforge.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
+    from kernelforge.workflows.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
 
     spec = _tuner_spec(monkeypatch, A8W8BlockscaleTuner)
     assert spec.extra_args == ("--libtype", "all", "--splitK")

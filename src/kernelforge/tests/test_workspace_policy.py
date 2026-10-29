@@ -3,12 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from kernelforge.workspace.edit_policy import (
-    FORGE_LOOP_OUTPUT_DIRNAME,
-    FORGE_PROTECTED_PATHS,
-    hide_forge_loop_output,
-    tracked_editable_paths,
-)
+from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME, FORGE_PROTECTED_PATHS
+from kernelforge.workflows.forge_loop.campaign.workspace_files import hide_forge_loop_output, tracked_editable_paths
 
 
 def _git(root: Path, *args: str) -> None:

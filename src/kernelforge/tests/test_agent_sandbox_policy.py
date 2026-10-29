@@ -13,10 +13,8 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
     with_writable_sandbox,
 )
-from kernelforge.loop import task_preparer
-from kernelforge.rewrite_by_flydsl import (
-    flydsl_rewrite_driver_preparation as driver_preparation,
-)
+from kernelforge.workflows.forge_loop.preparation import task_preparer
+from kernelforge.workflows.flydsl_rewrite import flydsl_rewrite_driver_preparation as driver_preparation
 
 
 def _runtime(sandbox_mode: str) -> AgentRuntimeConfig:

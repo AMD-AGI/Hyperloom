@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import AuthorBrief, build_author_prompt
+from kernelforge.workflows.forge_fusion.author import AuthorBrief, build_author_prompt
 
 
 def _recipe():

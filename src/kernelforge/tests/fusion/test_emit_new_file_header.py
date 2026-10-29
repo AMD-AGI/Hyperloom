@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom.common.unified_diff import PatchOp, PatchTarget, parse_patch_manifest
-from kernelforge.fusion.emit import FusionFiles, _export_nongit, _unified_file_diff
+from kernelforge.workflows.forge_fusion.emit import FusionFiles, _export_nongit, _unified_file_diff
 
 
 def test_unified_file_diff_marks_an_absent_base_as_a_creation():

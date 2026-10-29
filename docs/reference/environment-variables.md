@@ -630,7 +630,7 @@ including baseline, explore, sweep, and rebench measurements:
 
 | Variable | Default | Description |
 |---|---|---|
-| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800`; under `HYPERLOOM_AGENTIC_BACKEND=mlperf`, sized to the trajectory count, and under native AgentX sized to the round's `CONC` (see [MLPerf agentic backend](#mlperf-agentic-backend)) | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. An explicit value always wins. |
 | `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
 
 Session `--max-hours` and cancellation apply independently of benchmark limits.
@@ -761,7 +761,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills calls still missing their token or text half, the recipe-KB, specialist-intel, Forge-step, GEMM-tuning and trajectory logs, and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
@@ -777,7 +777,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 ### Langfuse and artifact-package — security and known limitations
 
 * **Sensitive data surface**: When live push is on, `conversations.jsonl`
-  (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
+  (and Langfuse Generations) carry full prompt/response text. `redact_secret_values`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
@@ -791,11 +791,11 @@ Primary switch (default **off**) for live Langfuse trace push.
   disabling live push or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap**: Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
-  live run re-emits the out-of-process children onto the same trace and can
+  live run re-emits the generations and decision scores onto the same trace and can
   duplicate observations. Use one path per session, or treat backfill as a
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
-  session-end reconcile runs as named steps (leftover halves, `ext/` shards,
+  session-end reconcile runs as named steps (leftover halves,
   recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
   decision scores, span close, final SDK flush). Every call runs every step,
   and each step sends only what is still owed, so a duplicated CLOSE step
@@ -807,13 +807,12 @@ Primary switch (default **off**) for live Langfuse trace push.
   (a crash plus a `--resume`, or two shutdown paths racing) reports into the
   same trace. `rows_sent` maps each
   append-only log, by its path under the session directory, to how many of its
-  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  rows were sent: the `trajectory/*.jsonl` shards, the
   recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
-  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
-  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
-  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  next call or the next leg. A v1.1.3 receipt carries the trajectory shard
+  counts as `trajectory_rows_sent`, which is still read. `decision_trace.jsonl` is rewritten ts-sorted on
   every export, so decision scores are tracked by the `decision_id` its writer
   stamps on each row instead (`decisions_sent`). Both record what was handed to
   the Langfuse SDK: its flush does not report a failed export, so a row lost in
@@ -983,6 +982,26 @@ With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YA
 from its ordinary workload flags. `--docker-image` supplies an explicit serving
 image identity, required for custom models.
 
+Canonical replay warms up 11 requests per lane plus one probe before it opens its
+fixed profiling window, so its round grows with the concurrency being measured
+while the window does not. That shape is Magpie's, at the ref native AgentX pins
+it to (see [Magpie](../components/magpie.md)); Hyperloom composes only `CONC`, and
+the numbers below have to be re-measured when the pin moves. With
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset and a `CONC` pinned, the cap
+defaults to `(11 × CONC + 1) × 20 s + 3640 s + 300 s + 1800 s` (20 s per warmup
+request, sized to the slowest rung of one 8×MI355X sweep -- 18.8 s at `CONC` 20 --
+with about 6% over it, plus the `metric_window_s` window, metrics finalisation and
+boot), and never below the stock 7800 s: about 10,200 s at `CONC` 20. A
+concurrency sweep sizes this per rung from the environment the rung's own config
+is launched with -- whether the `CONC` in it was pinned by the rung, inherited
+from the base config or cleared by the rung -- so the rung that measures more
+lanes is granted more time rather than the ladder sharing one grant. The
+override itself stays the operator's: it is read from the process environment
+that preflight validated, never from a rung's config. Sizing reads a rung's
+workload pins as its launch would, so a rung whose config spells one the reader
+refuses (`HYPERLOOM_AGENTX=maybe`) is recorded as failed with error class
+`benchmark_cap_error` and the sweep carries on with the next rung.
+
 Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation with
 fixed-sequence profiling. Configure capture steps, count, delay and interval through
 `benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
@@ -1081,6 +1100,8 @@ archive directory of the run is `<session dir>/archive/`, mode 0700, owned by th
 `src/hyperloom/hosted/app_bootstrap.sh` starts a hosted run in an image without Hyperloom. It installs into the framework Python environment instead of a venv of its own, because a venv made from the image's interpreter cannot see the torch and ROCm stack that `install.sh` requires. The script is baked into the image: a change to it needs a rebuild.
 
 `scripts/hosted_app_image/build.sh --tag <ref> [--base <image>] [--claude-version V] [--push]` builds that image: a framework base image (`--base`), the script as the image's command, the `hl-specialist` account for `HYPERLOOM_SPECIALIST_USER`, and the claude CLI that specialists spawn (`/usr/local/bin/claude` -> `/opt/claude-code`). The CLI's version is `--claude-version`; when it is not passed the build takes `latest`, so two builds of one tag can carry different CLI versions. Pass a version to pin it. The codex CLI is not installed separately: it comes with the wheel (`openai-codex-cli-bin`).
+
+The image is not required. `scripts/hosted_app_image/build_layer.sh --out <dir> [--claude-version V] [--ca-file PEM]` builds a layer directory `<dir>/<short sha>-claude<version>/` (`start.sh`, `app_bootstrap.sh`, `bin/claude`, and `ca.pem` with `--ca-file`), and `scripts/hosted_app_image/Dockerfile.layer` makes it a small image (the directory is its build context; the content is under `/layer`). An application pod copies `/layer` into a volume with an init container (`cp -a /layer/. /opt/hyperloom-host/` into an `emptyDir`), and the main container runs `sh /opt/hyperloom-host/start.sh` on any framework image, unchanged. `start.sh` runs as the container's root and reads only its own directory (the layer may be mounted read-only): it creates `hl-specialist` (uid/gid 2000) when missing, puts `bin/claude` on `PATH`, writes a CA bundle (the image's plus `ca.pem`) to `${TMPDIR:-/tmp}/hyperloom-host/ca-bundle.pem` (directory 0755, file 0644, local to the container; nothing goes to the state dir) for `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `GIT_SSL_CAINFO`, and execs `app_bootstrap.sh`. The image must already have `git`, `setpriv` and `bash`; `start.sh` refuses by name when one is missing and installs nothing. uid 2000 must not belong to another account.
 
 | Variable | Required | Description |
 |----------|----------|-------------|

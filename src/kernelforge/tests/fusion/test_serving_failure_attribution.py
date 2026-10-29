@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from kernelforge.fusion import serving_gate
-from kernelforge.fusion.validate import (
+from kernelforge.workflows.forge_fusion import serving_gate
+from kernelforge.workflows.forge_fusion.validate import (
     SMOKE_STAGE_STARTUP_CRASH,
     SmokeVerdict,
     _explicit_fatal_error,

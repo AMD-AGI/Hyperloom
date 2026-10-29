@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for how a CRASHed iteration is archived and surfaced to the next agent prompt (loop/archive.py)."""
+"""Unit tests for how a CRASHed iteration is archived and surfaced to the next agent prompt (workflows/forge_loop/campaign/archive.py)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.archive import CandidateArchive, CandidateRecord
+from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive, CandidateRecord
 
 
 def _seed(archive: CandidateArchive) -> None:

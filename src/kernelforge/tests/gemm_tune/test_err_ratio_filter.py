@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
+from kernelforge.workflows.gemm_tune.tuners import sglang_dense_bf16 as sd
 
 _HDR = ",".join(
     [
@@ -231,7 +231,7 @@ class TestReportingFollowsTheArtifact:
     def test_a_shape_whose_row_was_dropped_is_not_reported_as_a_win(self):
         # Reporting "1.24x on M=16" while the artifact holds nothing for M=16 is the exact failure this path exists to
         # prevent.
-        from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
+        from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as ac
 
         shape_results = [
             {"M": 16, "N": 1536, "K": 7168, "speedup": 1.24, "improved": True},
@@ -244,7 +244,7 @@ class TestReportingFollowsTheArtifact:
         assert [r["M"] for r in kept] == [1024]
 
     def test_shapes_that_kept_their_row_are_untouched(self):
-        from kernelforge.gemm_tune.tuners import _aiter_dense_common as ac
+        from kernelforge.workflows.gemm_tune.tuners import _aiter_dense_common as ac
 
         shape_results = [{"M": 1024, "N": 1536, "K": 7168, "improved": True}]
 

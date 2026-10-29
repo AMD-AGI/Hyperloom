@@ -1,0 +1,570 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Immutable configuration for one resumable Forge campaign."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import math
+import os
+import re
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+
+from kernelforge.utils.git import git
+from kernelforge.utils.gpu_arch import canon_arch, detect_arch
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
+    infer_source_owner_framework,
+    resolve_operation,
+)
+from kernelforge.knowledge.kb_store.identity.implementation import (
+    hash_implementation_identity,
+    implementation_signature,
+)
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
+from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
+from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
+from kernelforge.utils.durable_io import atomic_write_text
+from kernelforge.workflows.forge_loop.search.agent_relay import AgentRelayPolicy
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+
+
+_AMDGPU_ASSEMBLY_RE = re.compile(
+    r"^\s*\.(?:amdgcn_target\s+[\"']?amdgcn-amd-amdhsa\b|amdhsa_kernel\b|amdgpu_hsa_kernel\b)",
+    re.MULTILINE,
+)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+log = logging.getLogger(__name__)
+
+_FALLBACK_KERNEL_BACKEND = "flydsl"
+
+
+@dataclass(frozen=True)
+class CampaignConfig:
+    """Inputs that must remain stable across all sessions in a campaign."""
+
+    kernel_path: str = ""
+    driver_path: str = ""
+    driver_sha256: str = ""
+    source_files: list[str] = field(default_factory=list)
+    program_md_path: str = ""
+    program_md_sha256: str = ""
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    gpu_target: str = ""
+    gpu_type: str = "mi355x"
+    kernel_backend: str = ""
+    task_type: str = ""
+    target_functions: list[str] = field(default_factory=list)
+    git_branch: str = ""
+    base_commit: str = ""
+    framework: str = ""
+    operator_name: str = ""
+    # Snapshotted like every other identity dimension: a resumed campaign that re-derived it would publish under an
+    # address earlier sessions never used.
+    producer: str = ""
+    implementation_signature: str = ""
+    implementation_identity: dict = field(default_factory=dict)
+    # Measurement semantics.
+    nproc_per_node: int = 1
+    bench_repeat: int = 1
+    # Paths the Implementer may CREATE and still have committed with a KEEP (see
+    # ``IterationConfig.commit_new_paths``).
+    commit_new_paths: list[str] = field(default_factory=list)
+    agent_relay: AgentRelayPolicy | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "CampaignConfig":
+        """Rebuild a campaign from exactly the fields this code writes."""
+        if not isinstance(payload, dict):
+            raise ValueError("campaign config must be a JSON object")
+        expected_fields = {item.name for item in fields(cls)}
+        unknown_fields = set(payload) - expected_fields
+        if unknown_fields:
+            raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
+        missing_fields = expected_fields - set(payload)
+        if missing_fields:
+            raise ValueError("campaign config missing fields: " + ", ".join(sorted(missing_fields)))
+        config = cls(
+            kernel_path=str(payload["kernel_path"]),
+            driver_path=str(payload["driver_path"]),
+            driver_sha256=str(payload["driver_sha256"]).lower(),
+            source_files=[str(path) for path in payload["source_files"]],
+            program_md_path=str(payload["program_md_path"]),
+            program_md_sha256=str(payload["program_md_sha256"]),
+            snr_threshold=float(payload["snr_threshold"]),
+            gpu_target=str(payload["gpu_target"]),
+            gpu_type=str(payload["gpu_type"]).strip().lower(),
+            kernel_backend=str(payload["kernel_backend"]),
+            task_type=str(payload["task_type"]),
+            target_functions=[str(name) for name in payload["target_functions"]],
+            git_branch=str(payload["git_branch"]),
+            base_commit=str(payload["base_commit"]),
+            framework=str(payload["framework"]),
+            operator_name=str(payload["operator_name"]),
+            producer=str(payload["producer"]),
+            implementation_signature=str(payload["implementation_signature"]).lower(),
+            implementation_identity=dict(payload["implementation_identity"]),
+            nproc_per_node=int(payload["nproc_per_node"]),
+            bench_repeat=int(payload["bench_repeat"]),
+            # Re-validated on read: this list decides which untracked files a KEEP commits and a REVERT deletes, so a
+            # hand-edited pattern the loop would read differently than its author meant is refused here rather than
+            # acted on later.
+            commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            agent_relay=(
+                AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+            ),
+        )
+        if config.nproc_per_node < 1:
+            raise ValueError("campaign nproc_per_node must be positive")
+        if config.bench_repeat < 1:
+            raise ValueError("campaign bench_repeat must be positive")
+        if config.program_md_path and not config.program_md_sha256:
+            raise ValueError("campaign program context digest is missing")
+        if config.program_md_sha256 and not config.program_md_path:
+            raise ValueError("campaign program context path is missing")
+        if not _SHA256_RE.fullmatch(config.driver_sha256):
+            raise ValueError("campaign canonical driver digest is missing or invalid")
+        if not math.isfinite(config.snr_threshold) or config.snr_threshold <= 0:
+            raise ValueError("campaign SNR threshold must be a positive finite float")
+        if not _SHA256_RE.fullmatch(config.implementation_signature):
+            raise ValueError("campaign pristine implementation signature is missing or invalid")
+        if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
+            raise ValueError("campaign pristine implementation identity does not match its signature")
+        return config
+
+
+def derive_campaign_implementation_contract(
+    *,
+    workspace_dir: str,
+    kernel_path: str,
+    source_files: list[str],
+    framework: str,
+    base_commit: str = "",
+) -> tuple[str, dict]:
+    """Derive the immutable implementation contract from pristine git sources."""
+    workspace = Path(workspace_dir).resolve()
+    raw_paths = _campaign_source_paths(workspace, kernel_path, source_files)
+    source_contents = _read_pristine_sources(
+        workspace,
+        raw_paths,
+        base_commit=base_commit,
+    )
+
+    kernel_absolute = str((workspace / kernel_path).resolve())
+    return implementation_signature(
+        workspace=str(workspace),
+        kernel_path=kernel_absolute,
+        source_files=raw_paths,
+        framework=framework,
+        source_contents=source_contents,
+    )
+
+
+def _campaign_source_paths(
+    workspace: Path,
+    kernel_path: str,
+    source_files: list[str],
+) -> list[str]:
+    raw_paths: list[str] = []
+    for relative in [kernel_path, *source_files]:
+        absolute = str((workspace / relative).resolve())
+        if absolute not in raw_paths:
+            raw_paths.append(absolute)
+    return raw_paths
+
+
+def _read_pristine_sources(
+    workspace: Path,
+    raw_paths: list[str],
+    *,
+    base_commit: str,
+) -> dict[str, str]:
+    if base_commit:
+        reachable = git("rev-parse", "--verify", "--quiet", f"{base_commit}^{{commit}}", cwd=workspace, check=False)
+        if reachable.returncode != 0:
+            # Every per-path read below falls back to the working tree when the commit cannot be reached, so an
+            # unresolvable base would hand the whole implementation signature the working tree under a pristine label.
+            raise ValueError(f"pristine base commit is not in the workspace: {base_commit}")
+
+    source_contents: dict[str, str] = {}
+    for absolute in raw_paths:
+        path = Path(absolute)
+        relative = path.relative_to(workspace).as_posix()
+        source = None
+        if base_commit:
+            result = git("show", f"{base_commit}:{relative}", cwd=workspace, check=False)
+            if result.returncode == 0:
+                source = result.stdout
+        # A source the pristine commit does not carry is one added since: the working tree holds its only content.
+        if source is None:
+            source = path.read_text(errors="replace")
+        source_contents[absolute] = source
+    return source_contents
+
+
+class CampaignConfigStore:
+    """Atomic store for ``forge_experiments/campaign_config.json``."""
+
+    def __init__(self, workspace_dir: str):
+        self.workspace = Path(workspace_dir).resolve()
+        layout = ExperimentsLayout.of(self.workspace)
+        self.root = layout.root
+        self.path = layout.campaign_config
+        self.program_path = self.root / "program.md"
+
+    def exists(self) -> bool:
+        return self.path.is_file()
+
+    def load(self) -> CampaignConfig:
+        if not self.path.is_file():
+            raise FileNotFoundError(f"campaign config not found: {self.path}")
+        try:
+            payload = json.loads(self.path.read_text())
+        except Exception as error:
+            raise ValueError(f"invalid campaign config: {error}") from error
+        if not isinstance(payload, dict):
+            raise ValueError("campaign config must be a JSON object")
+        if "agent_relay" not in payload:
+            payload["agent_relay"] = None
+        return CampaignConfig.from_dict(payload)
+
+    def save(
+        self,
+        config: CampaignConfig,
+        *,
+        program_md: str | None = None,
+    ) -> None:
+        """Persist once; an existing campaign config cannot be replaced."""
+        config_exists = self.path.exists()
+        if config_exists:
+            if self.load() != config:
+                raise ValueError("campaign config is immutable")
+        if config.program_md_path:
+            if program_md is None:
+                raise ValueError("campaign program context content is required")
+            digest = hashlib.sha256(program_md.encode()).hexdigest()
+            if digest != config.program_md_sha256:
+                raise ValueError("campaign program context digest does not match")
+            if self.program_path.exists():
+                if self.program_path.read_text() != program_md:
+                    raise ValueError("campaign program context is immutable")
+            else:
+                atomic_write_text(self.program_path, program_md)
+        if not config_exists:
+            payload = json.dumps(config.to_dict(), indent=2, sort_keys=True) + "\n"
+            atomic_write_text(self.path, payload)
+
+    def read_program_md(self, config: CampaignConfig) -> str:
+        if not config.program_md_path:
+            return ""
+        path = (self.workspace / config.program_md_path).resolve()
+        try:
+            path.relative_to(self.workspace)
+        except ValueError as error:
+            raise ValueError("campaign program path escapes workspace") from error
+        if not path.is_file():
+            raise ValueError(f"campaign program context is missing: {path}")
+        text = path.read_text(errors="replace")
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        if digest != config.program_md_sha256:
+            raise ValueError("campaign program context content has changed")
+        return text
+
+
+def _git_value(workspace: Path, *args: str) -> str:
+    return git(*args, cwd=workspace).stdout.strip()
+
+
+def _relative_file(workspace: Path, raw_path: str, label: str) -> str:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = workspace / path
+    path = path.resolve()
+    # Resolve BOTH sides: ``path`` is already symlink-expanded, so comparing it against an unexpanded workspace makes
+    # every containment check fail when the caller passes a symlinked root (e.g. USER_DATA_PATH=/primus/xiaofei/... ->
+    # /primus/data/xiaofei/...), rejecting a driver that is genuinely inside it.
+    workspace = workspace.resolve()
+    try:
+        relative = path.relative_to(workspace)
+    except ValueError as error:
+        raise ValueError(f"{label} must be inside workspace: {path}") from error
+    if not path.is_file():
+        raise ValueError(f"{label} is not a file: {path}")
+    return relative.as_posix()
+
+
+def _driver_reference(workspace: Path, raw_path: str) -> str:
+    """Resolve ``--driver`` to a campaign-stable reference."""
+    try:
+        return _relative_file(workspace, raw_path, "driver")
+    except ValueError as error:
+        if "must be inside workspace" not in str(error):
+            raise
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = workspace / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"driver is not a file: {path}")
+    return path.as_posix()
+
+
+def detect_gpu_target() -> str:
+    """Resolve the active AMD GPU architecture without a CLI option."""
+    configured = os.environ.get("GPU_TARGET", "").strip().lower()
+    if configured:
+        if canon_arch(configured) != configured:
+            raise ValueError(f"invalid GPU_TARGET: {configured}")
+        return configured
+    detected = detect_arch()
+    if not detected:
+        raise ValueError(
+            "could not detect exactly one GPU target; ensure rocminfo is available or set GPU_TARGET to the runtime GPU"
+        )
+    return detected
+
+
+def normalize_kernel_backend_name(kernel_backend: str) -> str:
+    """Reduce a backend label to its bare canonical name."""
+    return kernel_backend.strip()
+
+
+_ENV_OVERRIDE = "FORGE_KERNEL_BACKEND"
+
+
+def env_backend_override() -> str:
+    """The backend named by the environment, or ``""``."""
+    return os.environ.get(_ENV_OVERRIDE, "").strip()
+
+
+def resolve_kernel_backend_override(kernel_backend: str) -> str:
+    """Resolve an override against the registered kernel-building backends."""
+    name = normalize_kernel_backend_name(kernel_backend)
+    if name not in KERNEL_BACKENDS:
+        return _FALLBACK_KERNEL_BACKEND
+    return name
+
+
+# Source-text markers in precedence order, each naming the backend whose sources carry them.
+_BACKEND_TEXT_MARKERS = (
+    # Before Triton, and matching an import or a decorator rather than the word: Gluon IS Triton's low-level
+    # dialect, so a Gluon file imports triton and routinely keeps a `@triton.jit` sibling kernel as its fallback
+    # -- aiter's paged-MQA-logits ships exactly that shape, in a file under `aiter/ops/triton/`, so neither the
+    # path nor the presence of Triton markers distinguishes the two.
+    ("gluon", ("triton.experimental.gluon", "@gluon.jit", "gluon.language")),
+    ("triton", ("@triton.jit", "triton.language")),
+    ("ck", ("composable_kernel", "ck::")),
+)
+
+
+def infer_kernel_backend(source_paths: list[Path]) -> str:
+    """Infer the backend expertise prompt from configuration or source files."""
+    override = env_backend_override()
+    if override:
+        return resolve_kernel_backend_override(override)
+
+    for path in source_paths:
+        try:
+            text = path.read_text(errors="replace").lower()
+        except OSError:
+            text = ""
+        path_text = str(path).lower()
+        suffix = path.suffix.lower()
+        if suffix in {".s", ".asm"} and _AMDGPU_ASSEMBLY_RE.search(text):
+            return "assembly"
+        if "hipblaslt" in text or "hipblaslt" in path_text:
+            return "hipblaslt"
+        if "/aiter/" in path_text or "import aiter" in text:
+            return "aiter"
+        if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
+            return "flydsl"
+        for backend, markers in _BACKEND_TEXT_MARKERS:
+            if any(marker in text for marker in markers):
+                return backend
+        if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
+            return "hip"
+    raise ValueError(f"could not infer the kernel backend; set {_ENV_OVERRIDE} to a known backend")
+
+
+def _derive_target_functions(
+    workspace: Path,
+    source_files: list[str],
+    *,
+    source_contents: dict[str, str],
+) -> list[str]:
+    functions: list[str] = []
+    for relative in source_files:
+        source = source_contents[str((workspace / relative).resolve())]
+        for name in derive_kernel_names(source):
+            if name not in functions:
+                functions.append(name)
+    return functions
+
+
+def validate_pending_campaign_head(workspace_dir: str, base_commit: str) -> None:
+    """Require a pending fresh retry to remain at its known setup lineage."""
+    workspace = Path(workspace_dir).resolve()
+    base = _git_value(workspace, "rev-parse", base_commit)
+    head = _git_value(workspace, "rev-parse", "HEAD")
+    if head == base:
+        return
+    parents = _git_value(workspace, "rev-list", "--parents", "-n", "1", head).split()
+    subject = _git_value(workspace, "show", "-s", "--format=%s", head)
+    if len(parents) == 2 and parents[1] == base and subject.lower().startswith("kb warm-start:"):
+        return
+    raise ValueError(
+        "pending campaign HEAD mismatch: expected the configured base commit or one direct `kb warm-start:` child"
+    )
+
+
+def parse_list(raw: str) -> list[str]:
+    """Split a comma-or-newline-separated string into a stripped list."""
+    if not raw:
+        return []
+    return [p.strip() for p in re.split(r"[,\n]", raw) if p.strip()]
+
+
+@dataclass(frozen=True)
+class CampaignInputs:
+    """What the operator asked a fresh campaign to be; lists are comma-or-newline separated as given."""
+
+    kernel: str | None
+    driver: str | None
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    source_files: str = ""
+    program_md_file: str | None = None
+    target_functions: str = ""
+    operator_name: str = ""
+    producer: str = ""
+    kernel_backend: str = ""
+    git_branch: str = ""
+    gpu_target: str = ""
+    gpu_type: str | None = None
+    task_type: str = ""
+    framework: str = ""
+    # Measurement semantics and what a KEEP may ship beyond the tracked diff belong to the campaign, not one session.
+    nproc_per_node: int = 1
+    bench_repeat: int = 1
+    commit_new_paths: tuple[str, ...] = ()
+    # The Agent profiles a blockage may relay between, fixed when the campaign is created.
+    agent_relay: AgentRelayPolicy | None = None
+
+
+def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
+    """Workspace-relative source files, kernel first, without duplicates."""
+    normalized: list[str] = []
+    for raw_path in [kernel, *parse_list(source_files)]:
+        relative = _relative_file(workspace, raw_path, "source file")
+        if relative not in normalized:
+            normalized.append(relative)
+    return normalized
+
+
+def _require_dev_branch(workspace: Path) -> str:
+    """Current non-main branch of a clean forge workspace, or raise."""
+    if _git_value(workspace, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise ValueError("workspace has uncommitted tracked changes")
+    branch = _git_value(workspace, "branch", "--show-current")
+    if branch in {"", "main", "master"}:
+        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    return branch
+
+
+def _program_md_sha256(program_md_file: str | None) -> str:
+    """sha256 of an optional program.md's text, or blank when the campaign has none."""
+    if not program_md_file:
+        return ""
+    source_program = Path(program_md_file).expanduser().resolve()
+    if not source_program.is_file():
+        raise ValueError(f"program context is not a file: {source_program}")
+    return hashlib.sha256(source_program.read_text(errors="replace").encode()).hexdigest()
+
+
+def create_campaign_config(
+    workspace_dir: str,
+    inputs: CampaignInputs,
+    *,
+    base_commit: str | None = None,
+) -> CampaignConfig:
+    """Resolve and normalize all immutable inputs for a fresh campaign."""
+    workspace = Path(workspace_dir).resolve()
+    kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
+    driver_path = _driver_reference(workspace, inputs.driver)
+    normalized_sources = _normalized_sources(workspace, inputs.kernel, inputs.source_files)
+    branch = _require_dev_branch(workspace)
+    resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
+    raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
+    pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
+    backend_override = inputs.kernel_backend.strip()
+    resolved_kernel_backend = (
+        resolve_kernel_backend_override(backend_override)
+        if backend_override
+        else infer_kernel_backend([workspace / path for path in normalized_sources])
+    )
+    resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
+        workspace,
+        normalized_sources,
+        source_contents=pristine_sources,
+    )
+    kernel_absolute = str((workspace / kernel_path).resolve())
+    resolved_framework = infer_source_owner_framework(
+        KernelSources(
+            kernel_absolute,
+            pristine_sources.get(kernel_absolute, ""),
+            raw_source_paths,
+            source_contents=pristine_sources,
+        ),
+        target_functions=resolved_targets,
+        framework_override=inputs.framework.strip(),
+    )
+    pristine_signature, pristine_identity = implementation_signature(
+        workspace=str(workspace),
+        kernel_path=kernel_absolute,
+        source_files=raw_source_paths,
+        framework=resolved_framework,
+        source_contents=pristine_sources,
+    )
+    # Settled once, from the pristine sources, because it is part of the address the campaign's experience is filed
+    # under.
+    resolved_operator = inputs.operator_name.strip() or resolve_operation(
+        pristine_sources.get(kernel_absolute, ""),
+        kernel_absolute,
+        target_functions=resolved_targets,
+    )
+    program_md_sha256 = _program_md_sha256(inputs.program_md_file)
+    resolved_snr_threshold = float(inputs.snr_threshold)
+    if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
+        raise ValueError("SNR threshold must be a positive finite float")
+    return CampaignConfig(
+        kernel_path=kernel_path,
+        driver_path=driver_path,
+        driver_sha256=hashlib.sha256((workspace / driver_path).read_bytes()).hexdigest(),
+        source_files=normalized_sources,
+        program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
+        program_md_sha256=program_md_sha256,
+        snr_threshold=resolved_snr_threshold,
+        gpu_target=inputs.gpu_target.strip() or detect_gpu_target(),
+        gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
+        kernel_backend=resolved_kernel_backend,
+        task_type=inputs.task_type.strip() or ("repository" if len(normalized_sources) > 1 else ""),
+        target_functions=resolved_targets,
+        git_branch=inputs.git_branch.strip() or branch,
+        base_commit=resolved_base_commit,
+        framework=resolved_framework,
+        operator_name=resolved_operator,
+        producer=inputs.producer.strip().lower(),
+        implementation_signature=pristine_signature,
+        implementation_identity=pristine_identity,
+        nproc_per_node=max(1, int(inputs.nproc_per_node)),
+        bench_repeat=max(1, int(inputs.bench_repeat)),
+        commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
+        agent_relay=inputs.agent_relay,
+    )

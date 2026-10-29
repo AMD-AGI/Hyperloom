@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop.merge_candidates import (
+from kernelforge.workflows.forge_loop.iteration.merge_candidates import (
     MERGE_PLAN_PREFIX,
     MergeCandidate,
     attempted_pairs,

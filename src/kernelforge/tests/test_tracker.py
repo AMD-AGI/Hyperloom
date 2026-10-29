@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tracker import CampaignSegment, ExperimentSubject, ExperimentTracker
+from kernelforge.workflows.forge_loop.campaign.schema import CampaignSegment, ExperimentSubject
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
 from kernelforge.tests._experiment_records import persisted_experiments
 from kernelforge.tests.conftest import SRC_ROOT
@@ -394,7 +395,8 @@ import sys
 import time
 from pathlib import Path
 
-from kernelforge.tracker import CampaignSegment, ExperimentTracker
+from kernelforge.workflows.forge_loop.campaign.schema import CampaignSegment
+from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 
 experiments_dir, experiment_id, operation, ready_path, gate_path, callback_path = sys.argv[1:]
 tracker = ExperimentTracker(experiments_dir)

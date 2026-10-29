@@ -305,7 +305,7 @@ hyperloom = [
     "*.sh",
 ]
 # KernelForge's read-only resources live with their owning features and are
-# resolved through ``kernelforge.resources.resource_path``. The globs are
+# resolved through ``kernelforge.config.resources.resource_path``. The globs are
 # deliberately type-agnostic because the trees hold several asset types.
 kernelforge = [
     "examples/**/*",
@@ -381,6 +381,8 @@ omit = [
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
     "src/hyperloom/orchestrator/kernel/apply_kernel_patch.py",
+    "src/hyperloom/orchestrator/kernel/patch_jit_cache.py",
+    "src/hyperloom/orchestrator/kernel/patch_rebuild.py",
     # GEAK runner and Ray cluster lifecycle (subprocess submit).
     "src/hyperloom/orchestrator/kernel/geak_runner.py",
     "src/hyperloom/orchestrator/actions/executors/_ray_runtime.py",
@@ -406,6 +408,7 @@ omit = [
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
+    "src/hyperloom/orchestrator/actions/executors/benchmark_run/*",
     # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
     "*/test_*.py",
     # Shipped sample drivers, reference kernels, and local-wiki assets.
@@ -417,50 +420,50 @@ omit = [
     "src/kernelforge/cli/*",
     # The gemm-tune and forge-fuse pipelines and the stages they drive: agent sessions,
     # tuner subprocesses and serving runs end to end.
-    "src/kernelforge/gemm_tune/pipeline.py",
-    "src/kernelforge/fusion/pipeline.py",
-    "src/kernelforge/fusion/agent_selection.py",
-    "src/kernelforge/fusion/compile_pass_claim.py",
-    "src/kernelforge/fusion/harness_authoring.py",
-    "src/kernelforge/fusion/serving_gate.py",
-    "src/kernelforge/fusion/source_snapshot.py",
+    "src/kernelforge/workflows/gemm_tune/pipeline.py",
+    "src/kernelforge/workflows/forge_fusion/pipeline.py",
+    "src/kernelforge/workflows/forge_fusion/agent_selection.py",
+    "src/kernelforge/workflows/forge_fusion/compile_pass_claim.py",
+    "src/kernelforge/workflows/forge_fusion/harness_authoring.py",
+    "src/kernelforge/workflows/forge_fusion/serving_gate.py",
+    "src/kernelforge/workflows/forge_fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
     "src/kernelforge/evaluation/benchmark/runner.py",
     "src/kernelforge/evaluation/profiling/registers.py",
-    "src/kernelforge/loop/runner.py",
+    "src/kernelforge/workflows/forge_loop/iteration/runner.py",
     # ... and the per-job modules it was split into, which answer to the same hardware.
-    "src/kernelforge/loop/iteration/attempt_verdict.py",
-    "src/kernelforge/loop/iteration/best_publication.py",
-    "src/kernelforge/loop/iteration/campaign_report.py",
-    "src/kernelforge/loop/iteration/campaign_runtime.py",
-    "src/kernelforge/loop/iteration/case_coverage.py",
-    "src/kernelforge/loop/iteration/ceiling_runtime.py",
-    "src/kernelforge/loop/iteration/iteration_phases.py",
-    "src/kernelforge/loop/iteration/iteration_types.py",
-    "src/kernelforge/loop/iteration/keep_checkpoint.py",
-    "src/kernelforge/loop/iteration/lane_runtime.py",
-    "src/kernelforge/loop/iteration/locked_run.py",
-    "src/kernelforge/loop/iteration/outcome_runtime.py",
-    "src/kernelforge/loop/iteration/resume_recovery.py",
-    "src/kernelforge/loop/iteration/round_admission.py",
-    "src/kernelforge/loop/iteration/scoring_runtime.py",
-    "src/kernelforge/loop/iteration/supervisor_review.py",
-    "src/kernelforge/loop/iteration/workspace_git.py",
+    "src/kernelforge/workflows/forge_loop/iteration/attempt_verdict.py",
+    "src/kernelforge/workflows/forge_loop/iteration/best_publication.py",
+    "src/kernelforge/workflows/forge_loop/iteration/campaign_report.py",
+    "src/kernelforge/workflows/forge_loop/iteration/campaign_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/case_coverage.py",
+    "src/kernelforge/workflows/forge_loop/iteration/ceiling_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/iteration_phases.py",
+    "src/kernelforge/workflows/forge_loop/iteration/iteration_types.py",
+    "src/kernelforge/workflows/forge_loop/iteration/keep_checkpoint.py",
+    "src/kernelforge/workflows/forge_loop/iteration/lane_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/locked_run.py",
+    "src/kernelforge/workflows/forge_loop/iteration/outcome_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/resume_recovery.py",
+    "src/kernelforge/workflows/forge_loop/iteration/round_admission.py",
+    "src/kernelforge/workflows/forge_loop/iteration/scoring_runtime.py",
+    "src/kernelforge/workflows/forge_loop/iteration/supervisor_review.py",
+    "src/kernelforge/workflows/forge_loop/iteration/workspace_git.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
-    "src/kernelforge/orchestrator/agent.py",
+    "src/kernelforge/workflows/forge_loop/roles/agent.py",
     # Filesystem index walker over the curated knowledge tree.
     "src/kernelforge/knowledge/local_wiki/index.py",
     # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
-    "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
-    "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
-    "src/kernelforge/gemm_tune/tuners/fmoe_ck.py",
-    "src/kernelforge/gemm_tune/tuners/a4w4_blockscale.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8_blockscale.py",
-    "src/kernelforge/gemm_tune/tuners/a8w8_bpreshuffle.py",
-    "src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py",
-    "src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/sglang_dense_bf16.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/vllm_moe_triton.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/fmoe_ck.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a4w4_blockscale.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8_blockscale.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/a8w8_bpreshuffle.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/vllm_dense_tunableop.py",
+    "src/kernelforge/workflows/gemm_tune/tuners/_aiter_dense_common.py",
 ]
 
 [tool.coverage.report]
@@ -670,23 +673,23 @@ ignorelist = ["aiter"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
 # shared with kernelforge.agent_backends rather than redeclared here.
-"src/kernelforge/fusion/llm_failure.py" = ["E402"]
+"src/kernelforge/workflows/forge_fusion/llm_failure.py" = ["E402"]
 # Sphinx reads the module-level name ``copyright``.
 "docs/conf.py" = ["A001"]
 # Keyword names that mirror a stdlib signature callers already use:
 # ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
 # Renaming them would break keyword callers / the override.
 "src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
-"src/kernelforge/tools/git.py" = ["A002"]
+"src/kernelforge/utils/git.py" = ["A002"]
 "src/hyperloom_kb/http_service.py" = ["A002"]
 # Naive local-time timestamps are part of these files' on-disk / directory-name
 # formats (persisted ``isoformat()`` strings, log-clock parsing); making them
 # timezone-aware would change what existing readers parse and compare.
-"src/kernelforge/tracker/experiment.py" = ["DTZ005"]
-"src/kernelforge/tracker/schema.py" = ["DTZ005"]
-"src/kernelforge/tracker/usage_ledger.py" = ["DTZ005"]
+"src/kernelforge/workflows/forge_loop/campaign/experiment.py" = ["DTZ005"]
+"src/kernelforge/workflows/forge_loop/campaign/schema.py" = ["DTZ005"]
+"src/kernelforge/agent_backends/usage_ledger.py" = ["DTZ005"]
 "src/hyperloom/orchestrator/actions/executors/bypass_report.py" = ["DTZ005"]
-"src/hyperloom/orchestrator/actions/executors/baseline.py" = ["DTZ001"]
+"src/hyperloom/orchestrator/actions/executors/benchmark_run/bringup.py" = ["DTZ001"]
 "src/hyperloom/orchestrator/rehearsal/scenario.py" = ["DTZ001"]
 # These call the root logger directly; a root-level call configures logging on
 # first use when nothing else has, so moving them to a module logger changes

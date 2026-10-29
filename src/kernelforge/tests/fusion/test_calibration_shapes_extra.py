@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.fusion import calibration as cal
-from kernelforge.fusion.calibration import _interp, load_calibration_points
-from kernelforge.fusion.shapes import resolve_decode_shapes
+from kernelforge.workflows.forge_fusion import calibration as cal
+from kernelforge.workflows.forge_fusion.calibration import _interp, load_calibration_points
+from kernelforge.workflows.forge_fusion.shapes import resolve_decode_shapes
 
 
 # ── calibration ──────────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ def test_shapes_gqa_groups_computed(tmp_path):
 def test_shapes_non_dsv4_model_omits_o_groups_fields(tmp_path):
     """A model without ``o_groups`` (real Llama-2-70B GQA config) must NOT gain the
     DSv4 wo_a group axis, and the group-axis guard must be a no-op for it."""
-    from kernelforge.fusion.shapes import harness_group_dim_mismatch
+    from kernelforge.workflows.forge_fusion.shapes import harness_group_dim_mismatch
 
     # Real meta-llama/Llama-2-70b-hf config values.
     cfg = tmp_path / "config.json"
@@ -226,7 +226,7 @@ def test_shapes_dsv4_tp_sharded_attention_scales_group_axis(tmp_path):
 
 
 def test_harness_group_dim_mismatch_catches_gqa_as_g(tmp_path):
-    from kernelforge.fusion.shapes import harness_group_dim_mismatch
+    from kernelforge.workflows.forge_fusion.shapes import harness_group_dim_mismatch
 
     shapes = {
         "o_groups": 16,

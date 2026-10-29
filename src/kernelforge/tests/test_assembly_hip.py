@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from kernelforge.assembly import hip
+from kernelforge.kernel_backends.assembly import hip
 
 
 @pytest.fixture

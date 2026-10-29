@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop import task_preparer
+from kernelforge.workflows.forge_loop.preparation import task_preparer
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 

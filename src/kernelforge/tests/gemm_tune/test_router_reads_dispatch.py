@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
 _CK = "[aiter] [fused_moe] using 2stage ck for (256, {tok}, 4096, 2048, 8, 2)"
 _ASM = "[aiter] [fused_moe] using 1stage asm for (256, {tok}, 4096, 2048, 8, 2)"

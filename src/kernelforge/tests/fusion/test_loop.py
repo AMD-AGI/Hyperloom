@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.loop import (
+from kernelforge.workflows.forge_fusion.loop import (
     FusionExperienceLedger,
     LoopConfig,
     run_fusion_loop,
 )
-from kernelforge.fusion.models import Recipe, ValidationResult
+from kernelforge.workflows.forge_fusion.models import Recipe, ValidationResult
 
 
 def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", **over) -> Recipe:
@@ -95,7 +95,7 @@ class TestNoEarlyExit:
         assert res.best_recipe.pattern_id == "swiglu"
 
     def test_on_keep_collects_one_patch_per_keeper_strongest_first(self, tmp_path):
-        from kernelforge.fusion.loop import RecipePatch
+        from kernelforge.workflows.forge_fusion.loop import RecipePatch
 
         # #1 keeps 1.2x on file A, #2 fails, #3 keeps 1.5x on file B.
         campaign = _ScriptedCampaign(

@@ -12,6 +12,7 @@ looks exactly like a sweep that never ran.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -37,6 +38,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSin
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._grid_runner import GridStop, GridVariant, VariantResult
+from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -78,11 +80,18 @@ def _state(baseline_yaml: Path, **overrides: Any) -> SharedState:
     return state
 
 
-def _variant(name: str, *, throughput: float | None, status: str = "succeeded", envs: dict[str, str]) -> VariantResult:
+def _variant(
+    variant: GridVariant,
+    *,
+    throughput: float | None,
+    status: str = "succeeded",
+    granted_cap_sec: float | None = 7800.0,
+) -> VariantResult:
+    name = variant.name
     return VariantResult(
         name=name,
         extra_server_args="",
-        extra_envs=dict(envs),
+        extra_envs=dict(variant.extra_envs),
         status=status,
         output_throughput=throughput,
         request_throughput=throughput,
@@ -94,6 +103,10 @@ def _variant(name: str, *, throughput: float | None, status: str = "succeeded", 
         error=None if status == "succeeded" else "boom",
         error_class="" if status == "succeeded" else "magpie_timeout",
         killed_overtime=False,
+        # The runner grants each slot its cap once it has composed the rung's config, and publishes
+        # it on the row it returns; a double that left it out would stand in for a runner that never
+        # told anyone what it enforced.
+        granted_cap_sec=granted_cap_sec,
     )
 
 
@@ -139,9 +152,8 @@ def _run(state: SharedState, session_dir: Path, *, recorder: Any, run_grid: Any,
 async def _all_succeed(*, grid: list[GridVariant], **_kw):
     return [
         _variant(
-            variant.name,
+            variant,
             throughput=(130.0 if variant.name.startswith("optimized_") else 100.0) * int(variant.extra_envs["CONC"]),
-            envs=variant.extra_envs,
         )
         for variant in grid
     ]
@@ -228,6 +240,42 @@ def test_each_rung_carries_the_load_and_the_cap_it_ran_under(session_dir: Path, 
         assert point["wall_duration_sec"] is not None
 
 
+_OPERATOR_CAP = "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"
+
+
+async def _rungs_that_cleared_the_operator_cap(*, grid: list[GridVariant], **_kw):
+    """A runner whose rungs clear the operator's cap, so each one ran under the cap its own workload asks for."""
+    return [
+        _variant(
+            replace(variant, unset_envs=[_OPERATOR_CAP]),
+            throughput=100.0,
+            granted_cap_sec=resolve_benchmark_timeouts(
+                {"HYPERLOOM_AGENTX": "1", "CONC": str(variant.extra_envs["CONC"])}
+            )[1],
+        )
+        for variant in grid
+    ]
+
+
+def test_a_rung_is_recorded_under_the_cap_its_runner_granted_it(session_dir: Path, baseline_yaml: Path, monkeypatch):
+    """The runner grants the cap, so the record follows the row, not a second derivation from its envs.
+
+    These rungs cleared the operator's override before running, which no reader
+    of their pinned envs can see: one deriving the cap again finds the override
+    and writes down 60s for rungs that were held to hours.
+    """
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv(_OPERATOR_CAP, "60")
+    state = _state(baseline_yaml)
+    with session_scope(session_dir):
+        _run(state, session_dir, recorder=_recorder(), run_grid=_rungs_that_cleared_the_operator_cap)
+        ext = _sweep_event(session_dir)["ext"]
+
+    points = ext["arms"][ARM_OPTIMIZED]["points"]
+    # Canonical replay warms up per lane, so the CONC 16 rung was granted more than the stock 7800s.
+    assert [(point["conc"], point["granted_cap_sec"]) for point in points] == [(4, 7800.0), (16, 9280.0)]
+
+
 def test_the_arm_says_which_execution_strategy_ran_the_ladder(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
     with session_scope(session_dir):
@@ -273,10 +321,9 @@ def test_the_concurrency_the_server_would_not_boot_at_is_recorded(session_dir: P
     async def _first_rung_will_not_boot(*, grid: list[GridVariant], **_kw):
         return [
             _variant(
-                variant.name,
+                variant,
                 throughput=None if int(variant.extra_envs["CONC"]) == 4 else 400.0,
                 status="failed" if int(variant.extra_envs["CONC"]) == 4 else "succeeded",
-                envs=variant.extra_envs,
             )
             for variant in grid
         ]
@@ -373,6 +420,8 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
         assert refused["status"] == "skipped"
         assert refused["error_class"] == "budget_exhausted"
         assert refused["output_throughput"] is None
+        # No config was composed for this rung and no round of it ran, so it was granted no time.
+        assert refused["granted_cap_sec"] is None
     assert ext["runtime"]["budget_skip_reason"] == "first_arm_share_exhausted"
     assert payload["summary"]["successful_pairs"] == 1
 
@@ -571,7 +620,7 @@ def test_a_sweep_whose_arm_lost_a_rung_does_not_read_as_whole(session_dir: Path,
     async def _one_bad_rung(*, grid: list[GridVariant], **_kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            return [_variant(v.name, throughput=None, status="failed", envs=v.extra_envs) for v in grid]
+            return [_variant(v, throughput=None, status="failed") for v in grid]
         return await _all_succeed(grid=grid)
 
     with session_scope(session_dir):

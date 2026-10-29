@@ -10,12 +10,12 @@ from types import SimpleNamespace
 
 from click.testing import CliRunner
 
-from kernelforge.fusion import agent_selection
-from kernelforge.fusion import discovery_stage
-from kernelforge.fusion import pipeline as cli_module
+from kernelforge.workflows.forge_fusion import agent_selection
+from kernelforge.workflows.forge_fusion import discovery_stage
+from kernelforge.workflows.forge_fusion import pipeline as cli_module
 from kernelforge.cli.forge_fuse_command import forge_fuse as main
-from kernelforge.fusion.models import Diagnosis
-from kernelforge.fusion.report import ANCHOR_REPORT_NAME, ANCHOR_RESOLVED_VERDICT
+from kernelforge.workflows.forge_fusion.models import Diagnosis
+from kernelforge.workflows.forge_fusion.report import ANCHOR_REPORT_NAME, ANCHOR_RESOLVED_VERDICT
 
 ANCHOR = (
     "void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda"
@@ -257,7 +257,7 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
 
 
 def _recipe(hz):
-    from kernelforge.fusion.models import Recipe
+    from kernelforge.workflows.forge_fusion.models import Recipe
 
     return Recipe(
         pattern_id="residual_add_rmsnorm",

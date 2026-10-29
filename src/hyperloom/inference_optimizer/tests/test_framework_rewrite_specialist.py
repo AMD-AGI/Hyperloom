@@ -12,12 +12,12 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.actions.executors._framework_switch_manifest import KNOWN_CATEGORIES
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-    SpecialistPromptInputs,
+from hyperloom.orchestrator.prompts.specialist_focus import (
     _DOMAIN_FOCUS_TEMPLATES,
     _focus_framework_rewrite_specialist,
-    build_specialist_prompts,
 )
+from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAIN_KEYS,
     get_domain,

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner, _BatchRun
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner, _BatchRun
 
 
 def _tuner(tmp_path: Path) -> SglangDenseBf16Tuner:

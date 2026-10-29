@@ -485,9 +485,3 @@ def test_parse_codex_error_redacts_credentials_and_ignores_request_payload(tmp_p
     assert bearer_secret not in parsed
     assert payload_secret not in parsed
     assert "request" not in parsed
-
-
-def test_parse_codex_error_is_exported_from_trace_package(tmp_path):
-    from hyperloom.inference_optimizer.trace import parse_codex_jsonl_error
-
-    assert parse_codex_jsonl_error(tmp_path / "missing.jsonl") is None

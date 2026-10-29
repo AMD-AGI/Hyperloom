@@ -1938,10 +1938,8 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
 # 6. Specialist prompt — proposal self-curation contract (Section 1 + 8)
 def _build_specialist_prompt_text() -> str:
     from hyperloom.orchestrator.specialists.domains import get_domain
-    from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
-        SpecialistPromptInputs,
-        build_specialist_prompts,
-    )
+    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
+    from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
     inputs = SpecialistPromptInputs(
         domain=get_domain("serving_specialist"),

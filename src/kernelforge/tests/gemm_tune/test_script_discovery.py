@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.gemm_tune import script_discovery as sd
+from kernelforge.workflows.gemm_tune import script_discovery as sd
 
 
 @pytest.fixture(autouse=True)

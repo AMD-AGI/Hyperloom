@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from kernelforge.loop.round_budget import (
+from kernelforge.workflows.forge_loop.policy.round_budget import (
     ADMISSION_SESSION_SEC,
     DISPATCH_FLOOR_SEC,
     DISPATCH_SESSION_SEC,
@@ -21,14 +21,14 @@ from kernelforge.loop.round_budget import (
     estimate_measurement_sec,
     estimate_planning_sec,
 )
-from kernelforge.loop.run_state import (
+from kernelforge.workflows.forge_loop.campaign.run_state import (
     ROUND_COST_WINDOW,
     RoundCost,
     RoundCostState,
     RunState,
     apply_round_cost,
 )
-from kernelforge.orchestrator.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
+from kernelforge.workflows.forge_loop.roles.plan_critic import PLAN_CRITIC_TIMEOUT_SEC
 
 
 def _admit(remaining_sec, *, lanes=3, history=None, measurement_sec=None):

@@ -8,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop import knowledge_integration as integ
+from kernelforge.workflows.forge_loop.memory import knowledge_integration as integ
 from kernelforge.knowledge.kb_store import record_store
 from kernelforge.knowledge.kb_store.identity.implementation import implementation_signature
-from kernelforge.rewrite_by_flydsl import driver_contract, runner
-from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
+from kernelforge.workflows.flydsl_rewrite import driver_contract, runner
+from kernelforge.workflows.flydsl_rewrite.flydsl_rewrite_driver_preparation import (
     DriverPreflight,
 )
-from kernelforge.rewrite_by_flydsl.port_loop import PortResult
-from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
-from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun, RewriteWorkspace
+from kernelforge.workflows.flydsl_rewrite.port_loop import PortResult
+from kernelforge.workflows.flydsl_rewrite.ingest import RewriteSubject
+from kernelforge.workflows.flydsl_rewrite.request import DriverSetup, RewriteRun, RewriteWorkspace
 from kernelforge.tests.conftest import kb_store_run_config as _kb_store_config
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
-from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
+from kernelforge.workflows.forge_loop.memory.knowledge_integration import ExperiencePublication, WarmStartHarness
 
 #: The cap :func:`sanitize_read_error` bounds a persisted store error at.
 MAX_READ_ERROR_LENGTH = 240
@@ -1519,8 +1519,8 @@ def _rewrite_read_reason(monkeypatch, tmp_path, config, failure) -> str:
     ("site", "logger_name"),
     [
         (_experience_write_reason, "kernelforge.knowledge.kb_store.writer"),
-        (_warm_start_reason, "kernelforge.loop.knowledge_integration"),
-        (_rewrite_read_reason, "kernelforge.rewrite_by_flydsl.runner"),
+        (_warm_start_reason, "kernelforge.workflows.forge_loop.memory.knowledge_integration"),
+        (_rewrite_read_reason, "kernelforge.workflows.flydsl_rewrite.runner"),
     ],
     ids=["experience_write", "warm_start", "rewrite_read"],
 )

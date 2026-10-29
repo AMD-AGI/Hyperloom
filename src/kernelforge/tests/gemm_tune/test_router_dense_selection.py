@@ -3,8 +3,8 @@
 
 """The dense GEMM the runtime dispatches is not the one ``precision`` names."""
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.router import RoutingEvidence, RoutingTarget, select_tuners
 
 
 def _mxfp4_moe_profile(**kwargs):

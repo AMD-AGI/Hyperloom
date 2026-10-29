@@ -37,7 +37,7 @@ from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
-from kernelforge.tools.process_reaping import (
+from kernelforge.utils.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,

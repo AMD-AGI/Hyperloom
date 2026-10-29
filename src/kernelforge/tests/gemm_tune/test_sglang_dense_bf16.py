@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.report import build_report
-from kernelforge.gemm_tune.script_probe import ScriptSurface
-from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
-from kernelforge.gemm_tune.tuners.base import TuneContext
+from kernelforge.workflows.gemm_tune.model_analyzer import ModelProfile
+from kernelforge.workflows.gemm_tune.report import build_report
+from kernelforge.workflows.gemm_tune.script_probe import ScriptSurface
+from kernelforge.workflows.gemm_tune.tuners import sglang_dense_bf16 as sd
+from kernelforge.workflows.gemm_tune.tuners.base import TuneContext
 
 
 def _tune_ctx(**fields) -> TuneContext:

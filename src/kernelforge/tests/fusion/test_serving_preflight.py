@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.fusion.validate import _free_vram_fraction, gpu_is_free_enough
+from kernelforge.workflows.forge_fusion.validate import _free_vram_fraction, gpu_is_free_enough
 
 BUSY = """
 GPU[0]		: GPU Memory Allocated (VRAM%): 98

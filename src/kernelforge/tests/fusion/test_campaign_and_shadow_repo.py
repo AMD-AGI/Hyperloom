@@ -11,8 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kernelforge.fusion import campaign as campaign_module
-from kernelforge.fusion.campaign import (
+from kernelforge.workflows.forge_fusion import campaign as campaign_module
+from kernelforge.workflows.forge_fusion.campaign import (
     CampaignBrief,
     CampaignPaths,
     CampaignRuntime,
@@ -23,9 +23,9 @@ from kernelforge.fusion.campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
-from kernelforge.fusion.driver_shim import DriverSpec, render_driver
-from kernelforge.fusion.models import Recipe
-from kernelforge.fusion.shadow_repo import SHADOW_BRANCH, ensure_git_workspace
+from kernelforge.workflows.forge_fusion.driver_shim import DriverSpec, render_driver
+from kernelforge.workflows.forge_fusion.models import Recipe
+from kernelforge.workflows.forge_fusion.shadow_repo import SHADOW_BRANCH, ensure_git_workspace
 
 
 def _recipe(**over) -> Recipe:
@@ -280,7 +280,7 @@ class TestShadowRepo:
 
     def test_the_loop_accepts_the_workspace_the_shadow_hands_it(self, tmp_path, monkeypatch):
         """Run the loop's own campaign resolution against a real shadow tree."""
-        from kernelforge.loop.campaign_config import CampaignInputs, create_campaign_config
+        from kernelforge.workflows.forge_loop.campaign.campaign_config import CampaignInputs, create_campaign_config
 
         root, source = _framework_tree(tmp_path)
         fused = source.parent / "lfm2_fused_residual.py"

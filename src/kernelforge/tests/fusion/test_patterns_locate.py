@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.locate import FrameworkInstall, build_recipes
-from kernelforge.fusion.patterns import match_patterns
-from kernelforge.fusion.report import LocatedFusions, ManifestSubject, build_manifest
-from kernelforge.fusion.shapes import resolve_decode_shapes
+from kernelforge.workflows.forge_fusion.diagnose import TraceProfile, diagnose_from_shares
+from kernelforge.workflows.forge_fusion.locate import FrameworkInstall, build_recipes
+from kernelforge.workflows.forge_fusion.patterns import match_patterns
+from kernelforge.workflows.forge_fusion.report import LocatedFusions, ManifestSubject, build_manifest
+from kernelforge.workflows.forge_fusion.shapes import resolve_decode_shapes
 
 
 def _candidate_diag(shares, busy=0.21):

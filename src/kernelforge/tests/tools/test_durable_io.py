@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.tools.durable_io import (
+from kernelforge.utils.durable_io import (
     atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,

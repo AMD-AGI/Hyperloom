@@ -48,7 +48,7 @@ from ..actions.executors._grid_runner import (
     run_grid,
 )
 from ..actions.executors._grid_runner import variant_conc
-from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
 from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
@@ -66,6 +66,13 @@ from ..actions.executors._workload_envs import (
     num_prompts_per_conc,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
+from ._rung_outcomes import (
+    _CANCEL_STOP,
+    _SWEEP_BUDGET_STOP,
+    _budget_skip_result,
+    _deadline_skip_result,
+    _raised_result,
+)
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
     DecodeShape,
@@ -167,30 +174,6 @@ def _optimized_arm(state: SharedState) -> _Arm | None:
     )
 
 
-def _budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Synthetic VariantResult for a budget-exhausted variant; ``skipped`` status distinguishes \"out of time\" from \"Magpie crashed\"."""
-    return VariantResult(
-        name=variant.name,
-        extra_server_args=variant.extra_server_args,
-        extra_envs=dict(variant.extra_envs),
-        status="skipped",
-        output_throughput=None,
-        request_throughput=None,
-        total_token_throughput=None,
-        error="conc_sweep total budget exhausted before this variant ran",
-        error_class="budget_exhausted",
-        note=variant.note,
-    )
-
-
-_SWEEP_BUDGET_STOP = StoppedByTheRun(
-    error_class="budget_exhausted",
-    interrupted="conc_sweep total budget exhausted while this round was running",
-    never_started="conc_sweep total budget exhausted before this round ran",
-    ends_the_batch=True,
-)
-
-
 # The stop for a first-arm rung its half of the budget reaps or never reaches, and for a second-arm rung whose partner
 # never ran.
 _PAIR_SHARE_STOP = StoppedByTheRun(
@@ -199,36 +182,6 @@ _PAIR_SHARE_STOP = StoppedByTheRun(
     never_started="the conc_sweep budget left no time to measure this concurrency on both arms",
     ends_the_batch=True,
 )
-
-
-# The orchestrator stopped the sweep's action from outside -- a phase transition or a shutdown. Every rung after the
-# one it interrupted is recorded under this cause and never run.
-_CANCEL_STOP = STOPPED_BY_THE_RUN[ORCHESTRATOR_CANCELLED_CLASS]
-
-
-def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
-    """Keep the owner of the deadline on every rung that never ran."""
-    return VariantResult(
-        name=variant.name,
-        extra_server_args=variant.extra_server_args,
-        extra_envs=dict(variant.extra_envs),
-        status="skipped",
-        error=stopped.never_started,
-        error_class=stopped.error_class,
-        note=variant.note,
-    )
-
-
-def _raised_result(variant: GridVariant, stage: str, exc: Exception) -> VariantResult:
-    """The failed result of a rung whose run raised ``exc`` at ``stage``."""
-    return VariantResult(
-        name=variant.name,
-        extra_server_args=variant.extra_server_args,
-        extra_envs=dict(variant.extra_envs),
-        status="failed",
-        error=f"{stage}: {exc}",
-        error_class=type(exc).__name__,
-    )
 
 
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -548,7 +501,8 @@ class _SweepRun:
 
     ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
     far, and the second arm runs the rungs the first one reached. ``window`` is the earlier of the sweep's and the
-    session's monotonic deadlines, distinct from the fixed per-spawn ``benchmark_timeout_sec``.
+    session's monotonic deadlines; it holds no benchmark cap, because each rung's cap is sized from the config that
+    rung launches with and comes back on its row as ``granted_cap_sec``.
     """
 
     state: SharedState
@@ -564,7 +518,6 @@ class _SweepRun:
     workload: _WorkloadLadder
     optimized: _Arm
     baseline: _Arm
-    benchmark_timeout_sec: float
     window: _Window
     started_at: float
     total_budget_sec: int | None
@@ -650,7 +603,10 @@ class _SweepRun:
                 num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
                 start_time=note.start_time,
                 wall_duration_sec=note.wall_duration_sec,
-                granted_cap_sec=self.benchmark_timeout_sec,
+                # The cap the rung was actually held to, as its runner published it: each rung is granted
+                # time sized to its own workload, and a cap derived again here from what the result happens
+                # to carry would describe a run nobody made.
+                granted_cap_sec=result.granted_cap_sec,
                 budget_remaining_sec=note.budget_remaining_sec,
             ),
         )
@@ -1215,7 +1171,6 @@ async def _sweep_arms(run: _SweepRun, grid_source: str) -> None:
                 concs_ordered=run.ladder,
                 grid_source=grid_source,
                 num_prompts_factor=run.num_prompts_factor,
-                variant_timeout_sec=run.benchmark_timeout_sec,
                 arms_order=[run.baseline.name, run.optimized.name],
             )
         )
@@ -1275,7 +1230,6 @@ async def run_conc_sweep(
     nothing, which is what a direct caller with no session bound wants.
     Returns a skip envelope when prerequisites are unmet.
     """
-    _, benchmark_timeout_sec = resolve_benchmark_timeouts()
     session_deadline_sec = state.grid_session_deadline_sec()
     session_dir = Path(session_dir)
     # Whether the ladder was handed to the sweep or picked for the workload --
@@ -1399,7 +1353,6 @@ async def run_conc_sweep(
         workload=workload,
         optimized=optimized,
         baseline=_Arm(name="baseline"),
-        benchmark_timeout_sec=benchmark_timeout_sec,
         window=window,
         started_at=started_at,
         total_budget_sec=total_budget_sec,
