@@ -59,10 +59,10 @@ class UsageLedgerFile:
         self._published: dict[str, Any] = {}
 
     def publish(self, totals: dict[str, Any]) -> None:
-        """Record this process's totals so far. Never raises: accounting must not end a run."""
+        """Record this process's totals so far. An I/O failure is logged, not raised: accounting must not end a run."""
         try:
             self._publish(totals)
-        except Exception as error:  # outermost accounting sink: a ledger write must never break the caller
+        except OSError as error:
             log.debug("usage ledger publish skipped (%s: %s)", type(error).__name__, error, exc_info=True)
 
     def _publish(self, totals: dict[str, Any]) -> None:
