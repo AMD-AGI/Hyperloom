@@ -359,10 +359,7 @@ class _StreamCapture:
         """Report one unit of child output to the caller's liveness callback."""
         if self._on_output is None:
             return
-        try:
-            self._on_output()
-        except Exception as exc:  # outermost liveness sink: reporting never breaks capture
-            log.debug("_subprocess_kill: liveness callback failed: %s", exc, exc_info=True)
+        self._on_output()
 
     def _pump(self, pipe, chunks: list[str], mirror) -> None:
         """Read available bytes without waiting for a newline or a complete codepoint."""
@@ -788,47 +785,39 @@ _KV_METRICS_ENV = "INFERENCE_OPTIMIZER_KV_METRICS"
 
 
 def _build_kv_recorder(server_log_path: str | None, env: dict[str, str] | None) -> Any:
-    """Build the KV-metrics recorder for this round, or ``None`` when it is off or cannot be built.
-
-    Collection is strictly observational, so every failure here is swallowed: a round that produces a good benchmark
-    number and no KV metrics is a far better outcome than one that dies because a telemetry import went wrong.
-    """
+    """Build the KV-metrics recorder for this round, or ``None`` when it is off."""
     if not server_log_path:
         return None
     if not env_flag(_KV_METRICS_ENV, default=True):
         return None
-    try:
-        from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
+    from ._kv_metrics import KV_ARTIFACT_NAME, AiperfProgressPoller, KvMetricsPoller, KvMetricsRecorder, KvRound
 
-        workspace = Path(server_log_path).parent
-        return KvMetricsRecorder(
-            # The workspace is where the port actually lives: it is pinned in the round's materialized
-            # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
-            poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
-            # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
-            # publishes a progress address and the poller then never resolves a URL.
-            progress=AiperfProgressPoller(workspace),
-            kv_round=KvRound(
-                output_path=str(workspace / KV_ARTIFACT_NAME),
-                scope={
-                    "server_log_path": str(server_log_path),
-                    "workspace": workspace.name,
-                    "run_path": _run_relative_path(workspace),
-                    "session": os.path.basename(
-                        os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
-                    ),
-                },
-            ),
-        )
-    except Exception:
-        log.warning("kv_metrics: recorder could not be built; this round collects nothing", exc_info=True)
-        return None
+    workspace = Path(server_log_path).parent
+    return KvMetricsRecorder(
+        # The workspace is where the port actually lives: it is pinned in the round's materialized
+        # ``benchmark.envs.PORT``, which is never exported into the subprocess environment.
+        poller=KvMetricsPoller(config_envs=dict(env or {}), workspace=workspace),
+        # Authoritative phase boundaries when this round is an AgentX one; a no-op otherwise, since no other client
+        # publishes a progress address and the poller then never resolves a URL.
+        progress=AiperfProgressPoller(workspace),
+        kv_round=KvRound(
+            output_path=str(workspace / KV_ARTIFACT_NAME),
+            scope={
+                "server_log_path": str(server_log_path),
+                "workspace": workspace.name,
+                "run_path": _run_relative_path(workspace),
+                "session": os.path.basename(
+                    os.environ.get("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "").rstrip("/\\")
+                ),
+            },
+        ),
+    )
 
 
 class _RecorderFanout:
     """Drives this round's recorders from the watchdog's single ``note_phase`` / ``tick`` / ``close`` calls.
 
-    Each call is isolated: one recorder raising must not starve the others of their phase marks or their ``close``.
+    Each recorder absorbs its own scrape and write failures; anything else it raises fails the round.
     """
 
     def __init__(self, recorders: list[Any], *, ready_phase: str = "measured") -> None:
@@ -837,10 +826,7 @@ class _RecorderFanout:
 
     def _each(self, method: str, *args: Any, **kwargs: Any) -> None:
         for recorder in self._recorders:
-            try:
-                getattr(recorder, method)(*args, **kwargs)
-            except Exception:
-                log.warning("round recorder %s.%s failed", type(recorder).__name__, method, exc_info=True)
+            getattr(recorder, method)(*args, **kwargs)
 
     def note_phase(self, phase: str, mono: float) -> None:
         self._each("note_phase", self._ready_phase if phase == _READY_PHASE else phase, mono)
