@@ -659,9 +659,9 @@ class CodexSession:
             if not completed:
                 # Teardown of an already-failed turn: the timeout below is the reported failure, so interrupt errors
                 # add no signal.
-                with contextlib.suppress(self._sdk.CodexError, OSError, TimeoutError):
+                with contextlib.suppress(self._sdk.CodexError, OSError, asyncio.TimeoutError):
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
-                with contextlib.suppress(self._sdk.CodexError, RuntimeError, TimeoutError):
+                with contextlib.suppress(self._sdk.CodexError, RuntimeError, asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
                 raise CodexSessionTimeoutError(f"Codex turn timed out after {request.timeout_sec:g}s")
             sdk_result = turn_task.result()
