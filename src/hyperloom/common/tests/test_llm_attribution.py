@@ -313,6 +313,13 @@ class TestNestedInjectionRefines:
         llm_attribution.inject_env(child, component="fusion", phase="", source={_ATTR: "litellm"})
         assert "phase=" not in self._tags(child)
 
+    def test_an_explicit_phase_replaces_the_inherited_one_and_an_empty_one_removes_it(self) -> None:
+        replaced, removed = self._spawned(), self._spawned()
+        llm_attribution.inject_env(replaced, component="fusion", phase="CLOSE", source={_ATTR: "litellm"})
+        llm_attribution.inject_env(removed, component="fusion", phase="", source={_ATTR: "litellm"})
+        assert self._tags(replaced) == "application=hyperloom,session=claw-abc,component=fusion,phase=CLOSE"
+        assert self._tags(removed) == "application=hyperloom,session=claw-abc,component=fusion"
+
     def test_gateway_auth_and_tag_count_survive_the_nesting(self) -> None:
         child = self._spawned()
         llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
@@ -460,6 +467,16 @@ class TestSdkEnvOverlay:
         parsed = parse_custom_headers(overlay[_ANTHROPIC], env={})
         assert parsed["Ocp-Apim-Subscription-Key"] == "secret"
         assert parsed["x-litellm-tags"] == "application=hyperloom,session=claw-abc,component=framework"
+
+    def test_overlay_keeps_the_phase_its_environment_inherited(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(_ATTR, "litellm")
+        monkeypatch.delenv(_CLAW, raising=False)
+        monkeypatch.setenv(_ANTHROPIC, "x-litellm-tags: application=hyperloom,session=claw-abc,phase=KERNEL_AGENT")
+        overlay = llm_attribution.sdk_env_overlay(component="framework", operation="optimize")
+        assert (
+            parse_custom_headers(overlay[_ANTHROPIC], env={})["x-litellm-tags"]
+            == "application=hyperloom,session=claw-abc,component=framework,phase=KERNEL_AGENT,operation=optimize"
+        )
 
     def test_overlay_reports_only_variables_it_changes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(_ATTR, "litellm")

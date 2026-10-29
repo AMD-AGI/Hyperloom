@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     STATUS_FAILED,
     STATUS_QUEUED,
     STATUS_STARTED,
+    EventSpan,
     record_event,
     scalar_attributes,
 )
@@ -226,8 +227,7 @@ def _record_task_state(
     context: dict[str, Any] = {} if state == "queued" else {"parent_span_id": None}
     record_event(
         EVENT_TASK,
-        status=_TRAJECTORY_STATUS[state],
-        span_id=task_id,
+        span=EventSpan(span_id=task_id, status=_TRAJECTORY_STATUS[state]),
         task_id=task_id,
         attributes={**scalar_attributes(evidence), **attributes, "name": kind, "kind": kind},
         **context,

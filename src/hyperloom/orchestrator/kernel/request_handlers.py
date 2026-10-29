@@ -23,6 +23,7 @@ from ._forge_gemm_tuning import _run_forge_gemm_tuning
 from .integrate_accuracy import _integrate_accuracy_verdict
 from ._integrate_outcomes import (
     _applied_patch_result,
+    _FailureVerdict,
     _integrate_failure,
     _integrate_request_refusal,
     _integrate_result,
@@ -162,7 +163,7 @@ async def integrate_handler(
         except Exception as exc:  # isolation boundary: one integrate rebaseline, recorded as a REVERT
             log.warning("integrate_handler: rebaseline failed: %s", exc, exc_info=True)
             return _integrate_failure(
-                payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
+                payload, apply_result, _FailureVerdict("rebaseline_exception", repr(exc), "REVERT")
             )
     if not is_valid_measurement(bench_result):
         return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
@@ -172,11 +173,11 @@ async def integrate_handler(
         return _integrate_failure(
             payload,
             apply_result,
-            error_class="cpp_itfs_rebuild_not_verified",
-            error=(
-                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
+            _FailureVerdict(
+                "cpp_itfs_rebuild_not_verified",
+                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary",
+                "NEEDS_REVIEW",
             ),
-            decision="NEEDS_REVIEW",
             rebuild_check=rebuild_check,
         )
 
@@ -205,9 +206,7 @@ async def integrate_handler(
         return _integrate_failure(
             payload,
             apply_result,
-            error_class=EVAL_KIND_CONTEXT_TOO_SMALL,
-            error=accuracy_gate["reason"],
-            decision="NEEDS_REVIEW",
+            _FailureVerdict(EVAL_KIND_CONTEXT_TOO_SMALL, accuracy_gate["reason"], "NEEDS_REVIEW"),
             gain_pct=performance.gain_pct,
             accuracy_gate=accuracy_gate,
         )

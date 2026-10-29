@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.coerce import to_str_list
@@ -48,20 +49,26 @@ def _applied_patch_result(
     )
 
 
+@dataclass(frozen=True)
+class _FailureVerdict:
+    """Why one integration attempt failed and the decision on its patch."""
+
+    error_class: str
+    error: str
+    decision: str
+
+
 def _integrate_failure(
     payload: dict[str, Any],
     apply_result: dict[str, Any],
-    *,
-    error_class: str,
-    error: str,
-    decision: str,
+    verdict: _FailureVerdict,
     **extra: Any,
 ) -> HandlerResult:
     return {
         "status": "failed",
-        "error_class": error_class,
-        "error": error,
-        "decision": decision,
+        "error_class": verdict.error_class,
+        "error": verdict.error,
+        "decision": verdict.decision,
         "kernel_id": payload.get("kernel_id"),
         "patch_path": payload.get("patch_path"),
         "target_file": payload.get("target_file") or payload.get("source_file"),
@@ -82,14 +89,12 @@ def _unmeasured_integration_failure(
     ) or "bench_exception"
     # A run the stop class claims measured nothing, so the patch has no verdict to answer for.
     stopped = stopped_by_the_run_class(rebaseline_error_class)
-    return _integrate_failure(
-        payload,
-        apply_result,
-        error_class=stopped.error_class if stopped is not None else rebaseline_error_class,
-        error=stopped.interrupted if stopped is not None else "re-baseline did not succeed",
-        decision="NEEDS_REVIEW" if stopped is not None else "REVERT",
-        rebaseline_detail=bench_result,
+    verdict = (
+        _FailureVerdict(stopped.error_class, stopped.interrupted, "NEEDS_REVIEW")
+        if stopped is not None
+        else _FailureVerdict(rebaseline_error_class, "re-baseline did not succeed", "REVERT")
     )
+    return _integrate_failure(payload, apply_result, verdict, rebaseline_detail=bench_result)
 
 
 class _IntegrateVerdict(NamedTuple):

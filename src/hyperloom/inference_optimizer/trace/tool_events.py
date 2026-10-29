@@ -22,6 +22,7 @@ from .trajectory_trace import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    EventSpan,
     record_event,
 )
 
@@ -132,7 +133,7 @@ def record_stream_json_tools(log_path: str | Path) -> None:
         result_seen = bool(call.get("result_seen"))
         record_event(
             EVENT_TOOL,
-            status=tool_status(result_seen=result_seen, is_error=call.get("is_error")),
+            span=EventSpan(status=tool_status(result_seen=result_seen, is_error=call.get("is_error"))),
             attributes=tool_attributes(
                 ToolCall(
                     name=call["name"],

@@ -211,6 +211,8 @@ def test_build_prompt_partial_calibration():
 
 
 def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
+    from hyperloom.agents.quantization import QuantSkillRunOptions
+
     calls = _patch_quantize(monkeypatch, _fake_result("success", str(tmp_path / "q"), final=None, eval_gap=0.01))
     out = asyncio.run(qrh.run_quantization_prelude_async(prompt="fp8", source_model="/models/src", workspace=tmp_path))
     assert out == str(tmp_path / "q")
@@ -219,7 +221,7 @@ def test_adapter_success_returns_quantized_dir(tmp_path, monkeypatch):
     assert "`quantized/` in your workspace" in calls[0]["prompt"]
     assert str(tmp_path) not in calls[0]["prompt"]
     assert "fp8" in calls[0]["prompt"]
-    assert calls[0]["interactive"] is False
+    assert calls[0]["options"] == QuantSkillRunOptions(interactive=False)
     assert calls[0]["workspace"] == tmp_path
 
 
