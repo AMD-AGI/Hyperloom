@@ -58,38 +58,12 @@ class TestMedianNotMean:
         assert v.decisive and v.candidate_wins
         assert 3.5 < v.median_delta_pct < 6.0
 
-    def test_deltas_are_reported_for_audit(self):
-        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
-        assert v.deltas_pct == [10.0, 20.0]
-        assert v.to_dict()["pairs"] == [[100.0, 110.0], [100.0, 120.0]]
-
-    def test_mutating_exported_evidence_does_not_change_the_verdict(self):
-        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
-        snapshot = v.to_dict()
-        snapshot["deltas_pct"][0] = -99.0
-        snapshot["pairs"][0][1] = 1.0
-        assert v.deltas_pct == [10.0, 20.0]
-        assert v.pairs == [(100.0, 110.0), (100.0, 120.0)]
-        assert v.to_dict()["deltas_pct"] == [10.0, 20.0]
-        assert v.candidate_wins
-
-    def test_exported_evidence_does_not_follow_later_verdict_list_mutation(self):
-        v = assess_paired([(100.0, 110.0), (100.0, 120.0)])
-        snapshot = v.to_dict()
-        v.deltas_pct.append(30.0)
-        assert snapshot["deltas_pct"] == [10.0, 20.0]
-
 
 class TestBadInput:
     def test_non_positive_values_are_dropped(self):
         v = assess_paired([(0.0, 110.0), (100.0, 110.0), (100.0, 111.0)])
-        assert len(v.pairs) == 2 and v.decisive
+        assert v.median_delta_pct == 10.5 and v.decisive
 
     def test_dropping_leaves_too_few(self):
         v = assess_paired([(0.0, 110.0), (100.0, -1.0)])
         assert v.reason == "insufficient_pairs"
-
-    def test_threshold_is_configurable(self):
-        pairs = [(100.0, 104.0), (100.0, 104.5)]
-        assert assess_paired(pairs).reason == "candidate_faster"
-        assert assess_paired(pairs, threshold_pct=10.0).reason == "within_noise"

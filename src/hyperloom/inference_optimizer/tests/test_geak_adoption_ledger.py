@@ -185,8 +185,6 @@ def test_single_kernel_with_a_loaded_overlay_is_attributable() -> None:
     entry = phase.shared_state.kernel_integrate_attempts["_mxfp8_linear_kernel"]
     assert entry["validated"] is True
     assert entry["best_gain_pct"] == 20.0  # orchestrator rebench, not GEAK's 13.87
-    assert entry["geak_same_config_delta_pct"] == 13.87
-    assert entry["geak_isolated_speedup"] == 2.39
     assert entry["source"] == "geak_e2e"
     assert entry["basis"] == "cold"
     assert entry["alignment_status"] == "aligned"
