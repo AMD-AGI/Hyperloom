@@ -154,6 +154,12 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
 # (cp314 postdates it) must be allowed to keep the newer release the
 # kernel-agent installer resolved for them.
 _RAY_MIN_VERSION = "2.44.1"
+# Ray 2.44.1's CLI does not import under click 8.3+ ("ValueError: ... is not a valid Sentinel"). The smoke
+# test exits with this code for that failure alone, on that Ray alone; it is the one failure a fixed click
+# hold repairs, and every other smoke failure leaves click untouched. install_kernel_tools.sh applies the same rule.
+_RAY_CLICK_HOLD_VERSION = "2.44.1"
+_RAY_CLICK_HOLD_SPEC = "click<8.3"
+_RAY_SENTINEL_EXIT = 3
 # A representative `ray start` argv of the orchestrator's Ray runtime: every option it passes to the head
 # this step provisions, with values of its kind. Ray's own parser reading this argv is the certification, so
 # a pair whose `ray start` parses what Hyperloom passes is never refused over a version number.
@@ -170,6 +176,8 @@ import sys
 
 RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
 RAY_START_ARGV = __RAY_START_ARGV__
+RAY_CLICK_HOLD_VERSION = "__RAY_CLICK_HOLD_VERSION__"
+SENTINEL_EXIT = __RAY_SENTINEL_EXIT__
 ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
@@ -196,7 +204,8 @@ try:
     from ray.scripts.scripts import cli as _ray_cli  # `main` only wraps this group
 except Exception as exc:
     print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
+    sentinel = "is not a valid Sentinel" in str(exc) and ray.__version__ == RAY_CLICK_HOLD_VERSION
+    raise SystemExit(SENTINEL_EXIT if sentinel else 1)
 
 try:
     _ray_start = _ray_cli.commands["start"]
@@ -212,8 +221,11 @@ print(ray.__version__)
 """
 
 
-_RAY_SMOKE = _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION).replace(
-    "__RAY_START_ARGV__", repr(_RAY_START_ARGV)
+_RAY_SMOKE = (
+    _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
+    .replace("__RAY_START_ARGV__", repr(_RAY_START_ARGV))
+    .replace("__RAY_CLICK_HOLD_VERSION__", _RAY_CLICK_HOLD_VERSION)
+    .replace("__RAY_SENTINEL_EXIT__", str(_RAY_SENTINEL_EXIT))
 )
 
 
@@ -244,6 +256,17 @@ def _pip_install_ray(python_exe: str, pip_extra: list[str], specs: tuple[str, ..
     return subprocess.run(argv, capture_output=True, text=True)
 
 
+def _smoke_after_click_hold(
+    python_exe: str, pip_extra: list[str], ray_version: str, check: subprocess.CompletedProcess
+) -> subprocess.CompletedProcess:
+    """Hold click below 8.3 and smoke again, but only for the Sentinel import failure of Ray 2.44.1."""
+    if check.returncode != _RAY_SENTINEL_EXIT:
+        return check
+    print(f"Preflight: ray {_RAY_CLICK_HOLD_VERSION} cannot import under this click; holding {_RAY_CLICK_HOLD_SPEC}")
+    _pip_install_ray(python_exe, pip_extra, (_RAY_CLICK_HOLD_SPEC,))
+    return _ray_smoke(python_exe, ray_version)
+
+
 def _ray_result(status: str, python_exe: str, spec: str, version_after: str, message: str | None) -> dict[str, Any]:
     """The record the Ray step reports, whether it found Ray or had to install it."""
     return {
@@ -270,7 +293,7 @@ def _install_ray(python_exe: str, pip_extra: list[str], ray_version: str, ray_sp
     if install.returncode != 0:
         detail = (install.stderr or install.stdout or "no pip output").strip()
         raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
-    check = _ray_smoke(python_exe, ray_version)
+    check = _smoke_after_click_hold(python_exe, pip_extra, ray_version, _ray_smoke(python_exe, ray_version))
     if check.returncode != 0:
         detail = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         # The floor spec is satisfied by whatever Ray is already installed, so a
@@ -290,6 +313,13 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     ray_version = os.environ.get("RAY_VERSION", "")
     ray_spec = f"ray[default]=={ray_version or _RAY_MIN_VERSION}"
     check = _ray_smoke(python_exe, ray_version)
+    if check.returncode == _RAY_SENTINEL_EXIT:
+        held = _smoke_after_click_hold(python_exe, pip_extra, ray_version, check)
+        if held.returncode == 0:
+            version_after = held.stdout.strip() or ray_version or _RAY_MIN_VERSION
+            reason = "ray CLI Sentinel import failure"
+            return _ray_result("applied", python_exe, _RAY_CLICK_HOLD_SPEC, version_after, reason)
+        check = held
     if check.returncode == 0:
         print("Preflight: ray OK")
         version_after = check.stdout.strip() or ray_version or _RAY_MIN_VERSION
