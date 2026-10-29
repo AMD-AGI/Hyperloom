@@ -28,7 +28,6 @@ def _forge_framework_for_vllm(
     framework: str,
     precision: str,
     quant_type: str,
-    tunableop_input: str,
     aiter_routing: VllmAiterRouting = VllmAiterRouting(),
 ) -> str:
     """Route vLLM runs served by aiter to Forge's AITER tuner family.
@@ -38,7 +37,7 @@ def _forge_framework_for_vllm(
     executes. Its sglang branch carries the tuners that do write the tables aiter
     reads, and the router already accepts ``vllm-aiter`` as an alias for it.
     """
-    if framework != "vllm" or tunableop_input:
+    if framework != "vllm":
         return framework
     if _is_vllm_block_fp8(precision, quant_type):
         return "vllm-aiter"

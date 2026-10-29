@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.coerce import optional_positive_int
 
 from . import forge_fusion
 from ..actions.executors._kernel_agent_tool import HandlerResult
@@ -21,7 +20,6 @@ from ._forge_lane_budget import (
     _lane_budget,
     _unfunded_lane_skip,
 )
-from ._integrate_payload import _requested_framework, _requested_setting
 from .lane_budget import LANE_FUSION
 
 
@@ -95,85 +93,54 @@ def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
     return active
 
 
-def _resolve_forge_agent(
-    payload: Mapping[str, Any],
-    *,
-    env: Mapping[str, str] | None = None,
-) -> tuple[str, str]:
+def _resolve_forge_agent(env: Mapping[str, str] | None = None) -> tuple[str, str]:
     """Resolve the Forge agent backend and model as one decision.
 
-    Shared by forge-fusion and the rewrite lane, which uses the same model
-    ladder via :func:`llm_config.resolve_forge_llm_model`. A valid explicit
-    ``agent_backend`` or ``llm_model`` in the request wins; otherwise
-    :func:`llm_config.resolve_agent_backend` decides (an explicit ``INFERENCE_OPTIMIZER_AGENT_BACKEND``, else the
-    credential-ranked choice), so this role cannot disagree with the orchestration role or the Forge registry about
-    which backend a box is configured for.
-
-    Model id precedence (after the backend is chosen) is owned by
+    :func:`llm_config.resolve_agent_backend` decides the backend (an explicit
+    ``INFERENCE_OPTIMIZER_AGENT_BACKEND``, else the credential-ranked choice), so
+    this role cannot disagree with the orchestration role or the Forge registry
+    about which backend a box is configured for. Model id precedence is owned by
     :func:`llm_config.resolve_forge_llm_model`.
 
-
-
     Raises:
-        ValueError: If ``agent_backend`` is not a known harness name.
+        ValueError: If ``INFERENCE_OPTIMIZER_AGENT_BACKEND`` names no known backend.
     """
     source = env if env is not None else os.environ
-    known_backends = set(llm_config.AGENT_BACKEND_CHOICES)
-    explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
-    if explicit_backend and explicit_backend not in known_backends:
-        raise ValueError(f"agent_backend={explicit_backend!r} is invalid; choose one of {sorted(known_backends)}")
-
-    agent_backend = explicit_backend or llm_config.resolve_agent_backend(source)
-    llm_model = llm_config.resolve_forge_llm_model(
-        agent_backend,
-        env=source,
-        explicit=str(payload.get("llm_model") or ""),
-    )
-    return agent_backend, llm_model
+    agent_backend = llm_config.resolve_agent_backend(source)
+    return agent_backend, llm_config.resolve_forge_llm_model(agent_backend, env=source)
 
 
-def _resolve_forge_fusion_sandbox_mode(
-    payload: Mapping[str, Any],
-    *,
-    agent_backend: str,
-    env: Mapping[str, str] | None = None,
-) -> str:
+def _resolve_forge_fusion_sandbox_mode(*, agent_backend: str, env: Mapping[str, str] | None = None) -> str:
     """Resolve and validate the sandbox policy recorded for forge-fusion.
 
-    Codex delegates both defaults and validation to the canonical Hyperloom
+    Codex delegates the default and validation to the canonical Hyperloom
     resolver, including its operator opt-in for ``bypass``. Claude records
-    ``workspace-write`` as the stable audit default; an explicit override is
-    validated by that same resolver so both backends share one policy vocabulary
-    and unsafe bypass cannot reach the subprocess.
-
-
+    ``workspace-write`` as the stable audit default.
 
     Raises:
-        CodexSessionUnavailableError: If the mode is unknown or bypass lacks
-            the operator mode confirmation.
+        CodexSessionUnavailableError: If the configured mode is unknown or bypass
+            lacks the operator mode confirmation.
     """
-    explicit = str(payload.get("agent_sandbox_mode") or "").strip()
-    if agent_backend == "claude" and not explicit:
+    if agent_backend == "claude":
         return codex_session.DEFAULT_CODEX_SANDBOX_MODE
-    return codex_session.resolve_codex_sandbox_mode(
-        sandbox_mode=explicit,
-        env=dict(env) if env is not None else None,
-    )
+    return codex_session.resolve_codex_sandbox_mode(env=dict(env) if env is not None else None)
 
 
-async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResult:
-    """Autonomous kernel fusion via the forge-fusion CLI.
+def _fusion_failure(error_class: str, error: str, *, status: str = "failed") -> HandlerResult:
+    """A forge-fusion run that ended before forge-fuse started."""
+    return {
+        "status": status,
+        "backend": "forge",
+        "engine": "forge_fusion",
+        "error_class": error_class,
+        "error": error,
+        "decision": "REVERT",
+        "kept": False,
+    }
 
-    Resolves one provider-compatible agent backend, model, and validated sandbox
-    policy, then runs forge-fuse through :func:`forge_fusion.run_forge_fusion`,
-    which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
-    and ``requires_e2e_validation`` so the integrate gate confirms the
-    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling).
-    """
-    from ..state.shared_state import SharedState
 
-    state = SharedState.load_or_init(session_dir)
-
+def _fusion_precondition_refusal(state: Any, *, model_path: str, trace_path: str) -> HandlerResult | None:
+    """Why this session cannot run forge-fusion now, or ``None`` when it can."""
     active_fusion_flags = _active_forge_fusion_env_flags(state)
     if active_fusion_flags:
         return {
@@ -191,117 +158,86 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             ),
             "source": "forge_fusion",
         }
-
     if not _forge_fusion_available():
-        return {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "forge_fusion_not_found",
-            "error": ("KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'."),
-            "decision": "REVERT",
-            "kept": False,
-        }
-
-    model_path = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
+        return _fusion_failure(
+            "forge_fusion_not_found",
+            "KernelForge fusion pipeline not found. Install via 'pip install <KernelForge>[claude,codex]'.",
+        )
     if not model_path:
-        return {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "model_path_missing",
-            "error": "model_path is required",
-            "decision": "REVERT",
-            "kept": False,
-        }
-
-    trace_path = _resolve_fusion_decode_trace(state)
+        return _fusion_failure("model_path_missing", "model_path is required")
     if not trace_path:
         recorded = str(getattr(state, "last_profile_trace", "") or "").strip()
-        return {
-            "status": "skipped",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "decode_trace_missing",
-            "error": (
-                "no decode trace available for fusion discovery "
-                f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)"
-            ),
-            "decision": "REVERT",
-            "kept": False,
-        }
-
-    framework = _requested_framework(payload, state, "sglang")
-    gpu = str(payload.get("gpu") or "0").strip()
-    try:
-        agent_backend, llm_model = _resolve_forge_agent(payload)
-    except ValueError as exc:
-        return {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "invalid_agent_backend",
-            "error": str(exc),
-            "decision": "REVERT",
-            "kept": False,
-        }
-    try:
-        agent_sandbox_mode = _resolve_forge_fusion_sandbox_mode(
-            payload,
-            agent_backend=agent_backend,
+        return _fusion_failure(
+            "decode_trace_missing",
+            "no decode trace available for fusion discovery "
+            f"(state.last_profile_trace={recorded or '(empty)'}; run profile/roofline first)",
+            status="skipped",
         )
+    return None
+
+
+async def run_fusion_handler(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Autonomous kernel fusion via the forge-fusion CLI, awaited by KernelPhase at KERNEL entry.
+
+    Resolves one provider-compatible agent backend, model, and validated sandbox
+    policy, then runs forge-fuse through :func:`forge_fusion.run_forge_fusion`,
+    which returns the fusion contract result. A KEPT fusion carries a source patch + env flags
+    and ``requires_e2e_validation`` so the integrate gate confirms the
+    end-to-end gain. Reuses the PRELUDE decode trace (no re-profiling); only
+    ``payload['task_id']`` is read, to name the workspace.
+    """
+    from ..state.shared_state import SharedState
+
+    state = SharedState.load_or_init(session_dir)
+    model_path = str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or "").strip()
+    trace_path = _resolve_fusion_decode_trace(state)
+    refusal = _fusion_precondition_refusal(state, model_path=model_path, trace_path=trace_path)
+    if refusal is not None:
+        return refusal
+
+    framework = str(getattr(state, "framework", "") or "sglang").strip().lower()
+    try:
+        agent_backend, llm_model = _resolve_forge_agent()
+    except ValueError as exc:
+        return _fusion_failure("invalid_agent_backend", str(exc))
+    try:
+        agent_sandbox_mode = _resolve_forge_fusion_sandbox_mode(agent_backend=agent_backend)
     except RuntimeError as exc:
-        return {
-            "status": "failed",
-            "backend": "forge",
-            "engine": "forge_fusion",
-            "error_class": "invalid_agent_sandbox_mode",
-            "error": str(exc),
-            "decision": "REVERT",
-            "kept": False,
-        }
-    max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
+        return _fusion_failure("invalid_agent_sandbox_mode", str(exc))
     fusion_lane = _lane_budget(state, LANE_FUSION)
     if fusion_lane is None:
         return {**_unfunded_lane_skip(LANE_FUSION), "engine": "forge_fusion"}
-    timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
-    requested_recipes = optional_positive_int(payload.get("max_recipes"), 0)
-    # An explicit payload value stays an operator/test escape hatch.
-    fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 
     workspace = session_dir / "runs" / "fusion" / str(payload.get("task_id") or "kernel_entry_fusion")
     workspace.mkdir(parents=True, exist_ok=True)
-
-    input_payload = {
-        "trace_path": trace_path,
-        "model_path": model_path,
+    result = await forge_fusion.run_forge_fusion(
+        {
+            "trace_path": trace_path,
+            "model_path": model_path,
+            "framework": framework,
+            "output_dir": str(workspace),
+            "discover_mode": "llm",
+            "agent_backend": agent_backend,
+            "llm_model": llm_model,
+            "agent_sandbox_mode": agent_sandbox_mode,
+            "max_turns": int(os.environ.get("FORGE_FUSION_MAX_TURNS") or 100),
+            "gpu": "0",
+            "timeout": _forge_fusion_timeout_sec(lane_budget_sec=fusion_lane.budget_sec),
+            # How many recipes the lane's share pays for. Omitted when none could be
+            # derived, which leaves forge-fuse on every discovered recipe.
+            **({"max_recipes": fusion_lane.max_targets} if fusion_lane.max_targets > 0 else {}),
+            **_fusion_session_serve_args(state, framework=framework, model_path=model_path),
+        }
+    )
+    return {
+        "backend": "forge",
+        "engine": "forge_fusion",
+        "workspace": str(workspace),
         "framework": framework,
-        "output_dir": str(workspace),
-        "discover_mode": str(payload.get("discover_mode") or "llm"),
+        "model_path": model_path,
         "agent_backend": agent_backend,
         "llm_model": llm_model,
         "agent_sandbox_mode": agent_sandbox_mode,
-        "max_turns": max_turns,
-        "gpu": gpu,
-        "timeout": timeout,
-        # Multi-patch (one independent sibling per recipe) is the default; the
-        # combine escape hatch (a single merged patch) must be requested explicitly.
-        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
-        # How many recipes the lane's share pays for. Omitted when none could be
-        # derived, which leaves forge-fuse on every discovered recipe.
-        **({"max_recipes": fusion_recipe_ceiling} if fusion_recipe_ceiling > 0 else {}),
-        "verbose": bool(payload.get("verbose", False)),
-        **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
+        "source": "forge_fusion",
+        **result,
     }
-    result = await forge_fusion.run_forge_fusion(input_payload)
-
-    result.setdefault("backend", "forge")
-    result.setdefault("engine", "forge_fusion")
-    result.setdefault("workspace", str(workspace))
-    result.setdefault("framework", framework)
-    result.setdefault("model_path", model_path)
-    result.setdefault("agent_backend", agent_backend)
-    result.setdefault("llm_model", llm_model)
-    result.setdefault("agent_sandbox_mode", agent_sandbox_mode)
-    result.setdefault("source", "forge_fusion")
-    return result

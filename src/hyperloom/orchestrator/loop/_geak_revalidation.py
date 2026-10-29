@@ -9,6 +9,7 @@ import logging as _logging
 from typing import Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
+from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
     REBENCH_FALLBACK,
@@ -34,7 +35,6 @@ from ..kernel.geak_config import (
     _geak_revalidation_decision,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
-    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from ..state.shared_state import ActionAttempt, resolve_graded_comparison, stack_base_params
@@ -166,7 +166,7 @@ def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
 
 
 def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
-    if not overlay.path or not geak_overlay_is_loadable(overlay.path):
+    if not overlay.path or not overlay_is_loadable(overlay.path):
         return False
     return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
 
@@ -235,7 +235,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         from ..actions.executors._proposal_identity import BaseControls, effective_fingerprint
 
         overlay = product.overlay
-        if overlay and not geak_overlay_is_loadable(overlay):
+        if overlay and not overlay_is_loadable(overlay):
             log.warning(
                 "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
                 "revalidating the config WITHOUT the authored kernel",
@@ -435,13 +435,13 @@ class GeakRevalidation(CoordinatorCollaborator):
         if expected_overlay:
             expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
             got_digest = _geak_overlay_digest(expected_overlay)
-            overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+            overlay_loaded = overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
             if not overlay_loaded and decision == REBENCH_VALIDATED:
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
                     "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
                     expected_overlay,
-                    geak_overlay_is_loadable(expected_overlay),
+                    overlay_is_loadable(expected_overlay),
                     expected_digest,
                     got_digest,
                 )
@@ -734,7 +734,7 @@ class GeakRevalidation(CoordinatorCollaborator):
                 "(loadable=%r digest before=%r after=%r) -> gain credited "
                 "to config, not to a kernel",
                 overlay.path,
-                geak_overlay_is_loadable(overlay.path),
+                overlay_is_loadable(overlay.path),
                 overlay.digest_before,
                 _geak_overlay_digest(overlay.path),
             )
