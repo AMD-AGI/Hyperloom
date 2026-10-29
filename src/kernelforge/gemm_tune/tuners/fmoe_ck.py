@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +29,8 @@ _FMOE_CSV_HEADER = (
 )
 _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
 _ENCODING = "utf-8"
-
-# MI355X, a4w4 per_1x32: 30 rows (368 candidates each) took 3529s. aiter writes no row until all finish, so a
-# row list past the timeout yields nothing.
-_PER_ROW_COST_S = 118
-_RESERVE_S = 120
+# run_subprocess's exit code for a run it killed at its timeout.
+_TIMED_OUT = 124
 
 
 def _spread(items: list, budget: int) -> list:
@@ -181,7 +180,7 @@ class FmoeCKTuner(BaseTuner):
             key = self._demand_key()
             if key is None:
                 raise ValueError(_NO_RUNTIME_KEY)
-            return self._rows_within_timeout(self._untuned_csv_from_demand(key)), "runtime_observed"
+            return self._untuned_csv_from_demand(key), "runtime_observed"
 
         path = Path(external)
         if not path.is_file():
@@ -192,26 +191,50 @@ class FmoeCKTuner(BaseTuner):
             # unreachable at run time.
             raise ValueError(f"unusable moe_untuned_csv {path}: {problem}")
         log.info("Using caller-supplied untuned CSV at %s", path)
-        return self._rows_within_timeout(path), "runtime_observed"
+        return path, "runtime_observed"
 
-    def _rows_within_timeout(self, path: Path) -> Path:
-        """``path``, or a copy holding only the rows ``ctx.timeout_s`` can finish, spread across keys and tokens."""
-        header, *rows = [line for line in path.read_text(encoding=_ENCODING).splitlines() if line.strip()]
-        budget = max(1, (self.ctx.timeout_s - _RESERVE_S) // _PER_ROW_COST_S)
-        if len(rows) <= budget:
-            return path
-        kept = _spread(rows, budget)
-        log.info(
-            "%d MoE rows need ~%ds at ~%ds each but the timeout is %ds; tuning %d of them",
-            len(rows),
-            len(rows) * _PER_ROW_COST_S,
-            _PER_ROW_COST_S,
-            self.ctx.timeout_s,
-            len(kept),
-        )
-        csv_path = self.work_dir / "untuned_fmoe.csv"
-        csv_path.write_text("\n".join([header, *kept]) + "\n", encoding=_ENCODING)
-        return csv_path
+    def _tune_rows(self, invocation: _tr.TunerInvocation) -> tuple[int, str, str, Path | None]:
+        """Tune the rows in file order, one aiter run each, until ``ctx.timeout_s`` is spent.
+
+        aiter writes nothing until a run's every row finishes, so a row the deadline kills is dropped, not the list.
+        """
+        header, rows = _tr.read_untuned_csv(invocation.input_csv)
+        env_override = _tr.compare_temp_env()
+        compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
+        deadline = time.monotonic() + self.ctx.timeout_s
+        outs, errs, candidates = [], [], _tr._MergedCsv()
+        for idx, row in enumerate(rows):
+            remaining = int(deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            row_csv = self.work_dir / f"untuned_fmoe_{idx}.csv"
+            row_csv.write_text(f"{header}\n{row}\n", encoding=_ENCODING)
+            row_run = dataclasses.replace(
+                invocation, input_csv=row_csv, tuned_csv=self.work_dir / f"tuned_fmoe_{idx}.csv"
+            )
+            start = time.time()
+            rc, out, err = run_subprocess(
+                row_run.command(),
+                cwd=invocation.aiter_root,
+                timeout_s=remaining,
+                log_file=self.work_dir / f"tune_{idx}.log",
+                env_override=env_override,
+            )
+            if rc == _TIMED_OUT:
+                log.info(
+                    "MoE row %d/%d did not finish in the remaining %ds; keeping %d", idx + 1, len(rows), remaining, idx
+                )
+                break
+            if rc != 0:
+                return rc, out, err, None
+            outs.append(out)
+            errs.append(err)
+            candidate = _tr._latest_candidate(compare_dir, row_run.tuned_csv.stem, start)
+            if candidate is not None:
+                candidates.absorb(_tr._read_csv_lines(candidate))
+        if not outs:
+            return _TIMED_OUT, "", "", None
+        return 0, "\n".join(outs), "\n".join(errs), candidates.write(self.work_dir / "candidate_tuned_fmoe.merged.csv")
 
     def _parse_compare_output(self, stdout: str) -> list[dict[str, Any]]:
         """Parse the compare report from tuner stdout."""
@@ -258,10 +281,6 @@ class FmoeCKTuner(BaseTuner):
         script = find_tuner_script("fmoe_ck")
         assert script is not None  # validated already
 
-        import time
-
-        run_start_time = time.time()
-
         untuned_csv, key_source = self._resolve_untuned_csv()
         tuned_csv = self.work_dir / "tuned_fmoe.csv"
         profile_csv = self.work_dir / "profile_fmoe.csv"
@@ -285,14 +304,8 @@ class FmoeCKTuner(BaseTuner):
         ]
 
         aiter_root = resolve_aiter_root()
-        cwd = aiter_root if aiter_root else None
-
-        env_override = _tr.compare_temp_env()
-        compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
         invocation = _tr.TunerInvocation(str(script), base_args, untuned_csv, tuned_csv, self.work_dir, aiter_root)
-        isolated = _tr.is_isolation_enabled()
-        iso_candidate = None
-        if isolated:
+        if _tr.is_isolation_enabled():
             blocklist = _tr.FaultBlocklist(
                 getattr(self.ctx, "faulted_blocklist_path", None),
                 {
@@ -302,7 +315,7 @@ class FmoeCKTuner(BaseTuner):
                     "tuner": self.name,
                 },
             )
-            rc, stdout, stderr, iso_candidate = _tr.run_isolated(
+            rc, stdout, stderr, candidate_csv = _tr.run_isolated(
                 invocation,
                 _tr.IsolationGuard(
                     outer_timeout_s=self.ctx.timeout_s,
@@ -311,15 +324,9 @@ class FmoeCKTuner(BaseTuner):
                 ),
             )
         else:
-            rc, stdout, stderr = run_subprocess(
-                invocation.command(),
-                cwd=cwd,
-                timeout_s=self.ctx.timeout_s,
-                log_file=self.work_dir / "tune.log",
-                env_override=env_override,
-            )
+            rc, stdout, stderr, candidate_csv = self._tune_rows(invocation)
 
-        if rc == 124:
+        if rc == _TIMED_OUT:
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",
@@ -341,10 +348,6 @@ class FmoeCKTuner(BaseTuner):
             # Try parsing from stderr (some versions print there)
             shape_results = self._parse_compare_output(stderr)
 
-        # Find candidate CSV.
-        candidate_csv = (
-            iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
-        )
         artifact = ""
         artifact_problem = (
             _validate_fmoe_csv(candidate_csv, tuned=True) if candidate_csv else "no candidate CSV produced"

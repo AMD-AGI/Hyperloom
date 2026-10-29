@@ -207,8 +207,7 @@ def _write_fmoe_untuned_csv_from_log(
     if not tunable:
         return "", report
 
-    rendered = [moe_untuned_csv_text(key).splitlines() for key in tunable]
-    lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
+    lines = moe_untuned_csv_text(*tunable).splitlines()
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
     try:
