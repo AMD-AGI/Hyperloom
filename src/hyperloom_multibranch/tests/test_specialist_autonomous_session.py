@@ -31,7 +31,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS
 from hyperloom_multibranch.blackboard.tests.factories import result
@@ -1159,6 +1159,41 @@ async def test_an_agent_in_component_mode_runs_to_the_deadline_on_the_commit_mb_
     assert config["component"] == {"outbox": "snaps", "deadline": int(now + 3600.0 - 0.5), "root": root}
     assert "docs/hosts.md" in rig.sandbox.prompts[0]
     assert root == json.loads((tmp_path / BRANCH / "session" / "agent-watch.json").read_text())["root"]
+
+
+async def test_an_agent_in_component_mode_reads_the_root_profile_s_op_shares_from_a_file_mb_writes(
+    tmp_path: Path,
+) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(), tail=30.0), start_seconds=0.2)
+    root = await rig.repo.head(INTEGRATION_BRANCH)
+    rates = {"output_throughput": 0.2}
+    gate = LocalBlackboard(tmp_path / "blackboard", Writer(Role.GATE, "gate"))
+    await gate.write_baseline(BaselineRecord(root, {"output_throughput": 6290.7}, rates, rates, ("b1",)))
+    toolbox = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
+    shares = {"gemm": 41.5, "attention": 22.0}
+    await toolbox.notify_tool_result(ToolResultPointer("prelude", "job-7", "/a", "trace analysed", root, "p1", shares))
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    checkout = tmp_path / BRANCH / "session" / AGENT_DIR / "src"
+    config = json.loads((checkout / "campaign.json").read_text())
+    profile = checkout / SNAPSHOTS["session"] / "op_shares.json"
+    assert config["component"]["profile"] == str(profile)
+    assert json.loads(profile.read_text()) == {
+        "source": "PRELUDE root profile", "commit": root, "job": "job-7", "shares": shares,
+    }  # fmt: skip
+
+
+async def test_an_agent_in_component_mode_without_a_root_profile_gets_no_profile(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Component(keeps=(), tail=30.0), start_seconds=0.2)
+
+    await rig.session.preflight()
+    await rig.session.stop()
+
+    checkout = tmp_path / BRANCH / "session" / AGENT_DIR / "src"
+    assert "profile" not in json.loads((checkout / "campaign.json").read_text())["component"]
+    assert not (checkout / SNAPSHOTS["session"] / "op_shares.json").exists()
 
 
 async def test_an_agent_in_component_mode_with_no_explore_end_has_a_deadline_mb_s_stop_comes_before(

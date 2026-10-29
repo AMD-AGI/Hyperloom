@@ -14,7 +14,8 @@ refused for a reason the next attempt would meet again (:class:`ModelRefused`).
 
 An agent that writes a snapshot of each keep runs as a component of MB, in the mode Arbor's README describes: MB sets
 that mode, its host, the absolute deadline and the commit its keeps are read against in its config itself
-(:func:`component_config`), whatever the manifest says of them.
+(:func:`component_config`), whatever the manifest says of them, and, when the session's root was profiled, the file in
+its session that holds the root's op shares (:data:`PROFILE_FILE`).
 
 The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
 ``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
@@ -33,6 +34,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom_multibranch.contracts.blackboard.records import OpShares
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
 from hyperloom_multibranch.specialist.runtime import PreflightFailed
 
@@ -48,6 +50,8 @@ GIT = "git"
 SHIM_DIR = "bin"
 #: The lines of an output a failure keeps, the end of the output, where the cause usually is.
 TAIL_LINES = 20
+#: The file, in the session of an agent run as a component, that holds the op shares of the session's root profile.
+PROFILE_FILE = "op_shares.json"
 
 DOCKER_SHIM = """#!/usr/bin/env python3
 # Runs `docker exec` and `docker cp` in place, for an agent written to drive a container; the sandbox has no daemon.
@@ -99,8 +103,8 @@ class AgentSpec:
     the ports its servers may listen on, ``client``, the command the gate measures a server on ``port`` with (empty when
     the session has none to give), ``baseline``, what the gate measured of the metric on the session's root (``None``
     before it did), ``knowledge``, the notes on the integration head the agent reads each iteration, and, for an agent
-    run as a component, ``deadline``, the clock time it ends by, and ``root``, the commit of ``workspace`` its patches
-    are made against."""
+    run as a component, ``deadline``, the clock time it ends by, ``root``, the commit of ``workspace`` its patches
+    are made against, and ``root_shares``, the op shares of the session root's profile (``None`` when it has none)."""
 
     model: str
     framework: str
@@ -120,6 +124,7 @@ class AgentSpec:
     knowledge: str = ""
     deadline: float = 0.0
     root: str = ""
+    root_shares: OpShares | None = None
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -236,7 +241,8 @@ async def _attempt(
     except (ManifestError, ValueError) as error:
         raise AttemptFailed(f"the manifest: {error}") from error
     if manifest.snapshots is not None:
-        manifest = replace(manifest, config=component_config(manifest.config, spec))
+        profile = root_profile(spec.root_shares, checkout / manifest.snapshots.session)
+        manifest = replace(manifest, config=component_config(manifest.config, spec, profile))
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = agent_env(agent_dir)
@@ -262,18 +268,37 @@ async def install(manifest: AgentManifest, setup: OnboardingSetup, checkout: Pat
             raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
 
 
-def component_config(config: Mapping[str, object], spec: AgentSpec) -> dict[str, object]:
+def component_config(config: Mapping[str, object], spec: AgentSpec, profile: Path | None = None) -> dict[str, object]:
     """``config`` in Arbor's component mode, which runs on the host only, ending by ``spec``'s deadline, in whole unix
-    seconds, and making every patch against ``spec``'s root."""
+    seconds, making every patch against ``spec``'s root and reading the root's op shares from ``profile``, if any."""
 
     component = config.get("component")
     given = dict(component) if isinstance(component, Mapping) else {}
+    profiled = {} if profile is None else {"profile": str(profile)}
     return {
         **config,
         "mode": "component",
         "docker_container": "@host",
-        "component": {**given, "deadline": int(spec.deadline), "root": spec.root},
+        "component": {**given, "deadline": int(spec.deadline), "root": spec.root, **profiled},
     }
+
+
+def root_profile(shares: OpShares | None, session: Path) -> Path | None:
+    """Write ``shares`` to :data:`PROFILE_FILE` in ``session``, the form Arbor's ``component.profile`` reads; the file,
+    ``None`` with no shares."""
+
+    if shares is None:
+        return None
+    document = {
+        "source": "PRELUDE root profile",
+        "commit": shares.commit_id,
+        "job": shares.job_id,
+        "shares": dict(shares.shares),
+    }
+    profile = session / PROFILE_FILE
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(json.dumps(document, indent=2), encoding=ENCODING)
+    return profile
 
 
 async def _started(process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup) -> None:
@@ -393,8 +418,9 @@ The sandbox:
 
 If the agent can run inside a host (Arbor's component mode, which its docs/hosts.md describes: an absolute deadline, the
 commit its patches are made against, and a snapshot directory written for each kept change), run it in that mode: MB
-sets its "mode", "docker_container", "component.deadline" ("deadline") and "component.root" ("root") itself; set
-everything else docs/hosts.md asks of a host, give its session a directory in the checkout, and answer "snapshots".
+sets its "mode", "docker_container", "component.deadline" ("deadline"), "component.root" ("root") and, when the
+session's root was profiled, "component.profile" itself; set everything else docs/hosts.md asks of a host, give its
+session a directory in the checkout, and answer "snapshots".
 
 MB judges every change the agent keeps by measuring it with "client", the gate's own benchmark client, against a
 server on "port"; another client sends other prompts and ranks changes otherwise. Unless "client" is empty, make the
@@ -446,6 +472,7 @@ __all__ = [
     "SOURCE_DIR",
     "DOCKER_SHIM",
     "ONBOARDING_PROMPT",
+    "PROFILE_FILE",
     "AgentProcess",
     "AgentSandbox",
     "AgentSpec",
@@ -459,6 +486,7 @@ __all__ = [
     "install",
     "make_ready",
     "onboarding_prompt",
+    "root_profile",
     "split_source",
     "tail",
 ]

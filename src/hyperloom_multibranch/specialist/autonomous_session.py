@@ -223,7 +223,8 @@ class AutonomousSession:
         root = self._place.worktree.commit()
         launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         await self._notes.refresh()
-        baseline = (await self._place.blackboard.snapshot()).baseline
+        snapshot = await self._place.blackboard.snapshot()
+        baseline = snapshot.baseline
         seconds = self._run_seconds()
         spec = replace(
             self._setup.spec,
@@ -235,6 +236,7 @@ class AutonomousSession:
             knowledge=str(self._notes.path),
             deadline=self._setup.clock() + (seconds or NO_DEADLINE_SECONDS),
             root=root,
+            root_shares=None if baseline is None else snapshot.op_shares.get(baseline.root_commit),
         )
         lease = await self._lease(spec.tp)
         spec = replace(spec, cards=lease.gpu_ids)
