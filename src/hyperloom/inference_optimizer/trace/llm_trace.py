@@ -25,7 +25,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
     {
         "orchestration",
         "kernel_agent",
-        "dynamic_action",
         "specialist",
         "critic",
         "proposal_scorer",
@@ -68,7 +67,6 @@ class LLMCallSite:
     component: str
     role: str | None = None
     task_id: str | None = None
-    dyn_id: str | None = None
     tick: int | None = None
     phase: str | None = None
     turn: int | None = None
@@ -86,7 +84,6 @@ class LLMCallRecord:
     call_id: str | None = None
     role: str | None = None
     task_id: str | None = None
-    dyn_id: str | None = None
     tick: int | None = None
     phase: str | None = None
     turn: int | None = None
@@ -143,7 +140,6 @@ class LLMCallRecord:
             call_id=md.get("call_id"),
             role=site.role,
             task_id=site.task_id,
-            dyn_id=site.dyn_id,
             tick=site.tick,
             phase=site.phase,
             turn=site.turn,
@@ -173,7 +169,6 @@ class LLMCallRecord:
             call_id=call_id,
             role=site.role,
             task_id=site.task_id,
-            dyn_id=site.dyn_id,
             tick=site.tick,
             phase=site.phase,
             turn=site.turn,

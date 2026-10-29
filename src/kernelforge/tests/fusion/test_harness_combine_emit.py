@@ -9,7 +9,7 @@ import re
 import subprocess
 
 from kernelforge.fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
-from kernelforge.fusion.command import _combined_recipe, _safe_artifact_id
+from kernelforge.fusion.pipeline import _combined_recipe, _safe_artifact_id
 from kernelforge.fusion.emit import FusionFiles, export_artifacts, restore_exported_changes
 from kernelforge.fusion.models import Recipe
 

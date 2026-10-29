@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry point for ``kernelforge ceiling``."""
+"""One workspace's ceiling estimated on its own, outside a forge-loop campaign, from its task configuration."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-import click
 import yaml
 
 from kernelforge.agent_backends.base import AgentRuntimeSettings, with_writable_sandbox
@@ -23,22 +19,20 @@ from kernelforge.agent_backends.registry import (
     resolve_agent_runtime,
     select_default_agent_provider,
 )
-from kernelforge.option_groups import option_group
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
-from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.estimate import (
     ESTIMATE_ERRORS,
+    CeilingOutcome,
     estimate_ceiling,
 )
 from kernelforge.roofline_ceiling.evidence import PerformanceRun
-from kernelforge.roofline_ceiling.report import WORKSPACE_SUBDIR
 from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
 
 CONFIG_FILENAME = "config.yaml"
 
-#: Printed around the machine-readable result so a caller driving this command
-#: from a script can find it in the log, the way forge-loop's is found.
-RESULT_SENTINEL = "__FORGE_ROOFLINE_CEILING_RESULT__"
+
+class CeilingError(Exception):
+    """The estimate cannot be taken; the message says why, for the operator who asked for it."""
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -48,11 +42,11 @@ def _load_config(path: Path) -> dict[str, Any]:
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        raise click.ClickException(f"{path} could not be read: {exc}") from exc
+        raise CeilingError(f"{path} could not be read: {exc}") from exc
     if document is None:
         return {}
     if not isinstance(document, dict):
-        raise click.ClickException(f"{path} does not parse to a mapping of task settings")
+        raise CeilingError(f"{path} does not parse to a mapping of task settings")
     return document
 
 
@@ -68,15 +62,13 @@ def _resolve_performance_command(explicit: str, document: dict[str, Any], config
 
     declared = document.get("performance_command")
     if not declared:
-        raise click.ClickException(
-            f"no --performance-command given and {config_path} declares no 'performance_command'"
-        )
+        raise CeilingError(f"no --performance-command given and {config_path} declares no 'performance_command'")
     if isinstance(declared, str):
         commands = [declared]
     elif isinstance(declared, (list, tuple)) and all(isinstance(entry, str) for entry in declared):
         commands = [str(entry) for entry in declared]
     else:
-        raise click.ClickException(
+        raise CeilingError(
             f"{config_path} declares 'performance_command' as {declared!r}; "
             "it must be a shell command string or a list of them"
         )
@@ -92,7 +84,7 @@ def _resolve_kernel_files(explicit: Sequence[str], document: dict[str, Any], wor
         declared = [declared]
     resolved = [str((workspace / str(entry)).resolve()) for entry in declared if str(entry).strip()]
     if not resolved:
-        raise click.ClickException(
+        raise CeilingError(
             "no --kernel given and the task configuration declares no 'source_file_path'; "
             "the analyst needs at least one source file to model"
         )
@@ -137,19 +129,6 @@ def resolve_analyst_backend(agent: AnalystAgent):
     return create_registered_backend(with_writable_sandbox(runtime))
 
 
-def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> None:
-    """Print the machine-readable result between its sentinels."""
-    payload = {
-        "source": source,
-        "report_path": str(report_path) if report_path else "",
-        "ideal_ms": report.ideal_ms(),
-        "mean_ideal_ms": report.mean_ideal_ms(),
-    }
-    click.echo(RESULT_SENTINEL)
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-    click.echo(RESULT_SENTINEL)
-
-
 @dataclass(frozen=True)
 class CeilingInputs:
     """The workspace and task settings the estimate is taken from."""
@@ -163,7 +142,7 @@ class CeilingInputs:
 
 @dataclass(frozen=True)
 class AnalystOptions:
-    """The analyst session's provider, model, budget and sandbox as typed on the command line."""
+    """The analyst session's provider, model, budget and sandbox."""
 
     agent_provider: str
     agent_model: str
@@ -173,7 +152,7 @@ class AnalystOptions:
 
 @dataclass(frozen=True)
 class CeilingRequest:
-    """Every option of one ``roofline-ceiling`` invocation, grouped by concern."""
+    """Every option of one standalone ceiling estimate, grouped by concern."""
 
     inputs: CeilingInputs
     output_dir: str
@@ -182,87 +161,66 @@ class CeilingRequest:
     run_timeout_sec: int
 
 
-@click.command("roofline-ceiling")
-@option_group(
-    "request",
-    CeilingRequest,
-    option_group(
-        "inputs",
-        CeilingInputs,
-        click.option("--workspace", "workspace_dir", required=True, help="Kernel workspace to analyse"),
-        click.option(
-            "--kernel",
-            "kernel_files",
-            multiple=True,
-            help="Source file the analyst models; repeatable. Defaults to config.yaml 'source_file_path'.",
-        ),
-        click.option("--driver", "driver_script", default="", help="Measurement driver, for the analyst's context"),
-        click.option(
-            "--config",
-            "config_path",
-            default="",
-            help=f"Task configuration. Defaults to <workspace>/{CONFIG_FILENAME}.",
-        ),
-        click.option(
-            "--performance-command",
-            default="",
-            help="Shell command that runs the timed benchmark. Overrides config.yaml 'performance_command'.",
-        ),
-    ),
-    click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}."),
-    click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted."),
-    option_group(
-        "analyst",
-        AnalystOptions,
-        click.option(
-            "--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted."
-        ),
-        click.option("--agent-model", default="", help="Agent model. Falls back to the provider default."),
-        click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session"),
-        click.option(
-            "--agent-sandbox-mode",
-            default=None,
-            help="Provider sandbox mode. Defaults to FORGE_AGENT_SANDBOX_MODE, as for every other command.",
-        ),
-    ),
-    click.option("--run-timeout-sec", default=1800, type=int, help="Wall-clock budget for each measurement subprocess"),
-)
-def roofline_ceiling_command(request: CeilingRequest) -> None:
-    """Estimate the theoretical achievable latency of one kernel, per scored shape.
+@dataclass(frozen=True)
+class PreparedCeiling:
+    """A ceiling request with its workspace inputs resolved: everything the estimate runs, before it starts."""
 
-    The answer is an optimistic lower bound under hardware limits and legal
-    algorithm constraints. It reports no attainment ratio: the only latency this
-    command has to divide by is a single run of the benchmark, and a campaign
-    measures attainment against its own per-case medians instead.
+    request: CeilingRequest
+    workspace: Path
+    document: dict[str, Any]
+    command: list[str]
+    sources: list[str]
+    sandbox_mode: str
+
+
+def prepare_workspace_ceiling(request: CeilingRequest) -> PreparedCeiling:
+    """Resolve the workspace, its config, the benchmark command and the kernel sources an estimate needs.
+
+    Raises :class:`CeilingError` when one of them cannot be resolved, before anything is run.
     """
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
-
     inputs = request.inputs
-    analyst = request.analyst
     workspace = Path(inputs.workspace_dir).expanduser().resolve()
     if not workspace.is_dir():
-        raise click.ClickException(f"workspace is not a directory: {workspace}")
+        raise CeilingError(f"workspace is not a directory: {workspace}")
 
     config_file = Path(inputs.config_path).expanduser() if inputs.config_path.strip() else workspace / CONFIG_FILENAME
     document = _load_config(config_file)
-    command = _resolve_performance_command(inputs.performance_command, document, config_file)
-    sources = _resolve_kernel_files(inputs.kernel_files, document, workspace)
-    sandbox_mode = Config.from_env(
-        **({"agent_sandbox_mode": analyst.agent_sandbox_mode} if analyst.agent_sandbox_mode is not None else {})
-    ).agent_sandbox_mode
+    sandbox = request.analyst.agent_sandbox_mode
+    return PreparedCeiling(
+        request=request,
+        workspace=workspace,
+        document=document,
+        command=_resolve_performance_command(inputs.performance_command, document, config_file),
+        sources=_resolve_kernel_files(inputs.kernel_files, document, workspace),
+        sandbox_mode=Config.from_env(
+            **({"agent_sandbox_mode": sandbox} if sandbox is not None else {})
+        ).agent_sandbox_mode,
+    )
 
-    click.echo("[ceiling] collecting evidence (driver run, device profile, trace)...")
+
+def estimate_workspace_ceiling(prepared: PreparedCeiling) -> CeilingOutcome:
+    """Estimate the theoretical achievable latency of one workspace's kernel, per scored shape.
+
+    The answer is an optimistic lower bound under hardware limits and legal
+    algorithm constraints. It reports no attainment ratio: the only latency this
+    estimate has to divide by is a single run of the benchmark, and a campaign
+    measures attainment against its own per-case medians instead. Raises
+    :class:`CeilingError` when the estimate cannot be taken.
+    """
+    request, analyst = prepared.request, prepared.request.analyst
     try:
-        outcome = asyncio.run(
+        return asyncio.run(
             estimate_ceiling(
                 resolve_analyst_backend(
-                    AnalystAgent(analyst.agent_provider, analyst.agent_model, analyst.agent_timeout_sec, sandbox_mode)
+                    AnalystAgent(
+                        analyst.agent_provider, analyst.agent_model, analyst.agent_timeout_sec, prepared.sandbox_mode
+                    )
                 ),
                 CeilingTask(
-                    run=PerformanceRun(command, workspace, float(request.run_timeout_sec)),
-                    kernel_files=sources,
-                    driver_script=inputs.driver_script,
-                    case_params=document.get("shapes") or document.get("cases") or {},
+                    run=PerformanceRun(prepared.command, prepared.workspace, float(request.run_timeout_sec)),
+                    kernel_files=prepared.sources,
+                    driver_script=request.inputs.driver_script,
+                    case_params=prepared.document.get("shapes") or prepared.document.get("cases") or {},
                     arch=request.arch,
                 ),
                 AnalystSession(model=analyst.agent_model, timeout_sec=analyst.agent_timeout_sec),
@@ -270,12 +228,18 @@ def roofline_ceiling_command(request: CeilingRequest) -> None:
             )
         )
     except ESTIMATE_ERRORS as exc:
-        raise click.ClickException(str(exc) or type(exc).__name__) from exc
-
-    for note in outcome.notes:
-        click.echo(f"[ceiling] note: {note}")
-    click.echo(f"[ceiling] {len(outcome.scored_case_ids)} scored case(s)")
-    _emit(outcome.report, source=outcome.source, report_path=outcome.report_path)
+        raise CeilingError(str(exc) or type(exc).__name__) from exc
 
 
-__all__ = ["RESULT_SENTINEL", "AnalystAgent", "resolve_analyst_backend", "roofline_ceiling_command"]
+__all__ = [
+    "AnalystAgent",
+    "AnalystOptions",
+    "CONFIG_FILENAME",
+    "CeilingError",
+    "CeilingInputs",
+    "CeilingRequest",
+    "PreparedCeiling",
+    "estimate_workspace_ceiling",
+    "prepare_workspace_ceiling",
+    "resolve_analyst_backend",
+]

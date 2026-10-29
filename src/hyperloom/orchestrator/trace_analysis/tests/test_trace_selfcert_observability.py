@@ -110,7 +110,6 @@ def test_metrics_state_the_terms_they_were_computed_from(tmp_path):
 
     rank = certify_trace_dir(tmp_path, framework="sglang")["rank_level"][0]
 
-    assert rank["parse"]["aggregation_scope"] is not None
     assert rank["parse"]["truncated"] is False
     assert rank["parse"]["truncation_reason"] == ""
     assert rank["attribution"]["gpu_kernel_sum_ms"] is not None

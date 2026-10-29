@@ -306,22 +306,22 @@ def test_driver_aggregates_repeats_by_median():
     assert "_reduce_max" not in round_calls, "worker must not reduce a case median again"
 
 
-def test_cli_can_actually_call_kb_warmstart():
-    """The CLI's call site must match the function it calls."""
+def test_forge_loop_can_actually_call_kb_warmstart():
+    """The forge-loop call site must match the function it calls."""
     import inspect
     import textwrap
 
-    from kernelforge.cli import forge_loop_command
+    from kernelforge.loop.bootstrap import warm_start
     from kernelforge.loop.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
-    tree = ast.parse(textwrap.dedent(inspect.getsource(forge_loop_command._read_kb_warm_start)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(warm_start._read_kb_warm_start)))
     calls = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "kb_warmstart"
     ]
     passed = {keyword.arg for call in calls for keyword in call.keywords}
-    assert passed, "could not read the CLI call site"
+    assert passed, "could not read the forge-loop call site"
     unknown = passed - accepted
-    assert not unknown, f"CLI passes keywords kb_warmstart rejects: {sorted(unknown)}"
+    assert not unknown, f"forge-loop passes keywords kb_warmstart rejects: {sorted(unknown)}"

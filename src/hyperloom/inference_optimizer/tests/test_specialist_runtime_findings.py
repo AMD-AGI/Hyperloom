@@ -31,7 +31,6 @@ def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
 
 def _make_inp(runtime_findings: str) -> SpecialistPromptInputs:
     return SpecialistPromptInputs(
-        task_id="t-1",
         domain=get_domain("serving_specialist"),
         gap_canonical_id="gap.x",
         runtime_findings=runtime_findings,

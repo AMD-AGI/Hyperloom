@@ -43,8 +43,6 @@ def build_command(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "untuned_csv", "--untuned-csv")
     _add_opt(cmd, args, "moe_untuned_csv", "--moe-untuned-csv")
     _add_opt(cmd, args, "shapes_json", "--shapes-json")
-    # forge calls the manifest its preferred dense-shape source, and Hyperloom has produced one since WP-1 -- but
-    # nothing forwarded it, so the file was written and never read.
     _add_opt(cmd, args, "shapes_manifest", "--shapes-manifest")
     _add_opt(cmd, args, "demand_json", "--demand")
     _add_opt(cmd, args, "tunableop_input", "--tunableop-input")

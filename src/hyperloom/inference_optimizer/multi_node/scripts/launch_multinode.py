@@ -12,9 +12,7 @@ import json
 import os
 import shlex
 import subprocess
-import pathlib
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -398,10 +396,7 @@ def _rollback_remote(pid: int) -> str:
 def _rank0_pid_from_log(pid_dir: str) -> int | None:
     """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort)."""
     try:
-        pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
-        if not pid_path.is_file():
-            pid_path = pathlib.Path(tempfile.gettempdir()) / "multi_node_pids" / "rank_0.pid"
-        return int(pid_path.read_text().strip())
+        return int((Path(pid_dir) / "rank_0.pid").read_text().strip())
     except (OSError, ValueError):
         return None
 

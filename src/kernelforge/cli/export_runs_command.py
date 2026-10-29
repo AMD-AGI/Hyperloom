@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import click
@@ -50,13 +49,11 @@ def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     Collect the document with `hyperloom-kb-collect --mapping kernelforge-v1 --document <output>`.
     """
 
-    from kernelforge.run_export.document import NO_RAW_LOGS, normalize
+    from kernelforge.run_export.document import normalize, write_document
 
     try:
         document = normalize(log_roots)
     except OSError as error:
         raise click.ClickException(_unreadable(error)) from error
-    output.parent.mkdir(parents=True, exist_ok=True)
-    (output.parent / NO_RAW_LOGS).write_bytes(b"")
-    output.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    write_document(document, output)
     click.echo(f"wrote {len(document['runs'])} runs to {output}")

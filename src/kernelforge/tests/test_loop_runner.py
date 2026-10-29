@@ -695,7 +695,7 @@ def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeyp
     Moving it to after ``run_lanes`` returns deletes the lane copy first, and
     the guard then fails the resume before the session can answer.
     """
-    from kernelforge.cli import lanes as cli_lanes
+    from kernelforge.loop.bootstrap import lanes as cli_lanes
     from kernelforge.config import Config
     from kernelforge.orchestrator import agent as agent_module
     from kernelforge.tests.test_claude_resume import _FakeOptions, _backend

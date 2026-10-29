@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""TraceLens/bypass trace analysis: candidate env enrichment, argv assembly, and the trace_analyze handler."""
+"""TraceLens trace analysis: candidate env enrichment, argv assembly, and the trace_analyze handler."""
 
 from __future__ import annotations
 
@@ -21,16 +21,12 @@ from ._kernel_agent_tool import (
     _run_subprocess,
     _shape_tool_result,
 )
-from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom.common.coerce import first_text
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
 log = logging.getLogger(__name__)
-
-# Recognized trace-analysis routes. Only an omitted value defaults to ``agent``;
-# an explicit unknown value fails before dispatch so it cannot start an LLM.
-_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "agent"})
-
 
 _CANDIDATE_ENV_KEYS = {
     "CONC",
@@ -351,7 +347,7 @@ def _enrich_candidates_artifact(
 
 
 _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_analysis"
-_BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
+_ANALYSIS_TOOL = "tracelens"
 
 
 def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
@@ -369,22 +365,12 @@ class _AnalysisRun:
 
     trace_input: Any
     workspace_path: str
-    tracelens_root: "Path | None"
-    is_bypass: bool
+    tracelens_root: Path
+    route: AnalysisRoute
     scriptable: bool
     model_name: str
     framework: str
     target_platform: str
-    analysis_mode: str
-
-
-def _bypass_flags(state: Any, analysis_mode: str) -> list[str]:
-    """Flags only the bypass route reads; the analysis-mode hint retires with the bypass route."""
-    flags = _optional_flags(("--analysis-mode", analysis_mode))
-    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        flags += ["--require-single-rank"]
-        flags += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
-    return flags
 
 
 def _split_llm_flags(payload: dict, workload: dict) -> list[str]:
@@ -405,56 +391,44 @@ def _build_trace_analyze_cmd(
     run: _AnalysisRun,
     *,
     session_dir: Path,
-    state: Any,
     workload: dict,
 ) -> "tuple[list[str], str]":
-    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
+    """Assemble the trace-analysis tool argv; returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
-    is_bypass = run.is_bypass
     scriptable = run.scriptable
-    # Both tools share the CLI surface below except ``--tracelens-root``.
     cmd = [
         sys.executable,
         "-m",
-        _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
+        _TRACELENS_ANALYSIS_MODULE,
         "--trace-input",
         str(run.trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
         run.workspace_path,
-    ]
-    if not is_bypass:
+        "--route",
+        run.route.value,
         # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(run.tracelens_root)]
-        # The tool's SDK run books its model requests onto this session's trajectory ledger.
-        for key, value in inherited_scope_fields().items():
-            cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
-    else:
-        cmd += _bypass_flags(state, run.analysis_mode)
+        "--tracelens-root",
+        str(run.tracelens_root),
+    ]
+    # The tool's SDK run books its model requests onto this session's trajectory ledger.
+    for key, value in inherited_scope_fields().items():
+        cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
 
-    model_path = first_text(payload.get("model_path"), getattr(state, "model_path", ""), os.environ.get("MODEL_PATH"))
-    precision = first_text(payload.get("precision"), getattr(state, "precision", ""))
     cmd += _optional_flags(
         ("--model-name", run.model_name),
         ("--framework", run.framework),
         ("--target-platform", run.target_platform),
-        ("--model-path", model_path),
-        ("--precision", precision),
     )
-
-    if scriptable:
-        num_denoise = optional_positive_int(payload.get("num_denoise_steps"))
-        cmd += _optional_flags(("--num-denoise-steps", num_denoise))
-    elif not is_bypass:
-        cmd += _split_llm_flags(payload, workload)
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    if scriptable and not is_bypass:
+    if scriptable:
         steady_state_mode = "generic"
     else:
+        cmd += _split_llm_flags(payload, workload)
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()
@@ -469,77 +443,43 @@ def _build_trace_analyze_cmd(
     return cmd, steady_state_mode
 
 
-# TraceLens picks its steady-state window by writing split chunks and selecting
-# one file; the TraceLens-free reader picks a window in memory and never writes
-# chunks. Both answer "is the window this analysis rests on trustworthy", so the
-# event normalizes them onto one shape and keeps the raw form under ``selected``.
-_STEADY_SOURCE_SPLIT_CHUNK = "split_chunk"
-_STEADY_SOURCE_READER_WINDOW = "in_reader_window"
-
-
-def _analysis_steady_state(
-    result: dict[str, Any],
-    *,
-    requested_mode: str,
-    tool: str,
-) -> dict[str, Any]:
-    """Normalize the steady-state window across analysis tools.
+def _analysis_steady_state(result: dict[str, Any], *, requested_mode: str) -> dict[str, Any]:
+    """Describe the steady-state window the run analysed, from the tool's split selection.
 
     Args:
         result: The analysis tool's result dict.
         requested_mode: The steady-state mode asked of the tool.
-        tool: ``tracelens`` or ``bypass``.
 
     Returns:
-        A dict naming the requested mode, how the window was picked, the raw
-        selection, whether the tool fell back to the full trace, and the
-        aggregation scope the shares are anchored to.
+        A dict naming the requested mode, the raw selection and whether the tool
+        fell back to the full trace.
     """
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
-    scope = str(result.get("aggregation_scope") or run_meta.get("aggregation_scope") or "")
-    if tool == "bypass":
-        selected = result.get("steady_window") or {}
-        fell_back = bool(result.get("estimated")) or (bool(scope) and scope != "steady_state")
-        source = _STEADY_SOURCE_READER_WINDOW
-    else:
-        selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
-        selected = selection or {}
-        fell_back = bool(selection.get("fell_back_to_full_trace"))
-        source = _STEADY_SOURCE_SPLIT_CHUNK
+    selection = run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {}
     return {
         "requested_mode": str(requested_mode or ""),
-        "source": source,
-        "selected": selected if isinstance(selected, dict) else {"value": selected},
-        "fell_back_to_full_trace": fell_back,
-        "aggregation_scope": scope,
+        "selected": selection,
+        "fell_back_to_full_trace": bool(selection.get("fell_back_to_full_trace")),
     }
-
-
-def _analysis_tool(route: str) -> str:
-    """The tool a route runs: agent runs TraceLens, bypass its standalone reader."""
-    return "bypass" if route == "bypass" else "tracelens"
 
 
 def _build_analysis_meta(
     result: dict[str, Any],
     *,
-    route: str,
+    route: AnalysisRoute,
     requested_mode: str,
     trace_input: str,
     duration_sec: float,
 ) -> dict[str, Any]:
     """Assemble the per-run analysis metadata the roofline timeline event carries.
 
-    The TraceLens agent and TraceLens-free reader share this envelope. ``route``
-    records the routing policy (``agent`` / ``bypass``), while ``tool`` records
-    the implementation that ran (``tracelens`` / ``bypass``). Tool-specific
-    analysis output lands under ``route_ext`` rather than widening the shared
-    envelope.
+    ``route`` records the routing policy (``agent`` / ``non-llm``) and ``tool`` the
+    implementation that ran, which is TraceLens on both. Tool-specific analysis
+    output lands under ``route_ext`` rather than widening the shared envelope.
 
     Args:
         result: The analysis tool's result dict.
-        route: The requested analysis route (``agent`` / ``bypass``); it names
-            the tool that ran (``tracelens`` / ``bypass``).
+        route: The analysis route the run took.
         requested_mode: The steady-state mode asked of the tool.
         trace_input: The trace the run analyzed.
         duration_sec: Wall-clock seconds the subprocess took.
@@ -547,16 +487,15 @@ def _build_analysis_meta(
     Returns:
         The analysis metadata dict.
     """
-    tool = _analysis_tool(route)
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     steps = run_meta.get("steps")
     return {
-        "route": str(route or ""),
-        "tool": str(tool or ""),
+        "route": route.value,
+        "tool": _ANALYSIS_TOOL,
         "steady_state_mode": str(requested_mode or ""),
         "trace_input": str(trace_input or ""),
         "duration_sec": duration_sec,
-        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode, tool=tool),
+        "steady_state": _analysis_steady_state(result, requested_mode=requested_mode),
         "preflight": run_meta.get("preflight") if isinstance(run_meta.get("preflight"), dict) else {},
         "split": run_meta.get("split") if isinstance(run_meta.get("split"), dict) else {},
         "selection": run_meta.get("selection") if isinstance(run_meta.get("selection"), dict) else {},
@@ -565,17 +504,17 @@ def _build_analysis_meta(
     }
 
 
-def _record_tool_version(session_dir: Path, tool: str) -> None:
-    # This run is the only place the build of the reader that produced the session's hot
+def _record_tool_version(session_dir: Path) -> None:
+    # This run is the only place the TraceLens build that produced the session's hot
     # kernels is in scope. Nothing downstream can recover it, so it is recorded here even
     # though the rest of the discovery run is already on the roofline event.
     from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
     from hyperloom.inference_optimizer.breakdown.recorder.trace import trace_skip
 
     try:
-        tool_versions.record_tool_version(session_dir, tool=tool)
+        tool_versions.record_tool_version(session_dir, tool=_ANALYSIS_TOOL)
     except recorder_warnings.RECORDING_ERRORS as exc:
-        trace_skip(reason="caller raised before the recorder", section="versions", entity=tool, error=exc)
+        trace_skip(reason="caller raised before the recorder", section="versions", entity=_ANALYSIS_TOOL, error=exc)
 
 
 def _framework_for_analysis(payload: dict, state: Any) -> tuple[str, list[dict[str, Any]]]:
@@ -691,35 +630,29 @@ async def trace_analyze_handler(
     framework, framework_warnings = _framework_for_analysis(payload, state)
     target_platform = first_text(payload.get("target_platform"), state.gpu_type)
     model_name = first_text(payload.get("model_name"), state.model_name, state.model_path)
-    analysis_mode = first_text(payload.get("analysis_mode"))
-    if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
-        analysis_mode = "inference"
 
-    # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``bypass`` (no-LLM,
-    # but still imports TraceLens for source mapping) is the explicit route via
-    # payload ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``.
-    explicit_route = _requested_route(payload)
+    # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``non-llm`` runs TraceLens alone,
+    # selected via payload ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``.
+    requested_route = _requested_route(payload)
     # An explicit unknown route is a configuration error. Falling back to
     # ``agent`` could turn a no-LLM request into a paid model session.
-    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        valid_routes = sorted(_VALID_ANALYSIS_ROUTES)
+    try:
+        analysis_route = AnalysisRoute(requested_route) if requested_route else AnalysisRoute.AGENT
+    except ValueError:
+        valid_routes = [route.value for route in AnalysisRoute]
         message = (
-            f"unknown analysis_route {explicit_route!r} (expected one of {valid_routes}); "
+            f"unknown analysis_route {requested_route!r} (expected one of {valid_routes}); "
             "refusing to fall back to 'agent' because that may start an LLM session. "
-            "Use 'bypass' for no-LLM trace analysis."
+            "Use 'non-llm' for no-LLM trace analysis."
         )
         log.error("trace_analyze: %s", message)
         return {
             "status": "failed",
             "error_class": "invalid_analysis_route",
             "error": message,
-            "requested_route": explicit_route,
+            "requested_route": requested_route,
             "valid_routes": valid_routes,
         }
-    analysis_route = explicit_route or "agent"
-    is_bypass = analysis_route == "bypass"
-    # Both routes need an importable checkout: bypass transitively imports
-    # TraceLens for source-path mapping.
     tracelens_root = paths.tracelens_root()
     # Self-heal when the checkout is missing or incomplete (no .git).
     if not (tracelens_root / ".git").exists():
@@ -746,15 +679,13 @@ async def trace_analyze_handler(
             trace_input=trace_input,
             workspace_path=workspace_path,
             tracelens_root=tracelens_root,
-            is_bypass=is_bypass,
+            route=analysis_route,
             scriptable=scriptable,
             model_name=model_name,
             framework=framework,
             target_platform=target_platform,
-            analysis_mode=analysis_mode,
         ),
         session_dir=session_dir,
-        state=state,
         workload=workload,
     )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
@@ -787,9 +718,6 @@ async def trace_analyze_handler(
     if isinstance(candidates_path, str):
         _enrich_candidates_artifact(candidates_path, metadata, trace_report_path=report_path)
 
-    # Route and tool are one-to-one after the no-LLM TraceLens route was
-    # removed: agent runs TraceLens, while bypass runs its standalone reader.
-    _disc_tool = _analysis_tool(analysis_route)
     # Surfaced for the caller's SBD V6 roofline event, which records the run
     # as it happens rather than re-deriving it at export time.
     result["analysis_meta"] = _build_analysis_meta(
@@ -799,5 +727,5 @@ async def trace_analyze_handler(
         trace_input=str(trace_input),
         duration_sec=_disc_duration_sec,
     )
-    _record_tool_version(session_dir, _disc_tool)
+    _record_tool_version(session_dir)
     return result

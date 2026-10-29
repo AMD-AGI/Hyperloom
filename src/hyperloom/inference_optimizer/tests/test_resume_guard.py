@@ -24,11 +24,8 @@ from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
 def test_real_coordinator_database_path_is_checked_before_resume(tmp_path):
-    path = db_path_for(tmp_path)
-    path.parent.mkdir(parents=True)
-    with closing(sqlite3.connect(path)) as db, db:
-        db.execute("CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, pid INTEGER)")
-        db.execute("INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123)")
+    path = _database(tmp_path)
+    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123, '')")
     before = path.read_bytes()
 
     with pytest.raises(ResumeBlocked, match="holder-1"):
@@ -37,14 +34,15 @@ def test_real_coordinator_database_path_is_checked_before_resume(tmp_path):
     assert path.read_bytes() == before
 
 
-def _database(tmp_path, *, legacy=False):
+def _database(tmp_path):
     path = db_path_for(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path)) as db:
-        scope = "" if legacy else ", owner_scope TEXT NOT NULL DEFAULT ''"
         db.executescript(
-            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, pid INTEGER" + scope + ");"
-            "CREATE TABLE tasks (task_id TEXT, state TEXT, requires_lanes TEXT, history TEXT, params TEXT);"
+            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, pid INTEGER,"
+            " owner_scope TEXT NOT NULL DEFAULT '');"
+            "CREATE TABLE tasks (task_id TEXT, state TEXT, requires_lanes TEXT, history TEXT, params TEXT,"
+            " updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00+00:00');"
             "CREATE TABLE bringup_rounds (round_id TEXT, state TEXT, holder_task_id TEXT);"
             "CREATE TABLE gpu_leases (gpu_id INTEGER, holder_id TEXT, task_id TEXT);"
         )
@@ -60,7 +58,7 @@ def _task(path, *, state="running", evidence=None, task_id="task-1"):
     history = [] if evidence is None else [{"from": "running", "to": state, "evidence": evidence}]
     _execute(
         path,
-        "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO tasks (task_id, state, requires_lanes, history, params) VALUES (?, ?, ?, ?, ?)",
         (task_id, state, '["benchmark_lane"]', json.dumps(history), '{"api_key": "never-print-this-secret"}'),
     )
 
@@ -82,20 +80,6 @@ def test_unknown_lease_scope_blocks_without_mutating_database(tmp_path, scope):
     assert path.read_bytes() == before
 
 
-def test_legacy_lease_without_scope_column_is_not_migrated(tmp_path):
-    path = _database(tmp_path, legacy=True)
-    _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123)")
-    before = path.read_bytes()
-
-    with pytest.raises(ResumeBlocked, match="task-1"):
-        ensure_resume_safe(tmp_path, owner_scope="this-boot:pidns")
-
-    assert path.read_bytes() == before
-    with closing(sqlite3.connect(path)) as db:
-        assert "owner_scope" not in {row[1] for row in db.execute("PRAGMA table_info(leases)")}
-
-
 def test_matching_scope_is_left_for_existing_reaper(tmp_path):
     path = _database(tmp_path)
     _task(path)
@@ -113,29 +97,22 @@ def test_absent_database_is_not_created(tmp_path):
     assert not db_path_for(tmp_path).parent.exists()
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_empty_database_has_no_unknown_execution(tmp_path, legacy):
-    path = _database(tmp_path, legacy=legacy)
+@pytest.mark.parametrize("schema", [True, False], ids=["empty", "no-schema"])
+def test_empty_database_has_no_unknown_execution(tmp_path, schema):
+    if schema:
+        path = _database(tmp_path)
+    else:
+        path = db_path_for(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
     before = path.read_bytes()
     ensure_resume_safe(tmp_path, owner_scope="local")
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("table", ["leases", "tasks", "bringup_rounds", "gpu_leases"])
-def test_missing_unused_table_is_not_created(tmp_path, table):
-    path = _database(tmp_path)
-    _execute(path, f"DROP TABLE {table}")
-    before = path.read_bytes()
-    ensure_resume_safe(tmp_path, owner_scope="local")
-    assert path.read_bytes() == before
-
-
-@pytest.mark.parametrize("missing_table", [False, True])
-def test_running_task_without_lease_is_not_proof_of_exit(tmp_path, missing_table):
+def test_running_task_without_lease_is_not_proof_of_exit(tmp_path):
     path = _database(tmp_path)
     _task(path)
-    if missing_table:
-        _execute(path, "DROP TABLE leases")
     before = path.read_bytes()
 
     with pytest.raises(ResumeBlocked, match="task-1") as exc:
@@ -426,7 +403,7 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI imports require POSIX fcntl")
-@pytest.mark.parametrize("residual", ["foreign", "legacy", "cancelled", "matching", "older_schema"])
+@pytest.mark.parametrize("residual", ["foreign", "cancelled", "matching", "older_schema"])
 def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkeypatch, capsys, residual):
     import hyperloom.inference_optimizer.cli as cli
     from hyperloom.orchestrator.bus import resource_lock
@@ -435,13 +412,10 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    path = _database(session_dir, legacy=residual == "legacy")
+    path = _database(session_dir)
     if residual == "cancelled":
         _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
         _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    elif residual == "legacy":
-        _task(path)
-        _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123)")
     elif residual == "older_schema":
         _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
         _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
@@ -627,18 +601,16 @@ def _rows(path, table):
         return [dict(row) for row in db.execute(f"SELECT * FROM {table}")]
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path, legacy):
-    path = _database(tmp_path, legacy=legacy)
+def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path):
+    path = _database(tmp_path)
     _task(path)
     _task(path, state="queued", task_id="other-task")
-    scope = "" if legacy else ", ''"
     for lane, holder, task in [
         ("benchmark_lane", "execution-1", "task-1"),
         ("bringup_round", "round-1", "task-1"),
         ("other_lane", "execution-2", "other-task"),
     ]:
-        _execute(path, f"INSERT INTO leases VALUES (?, ?, ?, 123{scope})", (lane, holder, task))
+        _execute(path, "INSERT INTO leases VALUES (?, ?, ?, 123, '')", (lane, holder, task))
     _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'other-task')")
@@ -675,8 +647,6 @@ def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path, 
         ensure_resume_safe(tmp_path, owner_scope="local")
     _confirm_in_sqlite(path, task_id="other-task")
     ensure_resume_safe(tmp_path, owner_scope="local")
-    if legacy:
-        assert "owner_scope" not in _rows(path, "leases")[0]
 
 
 @pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
@@ -684,7 +654,6 @@ def test_confirmation_preserves_terminal_history_payload_and_timestamp(tmp_path,
     path = _database(tmp_path)
     old_evidence = {"cleanup_confirmed": False, "outcome": {"state": "succeeded", "result": {"secret": "old-result"}}}
     _task(path, state=state, evidence=old_evidence)
-    _execute(path, "ALTER TABLE tasks ADD COLUMN updated_at TEXT DEFAULT '2026-01-01T00:00:00+00:00'")
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
     old_history = json.loads(_rows(path, "tasks")[0]["history"])
 
@@ -708,14 +677,9 @@ def test_confirmation_without_execution_leases_can_resolve_uncertain_owner(tmp_p
     _task(path, state=state, evidence={"reason": "cancelled_in_flight"})
     if state == "cancelled":
         _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    for table in ("leases", "gpu_leases"):
-        _execute(path, f"DROP TABLE {table}")
     result = _confirm_in_sqlite(path)
     assert result == dict(status="confirmed", task_id="task-1", released_leases=0, released_gpu_leases=0)
     ensure_resume_safe(tmp_path, owner_scope="local")
-    with closing(sqlite3.connect(path)) as db:
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert "leases" not in tables and "gpu_leases" not in tables
 
 
 @pytest.mark.parametrize("state", ["queued", "succeeded", "failed", "cancelled"])
@@ -732,14 +696,13 @@ def test_confirmation_does_not_cancel_clean_or_unstarted_task(tmp_path, state, o
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("scope", ["local", "foreign", " ", None, 0])
+@pytest.mark.parametrize("scope", ["local", "foreign", " ", 0])
 @pytest.mark.parametrize("lane", ["benchmark_lane", "bringup_round"])
 def test_confirmation_rejects_any_nonempty_or_invalid_target_scope(tmp_path, scope, lane):
     from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
 
-    path = _database(tmp_path, legacy=True)
+    path = _database(tmp_path)
     _task(path)
-    _execute(path, "ALTER TABLE leases ADD COLUMN owner_scope")
     _execute(path, "INSERT INTO leases VALUES ('other_lane', 'empty-owner', 'task-1', 123, '')")
     _execute(path, "INSERT INTO leases VALUES (?, 'owner', 'task-1', 123, ?)", (lane, scope))
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
@@ -862,7 +825,7 @@ def test_confirmation_public_uses_real_session_lock_and_existing_database(tmp_pa
     from hyperloom.inference_optimizer.session.lock import SessionLock
     from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
 
-    path = _database(tmp_path, legacy=True)
+    path = _database(tmp_path)
     _task(path)
     before = path.read_bytes()
     with SessionLock(tmp_path):
@@ -978,12 +941,12 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="End-to-end CLI confirmation requires a real POSIX flock")
-def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_path, monkeypatch):
+def test_confirmation_cli_real_unscoped_ledger_then_normal_resume_admission(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli.parser import _build_parser
 
-    path = _database(tmp_path, legacy=True)
+    path = _database(tmp_path)
     _task(path)
-    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder', 'task-1', 123)")
+    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder', 'task-1', 123, '')")
     _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
     with pytest.raises(ResumeBlocked):
         ensure_resume_safe(tmp_path, owner_scope="local")
@@ -1009,3 +972,17 @@ def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_pa
     entry = json.loads(_rows(path, "tasks")[0]["history"])[-1]
     assert entry["evidence"]["operator"] == pwd.getpwuid(os.getuid()).pw_name
     assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
+def test_confirmation_public_refuses_older_schema_without_changes(tmp_path):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
+
+    path = _database(tmp_path)
+    _task(path)
+    _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError, match="schema version 6"):
+        confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
+    assert path.read_bytes() == before

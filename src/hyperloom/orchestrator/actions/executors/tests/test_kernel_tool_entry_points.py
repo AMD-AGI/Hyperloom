@@ -15,7 +15,6 @@ from hyperloom.orchestrator.phases import kernel as kernel_phase
 
 _TOOL_MODULES = (
     trace_analyze._TRACELENS_ANALYSIS_MODULE,
-    trace_analyze._BYPASS_TRACE_ANALYSIS_MODULE,
     kernel_phase._GEAK_RUNNER_MODULE,
 )
 

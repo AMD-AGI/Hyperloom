@@ -12,6 +12,7 @@ to the document's directory: only ``NO_RAW_LOGS``.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -28,3 +29,10 @@ def normalize(roots: Sequence[Path]) -> dict[str, list[Any]]:
     order given, and the raw log every Experience links."""
 
     return {"runs": [unit for root in roots for unit in forge_loop_runs(root)], "raw_logs": [NO_RAW_LOGS]}
+
+
+def write_document(document: dict[str, list[Any]], output: Path) -> None:
+    """Write ``document`` to ``output`` and the empty ``NO_RAW_LOGS`` beside it, truncating one already there."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    (output.parent / NO_RAW_LOGS).write_bytes(b"")
+    output.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

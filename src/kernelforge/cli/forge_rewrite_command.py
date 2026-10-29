@@ -10,15 +10,9 @@ from dataclasses import dataclass
 
 import click
 
-from kernelforge.cli.options import (
-    CeilingSwitch,
-    GpuOptions,
-    _gpu_options,
-    _roofline_ceiling_option,
-    _validate_max_hours,
-)
-from kernelforge.option_groups import option_group
-from kernelforge.config import Config, KnowledgeConfig
+from kernelforge.cli.option_groups import option_group
+from kernelforge.cli.options import _gpu_options, _roofline_ceiling_option, _validate_max_hours
+from kernelforge.config import CeilingSwitch, Config, GpuOptions, KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
 from kernelforge.rewrite_by_flydsl.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace

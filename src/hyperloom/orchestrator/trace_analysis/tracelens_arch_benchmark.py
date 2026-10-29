@@ -155,7 +155,7 @@ def build_hyperloom_arch_spec(platform: str) -> dict | None:
 
     key = (platform or "").strip().lower()
     # Achievable first, vendor theoretical when a GPU has no measured entry: the same order the
-    # model-level ceiling and the bypass roofline already resolve peaks in.
+    # model-level ceiling already resolves peaks in.
     spec = HW_SPECS_ACHIEVABLE.get(key)
     if not isinstance(spec, dict):
         spec = HW_SPECS.get(key)

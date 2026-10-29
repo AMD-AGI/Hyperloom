@@ -46,7 +46,7 @@ def _shape_row(label: str, dist: Mapping[str, Any] | None) -> str:
 def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
     """Describe the agentic corpus a session replays, from ``SharedState.agentx_corpus_shape``; ``[]`` when unset."""
     # One renderer for both prompts so the corpus numbers are never two copies of the same literals. The shape is
-    # seeded from the canonical corpus and replaced by each aiperf run's measured distribution.
+    # seeded from the canonical corpus at bootstrap.
     if not shape:
         return []
     lines = [

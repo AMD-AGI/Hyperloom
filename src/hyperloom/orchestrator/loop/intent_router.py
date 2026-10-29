@@ -427,7 +427,6 @@ class IntentRouter(CoordinatorCollaborator):
             return ""
         for key in (
             "domain",
-            "source_domain",
             "provenance",
             "gap_canonical_id",
             "gap_layer",

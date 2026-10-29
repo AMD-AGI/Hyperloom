@@ -1414,7 +1414,7 @@ class _DeterministicClient:
 @pytest.fixture
 def critic_agent_root() -> Path:
     """Locate the real critic-agent checkout. Skip gracefully if absent."""
-    root = _resolve_agent_root("critic")
+    root = _resolve_agent_root()
     if root is None:
         pytest.skip(
             "critic-agent runtime not found — set CRITIC_AGENT_ROOT or check the src/hyperloom/agents/critic/ install"

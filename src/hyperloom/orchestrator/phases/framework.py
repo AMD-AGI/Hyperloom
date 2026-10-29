@@ -222,7 +222,7 @@ def _forward_integrate_source(
 ) -> None:
     """Preserve proposal ownership across delayed ``integrate_patch`` execution."""
 
-    domain = str(src.get("domain") or src.get("source_domain") or "").strip()
+    domain = str(src.get("domain") or "").strip()
     source_phase = patch_owner_phase(src)
     if source_phase:
         dst["source_phase"] = source_phase
@@ -1549,14 +1549,14 @@ class FrameworkPhase(ProposalBench):
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
-        from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
+        from ..actions.executors._framework_gap_composer import compose_gap
 
         return compose_gap(
             framework=str(state.framework or ""),
             gpu_type=str(state.gpu_type or ""),
             model_class=str(state.model_class or ""),
             precision=str(state.precision or ""),
-            evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
+            rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
         )
 
     def _record_local_explore_proposal(

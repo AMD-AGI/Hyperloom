@@ -658,6 +658,12 @@ from these benchmark limits and retain their existing contracts.
 | `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
 | `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
 
+## TraceLens analysis route
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A `trace_analyze` request's `analysis_route` key overrides it. Any other value fails the request. |
+
 ## TraceLens analysis budgets
 
 On the Claude backend, the TraceLens analysis session bounds each wait for the
@@ -755,7 +761,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills calls still missing their token or text half, the recipe-KB, specialist-intel, Forge-step, GEMM-tuning and trajectory logs, and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
@@ -771,7 +777,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 ### Langfuse and artifact-package — security and known limitations
 
 * **Sensitive data surface**: When live push is on, `conversations.jsonl`
-  (and Langfuse Generations) carry full prompt/response text. `redact_secrets`
+  (and Langfuse Generations) carry full prompt/response text. `redact_secret_values`
   scrubs common token shapes (Bearer, `sk-`/`pk-`, GitHub tokens, some
   `KEY=value`) but is not a complete data loss prevention (DLP) filter — bare keys without a
   recognizable prefix (for example, raw AWS `AKIA…`) can slip through. The artifact
@@ -785,11 +791,11 @@ Primary switch (default **off**) for live Langfuse trace push.
   disabling live push or loose packaging for those runs.
 * **`live push` + `backfill_langfuse` overlap**: Both derive the same
   `trace_id` from `claw_session_id`, so running the offline backfill *after* a
-  live run re-emits the out-of-process children onto the same trace and can
+  live run re-emits the generations and decision scores onto the same trace and can
   duplicate observations. Use one path per session, or treat backfill as a
   recovery tool only when live push did not run.
 * **`flush_session` is idempotent, and retries only what failed**: the
-  session-end reconcile runs as named steps (leftover halves, `ext/` shards,
+  session-end reconcile runs as named steps (leftover halves,
   recipe-KB audit, specialist intel, forge steps, GEMM tuning, trajectory,
   decision scores, span close, final SDK flush). Every call runs every step,
   and each step sends only what is still owed, so a duplicated CLOSE step
@@ -801,13 +807,12 @@ Primary switch (default **off**) for live Langfuse trace push.
   (a crash plus a `--resume`, or two shutdown paths racing) reports into the
   same trace. `rows_sent` maps each
   append-only log, by its path under the session directory, to how many of its
-  rows were sent: the `ext/*.jsonl` and `trajectory/*.jsonl` shards, the
+  rows were sent: the `trajectory/*.jsonl` shards, the
   recipe-KB audit, specialist intel, forge steps and GEMM tuning logs. A call
   sends only the rows past that count, advancing it one row at a time and
   stopping at the first row it could not send, so that row is retried by the
-  next call or the next leg. A receipt written by v1.0.0 through v1.1.3 carries
-  the ext shard counts as `ext_rows_sent`, and a v1.1.3 receipt also carries the
-  trajectory shard counts as `trajectory_rows_sent`; both are still read. `decision_trace.jsonl` is rewritten ts-sorted on
+  next call or the next leg. A v1.1.3 receipt carries the trajectory shard
+  counts as `trajectory_rows_sent`, which is still read. `decision_trace.jsonl` is rewritten ts-sorted on
   every export, so decision scores are tracked by the `decision_id` its writer
   stamps on each row instead (`decisions_sent`). Both record what was handed to
   the Langfuse SDK: its flush does not report a failed export, so a row lost in

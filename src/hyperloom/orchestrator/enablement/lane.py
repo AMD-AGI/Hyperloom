@@ -26,7 +26,7 @@ from ..collaborator import CoordinatorCollaborator
 from hyperloom.inference_optimizer.breakdown.round_archive import ROLE_LAUNCH_CONFIG, RoundArchive
 from ..phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from ..loop.offload import offload
-from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
+from .params import ENABLEMENT_PARAMS_BUDGET_SEC
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
@@ -49,32 +49,9 @@ _MIN_LEASE_SEC = 300.0
 _MOVED_ROUND_OUTCOMES = {"kept": BOOTED, "advanced": ADVANCED}
 
 
-def bind_integrate_to_lane(params: dict[str, Any], state: Any, *, session_dir: Path) -> None:
-    """Make an integrate_patch an enablement round exactly when the lane can take one as it starts to run.
-
-    Admission happens long before execution, so the lane may have moved on. A
-    closed lane (succeeded, or revalidating) strips the enablement context, and
-    the integrate is graded as any other. An untagged one executing in ENABLEMENT
-    gets the round's context; a tagged one already carries it.
-
-    Args:
-        params: The integrate_patch params; updated in place.
-        state: The shared state, which owns the lane and the phase.
-        session_dir: The session root, for the recorded boot verdict.
-    """
-    if not state.enablement.accepts_rounds:
-        for key in [k for k in params if k == "enablement" or k.startswith("enablement_")]:
-            del params[key]
-        return
-    if (state.phase or "").strip().upper() != PHASE_ENABLEMENT or params.get("enablement"):
-        return
-    verdict, _ = recorded_verdict(
-        state.enablement.launch_observation_path,
-        wrapper_text=state.enablement.launch_log or "",
-        session_dir=session_dir,
-    )
-    for key, value in _round_carriers(state, verdict.signature).items():
-        params.setdefault(key, value)
+def takes_enablement_round(state: Any) -> bool:
+    """Whether an enablement round may run now: in ENABLEMENT, while the lane accepts rounds."""
+    return (state.phase or "").strip().upper() == PHASE_ENABLEMENT and state.enablement.accepts_rounds
 
 
 class EnablementLane(CoordinatorCollaborator):
@@ -441,11 +418,7 @@ class EnablementLane(CoordinatorCollaborator):
         state.enablement.pending = False
 
     async def close_booted(self, *, reason: str) -> None:
-        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
-
-        Once the lane no longer accepts rounds, an integrate that executes afterwards is graded as any other
-        candidate rather than as an enablement round.
-        """
+        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event."""
         enablement = self.shared_state.enablement
         enablement.succeeded = True
         enablement.validation_pending = False

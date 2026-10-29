@@ -12,11 +12,11 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.fusion import command as cli
+from kernelforge.fusion import pipeline as cli
 from kernelforge.fusion import compile_pass_claim
 from kernelforge.fusion.compile_pass_claim import _live_file_restored
 from kernelforge.fusion.source_snapshot import _discard_failed_attempt, _needs_discard, _snapshot_fusion_source
-from kernelforge.fusion.command import run as cli_main
+from kernelforge.cli.forge_fuse_command import forge_fuse as cli_main
 from kernelforge.fusion.loop import LoopResult
 from kernelforge.fusion.models import ValidationResult
 

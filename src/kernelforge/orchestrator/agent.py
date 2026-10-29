@@ -438,7 +438,7 @@ class ImplementerTask:
 class SessionOptions:
     """How each Implementer session runs: its budget, permission mode, provider and in-session gate."""
 
-    # One implementer session's wall-clock budget (see kernelforge.cli.session_budget._forge_session_timeout_sec).
+    # One implementer session's wall-clock budget (see kernelforge.loop.bootstrap.session_budget._forge_session_timeout_sec).
     session_timeout_sec: int | None = None
     permission_mode: str | None = None
     agent_backend: str | None = None

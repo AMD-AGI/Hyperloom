@@ -10,7 +10,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.fusion.command import run as main
+from kernelforge.cli.forge_fuse_command import forge_fuse as main
 from kernelforge.fusion.vllm_passes import PassState, TargetRuntime
 
 FLAG = "enable_qk_norm_rope_fusion"

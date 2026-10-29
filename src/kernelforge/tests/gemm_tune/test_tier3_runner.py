@@ -314,9 +314,9 @@ class TestPlanPreviewsWhatRunDoes:
     """A preview that answers a different question than the thing it previews is worse than no preview: it is consulted precisely when someone is unsure, and it was showing TunableOp skipped for inputs under which the real run selects it."""
 
     def test_plan_accepts_an_explicit_demand_file(self):
-        from kernelforge.gemm_tune import cli
+        from kernelforge.cli.gemm_tune_command import plan
 
-        assert any("--demand" in (p.opts or []) for p in cli.plan.params), (
+        assert any("--demand" in (p.opts or []) for p in plan.params), (
             "run takes --demand; plan must too or they diverge again"
         )
 
@@ -327,7 +327,7 @@ class TestTheCliActuallyReachesTier3:
     def test_the_cli_has_a_call_site(self):
         import inspect
 
-        from kernelforge.gemm_tune import cli
+        from kernelforge.gemm_tune import pipeline as cli
 
         source = inspect.getsource(cli)
         assert "_attempt_tier3(" in source
@@ -339,12 +339,11 @@ class TestTheCliActuallyReachesTier3:
         # something.
         import inspect
 
-        from kernelforge.gemm_tune import cli
+        from kernelforge.gemm_tune import pipeline as cli
 
         # The selected tuners run in their own function; it is still the thing tier3 has to follow.
         assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
-        # click wraps the command, so reach the function it decorated.
-        source = inspect.getsource(cli.run.callback)
+        source = inspect.getsource(cli.run_tuning)
         assert source.index("_execute_tuners(") < source.index("_attempt_tier3(")
 
     def test_a_table_with_no_adapter_is_refused_rather_than_approximated(self):
@@ -357,9 +356,9 @@ class TestTheCliActuallyReachesTier3:
         # The generated result must reach reporting and deployment, not be dropped.
         import inspect
 
-        from kernelforge.gemm_tune import cli
+        from kernelforge.gemm_tune import pipeline as cli
 
-        source = inspect.getsource(cli.run.callback)
+        source = inspect.getsource(cli.run_tuning)
         assert "generated = _attempt_tier3(" in source
         assert "results.append(generated)" in source
 
@@ -368,10 +367,10 @@ class TestTheCliActuallyReachesTier3:
         # nothing, and that is the only condition tier3 exists for in practice.
         import inspect
 
-        from kernelforge.gemm_tune import cli
+        from kernelforge.gemm_tune import pipeline as cli
 
         assert "tuner_instance.execute()" in inspect.getsource(cli._execute_tuners)
-        source = inspect.getsource(cli.run.callback)
+        source = inspect.getsource(cli.run_tuning)
         recompute = source.index("_coverage_gaps(demand_report, tuner_specs, output_path, results)")
         assert source.index("_execute_tuners(") < recompute < source.index("_attempt_tier3(")
 
@@ -399,7 +398,7 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
         )
 
     def test_an_approved_outcome_maps_onto_a_tune_result(self):
-        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.pipeline import _tier3_result
 
         out = self._outcome(judgements=[self._judgement(1.5), self._judgement(0.9)])
         res = _tier3_result(out, _gap(table="bf16_tuned_gemm.csv"))
@@ -414,7 +413,7 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
 
     def test_a_shape_the_referee_could_not_time_is_in_no_micro_figure(self):
         """All three figures describe the shapes that were timed, so they cover the same set."""
-        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.pipeline import _tier3_result
         from kernelforge.gemm_tune.tier3.referee import Judgement
 
         out = self._outcome(judgements=[self._judgement(1.5), Judgement(shape="8x1536x7168")])
@@ -425,7 +424,7 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
 
     def test_it_is_a_candidate_so_e2e_still_has_to_agree(self):
         from kernelforge.gemm_tune.candidates import is_candidate, per_tuner_candidates
-        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.pipeline import _tier3_result
 
         res = _tier3_result(self._outcome(judgements=[self._judgement(1.5)]), _gap())
         assert res.candidate is True
@@ -433,12 +432,12 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
         assert [c.tuner for c in per_tuner_candidates([res])] == [res.tuner_name]
 
     def test_an_outcome_the_referee_did_not_approve_is_not_a_result(self):
-        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.pipeline import _tier3_result
 
         assert _tier3_result(self._outcome(ok=False), _gap()) is None
 
     def test_an_attempt_that_never_reached_a_csv_is_not_a_result(self):
-        from kernelforge.gemm_tune.cli import _tier3_result
+        from kernelforge.gemm_tune.pipeline import _tier3_result
 
         assert _tier3_result(self._outcome(output_csv=""), _gap()) is None
 
@@ -453,7 +452,7 @@ class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
 class TestShapesComeFromTheDemandDocument:
     def test_the_demand_lookup_matches_what_load_demand_returns(self, tmp_path):
         # Guard against treating the parsed demand dict as an object with ``tables``.
-        from kernelforge.gemm_tune import cli, evidence
+        from kernelforge.gemm_tune import evidence, pipeline as cli
 
         report = evidence.parse_log(
             "[aiter] shape is M:512, N:1536, K:7168, "
@@ -489,7 +488,7 @@ class TestShapesComeFromTheDemandDocument:
 
 def test_a_crashed_tier3_attempt_is_reported_as_a_failed_tuner(tmp_path, monkeypatch):
     """A crash must reach the report as a failed tuner, not read as "Tier3 not attempted"."""
-    from kernelforge.gemm_tune import cli, tier3
+    from kernelforge.gemm_tune import tier3, pipeline as cli
     from kernelforge.gemm_tune.tuners.base import TuneResult
 
     def crash(*_args, **_kwargs):

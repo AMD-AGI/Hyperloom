@@ -116,8 +116,7 @@ def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
 def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
     """Normalize trace-health warnings into queryable rows.
 
-    ``code`` already carries its own namespace (``bypass_*`` for the TraceLens-free
-    reader, bare names for TraceLens), so one flat list serves every route; the
+    ``code`` already names the warning, so one flat list serves every route; the
     remaining keys are parked under ``detail`` instead of widening the row.
     """
     out: list[dict[str, Any]] = []
@@ -223,8 +222,8 @@ def analysis_detail(result: Any) -> dict[str, Any]:
     """Project one ``trace_analyze`` result into the shared detail block.
 
     ``route`` and ``tool`` both come from ``_build_analysis_meta`` -- the agent
-    route reports ``agent`` / ``tracelens``, the TraceLens-free reader reports
-    ``bypass`` / ``bypass`` -- so keeping both preserves routing policy and tool
+    route reports ``agent`` / ``tracelens``, the no-LLM route ``non-llm`` /
+    ``tracelens`` -- so keeping both preserves routing policy and tool
     provenance. Tool-specific output stays in ``route_ext``.
     """
     payload = to_mapping(result)

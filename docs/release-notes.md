@@ -48,6 +48,13 @@ it.
   `GEAK_TERM_GRACE_S` is removed: the outer kill is now only a backstop, and
   run_e2e's chance to flush `result.json` is the `GEAK_FLUSH_GRACE_S` window
   geak_runner already gives it before that kill.
+- **A Ray install is certified by Ray's own `ray start` parser**, not by the
+  version of `click` it is built on. Preflight and the kernel-tools installer
+  hand `ray start` a representative argv of the one Hyperloom runs on the head
+  and accept the CLI exactly when it parses, so a `click` release that leaves
+  the CLI working no longer triggers a reinstall or a downgrade.
+  `RAY_CLI_CLICK_MAX_VERSION` is removed, superseding the 1.1.4 entry that
+  introduced it; `RAY_VERSION` is still honoured verbatim.
 
 ## Hyperloom 1.1.5 release
 

@@ -37,6 +37,8 @@ class TestRegistryEntry:
         """The new entry must not perturb how existing sessions report."""
         assert fr.throughput_unit("xdit") == "img/s"
         assert fr.throughput_unit("sglang") == "tok/s"
+        assert fr.throughput_unit("custom") == "unit/s"
+        assert fr.throughput_unit("bogus") == "tok/s"
 
 
 class TestConfigResolution:

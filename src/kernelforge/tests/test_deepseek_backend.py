@@ -554,7 +554,7 @@ def test_a_crashed_runtime_is_not_served_to_later_sessions(tmp_path: Path) -> No
 
 def test_the_relay_never_adds_the_harness_on_its_own(tmp_path):
     """Relay members are the providers auto selection could pick; the harness is reached only by naming it."""
-    from kernelforge.cli.relay import resolve_relay_policy
+    from kernelforge.loop.bootstrap.relay import resolve_relay_policy
     from kernelforge.config import Config
 
     claude_first = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="claude"))
