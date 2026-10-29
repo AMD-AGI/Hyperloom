@@ -786,10 +786,12 @@ class StuckToolbox(LeasingToolbox):
 @dataclass
 class FakeRegressionCheck:
     """A :class:`~hyperloom_multibranch.contracts.gate.RegressionCheck` for the tests: fails on a base commit
-    ``failures`` names, with its reason, and passes on any other; ``calls`` notes every
-    ``(base_commit, candidate_delta, sources)`` it was asked about."""
+    ``failures`` names, with its reason, and passes on any other, having checked the number of cases ``cases`` gives
+    the base commit, none by default; ``calls`` notes every ``(base_commit, candidate_delta, sources)`` it was asked
+    about."""
 
     failures: Mapping[str, str] = field(default_factory=dict)
+    cases: Mapping[str, int] = field(default_factory=dict)
     calls: list[tuple[str, RecipeDelta, tuple[str, ...]]] = field(default_factory=list)
 
     async def check(
@@ -797,7 +799,7 @@ class FakeRegressionCheck:
     ) -> RegressionOutcome:
         self.calls.append((base_commit, candidate_delta, sources))
         reason = self.failures.get(base_commit)
-        return RegressionOutcome(reason is None, reason or "")
+        return RegressionOutcome(reason is None, reason or "", self.cases.get(base_commit, 0))
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:

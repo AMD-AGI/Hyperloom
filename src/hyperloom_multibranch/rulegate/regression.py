@@ -150,7 +150,7 @@ class RegressionSet:
         digest = apply(await self._repo.read_recipe(base_commit), candidate_delta).digest()
         outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta, digest) for case in cases)
         failed = [f"{case.case_ref}: {outcome}" for case, outcome in zip(cases, outcomes) if outcome != NOT_REPRODUCED]
-        return RegressionOutcome(not failed, "; ".join(failed))
+        return RegressionOutcome(not failed, "; ".join(failed), len(cases))
 
     async def _cases(self, commits: Iterable[str]) -> list[RegressionCase]:
         """Every commit's cases, each once, in the order they are first found."""

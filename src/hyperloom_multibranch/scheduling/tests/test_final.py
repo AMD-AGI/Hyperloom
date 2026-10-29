@@ -352,6 +352,19 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
     assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta(), ()) for tag in ("i1", "c7"))
 
 
+async def test_a_candidate_check_says_how_many_regression_cases_ran_on_its_commit(tmp_path: Path) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1080.0, CONC: 1080.0},
+        frozenset({"c7"}): {MAIN_POINT: 1060.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+    bench.regression.cases = {bench.commits["i1"]: 2}
+
+    choice = await bench.selector().select(bench.candidates())
+
+    assert [(check.regression_passed, check.regression_cases) for check in choice.checks] == [(True, 2), (True, 0)]
+
+
 async def test_a_cold_start_within_the_reproduction_tolerance_of_its_record_is_reproduced(tmp_path: Path) -> None:
     curves = {
         frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},

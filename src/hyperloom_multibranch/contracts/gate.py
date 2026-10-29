@@ -95,10 +95,12 @@ class SessionGate(Protocol):
 
 @dataclass(frozen=True)
 class RegressionOutcome:
-    """What the regression set found: ``passed``, or why not in ``reason``, naming each failed case and its cause."""
+    """What the regression set found: ``passed``, or why not in ``reason``, naming each failed case and its cause, and
+    how many ``cases`` it checked, so a set with no case is told from one whose cases all ran clean."""
 
     passed: bool
     reason: str = ""
+    cases: int = 0
 
 
 class RegressionCheck(Protocol):
@@ -108,9 +110,9 @@ class RegressionCheck(Protocol):
     The integrator names the commit a merge brings in as ``sources``: a fix only that commit's ancestry holds is not in
     the integration head's. FINAL names none, because the candidate's own commit carries its whole ancestry.
 
-    It passes only when every case ran clean, and passes without a test when there is no case. A case that reproduced,
-    or ended without a verdict for any reason, fails it; a test outcome is never raised. A caller that is cancelled
-    takes the repro tests back.
+    It passes only when every case ran clean, and passes without a test, checking no case, when there is no case. A
+    case that reproduced, or ended without a verdict for any reason, fails it; a test outcome is never raised. A caller
+    that is cancelled takes the repro tests back.
     """
 
     async def check(

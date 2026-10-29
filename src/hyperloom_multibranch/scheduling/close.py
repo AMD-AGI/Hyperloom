@@ -119,12 +119,15 @@ def _final_lines(final: FinalChoice | None) -> list[str]:
         return ["No final selection ran."]
     chosen = final.chosen
     head = f"Chosen: {chosen.label} `{chosen.commit}` on {chosen.branch}" if chosen else "Chosen: none"
-    lines = [head, f"Reason: {final.reason}", "", "| candidate | commit | eligible | degraded concs | error |"]
-    lines.append("|---|---|---|---|---|")
+    header = "| candidate | commit | eligible | regression cases | degraded concs | error |"
+    lines = [head, f"Reason: {final.reason}", "", header, "|---|---|---|---|---|---|"]
     for check in final.checks:
         candidate = check.candidate
         degraded = ", ".join(str(conc) for conc in check.degraded_concs)
-        lines.append(f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {degraded} | {check.error} |")
+        lines.append(
+            f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {check.regression_cases} | {degraded} "
+            f"| {check.error} |"
+        )
     return lines
 
 

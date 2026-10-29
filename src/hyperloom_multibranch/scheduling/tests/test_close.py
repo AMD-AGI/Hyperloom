@@ -50,7 +50,13 @@ from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, Know
 from hyperloom_multibranch.scheduling import mb_fakes
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
-from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
+from hyperloom_multibranch.scheduling.close import (
+    CloseReport,
+    Closer,
+    ended_before_final,
+    report_document,
+    report_markdown,
+)
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -64,7 +70,7 @@ from hyperloom_multibranch.scheduling.exports import (
 )
 from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
-from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
+from hyperloom_multibranch.scheduling.final import CandidateCheck, FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.integrator import (
     ADOPTING_LEAD,
     CONFLICT_TRUNCATED,
@@ -304,8 +310,10 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
     assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge
+    assert all(check["regression_cases"] == 0 for check in breakdown["close"]["selection"]["checks"])
     markdown = layout.report_markdown.read_text()
     assert "Chosen: integration `i1`" in markdown
+    assert "| candidate | commit | eligible | regression cases | degraded concs | error |" in markdown
     assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
     assert f"Playbook: {knowledge['playbook']['status']}" in markdown
     assert f"Lesson curation: {SKIPPED} {NO_LESSONS}" in markdown
@@ -586,6 +594,20 @@ def test_a_pid_of_a_killed_session_another_process_reuses_is_not_the_session_run
 def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: SessionLayout) -> None:
     with pytest.raises(ValueError, match=f"already chose {CHOSEN}"):
         ended_before_final(_written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE))
+
+
+def test_the_report_says_how_many_regression_cases_ran_on_each_candidate() -> None:
+    chosen = FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0)
+    checks = (
+        CandidateCheck(chosen, {64: 1041.0}, True, True, True, regression_cases=2),
+        CandidateCheck(FinalCandidate("best branch", "b01", "c7", 1030.0), {64: 1030.0}, True, True, True),
+    )
+    final = FinalChoice(chosen, checks, "the higher value", METRIC, 64)
+    report = CloseReport(SessionStopReason.TIME_EXHAUSTED, final, None, StopReport((), QueueState()), "")
+
+    lines = report_markdown(report, "s").splitlines()
+
+    assert "| integration | `i1` | True | 2 |  |  |" in lines and "| best branch | `c7` | True | 0 |  |  |" in lines
 
 
 def test_a_final_that_chose_nothing_may_be_run_again(layout: SessionLayout) -> None:

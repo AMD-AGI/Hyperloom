@@ -142,7 +142,8 @@ class CandidateCheck:
     """What validating one candidate found.
 
     ``curve`` is the sweep's primary metric per conc, without the concs it measured nothing at; ``degraded_concs``
-    are the sweep points that fell below the other candidate's. ``note`` says what the choice's reason should carry
+    are the sweep points that fell below the other candidate's. ``regression_cases`` is how many regression cases ran
+    on the commit, none when no fix it builds on registered one. ``note`` says what the choice's reason should carry
     about how this candidate was measured, for a candidate that was still ranked on something short of a whole sweep.
     """
 
@@ -151,6 +152,7 @@ class CandidateCheck:
     accuracy_passed: bool = False
     reproduced: bool = False
     regression_passed: bool = False
+    regression_cases: int = 0
     degraded_concs: tuple[int, ...] = ()
     error: str = ""
     note: str = ""
@@ -266,13 +268,14 @@ class FinalSelector:
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
         regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA, sources=()))
         await together(sweep, repro, regression)
-        swept, reproduction = sweep.result(), repro.result()
+        swept, reproduction, regressed = sweep.result(), repro.result(), regression.result()
         check = CandidateCheck(
             candidate,
             sweep_curve(swept, self._metric) if swept.validity is Validity.SUCCEEDED else {},
             reproduction.accuracy_passed,
             reproduction.reproduced,
-            regression.result().passed,
+            regressed.passed,
+            regression_cases=regressed.cases,
         )
         if self._workload.conc in check.curve:
             return check

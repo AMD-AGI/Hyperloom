@@ -220,6 +220,15 @@ async def test_a_commit_no_fix_built_on_passes_without_a_test(session):
     assert session.runs() == []
 
 
+async def test_the_outcome_counts_the_cases_it_checked_so_an_empty_set_is_told_from_a_clean_one(session):
+    none = await session.regression.check(ROOT, MERGE, sources=())
+    one = await session.regression.check("c1", MERGE, sources=())
+    both = await session.regression.check("c1", MERGE, sources=("c2",))
+
+    assert (none.cases, one.cases, both.cases) == (0, 1, 2)
+    assert none.passed and one.passed and both.passed
+
+
 async def test_each_case_of_the_base_and_the_sources_runs_once_on_the_candidate_concurrently(session):
     session.toolbox.hold = True
     checking = asyncio.create_task(session.regression.check("c1", MERGE, sources=("c2", "c1")))
@@ -228,7 +237,7 @@ async def test_each_case_of_the_base_and_the_sources_runs_once_on_the_candidate_
 
     await session.toolbox.finish()
 
-    assert await checking == RegressionOutcome(True)
+    assert await checking == RegressionOutcome(True, cases=2)
     runs = session.runs()
     assert [(run.branch_id, run.parent_commit, run.delta) for run in runs] == [(INTEGRATION_BRANCH, "c1", MERGE)] * 2
     assert {run.attachments for run in runs} == {OVERFLOW, NAN}
@@ -249,7 +258,7 @@ async def test_a_case_that_does_not_run_clean_fails_the_set_with_its_cause(sessi
 
     outcome = await session.regression.check("c2", MERGE, sources=("c1",))
 
-    assert outcome == RegressionOutcome(False, cause)
+    assert outcome == RegressionOutcome(False, cause, cases=2)
 
 
 async def test_a_case_whose_result_does_not_re_verify_fails_the_set(session):
@@ -258,7 +267,7 @@ async def test_a_case_whose_result_does_not_re_verify_fails_the_set(session):
     outcome = await session.regression.check("c1", MERGE, sources=())
 
     assert outcome == RegressionOutcome(
-        False, "fp8_overflow: p3 did not re-verify: the manifest hash is not the recorded one"
+        False, "fp8_overflow: p3 did not re-verify: the manifest hash is not the recorded one", cases=1
     )
 
 
