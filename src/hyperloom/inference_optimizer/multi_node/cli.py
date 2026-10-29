@@ -375,10 +375,7 @@ def _read_pod_script(name: str) -> str:
     return p.read_text(encoding="utf-8")
 
 
-_KERNEL_NODE_OPS_DEPS = (
-    Path(aiter_jit_cache.__file__).resolve(),
-    _SCRIPTS_DIR / "patch_path_safety.py",
-)
+_KERNEL_NODE_OPS_DEPS = (Path(aiter_jit_cache.__file__).resolve(), _SCRIPTS_DIR / "patch_path_safety.py")
 _SHAPE_GATE_DEPS = (_SCRIPTS_DIR / "sglang_shape_gate.py",)
 _LAUNCHER_DEPS = (Path(__file__).parent / "_internal" / "server_args_safety.py", *_SHAPE_GATE_DEPS)
 
