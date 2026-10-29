@@ -472,7 +472,7 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
     dropped = result["measure_round_dropped"]
     assert dropped["bound"] == "session_usable"
-    assert dropped["priced_by"] == "warmup_post_ready"
+    assert dropped["priced_by"] == "warmup_post_ready_less_eval"
     assert dropped["measure_round_sec"] == pytest.approx(550.0, abs=1.0)
     assert dropped["one_more_measurement_sec"] == pytest.approx(900.0, abs=1.0)
     assert dropped["measure_round_sec"] < 1200.0, (
@@ -480,9 +480,8 @@ def test_a_budget_that_cannot_pay_for_the_measured_round_keeps_the_cold_warmup(t
     )
 
 
-def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
-    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
-    clock = _AClockOnlyThePassesMove()
+def _run_with_a_cold_round_eval(tmp_path, shared_state, clock: _AClockOnlyThePassesMove) -> tuple[dict, int]:
+    """A double-run baseline whose cold round also ran a GSM8K eval lm-eval timed at 450 s."""
     fake_run, state = _cold_then_hot_fake_run(clock=clock, boot_sec=350.0, benchmark_sec=550.0)
 
     def cold_round_also_ran_the_eval(cmd, *args, **kwargs):
@@ -507,7 +506,7 @@ def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
         magpie_python=sys.executable,
         default_config_path=base,
         session_dir=tmp_path,
-        shared_state=_prelude_shared_state(usable_sec=1200.0),
+        shared_state=shared_state,
     )
     ctx = _make_ctx({"output_dir": str(tmp_path / "ws"), "timeout_sec": 10, "gpu_type": "mi300x"})
     with (
@@ -518,13 +517,41 @@ def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
         ),
     ):
         result = _run(executor(ctx))
+    return result, state["calls"]
+
+
+def test_the_warmups_accuracy_eval_is_not_charged_to_the_hot_pass(tmp_path):
+    """The hot pass runs with RUN_EVAL off, so the eval the cold round spent is not part of its price."""
+    result, calls = _run_with_a_cold_round_eval(
+        tmp_path, _prelude_shared_state(usable_sec=1200.0), _AClockOnlyThePassesMove()
+    )
 
     # Charged the eval, the hot pass (550 s) and a cold-priced variant (900 s) need 1450 s of the 1200 s left.
-    assert state["calls"] == 2, "the hot pass was priced with the cold round's accuracy eval"
+    assert calls == 2, "the hot pass was priced with the cold round's accuracy eval"
     assert result["status"] == "succeeded"
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
+    assert result["eval_runtime_sec"] == pytest.approx(450.0)
     assert "measure_round_dropped" not in result
     assert MEASURE_ROUND_DROPPED_WARNING not in result.get("nonfatal_warnings", [])
+
+
+def test_both_gates_price_a_hot_pass_without_the_cold_rounds_eval(tmp_path):
+    """With no warm runtime yet, the pre-ignition and post-cold gates price the same second pass and agree."""
+    clock = _AClockOnlyThePassesMove()
+    state = _a_session_the_passes_spend(
+        usable_sec=2100.0,
+        clock=clock,
+        baseline_runtime_sec=900.0,
+        baseline_post_ready_runtime_sec=550.0,
+        baseline_eval_runtime_sec=450.0,
+    )
+
+    result, calls = _run_with_a_cold_round_eval(tmp_path, state, clock)
+
+    # Before ignition: 900 + (550 - 450) for the round and 900 for a variant fit 2100; with the eval charged,
+    # 900 + 550 + 900 would not. After the cold pass: (550 - 450) + 900 fit the 1200 s left.
+    assert calls == 2, "the gates did not price the second pass the same way"
+    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
 
 
 def test_a_round_admitted_before_ignition_is_not_refused_after_its_cold_pass(tmp_path):

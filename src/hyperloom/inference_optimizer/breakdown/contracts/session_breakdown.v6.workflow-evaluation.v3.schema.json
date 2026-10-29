@@ -1403,6 +1403,12 @@
             "number",
             "null"
           ]
+        },
+        "eval_runtime_sec": {
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

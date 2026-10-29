@@ -16,6 +16,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom_common.coerce import optional_positive_float
 from hyperloom_common.env import env_flag, is_truthy
 from hyperloom_common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
@@ -481,10 +482,7 @@ def parse_eval_results(
             "error": qg_out.get("error", "no quality_gate"),
         }
 
-    search_paths = [
-        workspace / "eval_*" / "**" / "results*.json",
-        workspace / "**" / "results*.json",
-    ]
+    search_paths = [workspace / "eval_*" / "**" / "results*.json", workspace / "**" / "results*.json"]
     result_files: list[Path] = []
     for pattern in search_paths:
         result_files.extend(Path(f) for f in glob.glob(str(pattern), recursive=True))
@@ -513,30 +511,11 @@ def parse_eval_results(
                         "task": task_name,
                         "metric": key,
                         "source_file": str(latest),
+                        # lm-eval's own wall-clock for the run; it ran inside the round's post-ready interval.
+                        "eval_runtime_sec": optional_positive_float(data.get("total_evaluation_time_seconds")),
                     }
 
     return {"accuracy": None, "error": f"no recognized metric in {latest}"}
-
-
-def post_ready_sec_without_eval(round_result: dict[str, Any]) -> Any:
-    """A round's post-ready time less its accuracy eval, which a hot pass rendered with RUN_EVAL off does not run.
-
-    The eval time is lm-eval's own clock, so it comes off only when the post-ready interval strictly encloses it.
-    """
-    post_ready = round_result.get("post_ready_runtime_sec")
-    eval_sec = _evaluation_seconds(round_result.get("accuracy_source"))
-    if isinstance(post_ready, (int, float)) and eval_sec is not None and eval_sec < post_ready:
-        return post_ready - eval_sec
-    return post_ready
-
-
-def _evaluation_seconds(results_file: Any) -> float | None:
-    """lm-eval's recorded wall-clock in ``results_file``, or ``None`` when there is no finite positive one."""
-    try:
-        seconds = float(json.loads(Path(results_file).read_text(encoding="utf-8")).get("total_evaluation_time_seconds"))
-    except (TypeError, ValueError, OSError, AttributeError):
-        return None
-    return seconds if math.isfinite(seconds) and seconds > 0.0 else None
 
 
 def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:

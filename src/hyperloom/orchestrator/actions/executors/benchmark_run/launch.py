@@ -547,7 +547,7 @@ class _BenchmarkLaunchMixin:
             "materialized_config": str(round_.materialized_config_path),
             # Magpie subprocess wall-clock (success path only).
             "subprocess_runtime_sec": round(finished.runtime_sec, 2),
-            # The benchmark's own share of that wall-clock, boot excluded.
+            # That wall-clock after the boot: the benchmark, and the accuracy eval when this round ran one.
             "post_ready_runtime_sec": _round_post_ready_sec(
                 round_.watchdog_server_log,
                 started_unix=finished.started_unix,

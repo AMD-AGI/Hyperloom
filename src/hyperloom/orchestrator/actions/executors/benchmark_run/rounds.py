@@ -34,7 +34,6 @@ from ....state.failure_evidence import (
 )
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from .. import _server_lifecycle as _lifecycle
-from .._accuracy_gate import post_ready_sec_without_eval
 from ..benchmark_result import served_complete_protocol
 from ..bypass_engine import lifecycle_meta_file, lifecycle_pid_file
 from .bringup import _classify_subprocess_error, _disable_cuda_graph_flag, _with_cuda_graph_disabled
@@ -406,9 +405,7 @@ class _BenchmarkRoundsMixin:
         attempt: BenchmarkAttempt,
     ) -> dict[str, Any] | None:
         affordable, evidence = self._measure_round_affordable(
-            warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
-            warmup_post_ready_sec=post_ready_sec_without_eval(warmup_result),
-            ctx_extra=getattr(attempt.ctx, "extra", None) or {},
+            warmup_result, ctx_extra=getattr(attempt.ctx, "extra", None) or {}
         )
         if affordable:
             return None
@@ -462,6 +459,7 @@ class _BenchmarkRoundsMixin:
             # The split belongs to round 1 for the same reason its wall-clock does: round 2 re-attached, so it
             # has no boot to separate and its own reading says nothing about what booting this workload costs.
             result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
+            result["eval_runtime_sec"] = warmup_result.get("eval_runtime_sec")
         hot = result.get("output_throughput") or 0.0
         cold = warmup_tput or 0.0
         log.info(
@@ -789,6 +787,7 @@ class _BenchmarkRoundsMixin:
                 result["accuracy_task"] = eval_data.get("task", "gsm8k")
                 result["accuracy_metric"] = eval_data.get("metric", "")
                 result["accuracy_source"] = eval_data.get("source_file", "")
+                result["eval_runtime_sec"] = eval_data.get("eval_runtime_sec")
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))

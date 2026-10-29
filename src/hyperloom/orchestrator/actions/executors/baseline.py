@@ -374,23 +374,19 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         return headroom_sec >= cost, priced
 
     def _measure_round_affordable(
-        self,
-        *,
-        warmup_runtime_sec: Any,
-        warmup_post_ready_sec: Any = None,
-        ctx_extra: dict[str, Any] | None = None,
+        self, warmup_result: Mapping[str, Any], *, ctx_extra: dict[str, Any] | None = None
     ) -> tuple[bool, dict[str, Any]]:
-        """Whether the budget covers the measured round *and a use for it*."""
+        """Whether the budget covers the measured round *and a use for it*, priced from the cold *warmup_result*."""
         state = (ctx_extra or {}).get("shared_state") or self.shared_state
         headroom_sec, evidence = _round_headroom_sec(state)
         if headroom_sec is None:
             return True, evidence
-        warmup_sec = optional_positive_float(warmup_runtime_sec)
-        priced_by = "session_hot_pass"
-        benchmark_sec = _phase_state.measured_seconds(state, "baseline_warm_runtime_sec")
-        if benchmark_sec is None:
-            priced_by = "warmup_post_ready"
-            benchmark_sec = optional_positive_float(warmup_post_ready_sec)
+        warmup_sec = optional_positive_float(warmup_result.get("subprocess_runtime_sec"))
+        session_hot_sec = _phase_state.measured_seconds(state, "baseline_warm_runtime_sec")
+        priced_by = "warmup_post_ready_less_eval" if session_hot_sec is None else "session_hot_pass"
+        benchmark_sec = _phase_state.hot_pass_cost_sec(
+            session_hot_sec, warmup_result.get("post_ready_runtime_sec"), warmup_result.get("eval_runtime_sec")
+        )
         if benchmark_sec is None or warmup_sec is None:
             return True, {"reason": "no_measured_benchmark_to_predict_from", **evidence}
         use_sec = 0.0
