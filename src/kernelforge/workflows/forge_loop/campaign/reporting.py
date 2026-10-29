@@ -19,7 +19,7 @@ from hyperloom_common.unified_diff import touched_paths
 
 from kernelforge.utils.git import git_bytes
 from kernelforge.evaluation.scoring import aggregate_regression_detail
-from kernelforge.utils.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from hyperloom_common.io import DURABLE, atomic_write_text, fsync_directory, fsync_tree
 
 # What every published best version must contain.
 BEST_BUNDLE_FILES = ("forge.patch", "validation.txt", "benchmark.json")
@@ -453,9 +453,9 @@ class BestResultPublisher:
         payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
 
         # The manifest is the atomic commit point.
-        atomic_write_text(self.manifest_path, payload)
-        atomic_write_text(self.result_path, payload)
-        atomic_write_text(self.report_path, self._render_report(manifest))
+        atomic_write_text(self.manifest_path, payload, options=DURABLE)
+        atomic_write_text(self.result_path, payload, options=DURABLE)
+        atomic_write_text(self.report_path, self._render_report(manifest), options=DURABLE)
         return manifest
 
     def refresh_round_budget(self, round_budget: dict) -> bool:
@@ -466,9 +466,9 @@ class BestResultPublisher:
             manifest = self._load_json(self.manifest_path, label="best manifest")
             manifest = {**manifest, "round_budget": dict(round_budget)}
             payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-            atomic_write_text(self.manifest_path, payload)
-            atomic_write_text(self.result_path, payload)
-            atomic_write_text(self.report_path, self._render_report(manifest))
+            atomic_write_text(self.manifest_path, payload, options=DURABLE)
+            atomic_write_text(self.result_path, payload, options=DURABLE)
+            atomic_write_text(self.report_path, self._render_report(manifest), options=DURABLE)
         except (ValueError, OSError, KeyError):
             return False
         return True
@@ -545,4 +545,4 @@ class BestResultPublisher:
             changed_files = self._changed_files_from_metadata(metadata)
             lines.extend([f"- `{path}`" for path in changed_files] or ["- (none)"])
             lines.append("")
-        atomic_write_text(self.history_path, "\n".join(lines))
+        atomic_write_text(self.history_path, "\n".join(lines), options=DURABLE)

@@ -16,7 +16,7 @@ from typing import Awaitable, Callable
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +104,12 @@ def _persist_interaction(workspace: str, interaction: SupervisorInteraction) -> 
             f"## Reply\n\n{reply_txt}\n"
         )
         path = d / f"intervention_iter_{iteration:03d}.md"
-        atomic_write_text(path, body)
+        atomic_write_text(path, body, options=DURABLE)
         if reply and reply.strip():
             atomic_write_text(
                 latest_supervisor_ruling_path(workspace),
                 reply,
+                options=DURABLE,
             )
         else:
             clear_latest_supervisor_ruling(workspace)
@@ -139,9 +140,9 @@ def persist_supervisor_ruling(
                 f"- trigger: {reason}\n\n"
                 f"## Reply\n\n{reply}\n"
             )
-            atomic_write_text(interaction, body)
+            atomic_write_text(interaction, body, options=DURABLE)
         persisted_interaction = interaction
-        atomic_write_text(latest, reply)
+        atomic_write_text(latest, reply, options=DURABLE)
         persisted_latest = latest
     except OSError as error:
         log.debug(

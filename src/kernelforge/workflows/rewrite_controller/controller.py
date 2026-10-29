@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.timeutil import now_iso
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.handoff import read_handoff
 from kernelforge.workflows.rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
@@ -164,6 +164,7 @@ def _write_state(layout: ControllerLayout, state: ControllerRunState) -> None:
     atomic_write_text(
         layout.controller_state,
         json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n",
+        options=DURABLE,
     )
 
 
@@ -217,7 +218,7 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
                 operator_id = path.name
             lines.append(f"- `{operator_id}`")
         lines.append("")
-    atomic_write_text(layout.summary_md, "\n".join(lines))
+    atomic_write_text(layout.summary_md, "\n".join(lines), options=DURABLE)
 
 
 def _initialize_layout(layout: ControllerLayout) -> None:

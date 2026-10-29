@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError, TaskPreparationFailed
-from kernelforge.utils.durable_io import atomic_write_json
+from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 
 if TYPE_CHECKING:
     from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeRun
@@ -82,7 +82,7 @@ def _exit_failed_preparation(run: _ForgeRun, prep: PrepareResult) -> NoReturn:
         err_result["task_preparation_audit_dir"] = prep.audit_dir
     result_json = run.request.artifacts.result_json
     if result_json:
-        atomic_write_json(result_json, err_result)
+        atomic_write_json(result_json, err_result, fmt=JsonFormat(trailing_newline=True), options=DURABLE)
     run.publish_result(err_result)
     raise TaskPreparationFailed(detail)
 

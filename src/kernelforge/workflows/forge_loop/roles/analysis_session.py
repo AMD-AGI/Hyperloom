@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.timeutil import now_iso
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 
 
 MAX_ANALYSIS_SESSION_ATTEMPTS = 2
@@ -101,7 +101,7 @@ class AnalysisSessionJournal:
     def _write_state(self, state: dict[str, Any] | None = None) -> None:
         payload = self.state if state is None else state
         payload["updated_at"] = _utc_now()
-        atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n", options=DURABLE)
 
     def _append_event(self, event_type: str, **fields: Any) -> None:
         event = {

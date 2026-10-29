@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from hyperloom_common.timeutil import now_iso
-from kernelforge.utils.durable_io import atomic_write_text
+from hyperloom_common.io import DURABLE, atomic_write_text
 from kernelforge.workflows.rewrite_controller.contracts import (
     TASK_STATUS_FAILED,
     TASK_STATUS_READY,
@@ -67,6 +67,7 @@ class TaskStateStore:
         atomic_write_text(
             self.path,
             json.dumps(state.to_dict(), indent=2, sort_keys=True) + "\n",
+            options=DURABLE,
         )
 
     def initialize_ready(self) -> TaskState:

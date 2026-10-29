@@ -511,10 +511,10 @@ def test_reference_generation_failure_before_index_keeps_old_index_valid(
     old_reference = _indexed_reference(root, 1)
     real_atomic_write = integ.atomic_write_text
 
-    def fail_index(path, text):
+    def fail_index(path, text, **kwargs):
         if path == root / "index.md":
             raise OSError("simulated index replacement failure")
-        return real_atomic_write(path, text)
+        return real_atomic_write(path, text, **kwargs)
 
     monkeypatch.setattr(integ, "atomic_write_text", fail_index)
     with pytest.raises(OSError, match="index replacement"):
