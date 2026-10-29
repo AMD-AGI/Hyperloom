@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from kernelforge.decode_modules import decode_module_lines
+from kernelforge.decode_modules import decode_module_lines, decode_module_ranking, named_modules
 
 from ..collaborator import CoordinatorCollaborator
+from ..measurement.cycle_bench import cycle_bench_enabled
 from ..measurement.runtime_findings import render_runtime_findings
 from ..state.shared_state import KbInjection
 from ..state.task_registry import TaskSpec
@@ -26,7 +27,8 @@ from ..policy.gate import (
     validate_freeform_wave_task,
 )
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_TASK_RETRY, record_event, trajectory_scope
-from .in_flight import held_module_group
+from .domains import is_custom_specialist_dispatch
+from .in_flight import MODULE_GROUPS, held_module_group
 from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
@@ -252,6 +254,35 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if group := held_module_group(params):
             rows = await asyncio.to_thread(decode_module_lines, source, module=group)
             params.setdefault("roofline_evidence", {})["owned_module"] = {"group": group, "rows": rows}
+
+    async def assign_module_group(self, params: dict[str, Any]) -> None:
+        """Name the module group of the capture's decode kernels a FRAMEWORK_AGENT dispatch's target text names.
+
+        A dispatch that names a group keeps it. Kernels of several groups resolve to the one with the most decode time per step. A ``task_kind`` dispatch is
+        Coordinator work with its own target, and a wave's tasks are assigned one by one.
+        """
+        if any(params.get(key) for key in ("module_group", "task_kind", "tasks")) or is_custom_specialist_dispatch(
+            params
+        ):
+            return
+        state = self.shared_state
+        if not cycle_bench_enabled() or state.phase != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        gap = state.find_gap(str(params.get("gap_canonical_id") or params.get("gap") or "").strip()) or {}
+        target = (
+            params.get("gap_symptom") or gap.get("symptom"),
+            params.get("task_summary"),
+            params.get("task_description"),
+        )
+        source = await asyncio.to_thread(_module_table_source, state)
+        text = " ".join(str(item or "") for item in target)
+        groups = (await asyncio.to_thread(named_modules, source, text)).intersection(MODULE_GROUPS)
+        if len(groups) == 1:
+            params["module_group"] = groups.pop()
+        elif groups:
+            ranked = await asyncio.to_thread(decode_module_ranking, source)
+            if group := next((m for m in ranked if m in groups), ""):
+                params["module_group"] = group
 
     def _warm_framework_context(self, params: dict[str, Any]) -> None:
         """Warm the runtime framework version and the local framework source roots."""

@@ -278,6 +278,77 @@ async def test_each_task_of_a_freeform_wave_holds_the_module_group_it_names(coor
     assert await _module_denials(coord) == 1
 
 
+_MOE_KERNEL = "mfma_moe1_silu_mul_afp4_wfp4"
+_GEMM_KERNEL = "ck_gemm_a8w8_blockscale_b_preshuffle"
+
+
+def _decode_capture(c: Coordinator, tmp_path: Any, *, moe_us: float, gemm_us: float) -> None:
+    from kernelforge.tests.trace_fixtures import kernel, step, write_trace
+
+    events = [
+        step("step[VERIFY bs=2]", 0.0, 100.0),
+        kernel(_MOE_KERNEL, 1.0, moe_us),
+        kernel(_GEMM_KERNEL, 2.0 + moe_us, gemm_us),
+    ]
+    c.shared_state.last_profile_trace = str(write_trace(tmp_path / "r-TP-0-EP-0.trace.json.gz", events))
+
+
+async def test_a_dispatch_naming_no_group_owns_the_group_of_the_kernels_its_gap_names(coord, monkeypatch, tmp_path):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    _decode_capture(coord, tmp_path, moe_us=60.0, gemm_us=40.0)
+    for cid, symptom in (
+        ("gap.gemm", f"{_GEMM_KERNEL} runs at 40% of its roofline"),
+        ("gap.moe", "mfma_moe1_silu_mul pads every expert to the full block"),
+        ("gap.idle", "GPU 85% idle between decode steps"),
+    ):
+        coord.shared_state.upsert_gap({"canonical_id": cid, "symptom": symptom})
+    await _freeform(coord, "fix the GEMM gap", gap_canonical_id="gap.gemm")
+    await _freeform(coord, "fix the MoE gap", gap_canonical_id="gap.moe")
+    await _freeform(coord, "fix the idle gap", gap_canonical_id="gap.idle")
+    await _freeform(coord, "author the PR", gap_canonical_id="gap.moe", task_kind="framework_authoring")
+    await _freeform(coord, "fix the MoE gap again", gap_canonical_id="gap.moe")
+    await _freeform(coord, "retune the MoE GEMMs", module_group="moe")
+
+    queued = await coord.tasks.by_state("queued")
+    assert [(t.params["task_description"], t.params.get("module_group")) for t in queued] == [
+        ("fix the GEMM gap", "gemm"),
+        ("fix the MoE gap", "moe"),
+        ("fix the idle gap", None),
+        ("author the PR", None),
+    ]
+    assert queued[1].params["roofline_evidence"]["owned_module"] == {
+        "group": "moe",
+        "rows": [
+            "| module | VERIFY bs=2 | top kernel |",
+            "|---|---:|---|",
+            f"| moe | 0.060 ms (60.0%) | `{_MOE_KERNEL}` |",
+        ],
+    }
+    assert await _module_denials(coord) == 2
+
+
+async def test_snake_case_words_naming_no_capture_kernel_own_no_group(coord, monkeypatch, tmp_path):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    _decode_capture(coord, tmp_path, moe_us=60.0, gemm_us=40.0)
+    coord.shared_state.upsert_gap({"canonical_id": "gap.sched", "symptom": "chunked_prefill stalls at max_num_seqs=64"})
+    await _freeform(coord, "fix the scheduler gap", gap_canonical_id="gap.sched")
+
+    (queued,) = await coord.tasks.by_state("queued")
+    assert queued.params.get("module_group") is None
+
+
+@pytest.mark.parametrize(("moe_us", "gemm_us", "group"), [(60.0, 40.0, "moe"), (40.0, 60.0, "gemm")])
+async def test_a_dispatch_naming_kernels_of_several_groups_owns_the_one_with_the_most_decode_time(
+    coord, monkeypatch, tmp_path, moe_us, gemm_us, group
+):
+    monkeypatch.setenv("HYPERLOOM_CYCLE_BENCH", "1")
+    _decode_capture(coord, tmp_path, moe_us=moe_us, gemm_us=gemm_us)
+    await _freeform(coord, f"fuse {_GEMM_KERNEL} into {_MOE_KERNEL}")
+
+    (queued,) = await coord.tasks.by_state("queued")
+    assert queued.params["module_group"] == group
+
+
 @pytest.mark.parametrize(("switch", "shown"), [("1", True), ("0", False)])
 async def test_orchestration_sees_the_module_groups_and_which_ones_live_specialists_hold(
     coord, monkeypatch, switch, shown

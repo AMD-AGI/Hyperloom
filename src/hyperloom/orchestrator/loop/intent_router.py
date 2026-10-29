@@ -1102,16 +1102,22 @@ class IntentRouter(CoordinatorCollaborator):
             return True
         return await self._keep_unqueued_variants(request.source, request.params)
 
+    async def _delegate_refused(self, source: str, intent: Intent, action_name: str) -> bool:
+        """Whether admission refuses the delegate, judged with the module group a specialist's target implies."""
+        params = intent.payload.get("params")
+        if action_name == "specialist":
+            await self._coord.specialist_dispatch.assign_module_group(params or {})
+        denied = await self._coord.dispatcher.admission_denial_for_action(action_name, params=params)
+        if denied is not None:
+            await self.record_policy_denied(source, intent, denied, action_name=action_name)
+        return denied is not None
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
-        denied = await self._coord.dispatcher.admission_denial_for_action(
-            action_name, params=intent.payload.get("params")
-        )
-        if denied is not None:
-            await self.record_policy_denied(source, intent, denied, action_name=action_name)
+        if await self._delegate_refused(source, intent, action_name):
             return
         # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
