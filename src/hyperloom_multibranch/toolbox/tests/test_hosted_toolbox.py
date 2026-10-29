@@ -250,6 +250,8 @@ def _toolbox(
         max_infra_retries=0,
         retry=_RETRY,
         lease_tuning=_FAST,
+        # No tables: on a host whose image holds aiter's, the default would name a snapshot these tests do not expect.
+        framework_configs="",
     )
     return build_hosted_toolbox(
         _inputs(service, tmp_path, **changed),

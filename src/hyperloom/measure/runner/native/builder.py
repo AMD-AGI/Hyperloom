@@ -181,7 +181,7 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
     errors = [_named_for_the_source(error, tree, laid.tracked, set(laid.laid)) for error in errors]
     log = "\n".join([*errors, result.stdout_tail, result.stderr_tail])
-    if result.timed_out or result.returncode < 0:
+    if result.returncode < 0:
         raise BuildInfraError(f"the compile of {recipe.component} timed out or was killed (rc={result.returncode})")
     if result.returncode != 0:
         exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
