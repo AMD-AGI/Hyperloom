@@ -73,6 +73,9 @@ _MISSING_KERNEL = re.compile(
 #: library print them.
 _DISK_FULL = re.compile(r"\[Errno (?:28|122)\]|No space left on device|Disk quota exceeded", re.IGNORECASE)
 _WATCHDOG_TIMEOUT = re.compile(r"watchdog timeout", re.IGNORECASE)
+#: A ``git`` command the benchmark client ran to fetch its own dependencies (Magpie's per-test ``submodule update`` of
+#: the replay client) that timed out: ``subprocess.TimeoutExpired: Command ['git', ...] timed out after N seconds``.
+_GIT_FETCH_TIMEOUT = re.compile(r"TimeoutExpired: Command \[['\"]git['\"],.*\] timed out after")
 #: A frame of aiter's JIT build in a stack dumped at the watchdog: py-spy writes ``build_module (aiter/jit/core.py:N)``, a
 #: Python traceback ``File ".../aiter/jit/core.py", line N, in build_module``.
 _JIT_BUILD_FRAME = re.compile(r"\bbuild_module\b.*\baiter[/.]jit[/.]core\b|\baiter[/.]jit[/.]core\b.*\bbuild_module\b")
@@ -127,6 +130,12 @@ def import_error(text: str) -> str | None:
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def git_fetch_timeout(text: str) -> str | None:
+    """The line that says a ``git`` command of the benchmark's own set-up timed out, a stall of the network or of the
+    remote that no candidate can cause."""
+    return _last_matching(text, lambda line: bool(_GIT_FETCH_TIMEOUT.search(line)))
 
 
 def disk_full(text: str) -> str | None:

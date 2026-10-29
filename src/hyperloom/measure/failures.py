@@ -79,6 +79,8 @@ RUNNER_EXITED = "runner_exited"
 #: attempts retry it once only (``hyperloom_multibranch.toolbox.attempts``). The reason is ``jit_build_timeout: <the
 #: watchdog's line>``.
 JIT_BUILD_TIMEOUT = "jit_build_timeout"
+#: A ``git`` fetch the benchmark client runs for its own dependencies timed out; the reason is ``<this>: <the line>``.
+GIT_FETCH_TIMEOUT = "git_fetch_timeout"
 
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
@@ -258,6 +260,9 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if full:
         # Before the signatures: a full disk breaks whatever was writing, and the traceback it leaves can match one.
         return _infra(f"{DISK_FULL}: {full}")
+    stalled_fetch = log_causes.git_fetch_timeout(text)
+    if stalled_fetch:
+        return _infra(f"{GIT_FETCH_TIMEOUT}: {stalled_fetch}")
     hang = log_causes.jit_build_timeout(text)
     if hang:
         return _infra(f"{JIT_BUILD_TIMEOUT}: {hang}")

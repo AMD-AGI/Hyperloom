@@ -104,6 +104,28 @@ def test_a_full_disk_in_the_runners_or_the_servers_output_is_an_infrastructure_f
     assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, f"{failures.DISK_FULL}: {line}")
 
 
+#: What a variant aborted in Magpie's AgentX dependency set-up records as its error (#163): the git fetch of the replay
+#: client timed out, before any server started.
+GIT_FETCH_STALL = (
+    'File "Magpie/modes/benchmark/agentx.py", line 806, in ensure_agentx_dependencies\n'
+    "subprocess.TimeoutExpired: Command ['git', '-C', '/w/scratch/cache/InferenceX-e625d03f', 'submodule', 'update', "
+    "'--init', '--recursive', '--', 'inferencex-e2e/utils/aiperf'] timed out after 300 seconds\n"
+)
+
+
+def test_a_git_fetch_of_the_benchmarks_own_dependencies_that_timed_out_is_an_infrastructure_failure() -> None:
+    verdict = _classify(returncode=1, logs=[GIT_FETCH_STALL])
+
+    assert verdict.failure_class is FailureClass.INFRA
+    assert verdict.failure_reason.startswith(f"{failures.GIT_FETCH_TIMEOUT}: subprocess.TimeoutExpired: Command ['git'")
+
+
+def test_a_timeout_of_any_other_command_stays_unclear() -> None:
+    other = "subprocess.TimeoutExpired: Command ['python3', 'bench.py'] timed out after 300 seconds\n"
+
+    assert _classify(returncode=1, logs=[other]).failure_class is FailureClass.UNCLEAR
+
+
 def test_a_full_disk_beats_the_candidate_signature_and_the_boot_timeout_it_caused() -> None:
     with_import = _classify(returncode=1, logs=[IMPORT_ERROR_LOG + QUOTA_IN_SERVER_LOG])
     slow = _classify(

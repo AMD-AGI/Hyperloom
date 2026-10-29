@@ -378,6 +378,20 @@ def test_a_measured_round_that_fails_keeps_the_evaluation_the_warmup_made(grid, 
     assert outcome.returncode == 5
 
 
+def test_a_round_whose_client_could_not_fetch_its_dependencies_is_an_infrastructure_failure(grid, server, tmp_path):
+    """No server started: Magpie's git fetch of the replay client stalled, which says nothing of the candidate (#163)."""
+    stall = (
+        "subprocess.TimeoutExpired: Command ['git', '-C', '/w/InferenceX', 'submodule', 'update', '--init', "
+        "'--recursive', '--', 'inferencex-e2e/utils/aiperf'] timed out after 300 seconds"
+    )
+    grid.answers["warmup"] = grid.result("warmup", status="failed", returncode=1, error=stall, error_class="x")
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert outcome.failure_class == "infra", outcome.failure_reason
+    assert outcome.failure_reason.startswith("git_fetch_timeout: subprocess.TimeoutExpired")
+
+
 def test_a_graded_test_the_run_stops_during_its_warmup_reports_the_stop_and_measures_nothing(grid, server, tmp_path):
     grid.answers["warmup"] = grid.result(
         "warmup", status="failed", returncode=None, error_class="session_time_exhausted", error="out of time"
