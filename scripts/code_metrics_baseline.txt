@@ -334,7 +334,6 @@ function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollabor
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._create_delegated_task 59
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 57
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 75
-function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 54
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 63
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner._execute 58
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 61
