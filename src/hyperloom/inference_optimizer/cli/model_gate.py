@@ -21,36 +21,17 @@ from typing import Any
 from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
+from ..session import sbd_v6
 from ...common.timeutil import now_iso
 from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
-    _MX_FP4_GROUP_SIZE,
-    _NATIVE_MOE_RUNNER_QUANT_METHODS,
     _config_architectures,
-    _is_quark_mx_fp4_entry,
     config_scopes,
     load_model_config_dict,
     _load_model_max_position_embeddings,
-    _model_declared_quant_method,
     _model_has_dual_chunk_attention,
-    _model_moe_runner_requires_aiter,
 )
-
-# Re-exported from model_config_utils for callers/tests.
-__all__ = [
-    "_GEMMA2_ARCHITECTURES",
-    "_MAXPOS_CONFIG_KEYS",
-    "_MX_FP4_GROUP_SIZE",
-    "_NATIVE_MOE_RUNNER_QUANT_METHODS",
-    "_config_architectures",
-    "_is_quark_mx_fp4_entry",
-    "load_model_config_dict",
-    "_load_model_max_position_embeddings",
-    "_model_declared_quant_method",
-    "_model_has_dual_chunk_attention",
-    "_model_moe_runner_requires_aiter",
-]
 
 log = logging.getLogger(__name__)
 
@@ -965,13 +946,12 @@ def _run_compat_detector(
     *,
     model_path: str,
     data: dict,
-    gpu_type: str | None,
 ) -> str | None:
     """Invoke a spec's detector sub-chain, returning the first non-None reason."""
     # Resolve a HF repo-id to its local cache dir ONCE so every disk-reading detector (hf_quant_config.json,
     # safetensors shards, tokenizer files, PEFT adapters, ...) sees a real directory.
     resolved_mp = str(resolve_local_model_dir(model_path) or model_path)
-    available = {"model_path": resolved_mp, "data": data, "gpu_type": gpu_type}
+    available = {"model_path": resolved_mp, "data": data}
     call_args = tuple(available[name] for name in spec.args)
     fns = spec.fn if isinstance(spec.fn, tuple) else (spec.fn,)
     for fn in fns:
@@ -1095,7 +1075,6 @@ def _detect_incompatible_model_config(
             spec,
             model_path=model_path,
             data=data,
-            gpu_type=gpu_type,
         )
         if reason is not None:
             return reason
@@ -1114,7 +1093,6 @@ _MODEL_GATE_ORDER = (
     "model_config_compat",
     "context_window",
 )
-_MODEL_GATE_EVENT_ATTR = "_sbd_v6_model_gate_event"
 
 
 def _model_gate_workload(args: argparse.Namespace) -> dict[str, Any]:
@@ -1152,73 +1130,26 @@ def _new_model_gate_event(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[str, Any]:
-    from ..session.sbd_v6 import read_timeline_event_for_update
-
-    event = getattr(args, _MODEL_GATE_EVENT_ATTR, None)
-    if not isinstance(event, dict):
-        event = read_timeline_event_for_update(session_dir, "model_gate")
-    if event is None or str(event.get("type") or "") != "model_gate":
-        event = _new_model_gate_event(args)
-    setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-    event.setdefault("kind", "model_gate")
-    event.setdefault("status", "succeeded")
-    event.setdefault("start_time", now_iso(timespec="seconds"))
-    event.setdefault("end_time", "")
-    ext = event.get("ext")
-    if not isinstance(ext, dict):
-        ext = {}
-        event["ext"] = ext
-    ext.setdefault("run_kind", "fresh")
-    ext.setdefault("skip_reason", None)
-    ext.setdefault("failed_gate_id", None)
-    ext["workload"] = _model_gate_workload(args)
-    checks = ext.get("checks")
-    ext["checks"] = [row for row in checks if isinstance(row, dict)] if isinstance(checks, list) else []
-    degraded = ext.get("degraded")
-    if not isinstance(degraded, dict):
-        degraded = {}
-        ext["degraded"] = degraded
-    degraded["active"] = bool(degraded.get("active"))
-    warnings = degraded.get("warnings")
-    degraded["warnings"] = [row for row in warnings if isinstance(row, dict)] if isinstance(warnings, list) else []
-    return event
-
-
-def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import write_timeline_event_at
-
-    write_timeline_event_at(session_dir, event)
-    return True
+    return sbd_v6.read_timeline_event_for_update(session_dir, "model_gate") or _new_model_gate_event(args)
 
 
 def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseException) -> None:
     """Best-effort retain a model-gate observability failure for export."""
-    from ..session.sbd_v6 import record_write_warning
-
-    if not record_write_warning(session_dir, component=component, exc=exc):
+    if not sbd_v6.record_write_warning(session_dir, component=component, exc=exc):
         log.debug("failed to persist SBD V6 model-gate warning", exc_info=exc)
 
 
-def _model_gate_status(
-    checks: list[dict[str, Any]],
-    *,
-    skip_reason: str | None = None,
-) -> str:
+def _model_gate_status(checks: list[dict[str, Any]]) -> str:
     statuses = {str(check.get("status") or "") for check in checks}
     if "failed" in statuses:
         return "failed"
     if "warned" in statuses or "unknown" in statuses:
         return "degraded"
-    if skip_reason:
-        return "skipped"
     return "succeeded"
 
 
 def _model_gate_check_order(check: dict[str, Any]) -> int:
-    try:
-        return int(check.get("order") or 0)
-    except (TypeError, ValueError):
-        return len(_MODEL_GATE_ORDER) + 1
+    return int(check["order"])
 
 
 def _record_model_gate_check(
@@ -1260,11 +1191,8 @@ def _record_model_gate_check(
             degraded["active"] = True
             degraded.setdefault("warnings", []).append(degraded_warning)
         ext["checks"] = checks
-        event["status"] = _model_gate_status(
-            checks,
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
-        _write_model_gate_event(session_dir, event)
+        event["status"] = _model_gate_status(checks)
+        sbd_v6.write_timeline_event_at(session_dir, event)
     except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
@@ -1273,9 +1201,7 @@ def _record_model_gate_check(
 def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Create the model-gate event before the first check executes."""
     try:
-        event = _new_model_gate_event(args)
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
+        sbd_v6.write_timeline_event_at(session_dir, _new_model_gate_event(args))
     except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
@@ -1285,13 +1211,9 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Finalize a successfully completed three-check model-gate chain."""
     try:
         event = _load_model_gate_event(args, session_dir)
-        ext = event["ext"]
-        event["status"] = _model_gate_status(
-            ext["checks"],
-            skip_reason=str(ext.get("skip_reason") or "") or None,
-        )
+        event["status"] = _model_gate_status(event["ext"]["checks"])
         event["end_time"] = now_iso(timespec="seconds")
-        _write_model_gate_event(session_dir, event)
+        sbd_v6.write_timeline_event_at(session_dir, event)
     except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
@@ -1324,8 +1246,7 @@ def _record_resumed_model_gate(
             }
             for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1)
         ]
-        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
-        _write_model_gate_event(session_dir, event)
+        sbd_v6.write_timeline_event_at(session_dir, event)
     except (OSError, ValueError, TypeError) as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)

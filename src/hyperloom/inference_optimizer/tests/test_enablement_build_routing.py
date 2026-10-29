@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
@@ -38,9 +37,6 @@ def coord(build_coord):
     build_coord.enablement_revalidation.open_row_past_spent_generations = _types.MethodType(
         EnablementRevalidation.open_row_past_spent_generations, build_coord.enablement_revalidation
     )
-    # The real wall-clock gate, on the real catalogue: with no budget set it admits everything, so a test that wants a
-    # denial sets one.
-    build_coord.action_registry = ACTION_CATALOGUE
 
     async def _maybe_rearm_enablement(res):
         build_coord._rearm_calls.append(dict(res) if isinstance(res, dict) else {})

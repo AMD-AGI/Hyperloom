@@ -145,16 +145,6 @@ def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
     return urlsplit(anthropic_url).netloc == urlsplit(openai_url).netloc
 
 
-def _codex_model_should_follow_claude() -> bool:
-    """True when the operator supplied only Anthropic config."""
-    return llm_config.is_anthropic_only()
-
-
-def _claude_model_should_follow_codex() -> bool:
-    """True when the operator supplied only OpenAI-compatible config."""
-    return llm_config.is_openai_only()
-
-
 def _catalog_probe_has_no_credential() -> bool:
     """True when a Claude subscription token is the only credential available."""
     if not os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
@@ -171,11 +161,6 @@ def _catalog_probe_has_no_credential() -> bool:
 def _custom_orch_model_allowed() -> bool:
     """Whether orchestration may use a model outside the AMD Claude allowlist; only an explicit false-token denies."""
     return env_bool("INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL", True)
-
-
-def _critic_agent_runtime_needed(critic_choice: str) -> bool:
-    """Whether the selected critic path will actually instantiate critic-agent."""
-    return critic_choice == "agent"
 
 
 def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
@@ -282,11 +267,9 @@ def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str],
     *,
-    claude_follows_codex: bool | None = None,
-) -> set[str] | None:
+    claude_follows_codex: bool,
+) -> None:
     """Gate Claude model selection against the gateway catalog; mutates ``args.claude_model``."""
-    if claude_follows_codex is None:
-        claude_follows_codex = _claude_model_should_follow_codex()
     chosen = (args.claude_model or "").strip()
     # Custom orchestration models are enabled by default; the gateway catalog probe below is the sole gate.
     allow_custom = _custom_orch_model_allowed()
@@ -297,7 +280,7 @@ def _validate_and_resolve_claude_model(
         claude_follows_codex=claude_follows_codex,
     )
     if not probed:
-        return None
+        return
 
     if catalog_ids is _CATALOG_NO_MODELS_ENDPOINT:
         # The gateway has no /models route; the model cannot be verified here, so proceed rather than refuse.
@@ -305,7 +288,7 @@ def _validate_and_resolve_claude_model(
             f"Preflight: WARNING — gateway has no /models route (HTTP 404/405); "
             f"cannot verify --claude-model={chosen!r}. Proceeding."
         )
-        return None
+        return
 
     if catalog_ids is None:
         # Auth/network/server/non-JSON/empty-catalog failure: genuinely unverifiable.
@@ -315,7 +298,7 @@ def _validate_and_resolve_claude_model(
                 f"--claude-model={chosen!r}. Proceeding with custom orchestration "
                 f"model support enabled (trusting the operator id)."
             )
-            return None
+            return
         print(
             "ERROR: gateway catalog unreachable after retries; cannot "
             "verify Claude model availability. Refusing to start.",
@@ -325,7 +308,7 @@ def _validate_and_resolve_claude_model(
 
     if chosen in catalog_ids or _catalog_compare_model_id(chosen) in catalog_ids:
         print(f"Preflight: Claude model {chosen!r} confirmed in gateway catalog")
-        return catalog_ids
+        return
 
     # For non-allowlisted custom ids the AMD fallback is meaningless; fail clearly on a catalog miss.
     if allow_custom and chosen not in _CLAUDE_ALLOWED_MODELS:
@@ -345,7 +328,7 @@ def _validate_and_resolve_claude_model(
         if candidate in catalog_ids:
             print(f"Preflight: WARNING — {chosen!r} not in gateway catalog; falling back to {candidate!r}")
             args.claude_model = candidate
-            return catalog_ids
+            return
 
     print(
         f"ERROR: none of the allowed Claude models {list(_CLAUDE_ALLOWED_MODELS)!r} "
@@ -361,15 +344,10 @@ def _resolve_models_for_run(
     args: argparse.Namespace,
     resolved_urls: tuple[str, str],
     *,
-    claude_follows_codex: bool | None = None,
-    codex_follows_claude: bool | None = None,
+    claude_follows_codex: bool,
+    codex_follows_claude: bool,
 ) -> None:
     """Resolve both model ids against the gateway before any session work."""
-    if claude_follows_codex is None:
-        claude_follows_codex = _claude_model_should_follow_codex()
-    if codex_follows_claude is None:
-        codex_follows_claude = _codex_model_should_follow_claude()
-
     if claude_follows_codex:
         # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
         # is.
@@ -511,35 +489,16 @@ DEFAULT_CRITIC_BACKEND = os.environ.get(
 _VALID_CRITIC_BACKENDS = ("mock", "agent")
 
 
-def _resolve_choice(
-    attr: str,
-    default: str,
-    valid: tuple[str, ...],
-    flag_hint: str,
-    *,
-    args: argparse.Namespace,
-) -> tuple[str, bool]:
-    """Resolve a backend choice from CLI args with validation and fallback to default."""
-    chosen = getattr(args, attr, None)
-    explicit = chosen is not None
+def _resolve_critic_choice(args: argparse.Namespace) -> str:
+    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
+    chosen = getattr(args, "critic_backend", None)
     if chosen is None:
-        chosen = default
-    if chosen not in valid:
+        chosen = DEFAULT_CRITIC_BACKEND
+    if chosen not in _VALID_CRITIC_BACKENDS:
         print(
-            f"ERROR: {attr.replace('_', ' ')} {chosen!r} not in {valid!r} (set by {flag_hint})",
+            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
+            "(set by --critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
             file=sys.stderr,
         )
         sys.exit(2)
-    return chosen, explicit
-
-
-def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
-    chosen, _ = _resolve_choice(
-        "critic_backend",
-        DEFAULT_CRITIC_BACKEND,
-        _VALID_CRITIC_BACKENDS,
-        "--critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
-        args=args,
-    )
     return chosen

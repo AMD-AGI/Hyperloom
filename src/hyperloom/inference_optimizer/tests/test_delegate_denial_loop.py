@@ -299,9 +299,7 @@ from hyperloom.orchestrator.phases.machine_state import (
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
 )
-from hyperloom.orchestrator.prompts.prompt_builder import (
-    FULL_ENABLED_ACTIONS,
-)
+from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 

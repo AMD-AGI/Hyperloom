@@ -402,7 +402,7 @@ def patch_breakdown_close(session_dir: Path | str) -> bool:
                 changed = True
 
         # This pass is the only one that ever sees the steps recorded *after* the breakdown was written —
-        # ``artifact_package``, ``ndjson_drain``, ``done`` — so drift among them is reported here or nowhere.
+        # ``artifact_package``, ``done`` — so drift among them is reported here or nowhere.
         metadata = breakdown.get("metadata")
         if isinstance(metadata, dict) and fresh_warnings:
             existing = [str(row) for row in metadata.get("warnings") or []]

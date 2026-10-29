@@ -33,7 +33,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
 from .conftest import seed_kernel_keep

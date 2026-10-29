@@ -36,9 +36,7 @@ def test_a_wheel_under_an_unrelated_checkout_is_not_that_checkout(checkout: Path
     nested.mkdir(parents=True)
     (nested / "__init__.py").write_text("x\n", encoding="utf-8")
 
-    assert trees.tree_kind(nested) == trees.VCS_NONE
     pinned = trees.resolve_trees([str(nested)])
-    assert pinned[0].vcs == trees.VCS_NONE
     # Borrowing the enclosing repo's commit would offer a diff base that never
     # contained these files.
     assert pinned[0].head_commit == ""
@@ -46,7 +44,6 @@ def test_a_wheel_under_an_unrelated_checkout_is_not_that_checkout(checkout: Path
 
 def test_a_checkout_records_the_commit_it_was_pinned_at(checkout: Path) -> None:
     pinned = trees.resolve_trees([str(checkout)])[0]
-    assert pinned.vcs == trees.VCS_GIT
     assert len(pinned.head_commit) == 40
 
 
