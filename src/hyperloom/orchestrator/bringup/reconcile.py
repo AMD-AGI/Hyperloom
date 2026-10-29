@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -204,7 +205,7 @@ class Reconciler:
         ):
             try:
                 await rule(now_unix, report)
-            except Exception:  # isolation boundary: one reconcile rule of the pass
+            except (sqlite3.Error, OSError):  # isolation boundary: one reconcile rule of the pass
                 log.exception("reconcile: rule %s raised", rule.__name__)
                 report.failures.append(rule.__name__)
         self.last_report = report
