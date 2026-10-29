@@ -53,6 +53,7 @@ from hyperloom_multibranch.blackboard.rsi.session import (
     FRONTIER_LOG,
     LEARNING_RECEIPT,
     MULTIBRANCH_RECEIPT,
+    NO_CASE,
     NO_KB,
     NO_PROFILE,
     NO_REPORTS,
@@ -430,6 +431,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Bla
         "scheduling_replay": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "specialist_outcomes": {"status": SKIPPED, "reason": NO_REPORTS, "counts": {}},
         "judge_decisions": {"status": SKIPPED, "reason": NO_TRANSCRIPT, "counts": {}},
+        "regression_cases": {"status": SKIPPED, "reason": NO_CASE, "counts": {}},
     }
     assert json.loads(json.dumps(close["knowledge"])) == close["knowledge"]
     assert "knowledge" not in build_breakdown(snapshot)["close"]
