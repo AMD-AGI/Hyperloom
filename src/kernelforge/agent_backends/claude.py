@@ -31,7 +31,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 from hyperloom_common.llm.llm_headers import format_custom_headers
 from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
@@ -253,23 +253,20 @@ def _record_progress(sink: list[str] | None, message: Any) -> None:
     """Append what this streamed message shows the agent doing."""
     if sink is None:
         return
-    try:
-        for block in getattr(message, "content", None) or ():
-            if hasattr(block, _TEXT):
-                text = " ".join(str(block.text).split())
-                if text:
-                    sink.append(f"say: {text[:_PROGRESS_TEXT_CHARS]}")
-            elif block.__class__.__name__ == "ToolUseBlock":
-                name = getattr(block, "name", "?")
-                detail = _tool_argument_digest(getattr(block, "input", {}))
-                sink.append(f"tool: {name}{f' {detail}' if detail else ''}")
-        if hasattr(message, "total_cost_usd"):
-            sink.append(f"end: subtype={getattr(message, 'subtype', '') or '?'}")
-        overflow = len(sink) - _PROGRESS_MAX_ENTRIES
-        if overflow > 0:
-            del sink[:overflow]
-    except Exception:  # never let telemetry break the session
-        log.debug("agent progress recording failed", exc_info=True)
+    for block in getattr(message, "content", None) or ():
+        if hasattr(block, _TEXT):
+            text = " ".join(str(block.text).split())
+            if text:
+                sink.append(f"say: {text[:_PROGRESS_TEXT_CHARS]}")
+        elif block.__class__.__name__ == "ToolUseBlock":
+            name = getattr(block, "name", "?")
+            detail = _tool_argument_digest(getattr(block, "input", {}))
+            sink.append(f"tool: {name}{f' {detail}' if detail else ''}")
+    if hasattr(message, "total_cost_usd"):
+        sink.append(f"end: subtype={getattr(message, 'subtype', '') or '?'}")
+    overflow = len(sink) - _PROGRESS_MAX_ENTRIES
+    if overflow > 0:
+        del sink[:overflow]
 
 
 def _prepare_claude_environment() -> None:
@@ -441,8 +438,10 @@ def _verified_file_changes(guard: WorkspaceGuard):
     try:
         return guard.verify()
     except Exception:
-        with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+        try:
             guard.rollback()
+        except (WorkspaceSafetyError, OSError, subprocess.SubprocessError):
+            log.warning("workspace rollback after a failed verify also failed", exc_info=True)
         raise
 
 
@@ -552,7 +551,7 @@ class ClaudeBackend:
                 check=False,
                 env={**os.environ, **runtime_env} if runtime_env else None,
             )
-        except Exception as error:
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
             raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {error}") from error
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()[-1200:]
@@ -835,7 +834,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
+                with suppress(RuntimeError, OSError):  # SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
