@@ -1792,9 +1792,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 ),
             )
     finally:
-        state = coordinator.shared_state
-        effective_stop_reason = stop_reason or coordinator.stop_classification
+        await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
+
+    _reconcile_crash_count(coordinator.shared_state, session_dir)
+    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
+
+    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
+
+
+async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: Path, stop_reason: str | None) -> None:
+    """Stop the coordinator; the lock release and terminal artifacts still happen when stopping raises."""
+    state = coordinator.shared_state
+    effective_stop_reason = stop_reason or coordinator.stop_classification
+    try:
         await coordinator.stop()
+    finally:
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
@@ -1804,12 +1817,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             state.save(session_dir)
         except (OSError, ValueError, TypeError):
             log.exception("failed to persist post-stop state (non-fatal)")
-
-    _reconcile_crash_count(coordinator.shared_state, session_dir)
-    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
-
-    _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:
